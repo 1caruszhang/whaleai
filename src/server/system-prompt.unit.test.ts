@@ -2,6 +2,19 @@ import { describe, expect, it } from 'vitest';
 
 import { buildSystemPromptAppend } from './system-prompt';
 
+describe('buildSystemPromptAppend Xiaojing identity', () => {
+  it('names the product without exposing the SDK vendor or a generic developer Agent', () => {
+    const prompt = buildSystemPromptAppend(
+      { type: 'desktop' },
+      { runtime: 'builtin', xiaojingMainAgent: true },
+    );
+    expect(prompt).toContain('你是「小鲸同学」');
+    expect(prompt).not.toContain('Claude Agent SDK');
+    expect(prompt).not.toContain('Anthropic Claude');
+    expect(prompt).not.toContain('通用的桌面端 AI Agent');
+  });
+});
+
 describe('buildSystemPromptAppend floating-ball surface', () => {
   it('adds floating-ball instructions only for the floating desktop surface', () => {
     expect(buildSystemPromptAppend({ type: 'desktop' })).not.toContain('<myagents-floating-ball-instructions>');

@@ -107,8 +107,9 @@ pub fn local_device_name() -> Option<String> {
 }
 
 fn device_id_path() -> Result<PathBuf, String> {
-    let home_dir = dirs::home_dir().ok_or_else(|| "Failed to get home directory".to_string())?;
-    Ok(home_dir.join(".myagents").join("device_id"))
+    crate::app_dirs::xiaojing_data_dir()
+        .map(|root| root.join("device_id"))
+        .ok_or_else(|| "Failed to get Xiaojing data directory".to_string())
 }
 
 fn normalize_device_name(value: Option<String>) -> Option<String> {

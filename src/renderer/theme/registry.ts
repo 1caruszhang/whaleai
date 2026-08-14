@@ -34,6 +34,7 @@ import { createPresetTheme, type PresetThemeManifest } from './themes/preset-the
 import { proofThemeManifest } from './themes/proof';
 import { raycastThemeManifest } from './themes/raycast';
 import { sageThemeManifest } from './themes/sage';
+import { xiaojingThemeManifest } from './themes/xiaojing';
 
 export { REQUIRED_THEME_CSS_TOKENS, REQUIRED_WIDGET_CSS_VARIABLES } from './registry-contract';
 
@@ -733,10 +734,29 @@ const defaultBlackFactory: OptionalThemeFactory = {
   }),
 };
 
+const xiaojingFactory: OptionalThemeFactory = {
+  id: xiaojingThemeManifest.id,
+  create: () => {
+    const theme = createPresetTheme(xiaojingThemeManifest);
+    return {
+      ...theme,
+      hero: {
+        ...theme.hero,
+        productName: "小鲸同学",
+        slogans: {
+          "zh-CN": "懂品牌、会创作、能跟进的 GEO 营销助手",
+          "en-US": "Your GEO marketing teammate",
+        },
+      },
+    };
+  },
+};
+
 /** Production catalog order is also the product order shown by Settings. */
 export const themeRegistry = new ThemeRegistry(
   [myAgentsDefaultTheme],
   [
+    xiaojingFactory,
     defaultBlackFactory,
     ...[
       myAgentsLightThemeManifest,
@@ -749,6 +769,7 @@ export const themeRegistry = new ThemeRegistry(
     ].map(presetFactory),
   ],
   [
+    xiaojingThemeManifest.id,
     myAgentsLightThemeManifest.id,
     myAgentsDefaultTheme.id,
     defaultBlackThemeManifest.id,

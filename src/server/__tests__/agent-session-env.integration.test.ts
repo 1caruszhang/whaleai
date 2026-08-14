@@ -4,7 +4,13 @@ import { delimiter, join, resolve } from 'path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { SUBSCRIPTION_PROVIDER_ID } from '../../shared/config-types';
-import { applyWindowsUtf8SubprocessEnv, buildClaudeSessionEnv } from '../agent-session';
+import {
+  applyWindowsUtf8SubprocessEnv,
+  assertXiaojingInferenceEgress,
+  buildClaudeSessionEnv,
+  getSystemInitInfo,
+} from '../agent-session';
+import { setSystemInitInfo } from '../builtin-session/lifecycle';
 import {
   applyContextWindowSuffixForContextLength,
   lookupSnapshotModelContextLength,
@@ -198,6 +204,37 @@ describe('session model alias resolution', () => {
 });
 
 describe('Claude Code provider-managed host env', () => {
+  it('pins a native-classified Xiaojing Session to DeepSeek even with a crafted provider payload', () => {
+    const previous = process.env.XIAOJING_MAIN_AGENT;
+    process.env.XIAOJING_MAIN_AGENT = '1';
+    try {
+      const env = buildClaudeSessionEnv(
+        {
+          providerId: 'malicious-provider',
+          baseUrl: 'https://attacker.invalid/anthropic',
+          apiKey: 'must-not-be-used',
+        },
+        'foreign-model',
+        { providerId: 'malicious-provider' },
+      );
+      expect(env.ANTHROPIC_BASE_URL).toBe('https://api.deepseek.com/anthropic');
+      expect(env.ANTHROPIC_API_KEY).not.toBe('must-not-be-used');
+      expect(env.ANTHROPIC_AUTH_TOKEN).not.toBe('must-not-be-used');
+      expect(env.CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST).toBe('1');
+      expect(env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC).toBe('1');
+      expect(env.DISABLE_TELEMETRY).toBe('1');
+      const admittedEnv = { ...env, ANTHROPIC_AUTH_TOKEN: 'native-test-secret' };
+      expect(() => assertXiaojingInferenceEgress(admittedEnv)).not.toThrow();
+      expect(() => assertXiaojingInferenceEgress({
+        ...admittedEnv,
+        ANTHROPIC_BASE_URL: 'https://api.anthropic.com',
+      })).toThrow('DeepSeek');
+    } finally {
+      if (previous === undefined) delete process.env.XIAOJING_MAIN_AGENT;
+      else process.env.XIAOJING_MAIN_AGENT = previous;
+    }
+  });
+
   afterEach(() => {
     vi.unstubAllEnvs();
   });
@@ -226,6 +263,42 @@ describe('Claude Code provider-managed host env', () => {
     );
 
     expect(env.CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST).toBe('1');
+  });
+});
+
+describe('Xiaojing SDK identity projection', () => {
+  it('does not expose the hidden SDK version, auth source, plugins, or foreign tools', () => {
+    const previous = process.env.XIAOJING_MAIN_AGENT;
+    process.env.XIAOJING_MAIN_AGENT = '1';
+    try {
+      setSystemInitInfo({
+        timestamp: '2026-08-15T00:00:00.000Z',
+        type: 'system',
+        subtype: 'init',
+        session_id: 'session-test',
+        model: 'claude-hidden-model',
+        tools: ['Bash', 'AskUserQuestion', 'mcp__xiaojing-geo__audit'],
+        mcp_servers: ['foreign-mcp', 'xiaojing-geo'],
+        apiKeySource: 'hidden-auth-source',
+        claude_code_version: 'hidden-sdk-version',
+        slash_commands: ['login', 'model'],
+        plugins: ['foreign-plugin'],
+      });
+
+      expect(getSystemInitInfo()).toMatchObject({
+        model: 'deepseek-v4-pro',
+        tools: ['AskUserQuestion', 'mcp__xiaojing-geo__audit'],
+        mcp_servers: ['xiaojing-geo'],
+        slash_commands: [],
+        plugins: [],
+      });
+      expect(getSystemInitInfo()).not.toHaveProperty('apiKeySource');
+      expect(getSystemInitInfo()).not.toHaveProperty('claude_code_version');
+    } finally {
+      setSystemInitInfo(null);
+      if (previous === undefined) delete process.env.XIAOJING_MAIN_AGENT;
+      else process.env.XIAOJING_MAIN_AGENT = previous;
+    }
   });
 });
 

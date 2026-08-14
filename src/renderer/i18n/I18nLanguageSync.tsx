@@ -63,3 +63,15 @@ export function I18nLanguageSync() {
 
   return null;
 }
+
+/** Xiaojing v1 exposes Simplified Chinese only. */
+export function XiaojingI18nSync() {
+  useEffect(() => {
+    applyDocumentLocale("zh-CN");
+    if (i18n.language !== "zh-CN") {
+      void i18n.changeLanguage("zh-CN");
+    }
+  }, []);
+
+  return null;
+}

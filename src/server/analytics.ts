@@ -8,11 +8,11 @@
 
 import { readFileSync } from 'fs';
 import { join } from 'path';
-import { homedir } from 'os';
 
 import { cancellableFetch } from './utils/cancellation';
+import { getAppDataDir } from './utils/app-data-dir';
 
-const CONFIG_PATH = join(homedir(), '.myagents', 'analytics_config.json');
+const CONFIG_PATH = join(getAppDataDir(), 'analytics_config.json');
 
 interface AnalyticsConfig {
   enabled: boolean;

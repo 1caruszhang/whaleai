@@ -6,12 +6,10 @@ import AppErrorBoundary from './components/AppErrorBoundary';
 import { ConfigProvider } from './config/ConfigProvider';
 import { ToastProvider } from './components/Toast';
 import { ImagePreviewProvider } from './context/ImagePreviewContext';
-import { FloatingI18nBootstrap } from './i18n/FloatingI18nBootstrap';
-import { I18nLanguageSync } from './i18n/I18nLanguageSync';
+import { XiaojingI18nSync } from './i18n/I18nLanguageSync';
 import {
-  ConfiguredThemeRuntime,
-  FloatingThemeRuntime,
-  primeThemeRuntimeFromBootstrap,
+  primeXiaojingThemeRuntime,
+  XiaojingThemeRuntime,
 } from './theme';
 import { initFrontendLogger, setLogServerReady, setRendererLogLabel } from './utils/frontendLogger';
 import { installMacFunctionKeyGuard } from './utils/macFunctionKeyGuard';
@@ -57,7 +55,7 @@ reportBootEvent('renderer-entry-evaluated');
 // Prime the validated bootstrap snapshot before React's first paint. A broken
 // snapshot/package is diagnostic, not permission to strand the window blank.
 try {
-  primeThemeRuntimeFromBootstrap();
+  primeXiaojingThemeRuntime();
   reportBootEvent('theme-renderer-bootstrap-complete');
 } catch (error) {
   reportBootEvent('theme-renderer-bootstrap-failed', describeBootError(error));
@@ -131,13 +129,12 @@ if (tauriWindowLabel === 'fb-ball') {
   root.render(
     <AppErrorBoundary>
       <BootCommitMarker />
-      <FloatingThemeRuntime>
-        <FloatingI18nBootstrap>
-          <React.Suspense fallback={null}>
-            <BallWindow />
-          </React.Suspense>
-        </FloatingI18nBootstrap>
-      </FloatingThemeRuntime>
+      <XiaojingThemeRuntime>
+        <XiaojingI18nSync />
+        <React.Suspense fallback={null}>
+          <BallWindow />
+        </React.Suspense>
+      </XiaojingThemeRuntime>
     </AppErrorBoundary>
   );
 } else if (tauriWindowLabel === 'fb-companion') {
@@ -148,17 +145,16 @@ if (tauriWindowLabel === 'fb-ball') {
   root.render(
     <AppErrorBoundary>
       <BootCommitMarker />
-      <FloatingThemeRuntime>
-        <FloatingI18nBootstrap>
-          <ToastProvider>
-            <ImagePreviewProvider>
-              <React.Suspense fallback={null}>
-                <CompanionWindow />
-              </React.Suspense>
-            </ImagePreviewProvider>
-          </ToastProvider>
-        </FloatingI18nBootstrap>
-      </FloatingThemeRuntime>
+      <XiaojingThemeRuntime>
+        <XiaojingI18nSync />
+        <ToastProvider>
+          <ImagePreviewProvider>
+            <React.Suspense fallback={null}>
+              <CompanionWindow />
+            </React.Suspense>
+          </ImagePreviewProvider>
+        </ToastProvider>
+      </XiaojingThemeRuntime>
     </AppErrorBoundary>
   );
 } else if (tauriWindowLabel === 'fb-shield') {
@@ -168,11 +164,12 @@ if (tauriWindowLabel === 'fb-ball') {
   root.render(
     <AppErrorBoundary>
       <BootCommitMarker />
-      <FloatingThemeRuntime>
+      <XiaojingThemeRuntime>
+        <XiaojingI18nSync />
         <React.Suspense fallback={null}>
           <ShieldWindow />
         </React.Suspense>
-      </FloatingThemeRuntime>
+      </XiaojingThemeRuntime>
     </AppErrorBoundary>
   );
 } else {
@@ -183,8 +180,8 @@ if (tauriWindowLabel === 'fb-ball') {
     <AppErrorBoundary>
       <BootCommitMarker />
       <ConfigProvider>
-        <ConfiguredThemeRuntime>
-          <I18nLanguageSync />
+        <XiaojingThemeRuntime ownsMainWindowBridge>
+          <XiaojingI18nSync />
           <ToastProvider>
             <ImagePreviewProvider>
               <React.Suspense fallback={null}>
@@ -192,7 +189,7 @@ if (tauriWindowLabel === 'fb-ball') {
               </React.Suspense>
             </ImagePreviewProvider>
           </ToastProvider>
-        </ConfiguredThemeRuntime>
+        </XiaojingThemeRuntime>
       </ConfigProvider>
     </AppErrorBoundary>
   );

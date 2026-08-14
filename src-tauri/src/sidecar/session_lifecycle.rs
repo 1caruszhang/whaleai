@@ -367,6 +367,12 @@ fn resolve_expected_runtime_identity(
     runtime_override: Option<&str>,
     runtime_source_override: Option<&str>,
 ) -> RuntimeIdentity {
+    // Brand workspaces have one product runtime. Persisted metadata, caller
+    // overrides, and agent config cannot opt a Xiaojing Session into a CLI
+    // runtime before the process is born.
+    if crate::brand_workspace::is_brand_workspace_path(workspace_path) {
+        return RuntimeIdentity::new(Some("builtin"), None);
+    }
     // Existing Session metadata is authoritative for desktop-style owners.
     // A metadata creator has no Session row yet, so it follows the exact same
     // override -> Agent resolution that the spawn path uses. Live IM owners
@@ -1004,6 +1010,18 @@ fn create_new_session_sidecar<'a, R: Runtime>(
     if mgmt_port > 0 {
         cmd.env("MYAGENTS_MANAGEMENT_PORT", mgmt_port.to_string());
     }
+    if let Some(data_root) = crate::app_dirs::xiaojing_data_dir() {
+        cmd.env("XIAOJING_DATA_ROOT", data_root);
+    }
+    if crate::brand_workspace::is_brand_workspace_path(workspace_path) {
+        crate::deepseek_credentials::inject_into_sidecar(&mut cmd)?;
+        cmd.env("XIAOJING_MAIN_AGENT", "1");
+        cmd.env_remove("MYAGENTS_RUNTIME");
+        cmd.env_remove("MYAGENTS_RUNTIME_SOURCE");
+    } else {
+        cmd.env_remove(crate::deepseek_credentials::SIDECAR_SECRET_ENV);
+        cmd.env_remove("XIAOJING_MAIN_AGENT");
+    }
 
     // Reuse validation and process spawn consume the same identity snapshot for
     // this ensure attempt. In particular, missing Session metadata is not an
@@ -1569,6 +1587,8 @@ pub async fn cmd_delete_session_if_unowned(
     im_state: tauri::State<'_, crate::im::ManagedImBots>,
     sessionId: String,
     releasableTabIds: Vec<String>,
+    brandWorkspaceId: Option<String>,
+    brandDeletionConfirmationToken: Option<String>,
 ) -> Result<SessionDeleteCommandResult, String> {
     if !is_canonical_session_id(&sessionId) {
         return Ok(SessionDeleteCommandResult::refused("invalid-session-id"));
@@ -1634,42 +1654,90 @@ pub async fn cmd_delete_session_if_unowned(
             };
             delete_authority
         };
-        let delete_dispatch = match manager.acquire_global_dispatch() {
-            Ok(dispatch) => dispatch,
-            Err(_) => return Ok(SessionDeleteCommandResult::refused("authority-unavailable")),
-        };
         drop(manager);
-        let client = crate::local_http::blocking_builder()
-            .timeout(Duration::from_secs(15))
-            .build()
-            .map_err(|error| format!("Failed to create local HTTP client: {error}"))?;
-        let delete_url = delete_dispatch.url_for_path(&format!("/sessions/{sessionId}"))?;
-        let response = client
-            .delete(delete_url)
-            .header(SESSION_DELETE_AUTHORITY_HEADER, delete_authority)
-            .send()
-            .map_err(|error| format!("Failed to delete session: {error}"))?;
-        let status = response.status();
-        let body = response
-            .text()
-            .unwrap_or_else(|_| "<unreadable response>".to_string());
-        // The lease ends at response-body materialization, before any later
-        // owner release or Tauri/WebKit IPC delivery.
-        drop(delete_dispatch);
-        let result = if status.is_success() {
-            SessionDeleteCommandResult::deleted()
-        } else {
-            match status.as_u16() {
-                403 => return Ok(SessionDeleteCommandResult::refused("protected-session")),
-                404 => SessionDeleteCommandResult::refused("not-found"),
-                409 => return Ok(SessionDeleteCommandResult::refused("in-use")),
-                _ => {
-                    return Err(format!(
-                        "Global Sidecar failed to delete session (HTTP {status}): {body}"
-                    ))
+        let brand_deletion = match (
+            brandWorkspaceId.as_deref(),
+            brandDeletionConfirmationToken.as_deref(),
+        ) {
+            (Some(workspace_id), Some(confirmation_token)) => {
+                let store = crate::brand_workspace::production_store()?;
+                store.admit_session_deletion(workspace_id, &sessionId, confirmation_token)?;
+                Some((store, workspace_id, confirmation_token))
+            }
+            (None, None) => None,
+            _ => return Err("Brand deletion requires workspace and confirmation token".into()),
+        };
+        let cancel_brand_admission = || {
+            if let Some((store, workspace_id, confirmation_token)) = &brand_deletion {
+                if let Err(error) = store.cancel_session_deletion_admission(
+                    workspace_id,
+                    &sessionId,
+                    confirmation_token,
+                ) {
+                    ulog_warn!("[brand-workspace] failed to cancel deletion admission: {error}");
                 }
             }
         };
+        let delete_dispatch = {
+            let mut manager = sidecars.lock().map_err(|error| error.to_string())?;
+            match manager.acquire_global_dispatch() {
+                Ok(dispatch) => dispatch,
+                Err(_) => {
+                    drop(manager);
+                    cancel_brand_admission();
+                    return Ok(SessionDeleteCommandResult::refused("authority-unavailable"));
+                }
+            }
+        };
+        let delete_transcript = || -> Result<(SessionDeleteCommandResult, bool), String> {
+            let client = crate::local_http::blocking_builder()
+                .timeout(Duration::from_secs(15))
+                .build()
+                .map_err(|error| format!("Failed to create local HTTP client: {error}"))?;
+            let delete_url = delete_dispatch.url_for_path(&format!("/sessions/{sessionId}"))?;
+            let response = client
+                .delete(delete_url)
+                .header(SESSION_DELETE_AUTHORITY_HEADER, delete_authority)
+                .send()
+                .map_err(|error| format!("Failed to delete session: {error}"))?;
+            let status = response.status();
+            let body = response
+                .text()
+                .unwrap_or_else(|_| "<unreadable response>".to_string());
+            if status.is_success() {
+                Ok((SessionDeleteCommandResult::deleted(), true))
+            } else {
+                match status.as_u16() {
+                    403 => Ok((
+                        SessionDeleteCommandResult::refused("protected-session"),
+                        false,
+                    )),
+                    404 => Ok((SessionDeleteCommandResult::refused("not-found"), true)),
+                    409 => Ok((SessionDeleteCommandResult::refused("in-use"), false)),
+                    _ => Err(format!(
+                        "Global Sidecar failed to delete session (HTTP {status}): {body}"
+                    )),
+                }
+            }
+        };
+        let deletion = delete_transcript();
+        // The dispatch lease covers only request/response materialization.
+        drop(delete_dispatch);
+        let (result, terminal) = match deletion {
+            Ok(deletion) => deletion,
+            Err(error) => {
+                cancel_brand_admission();
+                return Err(error);
+            }
+        };
+        if !terminal {
+            cancel_brand_admission();
+            return Ok(result);
+        }
+        if let Some((store, workspace_id, confirmation_token)) = &brand_deletion {
+            store.mark_session_transcript_deleted(workspace_id, &sessionId, confirmation_token)?;
+            store.finalize_session_deletion(workspace_id, &sessionId, confirmation_token)?;
+        }
 
         // Success and not-found are both terminal/idempotent outcomes. Release
         // only the App-authorized Tab owners after storage has reached that

@@ -37,9 +37,9 @@ MyAgents 是基于 Tauri v2 的桌面 AI Agent 客户端，提供 Claude Agent S
 ├──────────────────────────────────────────────────────────────────────────────┤
 │                              React Frontend                                  │
 │  ┌────────────────┐ ┌────────────────────────────────────────────────────┐  │
-│  │ GlobalSidebar  │ │ Active Tab Workspace                               │  │
-│  │ App Shell      │ │ Tab1 / Tab2 / Settings / Launcher / Capabilities   │  │
-│  │ nav + resource │ │ TaskCenter / Space                                 │  │
+│  │ XiaojingSidebar│ │ Active Tab Workspace             │ GEO Workbench    │  │
+│  │ brand/session  │ │ Tab1 / Tab2 / Settings / Chat    │ operation view   │  │
+│  │ projection     │ │ legacy surfaces remain compiled  │ collapsible      │  │
 │  │ projection     │ └───────────────────────┬────────────────────────────┘  │
 │  └───────┬────────┘                         │                               │
 │          │                 ┌────────────────┴───────────────────────────┐   │
@@ -95,6 +95,10 @@ Global Sidecar 同样把“应用仍需要它运行”与“当前候选进程�
 ### 小鲸同学 GEO 领域 Owner（移植契约）
 
 小鲸同学以 `BrandWorkspace` 为唯一品牌业务边界，以 `Session` 为独立聊天上下文边界；一个 Session 可以创建多个 `GeoOperation`，多个 Session 也可以并发操作同一品牌。共享权威数据的业务裁决属于 Node/TypeScript GEO 领域模块，持久化、原子文件操作、凭据和确定性调度属于 Rust。可执行行为基线由 `src/shared/geo/portContract.ts` 持有，完整来源与迁移规则见 `tech_docs/geo_port_contract.md`。
+
+小鲸主 Agent 的执行身份由 Rust 在品牌 Session Sidecar 出生时固化：runtime 固定为 builtin，模型固定为 `deepseek-v4-pro`，原生 DeepSeek 凭据只从 Windows Credential Manager 注入并在 Node 入口立即从环境删除。凭据保存或删除由同一个 Rust owner dispatch-close 现有品牌 Session generation、保留全部 owner，并以新凭据替换进程；Renderer、品牌数据库、config 与 transcript 只持有非 secret 的 configured 状态。Sidecar 在 SDK Query 出生前再次校验官方 DeepSeek Anthropic endpoint、应用托管路由、非必要流量禁用和国外云 selector 清空。
+
+主 Agent 的执行能力只有 host `AskUserQuestion` 与内置 `xiaojing-geo` MCP。该 MCP 由产品策略直接注册，不接受 Renderer 或工作区配置替换；当前提供真实的品牌/Session 上下文检查，后续 GEO 切片只能沿这一服务器扩展。终端、Git、任意文件 IO、通用 MCP、插件、Skill、子 Agent 与 external Runtime 同时在目录可见性、Query options 和最终 tool gate 上 fail closed。
 
 | 概念 | 含义 | 决策 Owner | 持久化 / 执行 Owner |
 |------|------|------------|---------------------|
@@ -363,13 +367,13 @@ Tab 内 MUST 用 `useTabState()` 的 `apiGet` / `apiPost`，禁止全局 `apiPos
 
 #### App Shell 与 Tab authority
 
-`GlobalSidebar` 挂在 `App` 的 Tab Workspace 之外，是应用级导航和资源投影，不是新的页面容器或 Session owner。顶部 Tab 仍是所有主内容页面的唯一 authority：active、关闭、恢复、拖拽、Sidecar owner token 与 pending-session birth 都继续由现有 Tab 状态机管理。
+当前默认产品壳在 `App` 的 Tab Workspace 两侧挂载 `XiaojingSidebar` 与 `XiaojingGeoWorkbench`：左侧只投影品牌与当前品牌 Session，右侧投影当前品牌摘要、GEO 操作空态和启动意图；两者都不是新的页面容器、Session owner 或 GeoOperation owner。旧 `GlobalSidebar` 保留给 expand 阶段编译兼容，但不再挂载。顶部 Tab 仍是所有主内容页面的唯一 authority：active、关闭、恢复、拖拽、Sidecar owner token 与 pending-session birth 都继续由现有 Tab 状态机管理。
 
 - 桌面主窗口 focus 以 Tauri `onFocusChanged` 为持续事件 authority；`App` 启动时用 renderer 当前 foreground 状态播种一次，之后只持有一个布尔投影并只让 active Chat 响应。focus 只负责保存/恢复滚动意图，不能充当窗口可见性或 geometry authority：仍在展示的 active Chat 即使失焦也持续把 live 消息交给 Virtuoso。只有 App 确实以 `content-visibility:hidden` 隐藏的 internal inactive Tab 才冻结 Virtuoso 输入；TabProvider/Sidecar 生命周期始终不受两者影响。
-- 侧栏只从既有 `ConfigProvider`、任务中心 store、Session 索引与当前 Tab 派生工作区/Session 展示；active 高亮是 projection，不持久化第二份“当前页面”。该投影保持单一持久选中面：Launcher 选择工作区时高亮工作区行，Chat 已进入具体 Session 时只高亮 Session 行，父工作区仅保留层级上下文而不同时涂底或声明 `aria-current`。工作区配置和 Session mutation 分别调用现有 Config / Task Center authority，不在侧栏另存领域状态。
+- 侧栏通过 `useBrandWorkspaces` 投影 Rust brand store 中的品牌 catalog 与当前品牌 `project.sqlite` Session 索引；所有读取和 mutation 必须显式携带 `workspaceId`，前台 `currentWorkspace` 只决定展示范围，不能成为后台访问的隐式 Active Project。品牌切换只更新 catalog 的持久选择并新建 pending Session，既有 Tab / Sidecar 继续服从 birth 时固化的 workspace；pending Session 在获得真实 runtime Session identity 前不得写入品牌索引。自动标题可以更新非 user 标题，用户重命名一旦写入就不能被迟到的自动标题覆盖。
 - 侧栏与顶部 Title/Tab chrome 是同一 App Shell material surface：三者只读取完整 Theme 必需的 `--global-sidebar-bg`，该 Token 由每套 Theme 的 light/dark package 拥有；页面内容与卡片/弹层继续使用既有 `--paper / --paper-elevated / --paper-inset` 语义。App Shell chrome 不再依赖与内容区的分割线，常规 leading inset 为 8px，手动 rail 的 52px 预留同时容纳固定 toggle 与其后 8px 留白；Tab active/hover 复用全局 `--hover-bg`。不能为制造分区而翻转通用 Paper 层级、在组件内混色或为 Tab Chrome 复制一套局部 palette。
 - 侧栏展开/rail 切换的布局槽一次提交最终宽度，不能给 `width` / `flex-basis` 加逐帧 transition 让 Chat、Browser、Terminal 等 resize-sensitive surface 连续重排。可见边界由固定展开宽度的独立 paint-only 材质层通过 `clip-path` 横向揭示/收回；右侧 Tab 标题栏与内容用一次布局后的 compositor transform 保持旧视觉中心，再与边界同节奏归位。Chat 右侧工作区复用镜像模式：面板材质横移，对话区在最终 flex 布局上从旧中心归位；内容只做 opacity/translate/clip 编排，且必须提供 `prefers-reduced-motion` 立即切换路径。
-- App Shell 使用 Task Center store 的 passive projection：只按需读取已展开工作区的 Session，每个规范化工作区 key 独立持有 loading/error/retry；只有用户打开全局搜索时才触发一次完整索引加载。passive 与完整 Task Center 读取共享 generation/latest-wins 交接，完整读取开始时使旧 passive 写入失效，完整 owner 卸载时显式把当前展开需求交还 passive。任务列表、轮询与 Tauri 监听仍由真正挂载的 Task Center 生命周期拥有，不能因侧栏常驻而前移到 App mount。
+- App Shell 的 Session 列表只查询当前 `workspaceId` 对应的品牌数据库，并用 generation/latest-wins 防止品牌切换期间的迟到结果污染新前台；Task Center 不参与品牌、Session 或 GEO 状态投影，也不因侧栏常驻而前移任何任务轮询或 Tauri 监听生命周期。
 - 点击已有 Session 必须回到 `App` 的统一 open-target-session planner：优先聚焦已打开 Tab，否则按既有恢复/创建路径 materialize；并发点击复用同一 in-flight guard。新建既有 Session Tab 时用 `flushSync` 把 `sidecarConfigDisposition:'pending'` 的 Tab 加入并激活，立即挂载 Chat owner 子树并由其既有 `ChatBootOverlay` 承担加载反馈，再异步 ensure/activate；`setTabs` 必须保持 functional composition，不能把 `tabsRef` 提升为第二个可写 authority。ensure 的锁内 `isNew` 仍是 `push/adopt` 唯一裁决。失败时只撤销该临时 Tab 并恢复仍存在的前一 active Tab，成功后不得把加载期间主动切走的用户强制拉回。
 - 删除 Session 必须回到 `App` 的统一 deletion capability，因为只有 App 拥有全部 mounted Tab：同一 App-owned admission map 先互斥目标 Session 的 open/switch、fork attach、pending→real identity adoption、TabProvider recovery、mounted Tab turn submission 与 delete，实时非 Tab owner 预检通过后，再由 Rust 将运行中 turn 接管为 `BackgroundCompletion` 或权威确认 idle；只有明确 idle 才把全部匹配 Chat Tab ids 交给 Rust，由 Rust 在同一 lifecycle fence 内以 `SessionEngine.isBusy()` 复核已接纳队列、完成最终 owner 裁决、存储删除与这些 Tab owner 的释放，成功后 App 才清退 UI 与 SSE。任何拒绝都必须原样保留 mounted Tab，不建立 renderer rollback。Floating companion 使用独立 `Companion` owner；headless Inbox 的 healthy reuse 与 dead resume 都在同一 fence 内用 transient `Agent` owner 覆盖投递到 `BackgroundCompletion` 接管，不能伪装成 App 可释放的 Tab。删除专用 strict handoff 不吞 transport / activity-check 错误；运行中或状态查询不可用都保留 mounted Tab 与 transcript，并返回结构化拒绝，不能拿 renderer `isGenerating` 投影当删除许可。GlobalSidebar、搜索覆盖层、Chat 菜单和历史下拉只消费这项 capability；不得各自猜当前 Tab、直接删存储或把 UI 快照当最终 authority。
 - `session start --agent` 的 fresh headless birth 复用现有 lifecycle：source 只提交已解析的 Agent/workspace 与 prompt，Rust 生成 Session/request identity 并持 transient `Agent` owner ensure 目标 workspace Sidecar；target 在写 metadata 前重新解析 Agent/Project lifecycle，并核对当前 Sidecar 的 Session/workspace。通过后按目标侧当前配置与实际 Runtime 创建 owned `prepared` snapshot，在 `SessionEngine` 的既有 dispatch guard 提交可见。明确拒绝按 request identity 回滚；dispatch ACK 后的 runtime 错误仍是已接纳 terminal，ACK 不明保留 ID 且不自动重试。Rust 只复用既有 `BackgroundCompletion` handoff，不为 fresh start 新增 durable token、恢复状态机、配置 fingerprint 或跨文件事务。成功 receipt 只证明 admission，不证明 terminal。
@@ -608,7 +612,7 @@ Managed Codex 的产品扩展也必须沿同一条链路进入：route 只调用
 
 新增“config 同步 / 注入 user 消息 / 等待 turn 完成 / session read / session operation”的 Sidecar endpoint 时，MUST 走 `SessionEngine` facade；不要在 route handler 里直接手写 builtin/external 分流。Phase5 已迁移的代表路径包括 `/api/session-state`、`/api/session-latest-result`、`/chat/stream`、`GET /sessions/:id`、`/chat/rewind`、`/sessions/fork`、proof-bearing `/api/session/surface-migration`、`/api/mcp/set`、`/api/agents/set`、`/api/provider/set`、`/api/session/config`。IM `/new` 只在 Rust owner/binding authority 内轮换，不调用 Node reset endpoint。`/chat/external-retry` 等只适用于 external Runtime 的操作由 `selector.ts` 的显式 helper 校验后调用原生实现，不进入公共 `SessionEngine` 接口，也不允许 route 直接 import `external-session.ts`。
 
-**测试防线：** server 测试必须显式后缀分层：`*.unit.test.ts`（pure policy / parser / boundary）、`*.integration.test.ts`（credential-free stateful server 集成，singleFork）、`*.credentialed.test.ts`（真实 Provider / SDK / upstream smoke，显式本地跑）。`unit` / `integration` 都加载 `src/test/setup-no-egress.ts`，阻断 fetch / undici / http(s) / net / tls / dns 非 loopback 出站；`npm run test:classification` 用实际 Vitest project list 扫描并禁止裸 `src/server/**/*.test.ts`。External runtime 的回归主路径通过 `external-session-mock.integration.test.ts` 在测试层 mock `runtimes/factory.ts`，fake runtime 伪装为真实 `RuntimeType`（如 `codex`），穿过 `SessionEngine` 覆盖正常 turn、failed turn、queue、permission response，不在生产代码里增加 mock runtime 类型。
+**测试防线：** server 测试必须显式后缀分层：`*.unit.test.ts`（pure policy / parser / boundary）、`*.integration.test.ts`（credential-free stateful server 集成，文件串行且 fork 隔离）、`*.credentialed.test.ts`（真实 Provider / SDK / upstream smoke，显式本地跑）。`unit` / `integration` 都加载 `src/test/setup-no-egress.ts`，阻断 fetch / undici / http(s) / net / tls / dns 非 loopback 出站；`npm run test:classification` 用实际 Vitest project list 扫描并禁止裸 `src/server/**/*.test.ts`。External runtime 的回归主路径通过 `external-session-mock.integration.test.ts` 在测试层 mock `runtimes/factory.ts`，fake runtime 伪装成真实 `RuntimeType`（如 `codex`），穿过 `SessionEngine` 覆盖正常 turn、failed turn、queue、permission response，不在生产代码里增加 mock runtime 类型。
 
 详见 `tech_docs/multi_agent_runtime.md`。
 
@@ -911,19 +915,16 @@ Tailwind，否则 utility 会静默回退 framework default。`build:web` 后的
 启动与窗口数据流：
 
 ```text
-Rust 读取归一后的非敏感 disk appearance
-  → 隐藏构建主窗口 + native canonical --paper 首帧投影
-  → one-shot initialization script 对齐 versioned localStorage snapshot
-    （Theme ID 只保留 renderer registry 已解析值；同进程 reload 不覆盖新快照）
-  → index.html 在 React 前应用 html[data-theme-id][data-color-scheme] + .dark
-  → durable AppConfig 加载后 ConfiguredThemeRuntime 校正并刷新 snapshot
+Rust 构建小鲸同学主窗口
+  → index.html 在 React 前固定 html[data-theme-id=xiaojing][data-color-scheme=dark] + .dark
+  → primeXiaojingThemeRuntime 经 Registry 激活已校验的 xiaojing stylesheet
+  → 主窗口与 Floating Webview 都挂 XiaojingThemeRuntime + 简体中文同步
   → ThemeRuntime 激活已校验的实际 stylesheet + ResolvedTheme Context + root CSS Token selector
     + 把当前 resolved --paper 投影到 main native Window background
   → CSS surface / Launcher / xterm / Monaco / Mermaid / Prism / Widget
-  → Tauri theme:selection-changed → FloatingThemeRuntime 即时重解析
 ```
 
-浮球 Webview 保持轻量 tree，不挂完整 `ConfigProvider`：先用 snapshot 保证首帧，随后先完成精简事件 listener 注册、再异步读 durable config；hydration 期间收到的 live event 具有更高 freshness，旧磁盘结果不能反向覆盖。`system` 由每个 Webview 的 `useSyncExternalStore(matchMedia)` 订阅；`.dark` 只是 Tailwind 兼容投影，不再是 React consumer 的反向状态源。
+浮球 Webview 保持轻量 tree，不挂完整 `ConfigProvider`，但与主窗口共享固定的 `xiaojing/dark` 和 `zh-CN` 投影。旧 snapshot/durable appearance 同步代码保留给 expand 阶段编译，不参与当前产品入口；`.dark` 只是 Tailwind 兼容投影，不是 React consumer 的反向状态源。
 
 Space 与其它 renderer CSS surface 一样直接继承 `<html>` 上当前 Theme 的语义 Token；不维护局部 Theme ID、独立 palette 或 portal scope 传播。Space 的布局、业务状态机、三方 Logo、用户内容和纯 alpha 遮罩仍不属于 Theme 身份，但 paper、文字、字体、圆角、阴影、动作色和业务状态色必须随全局 Theme / scheme 原子切换。
 

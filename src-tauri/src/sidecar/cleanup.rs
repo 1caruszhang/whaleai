@@ -2,10 +2,10 @@ use super::*;
 
 // ===== Port File for CLI Discovery =====
 
-/// Write the Global Sidecar port to ~/.myagents/sidecar.port so the CLI can discover it.
+/// Write the Global Sidecar port under Xiaojing's local data root.
 pub(super) fn write_global_port_file(port: u16) {
-    if let Some(home) = dirs::home_dir() {
-        let port_file = home.join(".myagents").join(PORT_FILE_NAME);
+    if let Some(root) = crate::app_dirs::xiaojing_data_dir() {
+        let port_file = root.join(PORT_FILE_NAME);
         if let Err(e) = std::fs::write(&port_file, port.to_string()) {
             ulog_warn!("[sidecar] Failed to write port file {:?}: {}", port_file, e);
         } else {
@@ -16,8 +16,8 @@ pub(super) fn write_global_port_file(port: u16) {
 
 /// Remove the port file (called on app exit / sidecar shutdown).
 pub(super) fn remove_global_port_file() {
-    if let Some(home) = dirs::home_dir() {
-        let port_file = home.join(".myagents").join(PORT_FILE_NAME);
+    if let Some(root) = crate::app_dirs::xiaojing_data_dir() {
+        let port_file = root.join(PORT_FILE_NAME);
         let _ = std::fs::remove_file(&port_file);
     }
 }

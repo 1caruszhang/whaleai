@@ -5,6 +5,12 @@ import { createRequire } from 'module';
 import { query, getSessionMessages as sdkGetSessionMessages, forkSession as sdkForkSession, deleteSession as sdkDeleteSession, type Query, type SDKUserMessage, type AgentDefinition, type HookInput, type HookJSONOutput, type PreToolUseHookInput, type PostToolUseHookInput, type PermissionRequestHookInput, type SlashCommand as SdkSlashCommand } from '@anthropic-ai/claude-agent-sdk';
 import { SDK_BUILTIN_TOOLS } from './sdk-builtin-tools';
 import {
+  XIAOJING_MAIN_AGENT,
+  isXiaojingMainAgentMcpServer,
+  isXiaojingMainAgentTool,
+} from '../shared/xiaojing-main-agent-policy';
+import { isXiaojingMainAgentSession, resolveXiaojingDeepseekSecret } from './xiaojing-native-secret';
+import {
   decideBackgroundAgentPermission,
   isBackgroundAgentToolRequest,
   backgroundAgentDenyMessage,
@@ -104,7 +110,7 @@ import { deriveSessionTitle } from '../shared/sessionTitle';
 import { createLiveUserMessageReplay } from '../shared/chatMessageReplay';
 import { isPendingSessionId } from '../shared/constants';
 import { workspacePathsEqual } from '../shared/workspacePath';
-import { normalizeReasoningEffort, isSdkEffortLevel } from '../shared/reasoningEffort';
+import { isSdkEffortLevel, normalizeReasoningEffort } from '../shared/reasoningEffort';
 import { BUILTIN_AUTO_COMPACT_PERCENT, computeContextUsage } from '../shared/contextUsage';
 import {
   chooseBuiltinContextUsageModel,
@@ -138,10 +144,7 @@ import { canonicalizeManagedProviderEnv, findProjectAgentByWorkspacePath, getDef
 import type { AgentConfig } from '../shared/types/agent';
 import { broadcast as broadcastSse, broadcastLive, flushPendingLiveEvents } from './sse';
 import { participatesInLiveRestore } from '../shared/liveRevision';
-import {
-  getEnabledPluginSdkConfigs,
-  getDefaultEnabledPluginIdsForWorkspace,
-} from './plugins/store';
+import { getDefaultEnabledPluginIdsForWorkspace, getEnabledPluginSdkConfigs } from './plugins/store';
 import { listPluginQualifiedSkillNames } from './plugins/manifest';
 import {
   buildBuiltinSkillAllowlist,
@@ -3532,7 +3535,16 @@ async function buildSdkMcpServers(): Promise<Record<string, McpServerEntry>> {
   // Global sidecar never receives /api/mcp/set and correctly gets no MCP.
   // Filter out SDK reserved names to prevent fatal crash:
   // "Invalid MCP configuration: X is a reserved MCP name." → exit code 1
-  const allServers: McpServerDefinition[] = configState.currentMcpServers ?? [];
+  const allServers: McpServerDefinition[] = isXiaojingMainAgentSession()
+    ? [{
+        id: XIAOJING_MAIN_AGENT.geoMcpServerId,
+        name: '小鲸 GEO 能力',
+        description: '小鲸同学产品登记的受控 GEO 能力',
+        type: 'stdio',
+        command: '__builtin__',
+        isBuiltin: true,
+      }]
+    : (configState.currentMcpServers ?? []);
   const servers = allServers.filter(s => {
     const normalized = s.id.replace(/[^a-zA-Z0-9_-]/g, '_');
     if (SDK_RESERVED_MCP_NAMES.includes(normalized)) {
@@ -3560,7 +3572,7 @@ async function buildSdkMcpServers(): Promise<Record<string, McpServerEntry>> {
   // tool surfaces that can't be expressed as a static prompt + CLI.
   const bridgeToolSurface = getImBridgeToolSurface();
   const bridgeServer = getImBridgeToolServer();
-  if (bridgeToolSurface && bridgeServer) {
+  if (bridgeToolSurface && bridgeServer && !isXiaojingMainAgentSession()) {
     result['im-bridge-tools'] = bridgeServer;
     console.log(`[agent] Added im-bridge-tools MCP server for plugin ${bridgeToolSurface.pluginId}`);
   }
@@ -5581,12 +5593,53 @@ export function buildClaudeSessionEnv(
   // Claude Code 2.1.x treats CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST as
   // "host owns auth", which blocks fallback to the local Claude Code
   // subscription store. Anthropic-sub must leave this unset so CC owns OAuth.
-  const effectiveProviderEnv = providerEnv ?? configState.currentProviderEnv;
-  const effectiveProviderId = opts?.providerId
-    ?? effectiveProviderEnv?.providerId
-    ?? (providerEnv === undefined
-      ? getSessionProviderId() ?? SUBSCRIPTION_PROVIDER_ID
-      : (!effectiveProviderEnv?.baseUrl && !effectiveProviderEnv?.apiKey ? SUBSCRIPTION_PROVIDER_ID : ''));
+  // Xiaojing's native host is the credential owner. Provider/model switching
+  // from config, restored metadata, or a crafted renderer payload must not
+  // redirect the focused product to another inference service.
+  const xiaojingMainAgent = isXiaojingMainAgentSession();
+  const nativeDeepseekSecret = resolveXiaojingDeepseekSecret();
+  const effectiveProviderEnv: ProviderEnv | undefined = xiaojingMainAgent
+    ? {
+        providerId: XIAOJING_MAIN_AGENT.providerId,
+        providerName: 'DeepSeek',
+        baseUrl: XIAOJING_MAIN_AGENT.anthropicBaseUrl,
+        ...(nativeDeepseekSecret ? { apiKey: nativeDeepseekSecret } : {}),
+        authType: XIAOJING_MAIN_AGENT.authType,
+        credentialSource: { kind: 'native-secret', providerId: 'deepseek' },
+        modelAliases: {
+          fable: XIAOJING_MAIN_AGENT.model,
+          sonnet: XIAOJING_MAIN_AGENT.model,
+          opus: XIAOJING_MAIN_AGENT.model,
+          haiku: 'deepseek-v4-flash',
+        },
+      }
+    : (providerEnv ?? configState.currentProviderEnv);
+  delete env[XIAOJING_MAIN_AGENT.credentialEnv];
+  if (xiaojingMainAgent) {
+    for (const key of [
+      'CLAUDE_CODE_USE_BEDROCK',
+      'CLAUDE_CODE_USE_VERTEX',
+      'CLAUDE_CODE_USE_FOUNDRY',
+      'CLAUDE_CODE_USE_ANTHROPIC_AWS',
+      'CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD',
+      'CLAUDE_CODE_USE_MANTLE',
+    ]) {
+      // SDK overlays this object on process.env, so an empty value is the only
+      // way to seal an inherited cloud selector out of the child process.
+      env[key] = '';
+    }
+    env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = '1';
+    env.DISABLE_TELEMETRY = '1';
+    env.DISABLE_ERROR_REPORTING = '1';
+    env.DISABLE_AUTOUPDATER = '1';
+  }
+  const effectiveProviderId = xiaojingMainAgent
+    ? XIAOJING_MAIN_AGENT.providerId
+    : (opts?.providerId
+      ?? effectiveProviderEnv?.providerId
+      ?? (providerEnv === undefined
+        ? getSessionProviderId() ?? SUBSCRIPTION_PROVIDER_ID
+        : (!effectiveProviderEnv?.baseUrl && !effectiveProviderEnv?.apiKey ? SUBSCRIPTION_PROVIDER_ID : '')));
 
   // Declare MyAgents as the inference-routing host for non-subscription
   // providers. This tells CC's `managedEnv` layer (see claude-code
@@ -5683,7 +5736,9 @@ export function buildClaudeSessionEnv(
   // For third-party providers, set ANTHROPIC_DEFAULT_*_MODEL so the SDK resolves aliases
   // to provider-specific model IDs (e.g., "sonnet" → "deepseek-chat" instead of "claude-sonnet-4-6").
   // Hoisted above the OpenAI early return so both protocol paths benefit.
-  const resolvedModel = modelOverride ?? configState.currentModel;
+  const resolvedModel = xiaojingMainAgent
+    ? XIAOJING_MAIN_AGENT.model
+    : (modelOverride ?? configState.currentModel);
   const aliases = resolveSessionModelAliases(effectiveProviderEnv?.modelAliases, resolvedModel);
   const resolveContextLength = (model: string | undefined): number | undefined => (
     opts?.contextWindowSnapshot
@@ -5893,6 +5948,41 @@ export function buildClaudeSessionEnv(
   // Anthropic credentials.
   sealCcAuthEnv(env);
   return env;
+}
+
+const XIAOJING_FOREIGN_RUNTIME_ENV = [
+  'CLAUDE_CODE_USE_BEDROCK',
+  'CLAUDE_CODE_USE_VERTEX',
+  'CLAUDE_CODE_USE_FOUNDRY',
+  'CLAUDE_CODE_USE_ANTHROPIC_AWS',
+  'CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD',
+  'CLAUDE_CODE_USE_MANTLE',
+] as const;
+
+/** Fail-closed query-launch gate immediately before the opaque SDK process is created. */
+export function assertXiaojingInferenceEgress(env: Record<string, string | undefined>): void {
+  if (env.ANTHROPIC_BASE_URL !== XIAOJING_MAIN_AGENT.anthropicBaseUrl) {
+    throw new Error('小鲸主对话请求出口必须固定为 DeepSeek Anthropic API');
+  }
+  if (env.CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST !== '1') {
+    throw new Error('小鲸主对话必须由应用托管 Provider 路由');
+  }
+  if (!env.ANTHROPIC_AUTH_TOKEN && !env.ANTHROPIC_API_KEY) {
+    throw new Error('小鲸主对话缺少原生 DeepSeek 凭据');
+  }
+  if (XIAOJING_FOREIGN_RUNTIME_ENV.some(key => env[key])) {
+    throw new Error('小鲸主对话禁止国外云 Runtime 路由');
+  }
+  for (const key of [
+    'CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC',
+    'DISABLE_TELEMETRY',
+    'DISABLE_ERROR_REPORTING',
+    'DISABLE_AUTOUPDATER',
+  ]) {
+    if (env[key] !== '1') {
+      throw new Error(`小鲸主对话缺少网络护栏 ${key}`);
+    }
+  }
 }
 
 function asString(value: unknown): string | undefined {
@@ -7049,7 +7139,24 @@ export function hasQueuedTurnByOwner(owner: TurnOwner): boolean {
 }
 
 export function getSystemInitInfo(): SystemInitInfo | null {
-  return lifecycleState.systemInitInfo;
+  const info = lifecycleState.systemInitInfo;
+  if (!info || !isXiaojingMainAgentSession()) return info;
+  return {
+    timestamp: info.timestamp,
+    type: info.type,
+    subtype: info.subtype,
+    cwd: info.cwd,
+    session_id: info.session_id,
+    tools: info.tools?.filter(isXiaojingMainAgentTool),
+    mcp_servers: info.mcp_servers?.filter(isXiaojingMainAgentMcpServer),
+    model: XIAOJING_MAIN_AGENT.model,
+    permissionMode: 'default',
+    slash_commands: [],
+    agents: [],
+    skills: [],
+    plugins: [],
+    uuid: info.uuid,
+  };
 }
 
 export function getLogLines(): string[] {
@@ -8183,48 +8290,54 @@ export async function enqueueUserMessage(
   }
   const channelDelivery = options.channelDelivery;
 
-  try {
-    const globalSkillInventory = createGlobalSkillInventorySnapshot();
-    const desiredCapabilities = resolveEffectiveProjectCapabilities(agentDir, { globalSkillInventory });
-    const disabledCapability = findDisabledCapabilityForSlashInput(trimmed, desiredCapabilities);
-    if (disabledCapability) {
+  if (isXiaojingMainAgentSession()) {
+    if (/^\/[a-z][a-z0-9_-]*(?:\s|$)/i.test(trimmed)) {
+      return { queued: false, error: '小鲸同学不开放底层 Runtime 斜杠命令' };
+    }
+  } else {
+    try {
+      const globalSkillInventory = createGlobalSkillInventorySnapshot();
+      const desiredCapabilities = resolveEffectiveProjectCapabilities(agentDir, { globalSkillInventory });
+      const disabledCapability = findDisabledCapabilityForSlashInput(trimmed, desiredCapabilities);
+      if (disabledCapability) {
+        return {
+          queued: false,
+          error: `/${disabledCapability.canonicalName} is disabled for this workspace`,
+        };
+      }
+      const currentCapabilities = configState.currentCapabilitySnapshot;
+      let projectionChanged = false;
+      if (
+        lifecycleState.query
+        && currentCapabilities
+        && !isTurnInFlight()
+        && (currentCapabilities.revision !== desiredCapabilities.revision
+          || currentCapabilities.integrityRevision !== desiredCapabilities.integrityRevision)
+      ) {
+        projectionChanged = trySyncProjectUserConfigFiles(agentDir, {
+          globalSkillInventory,
+          capabilitySnapshot: desiredCapabilities,
+        }, 'skill-sync').changed;
+        if (currentCapabilities.revision === desiredCapabilities.revision && !projectionChanged) {
+          configState.currentCapabilitySnapshot = desiredCapabilities;
+        }
+      }
+      if (
+        lifecycleState.query
+        && (currentCapabilities?.revision !== desiredCapabilities.revision || projectionChanged)
+      ) {
+        scheduleDeferredRestart('capabilities');
+        // Quiescent/pre-warmed Queries are replaced immediately. During a turn,
+        // the latch is drained by the terminal owner and the queued message is
+        // dispatched only by the replacement Query.
+        applyDeferredRestartIfNeeded();
+      }
+    } catch (error) {
       return {
         queued: false,
-        error: `/${disabledCapability.canonicalName} is disabled for this workspace`,
+        error: `Workspace capabilities are unavailable: ${error instanceof Error ? error.message : String(error)}`,
       };
     }
-    const currentCapabilities = configState.currentCapabilitySnapshot;
-    let projectionChanged = false;
-    if (
-      lifecycleState.query
-      && currentCapabilities
-      && !isTurnInFlight()
-      && (currentCapabilities.revision !== desiredCapabilities.revision
-        || currentCapabilities.integrityRevision !== desiredCapabilities.integrityRevision)
-    ) {
-      projectionChanged = trySyncProjectUserConfigFiles(agentDir, {
-        globalSkillInventory,
-        capabilitySnapshot: desiredCapabilities,
-      }, 'skill-sync').changed;
-      if (currentCapabilities.revision === desiredCapabilities.revision && !projectionChanged) {
-        configState.currentCapabilitySnapshot = desiredCapabilities;
-      }
-    }
-    if (
-      lifecycleState.query
-      && (currentCapabilities?.revision !== desiredCapabilities.revision || projectionChanged)
-    ) {
-      scheduleDeferredRestart('capabilities');
-      // Quiescent/pre-warmed Queries are replaced immediately. During a turn,
-      // the latch is drained by the terminal owner and the queued message is
-      // dispatched only by the replacement Query.
-      applyDeferredRestartIfNeeded();
-    }
-  } catch (error) {
-    return {
-      queued: false,
-      error: `Workspace capabilities are unavailable: ${error instanceof Error ? error.message : String(error)}`,
-    };
   }
 
   const queueId = options?.queueId ?? randomUUID();
@@ -8636,7 +8749,7 @@ export async function enqueueUserMessage(
     console.log(`[agent] pre-warm → active, first user message, sessionRegistered=${sessionRegistered}`);
     // Replay buffered system_init so frontend gets tools/session info
     if (lifecycleState.systemInitInfo) {
-      broadcast('chat:system-init', { info: lifecycleState.systemInitInfo, sessionId, runtime: 'builtin' });
+      broadcast('chat:system-init', { info: getSystemInitInfo(), sessionId, runtime: 'builtin' });
     }
   }
   // Cancel any pending pre-warm timer (user is sending a message now).
@@ -10247,49 +10360,71 @@ async function startStreamingSession(preWarm = false): Promise<void> {
     console.log('[agent] applying deferred provider history boundary reset before SDK start');
     resetForProviderHistoryBoundary();
   }
-  const adminConfigForSession = loadAdminConfig();
-  const cliToolRegistryEnabled = isCliToolRegistryEnabled(adminConfigForSession);
-  // One resolver owns UI and Runtime admission. The same inventory and
-  // project-winner snapshot also drive the compatibility projection before
-  // launch, so every Runtime observes one canonical result.
-  let launchCapabilitySnapshot: EffectiveProjectCapabilitySnapshot;
-  let unavailableBuiltinSkillNames: string[] = [];
-  try {
-    const globalSkillInventory = createGlobalSkillInventorySnapshot({ cliToolRegistryEnabled });
-    launchCapabilitySnapshot = resolveEffectiveProjectCapabilities(agentDir, { globalSkillInventory });
-    unavailableBuiltinSkillNames = trySyncProjectUserConfigFiles(agentDir, {
-      cliToolRegistryEnabled,
-      globalSkillInventory,
-      capabilitySnapshot: launchCapabilitySnapshot,
-    }).unavailableSkillNames;
-  } catch (error) {
-    const message = `Workspace capability admission failed: ${error instanceof Error ? error.message : String(error)}`;
-    console.error(`[agent] ${message}`);
-    lastAgentError = message;
+  const xiaojingMainAgent = isXiaojingMainAgentSession();
+  if (xiaojingMainAgent && !resolveXiaojingDeepseekSecret()) {
+    const message = '请先在连接设置中配置 DeepSeek API Key';
     const hadQueuedInput = getMessageQueue().length > 0;
     if (!preWarm || hadQueuedInput) {
       drainQueueWithCancellation();
+      lastAgentError = message;
       broadcast('chat:agent-error', { message });
     }
-    // Capability projection happens before the ordinary Query try/finally.
-    // Release the pre-warm owner here so a failed replacement cannot strand
-    // its requeued user message behind a permanently "pre-warming" Session.
     setPreWarmInProgress(false);
     setSessionState('idle');
     return;
   }
-  ensureGitignorePattern(agentDir, SESSION_PLANS_GITIGNORE_PATTERN);
+  const adminConfigForSession = loadAdminConfig();
+  const cliToolRegistryEnabled = !xiaojingMainAgent && isCliToolRegistryEnabled(adminConfigForSession);
+  let launchCapabilitySnapshot: EffectiveProjectCapabilitySnapshot;
+  let unavailableBuiltinSkillNames: string[] = [];
+  if (xiaojingMainAgent) {
+    launchCapabilitySnapshot = {
+      workspacePath: agentDir,
+      agentId: 'xiaojing-main-agent',
+      revision: 'xiaojing-geo-only-v1',
+      integrityRevision: 'xiaojing-geo-only-v1',
+      integrityIssues: [],
+      candidates: [],
+      enabledSkills: [],
+      enabledCommands: [],
+    };
+  } else {
+    try {
+      const globalSkillInventory = createGlobalSkillInventorySnapshot({ cliToolRegistryEnabled });
+      launchCapabilitySnapshot = resolveEffectiveProjectCapabilities(agentDir, { globalSkillInventory });
+      unavailableBuiltinSkillNames = trySyncProjectUserConfigFiles(agentDir, {
+        cliToolRegistryEnabled,
+        globalSkillInventory,
+        capabilitySnapshot: launchCapabilitySnapshot,
+      }).unavailableSkillNames;
+    } catch (error) {
+      const message = `Workspace capability admission failed: ${error instanceof Error ? error.message : String(error)}`;
+      console.error(`[agent] ${message}`);
+      lastAgentError = message;
+      const hadQueuedInput = getMessageQueue().length > 0;
+      if (!preWarm || hadQueuedInput) {
+        drainQueueWithCancellation();
+        broadcast('chat:agent-error', { message });
+      }
+      setPreWarmInProgress(false);
+      setSessionState('idle');
+      return;
+    }
+    ensureGitignorePattern(agentDir, SESSION_PLANS_GITIGNORE_PATTERN);
+  }
   // PRD #124: register a FRESH bridge token for this SDK subprocess.
   // `freshToken: true` retires the previous token (if any) so any late
   // requests from the dying old subprocess get rejected with a 400
   // "unknown bridge token" instead of resolving to the new subprocess's
   // config (the cross-pollination class we're eliminating).
   ensureActiveSessionBridgeRegistered({ freshToken: true });
-  const launchProviderId = getSessionProviderId() ?? SUBSCRIPTION_PROVIDER_ID;
-  const launchAgentDefinitionsSource = configState.currentAgentDefinitions;
+  const launchProviderId = xiaojingMainAgent
+    ? XIAOJING_MAIN_AGENT.providerId
+    : (getSessionProviderId() ?? SUBSCRIPTION_PROVIDER_ID);
+  const launchAgentDefinitionsSource = xiaojingMainAgent ? null : configState.currentAgentDefinitions;
   const launchContextWindowSnapshot = snapshotProviderModelContextLengths([
-    configState.currentModel,
-    ...Object.values(configState.currentProviderEnv?.modelAliases ?? {}),
+    xiaojingMainAgent ? XIAOJING_MAIN_AGENT.model : configState.currentModel,
+    ...Object.values(xiaojingMainAgent ? {} : (configState.currentProviderEnv?.modelAliases ?? {})),
     ...Object.values(launchAgentDefinitionsSource ?? {}).map(agent => agent.model),
   ], launchProviderId);
   const env = buildClaudeSessionEnv(undefined, undefined, {
@@ -10297,10 +10432,13 @@ async function startStreamingSession(preWarm = false): Promise<void> {
     providerId: launchProviderId,
     contextWindowSnapshot: launchContextWindowSnapshot,
   });
-  const launchModel = applyContextWindowSuffixForContextLength(
-    configState.currentModel,
-    lookupSnapshotModelContextLength(launchContextWindowSnapshot, configState.currentModel),
-  );
+  if (xiaojingMainAgent) assertXiaojingInferenceEgress(env);
+  const launchModel = xiaojingMainAgent
+    ? XIAOJING_MAIN_AGENT.model
+    : applyContextWindowSuffixForContextLength(
+        configState.currentModel,
+        lookupSnapshotModelContextLength(launchContextWindowSnapshot, configState.currentModel),
+      );
   const launchAgentDefinitions = launchAgentDefinitionsSource
     ? Object.fromEntries(
         Object.entries(launchAgentDefinitionsSource).map(([name, agent]) => [
@@ -10386,7 +10524,6 @@ async function startStreamingSession(preWarm = false): Promise<void> {
       configState.currentPermissionMode,
       currentScenario,
     );
-
     // Resolve SDK-compatible session ID for resume/create.
     // SDK requires valid UUID format for --resume (and --session-id).
     // Our internal sessionId may have a prefix (e.g., old cron-im-{uuid} format).
@@ -10545,7 +10682,10 @@ async function startStreamingSession(preWarm = false): Promise<void> {
     const claudeTranscriptCleanupPeriodDays = normalizeClaudeTranscriptCleanupPeriodDays(
       loadAdminConfig().claudeTranscriptCleanupPeriodDays,
     );
-    console.log(`[agent] starting query with model: ${configState.currentModel ?? 'default'}, permissionMode: ${configState.currentPermissionMode} -> SDK: ${sdkPermissionMode}, MCP: ${mcpStatus}, cleanupPeriodDays: ${claudeTranscriptCleanupPeriodDays}, ${resumeFrom ? `resume: ${resumeFrom}` : `sessionId: ${effectiveSdkSessionId}`}${effectiveResumeAt ? `, resumeSessionAt: ${effectiveResumeAt}` : ''}${forkMode ? `, FORK mode (forkPoint: ${forkResumeAt}${rewindResumeAt && rewindResumeAt !== forkResumeAt ? `, rewind→${rewindResumeAt}` : ''})` : ''}`);
+    const queryIdentity = xiaojingMainAgent
+      ? 'Xiaojing'
+      : `model: ${configState.currentModel ?? 'default'}, permissionMode: ${configState.currentPermissionMode} -> SDK: ${sdkPermissionMode}`;
+    console.log(`[agent] starting query with ${queryIdentity}, MCP: ${mcpStatus}, cleanupPeriodDays: ${claudeTranscriptCleanupPeriodDays}, ${resumeFrom ? `resume: ${resumeFrom}` : `sessionId: ${effectiveSdkSessionId}`}${effectiveResumeAt ? `, resumeSessionAt: ${effectiveResumeAt}` : ''}${forkMode ? `, FORK mode (forkPoint: ${forkResumeAt}${rewindResumeAt && rewindResumeAt !== forkResumeAt ? `, rewind→${rewindResumeAt}` : ''})` : ''}`);
 
     const promptGen = messageGenerator();
 
@@ -10610,36 +10750,44 @@ async function startStreamingSession(preWarm = false): Promise<void> {
     // request (resolveActiveSessionUpstreamConfig) — the SDK-side option
     // stays at the historical 'high' there. 'high' === omitting the param
     // per Anthropic docs, so 'default' keeps pre-#324 wire behavior exactly.
-    const sdkEffort = configState.currentProviderEnv?.apiProtocol !== 'openai' && isSdkEffortLevel(configState.currentReasoningEffort)
-      ? configState.currentReasoningEffort
-      : ('high' as const);
-    const enabledOfficialToolIds = getEffectiveOfficialToolIdsForSession(
-      agentDir,
-      getSessionMetadata(sessionId),
-      configState.currentEnabledOfficialToolIds,
-    );
+    const sdkEffort = xiaojingMainAgent
+      ? XIAOJING_MAIN_AGENT.reasoningEffort
+      : (configState.currentProviderEnv?.apiProtocol !== 'openai' && isSdkEffortLevel(configState.currentReasoningEffort)
+        ? configState.currentReasoningEffort
+        : ('high' as const));
+    const enabledOfficialToolIds = xiaojingMainAgent
+      ? []
+      : getEffectiveOfficialToolIdsForSession(
+          agentDir,
+          getSessionMetadata(sessionId),
+          configState.currentEnabledOfficialToolIds,
+        );
     const claudeCodeExecutable = resolveClaudeCodeCli();
-    const contextPluginIds = configState.currentEnabledPluginIds !== null
-      ? configState.currentEnabledPluginIds
-      : getDefaultEnabledPluginIdsForWorkspace(agentDir ?? '');
+    const contextPluginIds = xiaojingMainAgent
+      ? []
+      : (configState.currentEnabledPluginIds !== null
+        ? configState.currentEnabledPluginIds
+        : getDefaultEnabledPluginIdsForWorkspace(agentDir ?? ''));
     const enabledPluginConfigs = getEnabledPluginSdkConfigs(contextPluginIds);
     const enabledPluginSkillNames = enabledPluginConfigs.flatMap(plugin => (
       listPluginQualifiedSkillNames(plugin.path)
     ));
-    const enabledSkillAllowlist = buildBuiltinSkillAllowlist(
-      launchCapabilitySnapshot,
-      enabledPluginSkillNames,
-      unavailableBuiltinSkillNames,
-    );
+    const enabledSkillAllowlist = xiaojingMainAgent
+      ? []
+      : buildBuiltinSkillAllowlist(
+          launchCapabilitySnapshot,
+          enabledPluginSkillNames,
+          unavailableBuiltinSkillNames,
+        );
 
     const commonQueryOptions = {
-      enableFileCheckpointing: true,
+      enableFileCheckpointing: !xiaojingMainAgent,
       thinking: thinkingConfig,
       effort: sdkEffort,
       // Load settings from project scope only (.claude/)
       // Enabled global Skills are projected into <cwd>/.claude/skills/ before Query launch.
       // CLAUDE_CONFIG_DIR is NOT set — preserves Anthropic subscription Keychain lookup
-      settingSources: buildSettingSources(),
+      settingSources: xiaojingMainAgent ? [] : buildSettingSources(),
       // SDK-level allowlist is the execution gate for both project and global
       // Skills. Disk projection remains the compatibility bridge for Commands.
       skills: [...new Set(enabledSkillAllowlist)].sort(),
@@ -10673,12 +10821,12 @@ async function startStreamingSession(preWarm = false): Promise<void> {
       // - plan → plan
       // - fullAgency → bypassPermissions (skip all checks)
       // - custom → default (all tools go through canUseTool)
-      permissionMode: sdkPermissionMode,
+      permissionMode: xiaojingMainAgent ? ('default' as const) : sdkPermissionMode,
       // allowDangerouslySkipPermissions MUST always be true: pre-warm starts with acceptEdits
       // (configState.currentPermissionMode defaults to 'auto'), user may switch to fullAgency mid-session
       // via setPermissionMode('bypassPermissions'). Without this flag at query creation time,
       // the SDK silently ignores the mode switch and keeps calling canUseTool.
-      allowDangerouslySkipPermissions: true,
+      allowDangerouslySkipPermissions: !xiaojingMainAgent,
       // launchModel appends [1m] from the SAME context snapshot used by env
       // when the active provider's contextLength exceeds the SDK 200K default
       // (#335/#516). Without it, SDK
@@ -10712,12 +10860,13 @@ async function startStreamingSession(preWarm = false): Promise<void> {
           ),
           // agent-session.ts is the builtin Claude Agent SDK path by definition.
           runtime: 'builtin',
+          xiaojingMainAgent,
           // Universal CLI capability surface (cron / IM media). Was external-runtime
           // only when builtin still had `cron-tools` / `im-cron` / `im-media` MCPs;
           // those got dropped in favour of `myagents` CLI calls so builtin needs the
           // same prompt now. Single CLI, single source of truth across all runtimes.
-          cliToolsEnabled: true,
-          userCliToolsEnabled: cliToolRegistryEnabled,
+          cliToolsEnabled: !xiaojingMainAgent,
+          userCliToolsEnabled: !xiaojingMainAgent && cliToolRegistryEnabled,
           enabledOfficialToolIds,
         }),
       },
@@ -10731,7 +10880,7 @@ async function startStreamingSession(preWarm = false): Promise<void> {
       mcpServers: sdkMcpServersInitial,
       // Product visibility boundary. Permission policy remains separately
       // owned by allowedTools/disallowedTools/canUseTool/Hooks below.
-      tools: [...SDK_BUILTIN_TOOLS],
+      tools: xiaojingMainAgent ? [...XIAOJING_MAIN_AGENT.builtinTools] : [...SDK_BUILTIN_TOOLS],
       // PRD 0.2.17 — Claude plugin injection. SDK accepts
       // `plugins: [{ type: 'local', path }]`; it then scans each path for
       // .claude-plugin/plugin.json and wires up the contained
@@ -10757,7 +10906,7 @@ async function startStreamingSession(preWarm = false): Promise<void> {
       // prompts for plain searches in default mode. Both are read-only tools,
       // so auto-approving matches the existing getPermissionRules() semantics.
       // 'Task' is appended when sub-agents are injected so the model can delegate.
-      allowedTools: [
+      allowedTools: xiaojingMainAgent ? [] : [
         'Grep',
         'Glob',
         ...(launchAgentDefinitions && Object.keys(launchAgentDefinitions).length > 0
@@ -10771,7 +10920,7 @@ async function startStreamingSession(preWarm = false): Promise<void> {
       // model (the parent could be on a 200K model, the sub-agent on a 1M one,
       // or vice versa). The original configState.currentAgentDefinitions is left untouched
       // so config owner fingerprinting and downstream config consumers see clean names.
-      ...(launchAgentDefinitions && Object.keys(launchAgentDefinitions).length > 0
+      ...(!xiaojingMainAgent && launchAgentDefinitions && Object.keys(launchAgentDefinitions).length > 0
         ? { agents: launchAgentDefinitions }
         : {}),
       // disallowedTools: group chat deny list + IM-incompatible UI-interaction tools
@@ -10781,6 +10930,19 @@ async function startStreamingSession(preWarm = false): Promise<void> {
       // Effective when permissionMode is 'default' or 'acceptEdits' (not 'bypassPermissions')
       canUseTool: async (toolName: string, input: unknown, options: { signal: AbortSignal }) => {
         console.debug(`[permission] canUseTool checking: ${toolName}, mode=${configState.currentPermissionMode}`);
+
+        if (xiaojingMainAgent && !isXiaojingMainAgentTool(toolName)) {
+          return {
+            behavior: 'deny' as const,
+            message: '小鲸同学主 Agent 只能调用已登记的 GEO 能力。',
+          };
+        }
+        if (xiaojingMainAgent && toolName.startsWith(`mcp__${XIAOJING_MAIN_AGENT.geoMcpServerId}__`)) {
+          return {
+            behavior: 'allow' as const,
+            updatedInput: input as Record<string, unknown>,
+          };
+        }
 
         // SAFETY NET: fullAgency mode MUST auto-approve everything except user-interaction
         // tools that require explicit human review (AskUserQuestion, EnterPlanMode, ExitPlanMode).
@@ -11380,7 +11542,7 @@ async function startStreamingSession(preWarm = false): Promise<void> {
         setSdkControlReady(true);
         const normalizedSlashCommands = normalizeSdkSlashCommands(initResult?.commands);
         const slashCommands = normalizedSlashCommands
-          ? filterSlashCommandsForCapabilities(normalizedSlashCommands, launchCapabilitySnapshot)
+          ? (xiaojingMainAgent ? [] : filterSlashCommandsForCapabilities(normalizedSlashCommands, launchCapabilitySnapshot))
           : null;
         if (slashCommands) {
           broadcastSdkSlashCommands(slashCommands, 'initialize');
@@ -11694,7 +11856,7 @@ async function startStreamingSession(preWarm = false): Promise<void> {
           if (sessionState === 'starting') {
             setSessionState('running');
           }
-          broadcast('chat:system-init', { info: lifecycleState.systemInitInfo, sessionId: canonicalSessionId, runtime: 'builtin' });
+          broadcast('chat:system-init', { info: getSystemInitInfo(), sessionId: canonicalSessionId, runtime: 'builtin' });
         } else {
           // Pre-warm 不设 sessionRegistered — 这是核心设计约束
           // Pre-warm 的 system_init 只意味着 subprocess 准备好了，
@@ -11730,7 +11892,7 @@ async function startStreamingSession(preWarm = false): Promise<void> {
 
       const normalizedChangedSlashCommands = parseSdkCommandsChanged(sdkMessage);
       const changedSlashCommands = normalizedChangedSlashCommands
-        ? filterSlashCommandsForCapabilities(normalizedChangedSlashCommands, launchCapabilitySnapshot)
+        ? (xiaojingMainAgent ? [] : filterSlashCommandsForCapabilities(normalizedChangedSlashCommands, launchCapabilitySnapshot))
         : null;
       if (changedSlashCommands) {
         broadcastSdkSlashCommands(changedSlashCommands, 'commands_changed');
@@ -13524,7 +13686,11 @@ async function* messageGenerator(): AsyncGenerator<SDKUserMessage> {
     setCommittingTurnAdmissionQueueId(null);
 
     if (deferredSystemInit) {
-      broadcast('chat:system-init', { info: deferredSystemInit, sessionId, runtime: 'builtin' });
+      broadcast('chat:system-init', {
+        info: isXiaojingMainAgentSession() ? getSystemInitInfo() : deferredSystemInit,
+        sessionId,
+        runtime: 'builtin',
+      });
       console.log(`[agent] pre-warm → active (at admission), sessionRegistered=${sessionRegistered}`);
     }
     if (

@@ -68,6 +68,7 @@ import {
     rebuildAndPersistAvailableProviders,
 } from '@/config/configService';
 import { useConfig } from '@/hooks/useConfig';
+import { useResolvedTheme } from '@/theme';
 import { useSpaceBuildCapability } from '@/hooks/useSpaceBuildCapability';
 import { SpaceEnvironmentSwitch } from './components/SpaceEnvironmentSwitch';
 import { actions as spaceActions } from '@/pages/space/spaceStore';
@@ -105,7 +106,6 @@ import { workspacePathsEqual } from '../../../shared/workspacePath';
 import { normalizeProxyScope } from '../../../shared/proxyScope';
 import { describeProxyScopeSummary } from './proxyScopePresentation';
 import { formatSubscriptionVerifyError } from '../../../shared/subscription';
-import type { UiLanguage } from '../../../shared/i18n';
 import ProviderEnableOrderDialog from '@/components/ProviderEnableOrderDialog';
 import FloatingBallPetSettings from '@/components/FloatingBallPetSettings';
 import {
@@ -113,8 +113,8 @@ import {
     setNativeFloatingBallEnabled,
 } from '@/floating-ball/nativeFloatingBall';
 import {
-    MYAGENTS_GITHUB_URL,
-    MYAGENTS_RELEASES_URL,
+    WHALEAI_GITHUB_URL,
+    WHALEAI_RELEASES_URL,
     PLAYWRIGHT_DEVICE_PRESETS,
 } from './settingsSections';
 import {
@@ -128,9 +128,6 @@ import {
     getManagedCodexUpdateRefreshAction,
     type ManagedCodexRuntimeBusyAction,
 } from './managedCodexRuntimePresentation';
-import { AppearanceModeControl } from './components/AppearanceModeControl';
-import { ThemePresetSelect } from './components/ThemePresetSelect';
-import { useResolvedTheme } from '@/theme';
 import type {
     NetworkProbeResult,
     ProviderVerifyError,
@@ -270,7 +267,6 @@ export default function Settings({ mode = 'settings', initialSection, navigation
     const toast = useToast();
     const resolvedTheme = useResolvedTheme();
     const { t: tSettings } = useTranslation('settings');
-    const { t: tCommon } = useTranslation('common');
     // Stabilize toast reference to avoid unnecessary effect re-runs
     const toastRef = useRef(toast);
     toastRef.current = toast;
@@ -283,11 +279,6 @@ export default function Settings({ mode = 'settings', initialSection, navigation
         () => normalizeClaudeTranscriptCleanupPeriodDays(config.claudeTranscriptCleanupPeriodDays),
         [config.claudeTranscriptCleanupPeriodDays],
     );
-    const languageOptions = useMemo(() => [
-        { value: 'system', label: tCommon('language.system') },
-        { value: 'zh-CN', label: tCommon('language.zhCN') },
-        { value: 'en-US', label: tCommon('language.enUS') },
-    ], [tCommon]);
     const availableSpaceEnvironments = useMemo(
         () => new Set(spaceBuildCapability.environments ?? ['production']),
         [spaceBuildCapability.environments],
@@ -2263,7 +2254,6 @@ export default function Settings({ mode = 'settings', initialSection, navigation
         console.log('[verifyProvider] Provider:', provider.id, provider.name, `(gen=${gen})`);
         console.log('[verifyProvider] baseUrl:', provider.config.baseUrl);
         console.log('[verifyProvider] model:', provider.primaryModel);
-        console.log('[verifyProvider] apiKey:', apiKey.slice(0, 10) + '...');
 
         setVerifyLoading((prev) => ({ ...prev, [provider.id]: true }));
         setVerifyError((prev) => { const next = { ...prev }; delete next[provider.id]; return next; });
@@ -4348,54 +4338,6 @@ export default function Settings({ mode = 'settings', initialSection, navigation
                                 </p>
                             </div>
 
-                            <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
-                                <h3 className="text-base font-medium text-[var(--ink)]">{tSettings('general.appearanceTitle')}</h3>
-
-                                <div className="mt-4 flex items-center justify-between gap-4">
-                                    <div className="flex-1 pr-4">
-                                        <p className="text-sm font-medium text-[var(--ink)]">{tSettings('general.languageTitle')}</p>
-                                        <p className="text-xs text-[var(--ink-muted)]">
-                                            {tSettings('general.languageDescription')}
-                                        </p>
-                                    </div>
-                                    <CustomSelect
-                                        value={config.uiLanguage ?? 'system'}
-                                        options={languageOptions}
-                                        onChange={async (value) => {
-                                            await updateConfig({ uiLanguage: value as UiLanguage });
-                                            toast.success(tSettings('general.languageChanged'));
-                                        }}
-                                        triggerIcon={<Globe className="h-3.5 w-3.5" />}
-                                        className="w-[220px]"
-                                    />
-                                </div>
-
-                                <AppearanceModeControl
-                                    value={config.appearanceMode}
-                                    onChange={(mode) => { void updateConfig({ appearanceMode: mode }); }}
-                                />
-
-                                <div className="mt-4 flex items-center justify-between gap-4 border-t border-[var(--line)] pt-4">
-                                    <div className="min-w-0 flex-1 pr-4">
-                                        <p className="text-sm font-medium text-[var(--ink)]">{tSettings('general.themeTitle')}</p>
-                                        <p className="mt-0.5 text-xs text-[var(--ink-muted)]">
-                                            {tSettings('general.themeDescription')}
-                                        </p>
-                                    </div>
-                                    <ThemePresetSelect
-                                        value={resolvedTheme.themeId}
-                                        onPersistTheme={(themeId) => updateConfig({
-                                            themeId,
-                                            themeSelectionExplicit: true,
-                                        })}
-                                        onPersistError={(error) => {
-                                            const message = error instanceof Error ? error.message : String(error);
-                                            toast.error(tSettings('general.themeSaveFailed', { message }));
-                                        }}
-                                    />
-                                </div>
-                            </div>
-
                             {/* Startup Settings */}
                             <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
                                 <h3 className="text-base font-medium text-[var(--ink)]">{tSettings('general.startupTitle')}</h3>
@@ -4924,7 +4866,7 @@ export default function Settings({ mode = 'settings', initialSection, navigation
                                         className="theme-product-wordmark theme-launcher-hero-title cursor-default select-none"
                                         onClick={handleLogoTap}
                                     >
-                                        MyAgents
+                                        {resolvedTheme.hero.productName}
                                     </h1>
                                     <div className="mt-1 flex items-center gap-2">
                                         <p className="text-sm font-medium text-[var(--ink-muted)]">
@@ -4959,14 +4901,14 @@ export default function Settings({ mode = 'settings', initialSection, navigation
                                             </button>
                                         )}
                                         <ExternalLink
-                                            href={MYAGENTS_RELEASES_URL}
+                                            href={WHALEAI_RELEASES_URL}
                                             className="rounded-lg bg-[var(--paper-inset)] px-2 py-0.5 text-xs text-[var(--ink-secondary)] transition-colors hover:bg-[var(--paper-elevated)]"
                                         >
                                             {tSettings('about.releaseNotes')}
                                         </ExternalLink>
                                     </div>
                                     <p className="mt-3 text-base text-[var(--ink-secondary)]">
-                                        {tSettings('about.slogan')}
+                                        {resolvedTheme.hero.slogans['zh-CN']}
                                     </p>
                                     {updateDownloading && propUpdateVersion && (
                                         <div className="mt-3 space-y-2">
@@ -5172,10 +5114,10 @@ export default function Settings({ mode = 'settings', initialSection, navigation
                                     <div>
                                         <p className="text-xs font-medium uppercase tracking-wider text-[var(--ink-muted)]">GitHub</p>
                                         <ExternalLink
-                                            href={MYAGENTS_GITHUB_URL}
+                                            href={WHALEAI_GITHUB_URL}
                                             className="mt-1 block text-[var(--accent)] hover:underline"
                                         >
-                                            github.com/hAcKlyc/MyAgents
+                                            github.com/1caruszhang/whaleai
                                         </ExternalLink>
                                     </div>
                                 </div>

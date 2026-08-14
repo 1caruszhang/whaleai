@@ -43,6 +43,14 @@ describe('deleteSession', () => {
         expect(mocks.apiFetch).not.toHaveBeenCalled();
     });
 
+    it('carries brand confirmation into the same Rust lifecycle fence', async () => {
+        const admission = { workspaceId: 'brand-a', confirmationToken: 'confirmed-token' };
+
+        await expect(deleteSession('session-1', ['tab-a'], admission)).resolves.toEqual({ deleted: true });
+
+        expect(mocks.deleteSessionIfUnowned).toHaveBeenCalledWith('session-1', ['tab-a'], admission);
+    });
+
     it('refuses to delete storage while any sidecar owner is still alive', async () => {
         mocks.deleteSessionIfUnowned.mockResolvedValue({ deleted: false, reason: 'in-use' });
 

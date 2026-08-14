@@ -3,11 +3,11 @@
  */
 
 import { existsSync } from 'fs';
-import { homedir } from 'os';
 import { join } from 'path';
 import { ensureDirSync } from './utils/fs-utils';
+import { getAppDataDir } from './utils/app-data-dir';
 
-export const MYAGENTS_DIR = join(homedir(), '.myagents');
+export const MYAGENTS_DIR = getAppDataDir();
 export const LOGS_DIR = join(MYAGENTS_DIR, 'logs');
 // Retention policy moved to `./log-retention.ts` (#121, 2026-05). Keeping a
 // re-export of LOGS_DIR + ensureLogsDir as the only API of this module.

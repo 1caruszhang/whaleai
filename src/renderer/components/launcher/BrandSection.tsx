@@ -38,8 +38,10 @@ import type { RuntimeType, RuntimeModelInfo, RuntimePermissionMode } from '../..
 import type { Thought } from '../../../shared/types/thought';
 import type { OfficialToolDefinition, OfficialToolId } from '../../../shared/official-tools';
 import { useResolvedTheme } from '@/theme';
+import xiaojingWhale from '@/assets/brand/xiaojing-whale.svg';
 
 interface BrandSectionProps {
+    variant?: 'default' | 'xiaojing';
     // Workspace
     projects: Project[];
     selectedProject: Project | null;
@@ -111,6 +113,7 @@ interface BrandSectionProps {
 const LAUNCHER_INPUT_DROP_ZONE_ID = 'launcher-input';
 
 export default memo(function BrandSection({
+    variant = 'default',
     projects,
     selectedProject,
     defaultWorkspacePath,
@@ -192,7 +195,7 @@ export default memo(function BrandSection({
     // re-fetches and the just-saved note slides in as the first chip.
     const [thoughtRefreshKey, setThoughtRefreshKey] = useState(0);
     // Gracefully degrade in browser dev mode — ModeSegment is Tauri-only.
-    const modeSegmentEnabled = taskCenterAvailable();
+    const modeSegmentEnabled = variant === 'default' && taskCenterAvailable();
 
     // `runtime` is present for user-managed external CLIs. Managed Codex keeps
     // provider-style input chrome, so its execution Runtime comes from the
@@ -551,6 +554,64 @@ export default memo(function BrandSection({
             </button>
         </p>
     ) : null;
+
+    if (variant === 'xiaojing') {
+        const starterPrompts = [
+            '帮我分析当前品牌最值得做的 GEO 问题机会',
+            '为当前品牌规划一次完整 GEO 优化',
+            '基于品牌事实生成一篇 GEO 内容',
+            '检测当前品牌在 AI 回答中的可见性',
+        ] as const;
+
+        return (
+            <section ref={sectionRef} className="flex h-full flex-1 flex-col items-center justify-center px-8" data-xiaojing-launcher>
+                <div className="mb-7 flex max-w-[680px] flex-col items-center text-center">
+                    <img src={xiaojingWhale} alt="" className="h-20 w-20 rounded-2xl shadow-[var(--shadow-lg)]" />
+                    <span className="mt-5 rounded-full border border-[var(--accent)]/25 bg-[var(--accent-warm-subtle)] px-3 py-1 text-xs font-semibold tracking-[0.18em] text-[var(--accent)]">GEO 营销</span>
+                    <h1 className="theme-product-wordmark mt-4 text-3xl font-semibold">你好，我是{resolvedTheme.hero.productName}</h1>
+                    <p className="mt-2 text-sm text-[var(--ink-muted)]">{resolvedTheme.hero.slogans['zh-CN']}</p>
+                </div>
+
+                <div className="mb-4 grid w-full max-w-[680px] grid-cols-2 gap-2.5">
+                    {starterPrompts.map((prompt) => (
+                        <button key={prompt} type="button" onClick={() => { inputRef.current?.setValue(prompt); inputRef.current?.focus(); }} className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] px-4 py-3 text-left text-xs leading-5 text-[var(--ink-muted)] transition-colors hover:border-[var(--accent)]/45 hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]">
+                            {prompt}
+                        </button>
+                    ))}
+                </div>
+
+                <div ref={inputDropZoneRef} className="relative w-full max-w-[680px]" {...(canAcceptFileDrop ? htmlFileDragHandlers : {})}>
+                    <SimpleChatInput
+                        ref={inputRef}
+                        mode="launcher"
+                        capabilitySurface="geo"
+                        active={canAcceptFileDrop}
+                        onSend={handleSend}
+                        isLoading={!!isStarting}
+                        provider={provider}
+                        providers={providers}
+                        selectedModel={selectedModel}
+                        onProviderChange={onProviderChange}
+                        onModelChange={onModelChange}
+                        reasoningEffort={reasoningEffort}
+                        onReasoningEffortChange={onReasoningEffortChange}
+                        permissionMode={permissionMode}
+                        onPermissionModeChange={onPermissionModeChange}
+                        workspacePath={selectedProject?.path ?? null}
+                        sessionId={attachmentSessionId}
+                        showBuiltinSdkSlashCommands={false}
+                        apiKeys={apiKeys}
+                        providerVerifyStatus={providerVerifyStatus}
+                    />
+                    <DropZoneOverlay isVisible={showInputDropOverlay} />
+                </div>
+                <p className="mt-4 text-xs text-[var(--ink-subtle)]">
+                    {selectedProject ? `当前品牌：${selectedProject.displayName?.trim() || selectedProject.name}` : '请先从左侧创建或选择品牌'}
+                </p>
+                {providerSettingsPrompt}
+            </section>
+        );
+    }
 
     return (
         <section

@@ -647,7 +647,9 @@ export default function Chat({ isWindowFocused, onNewSession, onOpenSession, onO
       providerId: provider.id,
       providerName: provider.name,
       baseUrl: provider.config.baseUrl,
-      apiKey: apiKeysRef.current[provider.id],
+      ...(provider.id === 'deepseek'
+        ? { credentialSource: { kind: 'native-secret' as const, providerId: 'deepseek' as const } }
+        : { apiKey: apiKeysRef.current[provider.id] }),
       authType: provider.authType,
       apiProtocol: provider.apiProtocol,
       maxOutputTokens: provider.maxOutputTokens,
@@ -1413,7 +1415,7 @@ export default function Chat({ isWindowFocused, onNewSession, onOpenSession, onO
     currentRuntime,
     managedProviderRuntimeActive,
   });
-  const showLegacyRuntimeSelector = multiAgentRuntimeEnabled;
+  const showLegacyRuntimeSelector = false;
   const showBuiltinSdkSlashCommands = shouldShowBuiltinSdkSlashCommands(currentRuntime);
   const visibleSdkSlashCommands = useMemo(
     () => showBuiltinSdkSlashCommands ? sdkSlashCommands : [],
@@ -5478,6 +5480,7 @@ export default function Chat({ isWindowFocused, onNewSession, onOpenSession, onO
               事件意外触发面板（PRD D15）。onJumpToTool 由 Chat 实现是因为
               具体滚动由 ChatScrollController 统一处理。 */}
           <SimpleChatInput
+            capabilitySurface="geo"
             ref={chatInputRef}
             onSend={handleSendMessage}
             onStop={handleStop}

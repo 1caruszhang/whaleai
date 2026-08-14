@@ -60,6 +60,7 @@ prost = "0.13"
 pulldown-cmark = "0.12"
 # YAML frontmatter parsing for slash command / skill SKILL.md files (workspace_files::slash)
 serde_yaml = "0.9"
+rusqlite = { version = "0.31", features = ["bundled"] }
 # Fuzzy file name search for @ mention picker — small dependency, used only inside workspace_files::search
 fuzzy-matcher = "0.3"
 axum = { version = "0.8", default-features = false, features = ["json", "tokio", "query", "http1"] }
@@ -121,6 +122,7 @@ windows-sys = { version = "0.59", features = [
     "Wdk_Storage_FileSystem",
     "Win32_Foundation",
     "Win32_Security",
+    "Win32_Security_Credentials",
     "Win32_Storage_FileSystem",
     "Win32_System_Diagnostics_ToolHelp",
     "Win32_System_IO",

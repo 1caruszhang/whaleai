@@ -1293,6 +1293,11 @@ export type SessionDeleteResult =
     | { deleted: true }
     | { deleted: false; reason: SessionDeleteFailureReason };
 
+export interface BrandSessionDeletionAdmission {
+    workspaceId: string;
+    confirmationToken: string;
+}
+
 /**
  * Atomically delete after releasing only the mounted Tab owners named by App.
  * Any other owner keeps the Session protected.
@@ -1300,12 +1305,15 @@ export type SessionDeleteResult =
 export async function deleteSessionIfUnowned(
     sessionId: string,
     releasableTabIds: readonly string[] = [],
+    brandDeletion?: BrandSessionDeletionAdmission,
 ): Promise<SessionDeleteResult> {
     if (!isTauri()) return { deleted: false, reason: 'authority-unavailable' };
     try {
         return await invoke<SessionDeleteResult>('cmd_delete_session_if_unowned', {
             sessionId,
             releasableTabIds: [...releasableTabIds],
+            brandWorkspaceId: brandDeletion?.workspaceId,
+            brandDeletionConfirmationToken: brandDeletion?.confirmationToken,
         });
     } catch (error) {
         console.error(`[tauriClient] Failed to delete session ${sessionId}:`, error);

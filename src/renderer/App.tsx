@@ -20,7 +20,11 @@ import { stopTabSidecar, startGlobalSidecar, initGlobalSidecarReadyPromise, mark
 import ConfirmDialog from '@/components/ConfirmDialog';
 import BugReportOverlay from '@/components/BugReportOverlay';
 import CustomTitleBar from '@/components/CustomTitleBar';
-import GlobalSidebar, { type CapabilitySection } from '@/components/global-sidebar/GlobalSidebar';
+import type { CapabilitySection } from '@/components/global-sidebar/GlobalSidebar';
+import XiaojingGeoWorkbench from '@/components/xiaojing/XiaojingGeoWorkbench';
+import XiaojingSidebar from '@/components/xiaojing/XiaojingSidebar';
+import XiaojingWelcome from '@/components/xiaojing/XiaojingWelcome';
+import type { BrandSession, BrandSessionDeletionPreview, BrandWorkspace } from '@/api/brandWorkspaceClient';
 import LinkContextMenuProvider from '@/components/LinkContextMenuProvider';
 import TabBar from '@/components/TabBar';
 import { SessionDeletionContext } from '@/context/SessionDeletionContext';
@@ -31,10 +35,10 @@ import { useUpdater } from '@/hooks/useUpdater';
 import { useTrayEvents } from '@/hooks/useTrayEvents';
 import { useHelperAgentModelDefaults } from '@/hooks/useHelperAgentModelDefaults';
 import { useConfig } from '@/hooks/useConfig';
+import { useBrandWorkspaces } from '@/hooks/useBrandWorkspaces';
 import { useSpaceBuildCapability } from '@/hooks/useSpaceBuildCapability';
 import { useTabSwipeGesture } from '@/hooks/useTabSwipeGesture';
 import { actions as taskCenterActions } from '@/hooks/taskCenterStore';
-import Launcher from '@/pages/Launcher'; // eager: default first view → no cold-start fallback
 // Route-split (P1): heavy / non-initial pages load on demand. lazy-Chat moves the
 // entire markdown/mermaid/katex/syntax-highlighter chain out of the entry chunk
 // (reachable only via Chat). Launcher stays eager (default first view → no
@@ -68,6 +72,7 @@ import { tabContentKind } from '@/utils/tabContentKind';
 import { runAfterNextPaint } from '@/utils/afterPaint';
 import { perfMark } from '@/utils/perfMark';
 import { RENDERER_PERF_PHASE } from '../shared/perfTrace';
+import { XIAOJING_MAIN_AGENT } from '../shared/xiaojing-main-agent-policy';
 import type { ImageAttachment } from '@/components/SimpleChatInput';
 import { type CronRecoverySummaryPayload, type CronTaskRecoveredPayload, CRON_EVENTS } from '@/types/cronEvents';
 import { isBrowserDevMode, isTauriEnvironment } from '@/utils/browserMock';
@@ -122,7 +127,6 @@ import {
   originFromSessionMetadataLike,
 } from '../shared/session-origin';
 import { buildRuntimeBackedInitialSessionBirth } from '@/utils/providerSwitchSessionBirth';
-import { resolveGlobalSidebarWorkspace } from '@/utils/globalSidebarProjection';
 
 // ============================================================
 // User Support Prompt Builder
@@ -160,6 +164,32 @@ function resolveInitialPermissionMode(args: {
     ?? normalizeInitialPermissionMode(args.project.permissionMode)
     ?? normalizeInitialPermissionMode(args.defaultPermissionMode);
 }
+
+function projectFromBrandWorkspace(workspace: BrandWorkspace): Project {
+  return {
+    id: workspace.id,
+    name: workspace.name,
+    displayName: workspace.name,
+    path: workspace.rootPath,
+    providerId: XIAOJING_MAIN_AGENT.providerId,
+    model: XIAOJING_MAIN_AGENT.model,
+    permissionMode: XIAOJING_MAIN_AGENT.permissionMode,
+    mcpEnabledServers: [XIAOJING_MAIN_AGENT.geoMcpServerId],
+    lastOpened: workspace.updatedAt,
+  };
+}
+
+const XIAOJING_SESSION_BIRTH_HINT: LaunchSessionBirthHint = {
+  permissionMode: XIAOJING_MAIN_AGENT.permissionMode,
+  builtinSelection: {
+    providerId: XIAOJING_MAIN_AGENT.providerId,
+    model: XIAOJING_MAIN_AGENT.model,
+  },
+  reasoningEffort: XIAOJING_MAIN_AGENT.reasoningEffort,
+  mcpEnabledServers: [XIAOJING_MAIN_AGENT.geoMcpServerId],
+  enabledPluginIds: [],
+  enabledOfficialToolIds: [],
+};
 
 function normalizeStringSetting(value: unknown): string | undefined {
   const trimmed = typeof value === 'string' ? value.trim() : '';
@@ -288,12 +318,12 @@ interface TabContentProps {
 
 // Exported for focused content-mount behavior tests.
 export const MemoizedTabContent = memo(function TabContent({
-  tab, isActive, isWindowFocused, isLoading, error, isDeferredMount,
-  onLaunchProject, onOpenHistorySession, onNewSession,
+  tab, isActive, isWindowFocused, isDeferredMount,
+  onLaunchProject,
+  onOpenHistorySession, onNewSession,
   onUpdateGenerating, onUpdateTitle, onUpdateUnread, onRenameSession, onForkSession, onUpdateSessionId, onClearInitialMessage,
   claimSessionOpeningTransition,
   onSidecarConfigAdopted, onFilePreviewIntentConsumed,
-  onLauncherWorkspaceSelectionChange,
   settingsInitialSection,
   capabilityInitialSection,
   capabilityNavigationNonce,
@@ -314,10 +344,6 @@ export const MemoizedTabContent = memo(function TabContent({
   taskCenterCurrentSessionId,
 }: TabContentProps) {
   const kind = tabContentKind(tab, isDeferredMount);
-  const handleLauncherWorkspaceChange = useCallback(
-    (workspacePath: string | null) => onLauncherWorkspaceSelectionChange(tab.id, workspacePath),
-    [onLauncherWorkspaceSelectionChange, tab.id],
-  );
   const claimTabSessionOpeningTransition = useCallback(
     (sessionId: string) => claimSessionOpeningTransition(sessionId, tab.id),
     [claimSessionOpeningTransition, tab.id],
@@ -334,16 +360,12 @@ export const MemoizedTabContent = memo(function TabContent({
         // openNewTabDeferred).
         <div className="h-full w-full bg-[var(--paper)]" />
       ) : kind === 'launcher' ? (
-        <Launcher
-          onLaunchProject={onLaunchProject}
-          isStarting={isLoading}
-          startError={error}
-          isActive={isActive}
-          attachmentSessionId={createPendingSessionId(tab.id)}
-          selectedWorkspacePath={tab.launcherWorkspacePath}
-          onWorkspaceSelectionChange={handleLauncherWorkspaceChange}
-        />
-      ) : kind === 'settings' || kind === 'capabilities' ? (
+        <XiaojingWelcome onLaunchProject={onLaunchProject} />
+      ) : kind === 'settings' ? (
+        <Suspense fallback={PAGE_FALLBACK}>
+          <Settings mode="settings" />
+        </Suspense>
+      ) : kind === 'capabilities' ? (
         <Suspense fallback={PAGE_FALLBACK}>
           <Settings
             mode={kind}
@@ -468,6 +490,9 @@ export default function App() {
   // App config for tray behavior (shared via ConfigProvider — no CONFIG_CHANGED event needed)
   // Also get projects + CRUD actions for bug report (ensureSelfAwarenessWorkspace needs them)
   const { config, isLoading: configLoading, providers: appProviders, apiKeys: appApiKeys, providerVerifyStatus: appProviderVerifyStatus, projects: configProjects, addProject: configAddProject, patchProject: configPatchProject } = useConfig();
+  const brandState = useBrandWorkspaces();
+  const brandStateRef = useRef(brandState);
+  brandStateRef.current = brandState;
   const spaceBuildCapability = useSpaceBuildCapability(config.spaceEnvironment);
   const teamSpaceAvailable = spaceBuildCapability.available && config.teamSpaceEnabled === true;
   const [isWindowFocused, setIsWindowFocused] = useState(isRendererForegrounded);
@@ -1323,6 +1348,15 @@ export default function App() {
   // Update tab title (called from TabProvider when auto-title or rename occurs)
   const updateTabTitle = useCallback((tabId: string, title: string) => {
     setTabs(prev => prev.map(t => t.id === tabId ? { ...t, title } : t));
+    const tab = tabsRef.current.find((candidate) => candidate.id === tabId);
+    const workspace = tab?.agentDir
+      ? brandStateRef.current.workspaces.find((candidate) => workspacePathsEqual(candidate.rootPath, tab.agentDir))
+      : undefined;
+    if (workspace && tab?.sessionId && !isPendingSessionId(tab.sessionId)) {
+      void brandStateRef.current
+        .commitSession(workspace.id, tab.sessionId, title, 'auto')
+        .catch((error) => console.error('[App] Failed to project automatic brand session title:', error));
+    }
   }, []);
 
   // Update tab unread state (called from TabProvider when message completes on non-active tab)
@@ -1455,6 +1489,14 @@ export default function App() {
           t.id === tabId ? { ...t, sessionId: newSessionId } : t
         ));
       });
+      const workspace = currentTab.agentDir
+        ? brandStateRef.current.workspaces.find((candidate) => workspacePathsEqual(candidate.rootPath, currentTab.agentDir!))
+        : undefined;
+      if (workspace && !isPendingSessionId(newSessionId)) {
+        void brandStateRef.current
+          .commitSession(workspace.id, newSessionId, currentTab.title || '新会话', 'default')
+          .catch((error) => console.error('[App] Failed to commit brand session identity:', error));
+      }
       return true;
     } finally {
       releaseTargetTransition?.();
@@ -1995,6 +2037,13 @@ export default function App() {
       updateSession(tab.sessionId, { title: newTitle, titleSource: 'user' })
         .then(() => window.dispatchEvent(new CustomEvent(CUSTOM_EVENTS.SESSION_TITLE_CHANGED)))
         .catch(err => console.error('[App] Failed to persist renamed title:', err));
+      const workspace = tab.agentDir
+        ? brandStateRef.current.workspaces.find((candidate) => workspacePathsEqual(candidate.rootPath, tab.agentDir!))
+        : undefined;
+      if (workspace && !isPendingSessionId(tab.sessionId)) {
+        void brandStateRef.current.renameSession(workspace.id, tab.sessionId, newTitle)
+          .catch((error) => console.error('[App] Failed to rename brand session projection:', error));
+      }
     }
   }, [updateTabTitle]);
 
@@ -2537,16 +2586,6 @@ export default function App() {
     track('tab_new', { tab_count: currentLength + 1 });
   }, [openNewTabDeferred]);
 
-  const handleSidebarNewChat = useCallback(() => {
-    const currentTabs = tabsRef.current;
-    const leftmostLauncher = currentTabs.find((tab) => tab.view === 'launcher');
-    if (leftmostLauncher) {
-      setActiveTabId(leftmostLauncher.id, currentTabs);
-      return;
-    }
-    handleNewTab();
-  }, [handleNewTab, setActiveTabId]);
-
   const handleOpenWorkspaceFromSidebar = useCallback(async (
     project: Project,
     initialMessage?: InitialMessage,
@@ -2563,7 +2602,7 @@ export default function App() {
       await handleLaunchProject(project, initialMessage, {
         surface: 'global_sidebar',
         entryIntent,
-      });
+      }, XIAOJING_SESSION_BIRTH_HINT);
       return tabsRef.current.some((tab) => tab.id === launchTab.id);
     } catch (error) {
       console.error('[App] Failed to open workspace from global sidebar:', error);
@@ -2571,6 +2610,48 @@ export default function App() {
       return false;
     }
   }, [handleLaunchProject, openLaunchTabNow, removeUnusedPrecreatedLaunchTab, t]);
+
+  const handleOpenBrandWorkspace = useCallback((workspace: BrandWorkspace) => (
+    handleOpenWorkspaceFromSidebar(projectFromBrandWorkspace(workspace))
+  ), [handleOpenWorkspaceFromSidebar]);
+
+  const handleOpenBrandSession = useCallback((
+    session: BrandSession,
+    workspace: BrandWorkspace,
+  ) => handleOpenTargetSession(
+    session.id,
+    workspace.rootPath,
+    session.title || '新会话',
+    'global_sidebar',
+  ), [handleOpenTargetSession]);
+
+  const handleRenameBrandSession = useCallback(async (
+    session: BrandSession,
+    workspace: BrandWorkspace,
+    title: string,
+  ) => {
+    await updateSession(session.id, { title, titleSource: 'user' });
+    await brandStateRef.current.renameSession(workspace.id, session.id, title);
+    setTabs((current) => current.map((tab) => (
+      tab.sessionId === session.id ? { ...tab, title } : tab
+    )));
+    window.dispatchEvent(new CustomEvent(CUSTOM_EVENTS.SESSION_TITLE_CHANGED));
+  }, []);
+
+  const normalBrandStartupHandledRef = useRef(false);
+  useEffect(() => {
+    if (configLoading || brandState.isLoading || normalBrandStartupHandledRef.current) return;
+    normalBrandStartupHandledRef.current = true;
+    const workspace = brandState.currentWorkspace;
+    if (!workspace) return;
+    const launcher = tabsRef.current.find((tab) => tab.view === 'launcher');
+    if (!launcher) return;
+    setActiveTabId(launcher.id, tabsRef.current);
+    void handleLaunchProject(projectFromBrandWorkspace(workspace), undefined, {
+      surface: 'global_sidebar',
+      entryIntent: 'open_workspace',
+    }, XIAOJING_SESSION_BIRTH_HINT);
+  }, [brandState.currentWorkspace, brandState.isLoading, configLoading, handleLaunchProject, setActiveTabId]);
 
   // Handle tab reordering via drag and drop
   const handleReorderTabs = useCallback((activeId: string, overId: string) => {
@@ -3234,22 +3315,10 @@ export default function App() {
     setCapabilityInitialSelect(undefined);
   }, []);
 
-  const handleOpenGeneralSettings = useCallback(() => {
-    void handleOpenSettings('general');
-  }, [handleOpenSettings]);
-
-  const handleOpenBugReport = useCallback(() => setShowBugReport(true), []);
-
-  const handleOpenSidebarSession = useCallback((session: SessionMetadata, project: Project) => (
-    handleOpenTargetSession(
-      session.id,
-      project.path,
-      getSessionDisplayText(session),
-      'global_sidebar',
-    )
-  ), [handleOpenTargetSession]);
-
-  const handleDeleteSession = useCallback(async (sessionId: string) => {
+  const handleDeleteSession = useCallback(async (
+    sessionId: string,
+    brandDeletion?: { workspaceId: string; confirmationToken: string },
+  ) => {
     const releaseTransition = tryClaimSessionResourceTransition(
       sessionResourceTransitionsRef.current,
       sessionId,
@@ -3275,13 +3344,24 @@ export default function App() {
         handoffMountedSessionActivity: startBackgroundCompletionForDeletion,
         stopSseProxy,
         deletePersistedSession: (targetSessionId, releasableTabIds) => (
-          taskCenterActions.deleteSession(targetSessionId, releasableTabIds)
+          taskCenterActions.deleteSession(targetSessionId, releasableTabIds, brandDeletion)
         ),
       });
     } finally {
       releaseTransition();
     }
   }, []);
+
+  const handleDeleteBrandSession = useCallback(async (preview: BrandSessionDeletionPreview) => {
+    const result = await handleDeleteSession(preview.sessionId, {
+      workspaceId: preview.workspaceId,
+      confirmationToken: preview.confirmationToken,
+    });
+    if (!result.deleted) {
+      toastRef.current.error('会话仍在运行或被后台任务占用，暂时无法删除');
+    }
+    return result.deleted;
+  }, [handleDeleteSession]);
 
   // System tray event handling (minimize to tray, exit confirmation)
   useTrayEvents({
@@ -3373,26 +3453,17 @@ export default function App() {
     return () => ac.abort();
   }, [acknowledgeNotificationTarget, handleSelectTab, updateTabUnread]);
 
-  const activeWorkspacePath = resolveGlobalSidebarWorkspace(activeTab);
-
   return (
     <SessionDeletionContext.Provider value={handleDeleteSession}>
     <LinkContextMenuProvider>
-    <div className="flex h-screen bg-[var(--paper)]">
-      <GlobalSidebar
-        tabs={tabs}
+    <div className="xiaojing-product-shell flex h-screen bg-[var(--paper)]">
+      <XiaojingSidebar
+        brandState={brandState}
         activeTab={activeTab}
-        activeWorkspacePath={activeWorkspacePath}
-        sessionNotificationBadgeCounts={sessionNotificationBadgeCounts}
-        teamSpaceAvailable={teamSpaceAvailable}
-        onNewTab={handleSidebarNewChat}
-        onOpenTaskCenter={handleOpenTaskCenter}
-        onOpenSpace={handleOpenSpace}
-        onOpenCapabilities={handleOpenCapabilities}
-        onOpenSettings={handleOpenGeneralSettings}
-        onOpenBugReport={handleOpenBugReport}
-        onOpenWorkspace={handleOpenWorkspaceFromSidebar}
-        onOpenSession={handleOpenSidebarSession}
+        onOpenWorkspace={handleOpenBrandWorkspace}
+        onOpenSession={handleOpenBrandSession}
+        onRenameSession={handleRenameBrandSession}
+        onDeleteSession={handleDeleteBrandSession}
       />
       <div className="flex min-w-0 flex-1 flex-col" data-tab-workspace>
       {/* Chrome-style titlebar with tabs */}
@@ -3416,8 +3487,9 @@ export default function App() {
         />
       </CustomTitleBar>
 
+      <div className="flex min-h-0 flex-1">
       {/* Tab content - only Chat views need TabProvider for sidecar communication */}
-      <div ref={contentRef} className="relative flex-1 overflow-hidden" data-tab-content-workspace>
+      <div ref={contentRef} className="relative min-w-0 flex-1 overflow-hidden" data-tab-content-workspace>
         {tabs.map((tab) => (
           <MemoizedTabContent
             key={tab.id}
@@ -3461,6 +3533,17 @@ export default function App() {
             taskCenterCurrentSessionId={taskCenterCurrentSessionId}
           />
         ))}
+      </div>
+      <XiaojingGeoWorkbench
+        currentWorkspace={brandState.currentWorkspace}
+        onOpenWorkspace={(workspace, initialMessage, entryIntent) => (
+          handleOpenWorkspaceFromSidebar(
+            projectFromBrandWorkspace(workspace),
+            initialMessage,
+            entryIntent,
+          )
+        )}
+      />
       </div>
       </div>
 

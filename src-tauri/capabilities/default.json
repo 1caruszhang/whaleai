@@ -31,10 +31,10 @@
       "identifier": "fs:scope",
       "allow": [
         {
-          "path": "$HOME/.myagents"
+          "path": "$LOCALDATA/Xiaojing"
         },
         {
-          "path": "$HOME/.myagents/**"
+          "path": "$LOCALDATA/Xiaojing/**"
         }
       ]
     },

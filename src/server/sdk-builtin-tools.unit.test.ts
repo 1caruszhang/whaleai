@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 
 import { SDK_BUILTIN_TOOLS, SDK_EXCLUDED_BUILTIN_TOOLS } from './sdk-builtin-tools';
+import { XIAOJING_MAIN_AGENT } from '../shared/xiaojing-main-agent-policy';
 
 describe('Claude Agent SDK builtin catalog', () => {
   it('keeps the product-owned 26-tool catalog exact and duplicate-free', () => {
@@ -44,7 +45,7 @@ describe('Claude Agent SDK builtin catalog', () => {
     }
   });
 
-  it('keeps control-plane SDK queries tool-free while product sessions use the catalog', () => {
+  it('keeps control-plane queries tool-free and gives Xiaojing only its host interaction tool', () => {
     for (const relativePath of [
       'provider-verify.ts',
       'subscription-auth.ts',
@@ -59,6 +60,7 @@ describe('Claude Agent SDK builtin catalog', () => {
     }
 
     const sessionSource = readFileSync(new URL('agent-session.ts', import.meta.url), 'utf8');
-    expect(sessionSource).toContain('tools: [...SDK_BUILTIN_TOOLS]');
+    expect(sessionSource).toContain('tools: xiaojingMainAgent ? [...XIAOJING_MAIN_AGENT.builtinTools] : [...SDK_BUILTIN_TOOLS]');
+    expect(XIAOJING_MAIN_AGENT.builtinTools).toEqual(['AskUserQuestion']);
   });
 });

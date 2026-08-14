@@ -33,6 +33,8 @@ export {
 export {
   ConfiguredThemeRuntime,
   FloatingThemeRuntime,
+  XiaojingThemeRuntime,
+  primeXiaojingThemeRuntime,
   primeThemeRuntimeFromBootstrap,
   THEME_SELECTION_CHANGED_EVENT,
   ThemeRuntimeProvider,

@@ -1,5 +1,4 @@
 import { readFileSync } from 'node:fs';
-import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { Agent, Dispatcher, ProxyAgent } from 'undici';
 
@@ -15,6 +14,7 @@ import {
   startSocksBridge,
   stopSocksBridge,
 } from './utils/socks-bridge';
+import { getAppDataDir } from './utils/app-data-dir';
 
 export const PROXY_NO_PROXY_VAL = 'localhost,localhost.localdomain,127.0.0.1,127.0.0.0/8,::1';
 
@@ -137,7 +137,7 @@ function readInheritedProxySnapshot(): Record<string, string | undefined> {
 
 function readInitialProxySettings(): ProxySettings | null {
   try {
-    const raw = readFileSync(join(homedir(), '.myagents', 'config.json'), 'utf8');
+    const raw = readFileSync(join(getAppDataDir(), 'config.json'), 'utf8');
     const parsed = JSON.parse(raw.replace(/^\uFEFF/, '')) as { proxySettings?: unknown };
     return coerceProxySettings(parsed.proxySettings);
   } catch {

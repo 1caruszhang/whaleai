@@ -30,6 +30,8 @@ import type { AgentRuntime, RuntimeProcess, SessionStartOptions } from './runtim
 import type { RuntimeSource, RuntimeType } from '../shared/types/runtime';
 import { ensureDirSync } from './utils/fs-utils';
 import { createGuardedSdkQuery } from './utils/sdk-child-launch-guard';
+import { XIAOJING_MAIN_AGENT } from '../shared/xiaojing-main-agent-policy';
+import { isXiaojingMainAgentSession } from './xiaojing-native-secret';
 
 const TITLE_MAX_LENGTH = 30;
 export const BUILTIN_TITLE_TIMEOUT_MS = 30_000;
@@ -193,15 +195,18 @@ export async function generateTitle(
   model: string,
   providerEnv?: ProviderEnv,
 ): Promise<string | null> {
+  const xiaojingMainAgent = isXiaojingMainAgentSession();
+  const effectiveModel = xiaojingMainAgent ? XIAOJING_MAIN_AGENT.model : model;
+  const effectiveProviderEnv = xiaojingMainAgent ? undefined : providerEnv;
   // PRD #124: register a per-call bridge token if the title-gen provider is
   // OpenAI-protocol — the SDK subprocess routes to ITS upstream via a
   // dedicated /bridge/<token> path, fully isolated from the active session.
   // For Anthropic-direct / subscription title-gen, no token is needed.
-  const bridge = providerEnv?.apiProtocol === 'openai'
-    ? startOneShotBridge(providerEnv, model, `title-gen:${providerEnv.baseUrl ?? 'anthropic'}`)
+  const bridge = effectiveProviderEnv?.apiProtocol === 'openai'
+    ? startOneShotBridge(effectiveProviderEnv, effectiveModel, `title-gen:${effectiveProviderEnv.baseUrl ?? 'anthropic'}`)
     : null;
   try {
-    return await generateTitleInner(rounds, model, providerEnv, bridge?.token);
+    return await generateTitleInner(rounds, effectiveModel, effectiveProviderEnv, bridge?.token);
   } finally {
     bridge?.release();
   }
@@ -218,7 +223,9 @@ async function generateTitleInner(
 
   try {
     const cliPath = resolveClaudeCodeCli();
-    const cwd = join(homedir(), '.myagents', 'projects');
+    const cwd = isXiaojingMainAgentSession()
+      ? join(process.env.XIAOJING_DATA_ROOT || homedir(), 'projects')
+      : join(homedir(), '.myagents', 'projects');
     ensureDirSync(cwd);
 
     // Pass `model` as the override so CLAUDE_CODE_AUTO_COMPACT_WINDOW is
@@ -248,9 +255,9 @@ async function generateTitleInner(
         maxTurns: 1,
         sessionId,
         cwd,
-        settingSources: ['project'],
-        permissionMode: 'bypassPermissions',
-        allowDangerouslySkipPermissions: true,
+        settingSources: isXiaojingMainAgentSession() ? [] : ['project'],
+        permissionMode: isXiaojingMainAgentSession() ? 'default' : 'bypassPermissions',
+        allowDangerouslySkipPermissions: !isXiaojingMainAgentSession(),
         pathToClaudeCodeExecutable: cliPath,
         env,
         systemPrompt: SYSTEM_PROMPT,

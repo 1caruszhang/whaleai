@@ -104,13 +104,20 @@ impl LockAcquireResult {
     }
 }
 
-/// Return the MyAgents data directory (`~/.myagents/` by default).
+/// Return Xiaojing's local application data root.
 ///
-/// Future: debug builds may return `~/.myagents-dev/` to enable simultaneous
-/// dev/prod operation with fully isolated state (config, bots, sidecars, ports).
-/// For now, both profiles share the same directory.
+/// Windows resolves this to `%LOCALAPPDATA%/Xiaojing`. The product deliberately
+/// does not probe or migrate `~/.myagents`; all compatibility callers below are
+/// redirected to this root so a hidden legacy read cannot become a second
+/// brand/config authority.
+pub fn xiaojing_data_dir() -> Option<PathBuf> {
+    dirs::data_local_dir().map(|root| root.join("Xiaojing"))
+}
+
+/// Compatibility name retained while legacy modules are removed during the
+/// product expansion. It is a path alias only; it never points at `.myagents`.
 pub fn myagents_data_dir() -> Option<PathBuf> {
-    dirs::home_dir().map(|h| h.join(".myagents"))
+    xiaojing_data_dir()
 }
 
 /// Path to the PID lock file.

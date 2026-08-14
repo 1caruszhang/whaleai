@@ -9,7 +9,7 @@ import {
     rename,
     stat,
 } from '@tauri-apps/plugin-fs';
-import { homeDir, join, dirname } from '@tauri-apps/api/path';
+import { localDataDir, join, dirname } from '@tauri-apps/api/path';
 import { invoke } from '@tauri-apps/api/core';
 import { isBrowserDevMode } from '@/utils/browserMock';
 import { stripBom } from '../../../shared/utils';
@@ -93,7 +93,7 @@ export function isLockBusyError(error: unknown): boolean {
 
 // ============= Constants =============
 
-export const CONFIG_DIR_NAME = '.myagents';
+export const CONFIG_DIR_NAME = 'Xiaojing';
 export const CONFIG_FILE = 'config.json';
 export const PROJECTS_FILE = 'projects.json';
 export const PROVIDERS_DIR = 'providers';
@@ -243,8 +243,8 @@ let configDirPath: string | null = null;
 export async function getConfigDir(): Promise<string> {
     if (configDirPath) return configDirPath;
 
-    const home = await homeDir();
-    configDirPath = await join(home, CONFIG_DIR_NAME);
+    const localData = await localDataDir();
+    configDirPath = await join(localData, CONFIG_DIR_NAME);
     console.log('[configStore] Config directory:', configDirPath);
     return configDirPath;
 }

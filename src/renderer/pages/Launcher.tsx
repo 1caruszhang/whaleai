@@ -829,6 +829,7 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
             <main className="relative flex flex-1 items-center justify-center overflow-hidden">
                 <section className="launcher-brand relative flex h-full w-full items-center justify-center overflow-hidden">
                     <BrandSection
+                        variant="xiaojing"
                         projects={visibleProjects}
                         selectedProject={selectedWorkspace}
                         defaultWorkspacePath={config.defaultWorkspacePath}

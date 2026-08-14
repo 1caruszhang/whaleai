@@ -374,7 +374,7 @@ pub fn cmd_get_platform() -> String {
 }
 
 /// Command: Get or create device ID
-/// Stored in ~/.myagents/device_id to persist across app reinstalls
+/// Stored in the Xiaojing local-data root to persist across app reinstalls
 /// Only regenerates if the file is deleted by user
 #[tauri::command]
 pub fn cmd_get_device_id() -> Result<String, String> {
@@ -396,13 +396,13 @@ pub struct InitBundledWorkspaceResult {
 }
 
 /// Command: Initialize bundled workspace (mino) on first launch
-/// Copies from app resources to ~/.myagents/projects/mino/
+/// Copies from app resources to the Xiaojing local-data root.
 #[tauri::command]
 pub fn cmd_initialize_bundled_workspace<R: Runtime>(
     app_handle: AppHandle<R>,
 ) -> Result<InitBundledWorkspaceResult, String> {
-    let home_dir = dirs::home_dir().ok_or("Failed to get home dir")?;
-    let mino_dest = home_dir.join(".myagents").join("projects").join("mino");
+    let data_dir = crate::app_dirs::xiaojing_data_dir().ok_or("Failed to get local data dir")?;
+    let mino_dest = data_dir.join("projects").join("mino");
 
     // NOTE: Path::exists() follows symlinks, so a dangling
     // ~/.myagents/projects/mino link returns false here and we'd fall
@@ -999,7 +999,7 @@ pub fn cmd_copy_folder_to_templates(
 
 const ADMIN_AGENT_VERSION: &str = "25";
 
-/// Helper-bundled paths (relative to `~/.myagents/`) that previous versions
+/// Helper-bundled paths (relative to the application data root) that previous versions
 /// shipped but that have since been retired.
 ///
 /// `merge_dir_recursive` is overwrite-only ("never deletes"), so a file
@@ -1016,7 +1016,7 @@ const RETIRED_ADMIN_PATHS: &[&str] = &[
     ".claude/skills/self-config",
 ];
 
-/// Merge bundled admin agent files into ~/.myagents/
+/// Merge bundled admin agent files into the Xiaojing local-data root.
 /// Version-gated: only runs when ADMIN_AGENT_VERSION changes.
 #[tauri::command]
 pub async fn cmd_sync_admin_agent<R: Runtime>(app_handle: AppHandle<R>) -> Result<bool, String> {
@@ -1026,8 +1026,7 @@ pub async fn cmd_sync_admin_agent<R: Runtime>(app_handle: AppHandle<R>) -> Resul
 }
 
 fn sync_admin_agent_blocking<R: Runtime>(app_handle: AppHandle<R>) -> Result<bool, String> {
-    let home = dirs::home_dir().ok_or("Home dir not found")?;
-    let dest = home.join(".myagents");
+    let dest = crate::app_dirs::xiaojing_data_dir().ok_or("Local data dir not found")?;
 
     // Version gate
     let ver_file = dest.join(".admin-agent-version");
@@ -1083,7 +1082,7 @@ fn sync_admin_agent_blocking<R: Runtime>(app_handle: AppHandle<R>) -> Result<boo
         }
     }
 
-    // Merge into ~/.myagents/
+    // Merge into the application-owned local-data root.
     merge_dir_recursive(&src, &dest).map_err(|e| format!("Merge failed: {}", e))?;
 
     fs::write(&ver_file, ADMIN_AGENT_VERSION)
@@ -1234,8 +1233,8 @@ pub(crate) async fn sync_system_skills_for_startup<R: Runtime>(
 }
 
 fn ensure_system_skills_installation_current() -> Result<(), String> {
-    let home = dirs::home_dir().ok_or("Home dir not found")?;
-    ensure_system_skills_installation_current_at(&home.join(".myagents"))
+    let data_dir = crate::app_dirs::xiaojing_data_dir().ok_or("Local data dir not found")?;
+    ensure_system_skills_installation_current_at(&data_dir)
 }
 
 fn ensure_system_skills_installation_current_at(myagents_dir: &Path) -> Result<(), String> {
@@ -1272,8 +1271,7 @@ fn ensure_system_skills_installation_current_at(myagents_dir: &Path) -> Result<(
 }
 
 fn sync_system_skills_blocking<R: Runtime>(app_handle: AppHandle<R>) -> Result<bool, String> {
-    let home = dirs::home_dir().ok_or("Home dir not found")?;
-    let myagents_dir = home.join(".myagents");
+    let myagents_dir = crate::app_dirs::xiaojing_data_dir().ok_or("Local data dir not found")?;
     let skills_dir = myagents_dir.join("skills");
 
     // Version gate — skip the whole sweep if we've already landed

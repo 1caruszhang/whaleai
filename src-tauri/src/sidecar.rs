@@ -60,6 +60,8 @@ pub use cron_execute::{
     CronExecuteResponse, GoalExecutePayload, GoalExecuteResponse,
 };
 use health::{check_sidecar_http_health, wait_for_health, wait_for_readiness};
+#[cfg(windows)]
+pub(crate) use instances::restart_xiaojing_session_sidecars;
 pub use instances::{
     forward_terminal_events_to_renderer, get_tab_server_url, get_tab_sidecar_status,
     monitor_global_sidecar, monitor_session_sidecars, monitor_turn_wake_lock, start_global_sidecar,

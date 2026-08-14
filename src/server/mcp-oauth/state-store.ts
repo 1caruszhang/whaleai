@@ -9,7 +9,6 @@
 
 import { existsSync, readFileSync, writeFileSync, renameSync } from 'fs';
 import { join } from 'path';
-import { homedir } from 'os';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import type {
   LegacyOAuthToken,
@@ -19,9 +18,10 @@ import type {
 } from './types';
 import { ensureDirSync } from '../utils/fs-utils';
 import { withFileLock } from '../utils/file-lock';
+import { getAppDataDir } from '../utils/app-data-dir';
 
 export function getOAuthConfigDir(): string {
-  return process.env.MYAGENTS_CONFIG_DIR || join(homedir(), '.myagents');
+  return process.env.MYAGENTS_CONFIG_DIR || getAppDataDir();
 }
 
 function getStateFile(): string {
