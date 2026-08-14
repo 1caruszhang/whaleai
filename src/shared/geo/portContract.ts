@@ -520,72 +520,29 @@ export const GEO_PORT_CONTRACT = {
     "model-owned-paid-order-submission",
     "task-center-owned-geo-state",
   ],
-  parityCases: {
-    questionPriority: [
-      { match: 75, potential: 75, expected: "high" },
-      { match: 74, potential: 75, expected: "medium" },
-      { match: 50, potential: 50, expected: "medium" },
-      { match: 49, potential: 50, expected: "low" },
-    ],
-    questionMatch: [
-      { cosineSimilarity: 1, expected: 100 },
-      { cosineSimilarity: 0.499, expected: 50 },
-      { cosineSimilarity: -0.5, expected: 0 },
-    ],
-    questionPotential: [
-      { nearestSimilarity: 1, expected: 0 },
-      { nearestSimilarity: 0, expected: 50 },
-      { nearestSimilarity: -1, expected: 100 },
-    ],
-    channelQuality: [
-      { publishedRate: 0, price: "100", expected: true },
-      { publishedRate: 69, price: "100", expected: false },
-      { publishedRate: 70, price: "149", expected: true },
-      { publishedRate: 70, price: "150", expected: false },
-      { publishedRate: undefined, price: "99", expected: true },
-    ],
-    hybridScore: [
-      { vector: 1, lexical: 0.5, title: 0.25, metadata: 0.75, expected: 0.715 },
-    ],
-    channelQuota: [
-      {
-        availableMedia: 30,
-        availableWeMedia: 30,
-        expectedMedia: 20,
-        expectedWeMedia: 10,
-      },
-      {
-        availableMedia: 8,
-        availableWeMedia: 30,
-        expectedMedia: 8,
-        expectedWeMedia: 22,
-      },
-      {
-        availableMedia: 30,
-        availableWeMedia: 4,
-        expectedMedia: 26,
-        expectedWeMedia: 4,
-      },
-    ],
-    modelRouting: [
-      {
-        stage: "draft",
-        explicit: undefined,
-        expected: ["volcengine", "doubao-seed-2-0-pro-260215"],
-      },
-      {
-        stage: "draft",
-        explicit: ["custom-provider", "custom-model"],
-        expected: ["custom-provider", "custom-model"],
-      },
-      { stage: "review", explicit: undefined, expected: "active-model" },
-    ],
-  },
 } as const;
 
 function clampGeoScore(value: number): number {
   const finiteValue = Number.isFinite(value) ? value : 50;
   return Math.max(0, Math.min(100, Math.round(finiteValue)));
+}
+
+function geoCosineSimilarity(
+  left: readonly number[],
+  right: readonly number[],
+): number {
+  if (left.length === 0 || left.length !== right.length) return 0;
+
+  let dot = 0;
+  let leftNorm = 0;
+  let rightNorm = 0;
+  for (let index = 0; index < left.length; index += 1) {
+    dot += left[index] * right[index];
+    leftNorm += left[index] * left[index];
+    rightNorm += right[index] * right[index];
+  }
+  if (leftNorm === 0 || rightNorm === 0) return 0;
+  return dot / (Math.sqrt(leftNorm) * Math.sqrt(rightNorm));
 }
 
 /** Pure PRED-1 reference evaluator for parity tests in ported slices. */
@@ -611,6 +568,43 @@ export function classifyGeoQuestionPriority(
     return "medium";
   }
   return "low";
+}
+
+/**
+ * Public PRED-1 reference seam matching js_ai's scoreCandidates behavior.
+ * Missing candidate vectors degrade to neutral 50/50 instead of failing the
+ * whole question batch.
+ */
+export function scoreGeoQuestionCandidate(input: {
+  questionVector: readonly number[] | null;
+  profileAnchorVector: readonly number[] | null;
+  poolVectors: readonly (readonly number[])[];
+}): { match: number; potential: number; priority: "high" | "medium" | "low" } {
+  if (!input.questionVector) {
+    return { match: 50, potential: 50, priority: "medium" };
+  }
+
+  const match = input.profileAnchorVector
+    ? scoreGeoQuestionMatch(
+        geoCosineSimilarity(input.questionVector, input.profileAnchorVector),
+      )
+    : 50;
+  let nearestPoolSimilarity = 0;
+  if (input.poolVectors.length > 0) {
+    nearestPoolSimilarity = -1;
+    for (const poolVector of input.poolVectors) {
+      nearestPoolSimilarity = Math.max(
+        nearestPoolSimilarity,
+        geoCosineSimilarity(input.questionVector, poolVector),
+      );
+    }
+  }
+  const potential = scoreGeoQuestionPotential(nearestPoolSimilarity);
+  return {
+    match,
+    potential,
+    priority: classifyGeoQuestionPriority(match, potential),
+  };
 }
 
 export function scoreGeoHybridKnowledge(input: {
@@ -674,6 +668,317 @@ export function allocateGeoChannelQuota(
     media: Math.min(mediaAvailable, mediaLimit),
     weMedia: Math.min(weMediaAvailable, weMediaLimit),
   };
+}
+
+export type GeoRecallPath = "passive" | "active" | "fallback" | "preference";
+export type GeoChannelKind = "media" | "we-media";
+export type GeoContentType = (typeof GEO_PORT_CONTRACT.contentTypes)[number];
+export type GeoArticleStatus =
+  | (typeof GEO_PORT_CONTRACT.articleLifecycle.primaryPath)[number]
+  | (typeof GEO_PORT_CONTRACT.articleLifecycle.exceptionStates)[number];
+
+type GeoMigrationPoint = keyof typeof GEO_PORT_CONTRACT.migrationPlanners;
+export type GeoArticleGuard =
+  | "profileIncomplete"
+  | "generationFailed"
+  | "draftApproved"
+  | "riskBlocked"
+  | "factClear"
+  | "retryReview"
+  | "assignmentConfirmed"
+  | "distributionPlanConfirmed"
+  | "profileConfirmed"
+  | "retryGeneration"
+  | "retryAfterRejection";
+
+const GEO_ARTICLE_TRANSITIONS: readonly {
+  from: GeoArticleStatus;
+  to: GeoArticleStatus;
+  migrationPoint?: GeoMigrationPoint;
+  guard?: GeoArticleGuard;
+}[] = [
+  {
+    from: "planned",
+    to: "pending_confirmation",
+    migrationPoint: "material_to_facts",
+    guard: "profileIncomplete",
+  },
+  {
+    from: "planned",
+    to: "drafting",
+    migrationPoint: "question_construction",
+  },
+  { from: "drafting", to: "generation_failed", guard: "generationFailed" },
+  {
+    from: "drafting",
+    to: "draft_ready",
+    migrationPoint: "content_production",
+  },
+  {
+    from: "draft_ready",
+    to: "generation_failed",
+    guard: "generationFailed",
+  },
+  { from: "draft_ready", to: "reviewing", guard: "draftApproved" },
+  {
+    from: "reviewing",
+    to: "rejected",
+    migrationPoint: "review",
+    guard: "riskBlocked",
+  },
+  {
+    from: "reviewing",
+    to: "approved",
+    migrationPoint: "review",
+    guard: "factClear",
+  },
+  {
+    from: "reviewing",
+    to: "drafting",
+    migrationPoint: "content_production",
+    guard: "retryReview",
+  },
+  { from: "approved", to: "published", migrationPoint: "publish" },
+  { from: "published", to: "assigning" },
+  {
+    from: "assigning",
+    to: "scheduling",
+    migrationPoint: "channel_recommendation",
+    guard: "assignmentConfirmed",
+  },
+  {
+    from: "scheduling",
+    to: "monitoring",
+    guard: "distributionPlanConfirmed",
+  },
+  { from: "monitoring", to: "done" },
+  {
+    from: "pending_confirmation",
+    to: "drafting",
+    migrationPoint: "question_construction",
+    guard: "profileConfirmed",
+  },
+  {
+    from: "generation_failed",
+    to: "drafting",
+    migrationPoint: "content_production",
+    guard: "retryGeneration",
+  },
+  {
+    from: "rejected",
+    to: "drafting",
+    migrationPoint: "content_production",
+    guard: "retryAfterRejection",
+  },
+] as const;
+
+/** Pure article lifecycle oracle. A missing/false guard always parks. */
+export function migrateGeoArticleState(
+  status: GeoArticleStatus,
+  guards: Readonly<Partial<Record<GeoArticleGuard, boolean>>>,
+): {
+  nextStatus: GeoArticleStatus;
+  smallPlan?: { migrationPoint: GeoMigrationPoint; plannerRole: string };
+} {
+  for (const transition of GEO_ARTICLE_TRANSITIONS) {
+    if (transition.from !== status) continue;
+    if (transition.guard && guards[transition.guard] !== true) continue;
+
+    const plannerRole = transition.migrationPoint
+      ? GEO_PORT_CONTRACT.migrationPlanners[transition.migrationPoint]
+      : null;
+    return {
+      nextStatus: transition.to,
+      ...(transition.migrationPoint && plannerRole
+        ? {
+            smallPlan: {
+              migrationPoint: transition.migrationPoint,
+              plannerRole,
+            },
+          }
+        : {}),
+    };
+  }
+  return { nextStatus: status };
+}
+
+/** Deterministic key for exactly one article/channel/version publication. */
+export function buildGeoPublishIdempotencyKey(
+  articleId: string,
+  resourceId: number,
+  version: number | string = GEO_PORT_CONTRACT.publishing
+    .defaultIdempotencyVersion,
+): string {
+  return `article-${articleId}-channel-${resourceId}-v${version}`;
+}
+
+/** SHA-256 of the canonical title|content|remark payload used for dedup. */
+export async function computeGeoPublishPayloadHash(
+  title: string,
+  content: string,
+  remark = "",
+): Promise<string> {
+  const payload = new TextEncoder().encode(`${title}|${content}|${remark}`);
+  const digest = await globalThis.crypto.subtle.digest("SHA-256", payload);
+  return [...new Uint8Array(digest)]
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+/** Same-key order dedup: reuse identical payloads and fail closed on drift. */
+export function decideGeoIdempotentOrder(
+  existing:
+    | { externalOrderId?: string | null; payloadHash?: string | null }
+    | undefined,
+  newPayloadHash: string,
+):
+  | { action: "proceed" }
+  | { action: "skip"; existingOrderId: string }
+  | { action: "conflict"; existingOrderId: string } {
+  if (!existing) return { action: "proceed" };
+  const existingOrderId = existing.externalOrderId ?? "";
+  if (existing.payloadHash === newPayloadHash) {
+    return { action: "skip", existingOrderId };
+  }
+  return { action: "conflict", existingOrderId };
+}
+
+/** Fixed 1/5/15 minute retry policy, capped after the third retry. */
+export function geoPublishRetryBackoffMs(attempt: number): number {
+  if (attempt <= 0) return 0;
+  const delays = GEO_PORT_CONTRACT.publishing.retryBackoffMs;
+  return delays[Math.min(Math.floor(attempt), delays.length) - 1];
+}
+
+/** Local-calendar scheduling parity for the js_ai publish planner. */
+export function computeGeoNextPublishAt(input: {
+  nowMs: number;
+  channelDailyCount: number;
+  channelDailyLimit: number;
+  canWeekend: boolean;
+}): number {
+  if (input.channelDailyCount < input.channelDailyLimit) {
+    return Math.floor(input.nowMs / 1000);
+  }
+
+  const now = new Date(input.nowMs);
+  let next = new Date(
+    now.getFullYear(),
+    now.getMonth(),
+    now.getDate() + 1,
+    0,
+    1,
+    0,
+    0,
+  );
+  while (!input.canWeekend && (next.getDay() === 0 || next.getDay() === 6)) {
+    next = new Date(
+      next.getFullYear(),
+      next.getMonth(),
+      next.getDate() + 1,
+      0,
+      1,
+      0,
+      0,
+    );
+  }
+  return Math.floor(next.getTime() / 1000);
+}
+
+/**
+ * Pure ADR-0030 coverage floor: one occurrence per type for small batches and
+ * two for batches of at least five topics, without mutating caller input.
+ */
+export function enforceGeoContentTypeCoverage(
+  recommendations: readonly {
+    topicId: string;
+    types: readonly GeoContentType[];
+  }[],
+): Array<{ topicId: string; types: GeoContentType[] }> {
+  const minimumPerType = recommendations.length >= 5 ? 2 : 1;
+  const result = recommendations.map((recommendation) => ({
+    topicId: recommendation.topicId,
+    types: [...recommendation.types],
+  }));
+
+  for (const contentType of GEO_PORT_CONTRACT.contentTypes) {
+    let needed =
+      minimumPerType -
+      result.filter((recommendation) =>
+        recommendation.types.includes(contentType),
+      ).length;
+    while (needed > 0) {
+      const recipient = result
+        .filter(
+          (recommendation) =>
+            !recommendation.types.includes(contentType) &&
+            recommendation.types.length < GEO_PORT_CONTRACT.contentTypes.length,
+        )
+        .sort((left, right) => left.types.length - right.types.length)[0];
+      if (!recipient) break;
+      recipient.types.push(contentType);
+      needed -= 1;
+    }
+  }
+
+  return result;
+}
+
+/** Pure four-path union used as the parity oracle for ported channel recall. */
+export function mergeGeoChannelPathHits(
+  hits: readonly {
+    resourceId: number;
+    kind: GeoChannelKind;
+    name: string;
+    path: GeoRecallPath;
+  }[],
+): Array<{
+  resourceId: number;
+  kind: GeoChannelKind;
+  name: string;
+  pathHits: GeoRecallPath[];
+  hitCount: number;
+  score: number;
+}> {
+  const weights = GEO_PORT_CONTRACT.channelRecall.paths;
+  const byResourceId = new Map<
+    number,
+    {
+      resourceId: number;
+      kind: GeoChannelKind;
+      name: string;
+      pathHits: GeoRecallPath[];
+      hitCount: number;
+      score: number;
+    }
+  >();
+
+  for (const hit of hits) {
+    const existing = byResourceId.get(hit.resourceId);
+    if (existing) {
+      if (!existing.pathHits.includes(hit.path)) {
+        existing.pathHits.push(hit.path);
+        existing.hitCount = existing.pathHits.length;
+        existing.score += weights[hit.path].weight;
+      }
+      continue;
+    }
+    byResourceId.set(hit.resourceId, {
+      resourceId: hit.resourceId,
+      kind: hit.kind,
+      name: hit.name,
+      pathHits: [hit.path],
+      hitCount: 1,
+      score: weights[hit.path].weight,
+    });
+  }
+
+  return [...byResourceId.values()].sort(
+    (left, right) =>
+      right.score - left.score ||
+      right.hitCount - left.hitCount ||
+      left.resourceId - right.resourceId,
+  );
 }
 
 export function resolveGeoStageModel(

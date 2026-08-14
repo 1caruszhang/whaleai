@@ -60,7 +60,7 @@ describe('OpenAI bridge timeout ownership', () => {
       res.flushHeaders();
       setTimeout(() => {
         res.end(JSON.stringify({ error: { message: 'late upstream failure' } }));
-      }, 100);
+      }, 750);
     });
     await new Promise<void>((resolve) => server!.listen(0, '127.0.0.1', resolve));
     const address = server.address();
@@ -72,7 +72,9 @@ describe('OpenAI bridge timeout ownership', () => {
         baseUrl: `http://127.0.0.1:${address.port}`,
         apiKey: 'test-key',
       }),
-      upstreamHeadersTimeoutMs: 25,
+      // Keep the body slower than the headers deadline while leaving enough
+      // scheduling headroom for loaded CI runners to observe flushed headers.
+      upstreamHeadersTimeoutMs: 500,
       logger: null,
     });
     const response = await handler(new Request('http://127.0.0.1/v1/messages', {

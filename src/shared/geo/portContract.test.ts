@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { JS_AI_DEV_BEHAVIOR_FIXTURE } from "./__fixtures__/jsAiDevBehavior";
 import {
   allocateGeoChannelQuota,
   classifyGeoQuestionPriority,
@@ -304,22 +305,23 @@ describe("GEO port contract", () => {
   });
 
   it("publishes worked parity cases for future ported slices", () => {
-    for (const testCase of GEO_PORT_CONTRACT.parityCases.questionPriority) {
+    const fixture = JS_AI_DEV_BEHAVIOR_FIXTURE.scalarAlgorithms;
+    for (const testCase of fixture.questionPriority) {
       expect(
         classifyGeoQuestionPriority(testCase.match, testCase.potential),
       ).toBe(testCase.expected);
     }
-    for (const testCase of GEO_PORT_CONTRACT.parityCases.questionMatch) {
+    for (const testCase of fixture.questionMatch) {
       expect(scoreGeoQuestionMatch(testCase.cosineSimilarity)).toBe(
         testCase.expected,
       );
     }
-    for (const testCase of GEO_PORT_CONTRACT.parityCases.questionPotential) {
+    for (const testCase of fixture.questionPotential) {
       expect(scoreGeoQuestionPotential(testCase.nearestSimilarity)).toBe(
         testCase.expected,
       );
     }
-    for (const testCase of GEO_PORT_CONTRACT.parityCases.channelQuality) {
+    for (const testCase of fixture.channelQuality) {
       expect(
         isGeoChannelQualityEligible({
           publishedRate: testCase.publishedRate,
@@ -327,24 +329,21 @@ describe("GEO port contract", () => {
         }),
       ).toBe(testCase.expected);
     }
-    for (const testCase of GEO_PORT_CONTRACT.parityCases.hybridScore) {
+    for (const testCase of fixture.hybridScore) {
       expect(scoreGeoHybridKnowledge(testCase)).toBeCloseTo(
         testCase.expected,
         12,
       );
     }
-    for (const testCase of GEO_PORT_CONTRACT.parityCases.channelQuota) {
+    for (const testCase of fixture.channelQuota) {
       expect(
         allocateGeoChannelQuota(
           testCase.availableMedia,
           testCase.availableWeMedia,
         ),
-      ).toEqual({
-        media: testCase.expectedMedia,
-        weMedia: testCase.expectedWeMedia,
-      });
+      ).toEqual(testCase.expected);
     }
-    for (const testCase of GEO_PORT_CONTRACT.parityCases.modelRouting) {
+    for (const testCase of fixture.modelRouting) {
       expect(resolveGeoStageModel(testCase.stage, testCase.explicit)).toEqual(
         testCase.expected,
       );

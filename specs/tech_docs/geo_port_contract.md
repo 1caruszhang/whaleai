@@ -4,11 +4,15 @@
 
 ## 使用方式
 
-每个 GEO 切片的纯逻辑测试应直接导入 `GEO_PORT_CONTRACT`，在公开 seam 比较该切片实际使用的策略、阈值或状态转换。评分、混合检索、渠道质量、渠道配额和模型路由还提供纯 reference evaluator，worked cases 会真正执行这些算法，而不是只比对静态 JSON。专用入口：
+每个 GEO 切片的纯逻辑测试应直接导入 `GEO_PORT_CONTRACT`，在公开 seam 比较该切片实际使用的策略、阈值或状态转换。评分、混合检索、渠道质量、渠道配额、四路召回合并、五类内容覆盖、文章人工闸门、模型路由和确定性发布还提供纯 reference evaluator，worked cases 会真正执行这些算法，而不是只比对静态 JSON。
+
+独立预期值位于 `src/shared/geo/__fixtures__/jsAiDevBehavior.ts`，来源固定为本契约标注的 js_ai 提交。fixture 不导入生产契约或 evaluator，避免实现与期望一起变化后测试仍然通过；`src/shared/geo/jsAiBehaviorContract.test.ts` 只通过公开纯函数执行这些 worked cases。专用入口：
 
 ```bash
 npm run test:geo-contract
 ```
+
+GitHub Actions 在通用 unit gate 之前单独执行该入口，使 js_ai 行为偏差在 CI 页面上有独立、可定位的失败步骤；通用 unit gate 仍会再次覆盖这些文件，防止专用脚本与默认测试集合发生漂移。
 
 该入口运行在 unit project；`src/test/setup-no-egress.ts` 会阻断所有非 loopback 网络，契约模块本身也不读取环境变量、凭据、文件或计时器。因此测试不得依赖真实 Provider、真实密钥或用户目录。
 
