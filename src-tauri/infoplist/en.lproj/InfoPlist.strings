@@ -1,0 +1,4 @@
+/* English localization */
+CFBundleDisplayName = "MyAgents";
+CFBundleName = "MyAgents";
+NSAppleEventsUsageDescription = "MyAgents needs to control other apps so the AI can activate windows, run AppleScript, and perform desktop automation on your behalf.";

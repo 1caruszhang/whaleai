@@ -1,0 +1,8 @@
+{
+  "schemaVersion": 1,
+  "id": "mino-compass",
+  "displayName": "Mino Compass",
+  "description": "Compass-like companion for strong opinions and direction.",
+  "author": "MyAgents / image-gen reference / deterministic hatch-pet repair",
+  "spritesheetPath": "spritesheet.webp"
+}

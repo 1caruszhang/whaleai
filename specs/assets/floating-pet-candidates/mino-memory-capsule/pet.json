@@ -1,0 +1,8 @@
+{
+  "schemaVersion": 1,
+  "id": "mino-memory-capsule",
+  "displayName": "Mino Memory Capsule",
+  "description": "Archive capsule with memory-card accents for the memory-brain direction.",
+  "author": "MyAgents / image-gen reference / deterministic hatch-pet repair",
+  "spritesheetPath": "spritesheet.webp"
+}

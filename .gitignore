@@ -1,0 +1,110 @@
+# Dependencies
+node_modules/
+
+# Build outputs
+dist/
+*.tsbuildinfo
+
+# Lockfiles — v0.2.0+ uses npm (package-lock.json is committed).
+# Any residual bun.lock from pre-0.2.0 checkout is ignored so local installs
+# don't leave stray files in the tree.
+bun.lock
+
+# Vite
+.vite/
+
+# ESLint & Prettier
+.eslintcache
+.prettiercache
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*.code-workspace
+
+# macOS
+.DS_Store
+._*
+
+# Environment variables
+.env
+.env.*
+!.env.example
+
+# Turbo
+.turbo/
+
+# Claude Code (user-specific settings)
+.claude/settings.json
+.claude/settings.local.json
+
+# Codex CLI
+.context/
+.agents/
+
+# Tauri / Rust
+src-tauri/target/
+src-tauri/binaries/
+src-tauri/resources/server-dist.js
+src-tauri/resources/server-dist.js.map
+src-tauri/resources/plugin-bridge-dist.mjs
+src-tauri/resources/plugin-bridge-dist.mjs.map
+src-tauri/resources/claude-agent-sdk
+src-tauri/resources/cli/myagents.js
+src-tauri/resources/cli/myagents.cjs
+src-tauri/resources/cli/myagents.cmd
+src-tauri/resources/agent-browser-cli
+src-tauri/resources/sharp-runtime
+src-tauri/resources/tsx-runtime
+src-tauri/resources/nodejs/*
+!src-tauri/resources/nodejs/.gitkeep
+src-tauri/resources/nodejs-cache/
+src-tauri/resources/vcruntime140.dll
+src-tauri/resources/vcruntime140_1.dll
+src-tauri/nsis/Git-Installer.exe
+
+# Test coverage
+coverage/
+
+# Misc
+/rclone.exe
+*.pem
+*.local
+
+.agent/
+/.claude/
+/.scratch/
+.playwright-mcp/
+specs/prd/
+specs/research/
+specs/playground/
+specs/playgrounds/
+specs/issues/
+specs/marketing/
+specs/dev_exp/
+
+# Generated avatar candidate assets. Keep scripts/config docs tracked, but do
+# not commit raw/generated image batches or generated manifests.
+specs/assets/avatar-candidates/**/raw/
+specs/assets/avatar-candidates/**/*-v*/
+specs/assets/avatar-candidates/**/r2/
+specs/assets/avatar-candidates/**/manifest.json
+
+# Default workspace (cloned by setup.sh)
+/mino/
+
+# Dev
+.claude/plans/myagents/
+myagents_files/
+/HEARTBEAT.md
+
+# Wayfinder local tracker & research drafts (not for GitHub)
+.agents/
+specs/research/
