@@ -44,7 +44,7 @@ describe("Xiaojing product shell contract", () => {
     expect(app).toContain("useBrandWorkspaces()");
     expect(sidebar).toContain("createWorkspace");
     expect(sidebar).toContain("switchWorkspace");
-    expect(sidebar).toContain("输入“永久删除”完成二次确认");
+    expect(sidebar).toContain("t('xiaojingSidebar.deletePrompt')");
     expect(store).toContain('"project.sqlite"');
     expect(store).toContain("PRAGMA journal_mode = WAL");
     expect(store).toContain("session_deletion_intents");

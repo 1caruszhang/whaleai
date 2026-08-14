@@ -191,7 +191,7 @@ export default memo(function XiaojingSidebar({
         <button type="button" onClick={() => currentWorkspace && void onOpenWorkspace(currentWorkspace)} disabled={!currentWorkspace || busy} className="mt-1 flex h-10 w-full items-center justify-center gap-2 rounded-xl bg-[var(--button-primary-bg)] px-3 text-sm font-semibold text-[var(--button-primary-text)] hover:bg-[var(--button-primary-bg-hover)] disabled:opacity-60">{busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <MessageSquarePlus className="h-4 w-4" />}{t('xiaojingSidebar.newSession')}</button>
       </div>
 
-      <section className="mt-6 flex min-h-0 flex-1 flex-col" aria-label="Session 列表">
+      <section className="mt-6 flex min-h-0 flex-1 flex-col" aria-label={t('xiaojingSidebar.sessions')}>
         <div className="flex items-center justify-between px-4 pb-2"><h2 className="text-xs font-semibold uppercase tracking-[0.16em] text-[var(--ink-muted)]">{t('xiaojingSidebar.sessions')}</h2><span className="text-xs tabular-nums text-[var(--ink-subtle)]">{sessions.length}</span></div>
         <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-4">
           {isLoading ? <div className="flex items-center gap-2 px-3 py-4 text-xs text-[var(--ink-muted)]"><Loader2 className="h-3.5 w-3.5 animate-spin" />{t('xiaojingSidebar.loadingBrand')}</div>
@@ -238,7 +238,7 @@ export default memo(function XiaojingSidebar({
           <div className="w-full max-w-lg rounded-2xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5 shadow-xl">
             <h2 className="text-base font-semibold text-[var(--error)]">{t('xiaojingSidebar.deleteTitle', { title: deletionPreview.title })}</h2>
             <p className="mt-3 text-sm leading-6 text-[var(--ink-secondary)]">{t('xiaojingSidebar.deleteScope', { ...deletionPreview.scope, ...deletionPreview.retained })}</p>
-            <label className="mt-4 block text-sm text-[var(--ink-secondary)]">{t('xiaojingSidebar.deletePrompt', '输入“永久删除”完成二次确认')}<input value={deleteConfirmation} onChange={(event) => setDeleteConfirmation(event.target.value)} className="mt-2 w-full rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-2 outline-none focus:border-[var(--error)]" /></label>
+            <label className="mt-4 block text-sm text-[var(--ink-secondary)]">{t('xiaojingSidebar.deletePrompt')}<input value={deleteConfirmation} onChange={(event) => setDeleteConfirmation(event.target.value)} className="mt-2 w-full rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-2 outline-none focus:border-[var(--error)]" /></label>
             <div className="mt-5 flex justify-end gap-2"><button type="button" onClick={closeDeletionDialog} className="rounded-lg px-4 py-2 text-sm text-[var(--ink-muted)] hover:bg-[var(--hover-bg)]">{t('xiaojingSidebar.cancel')}</button><button type="button" onClick={() => void confirmDelete()} disabled={deleteConfirmation !== deleteConfirmationPhrase || busy} className="rounded-lg bg-[var(--error)] px-4 py-2 text-sm font-semibold text-[var(--on-error)] disabled:opacity-50">{t('xiaojingSidebar.permanentDelete')}</button></div>
           </div>
         </OverlayBackdrop>,
