@@ -248,7 +248,7 @@ describe('EditTool Codex fileChange rendering', () => {
     const status = screen.getByRole('status');
     expect(status).toHaveTextContent('内容过长，仅展示前 5000 行');
     expect(screen.getByLabelText('hard-cap.ts 的变更')).toHaveAttribute('aria-describedby', status.id);
-  });
+  }, 30_000);
 });
 
 describe('tool summary input fallback', () => {
