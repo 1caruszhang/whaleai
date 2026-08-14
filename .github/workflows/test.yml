@@ -63,6 +63,8 @@ jobs:
         run: npm run build:cli
       - name: Build renderer
         run: npm run build:web
+        env:
+          NODE_OPTIONS: --max-old-space-size=4096
 
   # Rust gate: cargo test plus project redline Clippy rules. We only deny
   # disallowed_methods/macros here; ordinary Clippy warnings stay non-fatal
