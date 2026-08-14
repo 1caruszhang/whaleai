@@ -11,7 +11,13 @@
     <title>小鲸同学</title>
     <!-- Xiaojing v1 intentionally has one language and one color scheme. -->
     <script>
-      document.documentElement.style.colorScheme = 'dark';
+      (function () {
+        var root = document.documentElement;
+        root.dataset.themeId = 'xiaojing';
+        root.dataset.colorScheme = 'dark';
+        root.classList.add('dark');
+        root.style.colorScheme = 'dark';
+      })();
     </script>
   </head>
   <body>

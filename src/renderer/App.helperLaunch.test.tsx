@@ -369,6 +369,13 @@ vi.mock('@/pages/Launcher', () => ({
   },
 }));
 
+vi.mock('@/components/xiaojing/XiaojingWelcome', () => ({
+  default: (props: Record<string, unknown>) => {
+    mocks.launcherProps.push(props);
+    return <div data-testid="xiaojing-welcome-page" />;
+  },
+}));
+
 vi.mock('@/pages/Settings', () => ({
   default: (props: Record<string, unknown>) => {
     mocks.settingsProps.push(props);

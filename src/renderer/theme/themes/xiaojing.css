@@ -35,9 +35,9 @@ html[data-theme-id='xiaojing'][data-color-scheme='light'] {
   --message-user-bg-a0: rgb(255 255 255 / 0);
   --paper-inset-a0: rgb(236 236 241 / 0);
   --hover-bg: rgb(14 165 233 / 0.07);
-  --accent: #0ea5e9;
-  --accent-warm: #0ea5e9;
-  --accent-warm-hover: #0284c7;
+  --accent: #0369a1;
+  --accent-warm: #0369a1;
+  --accent-warm-hover: #075985;
   --accent-warm-subtle: rgb(14 165 233 / 0.08);
   --accent-warm-muted: rgb(14 165 233 / 0.15);
   --accent-warm-subtle-a0: rgb(14 165 233 / 0);
@@ -61,8 +61,8 @@ html[data-theme-id='xiaojing'][data-color-scheme='light'] {
   --info: #456f8c;
   --info-bg: #e1ebf3;
   --on-info: #ffffff;
-  --button-primary-bg: #0ea5e9;
-  --button-primary-bg-hover: #0284c7;
+  --button-primary-bg: #0369a1;
+  --button-primary-bg-hover: #075985;
   --button-primary-text: #ffffff;
   --button-dark-bg: #1b1b1b;
   --button-dark-bg-hover: #333337;
@@ -166,7 +166,7 @@ html[data-theme-id='xiaojing'][data-color-scheme='dark'] {
   --accent-warm-subtle-a0: rgb(56 189 248 / 0);
   --accent-cool: #2dd4bf;
   --accent-cool-hover: #2dd4bf;
-  --on-accent: #ffffff;
+  --on-accent: #082f49;
   --heartbeat: #ed6a6a;
   --heartbeat-bg: rgb(237 106 106 / 0.16);
   --heartbeat-border: rgb(237 106 106 / 0.24);
@@ -184,8 +184,8 @@ html[data-theme-id='xiaojing'][data-color-scheme='dark'] {
   --info: #2dd4bf;
   --info-bg: rgb(98 167 160 / 0.16);
   --on-info: #131518;
-  --button-primary-bg: #38bdf8;
-  --button-primary-bg-hover: #0ea5e9;
+  --button-primary-bg: #0369a1;
+  --button-primary-bg-hover: #075985;
   --button-primary-text: #ffffff;
   --button-dark-bg: #e6f5fb;
   --button-dark-bg-hover: #c1dce7;

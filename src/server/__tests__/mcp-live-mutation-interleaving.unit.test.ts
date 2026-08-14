@@ -158,4 +158,41 @@ describe('live Query MCP mutation/promotion ordering', () => {
       }),
     });
   });
+
+  it('drops an unregistered remote MCP before credential or transport resolution for Xiaojing', async () => {
+    const previous = process.env.XIAOJING_MAIN_AGENT;
+    process.env.XIAOJING_MAIN_AGENT = '1';
+    try {
+      const setMcpServers = vi.fn(async () => ({ added: [], removed: ['old'], errors: {} }));
+      const query = {
+        setMcpServers,
+        interrupt: vi.fn(async () => undefined),
+        close: vi.fn(),
+      } as never;
+      setQuerySession(query);
+      setFrozenSdkMcpFingerprint('old');
+      setQueryMcpPrewarmOwner({ query, fingerprint: 'old', requiredServerIds: ['old'] });
+      setCurrentMcpServers([{
+        id: 'unregistered-remote',
+        name: 'unregistered-remote',
+        isBuiltin: false,
+        type: 'http',
+        url: 'https://example.com/mcp',
+        command: '',
+        args: [],
+      }]);
+
+      await expect(ensureSdkMcpInSync()).resolves.toBe(true);
+      expect(oauth.resolveAuthHeaders).not.toHaveBeenCalled();
+      expect(setMcpServers).toHaveBeenCalledWith({
+        'xiaojing-geo': expect.objectContaining({
+          name: 'xiaojing-geo',
+          type: 'sdk',
+        }),
+      });
+    } finally {
+      if (previous === undefined) delete process.env.XIAOJING_MAIN_AGENT;
+      else process.env.XIAOJING_MAIN_AGENT = previous;
+    }
+  });
 });

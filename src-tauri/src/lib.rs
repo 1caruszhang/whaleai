@@ -10,6 +10,7 @@ mod commands;
 pub mod config_io;
 mod crash_artifact_retention;
 pub mod cron_task;
+pub mod deepseek_credentials;
 pub mod device_identity;
 pub mod floating_ball;
 pub mod floating_ball_pets;
@@ -270,7 +271,6 @@ pub fn run() {
     let cleanup_done_for_monitor = cleanup_done.clone();
     let cleanup_done_for_session_monitor = cleanup_done.clone();
     let cleanup_done_for_wakelock_monitor = cleanup_done.clone();
-    let cleanup_done_for_agent_monitor = cleanup_done.clone();
     let cleanup_done_for_terminal_forwarder = cleanup_done.clone();
 
     // Create terminal manager state
@@ -413,6 +413,10 @@ pub fn run() {
             commands::cmd_get_platform,
             commands::cmd_get_device_id,
             commands::cmd_get_device_identity,
+            deepseek_credentials::cmd_deepseek_credential_status,
+            deepseek_credentials::cmd_deepseek_credential_save,
+            deepseek_credentials::cmd_deepseek_credential_delete,
+            deepseek_credentials::cmd_deepseek_credential_verify,
             brand_workspace::cmd_brand_workspace_bootstrap,
             brand_workspace::cmd_brand_workspace_create,
             brand_workspace::cmd_brand_workspace_switch,
@@ -1210,7 +1214,6 @@ pub fn run() {
 
             // Start the internal control plane before any backend automation can
             // create a Sidecar that needs MYAGENTS_MANAGEMENT_PORT.
-            let automation_app_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 let port = match management_api::start_management_api().await {
                     Ok(port) => port,
@@ -1220,14 +1223,8 @@ pub fn run() {
                     }
                 };
                 ulog_info!("[App] Management API started on port {}", port);
-
-                // Startup convergence is intentionally serial: legacy data must
-                // become Task authority before timers rebuild, and Goal recovery
-                // starts only after the shared control plane/timers are ready.
-                cron_task::initialize_cron_manager(automation_app_handle.clone()).await;
-                session_goal::initialize_session_goal_manager(automation_app_handle).await;
             });
-            ulog_info!("[App] Automation control-plane initialization scheduled");
+            ulog_info!("[App] Xiaojing control-plane initialization scheduled");
 
             // Bridge `SidecarManager::terminal_events` → `session:sidecar-terminal`
             // Tauri event. Renderer's App.tsx listens and resets `tab.sessionId`
@@ -1267,14 +1264,6 @@ pub fn run() {
                     }
                 }
             }
-
-            // Auto-start IM Bot if previously enabled (3s delay)
-            im::schedule_auto_start(app.handle().clone());
-            ulog_info!("[App] IM Bot auto-start scheduled");
-
-            // Auto-start Agent channels (4s delay, after IM bots)
-            im::schedule_agent_auto_start(app.handle().clone());
-            ulog_info!("[App] Agent auto-start scheduled");
 
             // Floating ball (PRD 0.2.35): bring the ball up at launch when the
             // developer gate + ball toggle are both enabled in config.
@@ -1318,16 +1307,6 @@ pub fn run() {
                 ).await;
             });
             ulog_info!("[App] Turn wake-lock monitor spawned");
-
-            // Start Agent Channel health monitor (15s initial delay)
-            let app_handle_for_agent_monitor = app.handle().clone();
-            tauri::async_runtime::spawn(async move {
-                im::monitor_agent_channels(
-                    app_handle_for_agent_monitor,
-                    cleanup_done_for_agent_monitor,
-                ).await;
-            });
-            ulog_info!("[App] Agent channel health monitor spawned");
 
             // Start background update check (60s delay, then stale updater temp cleanup)
             ulog_info!("[App] Setup complete, spawning background update check task...");

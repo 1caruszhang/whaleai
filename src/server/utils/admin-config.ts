@@ -22,6 +22,7 @@ import {
 import { resolve } from 'path';
 import { getAppDataDir } from './app-data-dir';
 import { getHomeDirOrNull } from './platform';
+import { isXiaojingMainAgentSession } from '../xiaojing-native-secret';
 import { stripBom } from '../../shared/utils';
 import { workspacePathsEqual } from '../../shared/workspacePath';
 import { promoteAgentMcpJsonToGlobal } from '../../shared/mcpConfig';
@@ -1096,8 +1097,9 @@ export function resolveProviderEnv(
   // (Codex review): a value like `"  "` is truthy and would silently be
   // sent to the upstream as the Authorization header, producing an opaque
   // 401 instead of an actionable "no API key" error.
-  const apiKey = isManagedOauth ? undefined : (c.providerApiKeys ?? {})[providerId];
-  if (!isManagedOauth && (!apiKey || !apiKey.trim())) return undefined;
+  const isNativeDeepseek = providerId === 'deepseek' && isXiaojingMainAgentSession();
+  const apiKey = (isManagedOauth || isNativeDeepseek) ? undefined : (c.providerApiKeys ?? {})[providerId];
+  if (!isManagedOauth && !isNativeDeepseek && (!apiKey || !apiKey.trim())) return undefined;
 
   // Extract provider config fields (same shape as frontend Chat.tsx builds)
   const providerConfig = (provider.config ?? {}) as Record<string, unknown>;
@@ -1109,7 +1111,9 @@ export function resolveProviderEnv(
     authType: (provider.authType as ResolvedProviderEnv['authType']) ?? 'both',
     ...(isManagedOauth
       ? { credentialSource: { kind: 'managed-oauth', providerId: XAI_SUBSCRIPTION_PROVIDER_ID } as const }
-      : {}),
+      : isNativeDeepseek
+        ? { credentialSource: { kind: 'native-secret', providerId: 'deepseek' } as const }
+        : {}),
   };
   if (provider.apiProtocol) result.apiProtocol = provider.apiProtocol as ResolvedProviderEnv['apiProtocol'];
   if (provider.maxOutputTokens) result.maxOutputTokens = Number(provider.maxOutputTokens);

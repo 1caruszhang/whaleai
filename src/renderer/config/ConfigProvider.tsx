@@ -37,6 +37,8 @@ import {
 import {
     getAllProviders,
     saveApiKey as saveApiKeyService,
+    loadApiKeys as loadApiKeysService,
+    NATIVE_SECRET_CONFIGURED,
     deleteApiKey as deleteApiKeyService,
     saveProviderVerifyStatus as saveProviderVerifyStatusService,
     saveCustomProvider as saveCustomProviderService,
@@ -71,6 +73,7 @@ import { listenWithCleanup } from '@/utils/tauriListen';
 import { workspacePathsEqual } from '../../shared/workspacePath';
 import { resolveAgentWorkspaceProjections } from '../../shared/agentWorkspaceIdentity';
 import { normalizeUiLanguage, type SupportedLocale, type UiLanguage } from '../../shared/i18n';
+import { XIAOJING_MAIN_AGENT } from '../../shared/xiaojing-main-agent-policy';
 import {
     effectiveGeneralProxyScopeKey,
     removeProviderFromProxySettingsScope,
@@ -94,15 +97,16 @@ async function loadConfigDiskSnapshot(): Promise<ConfigDiskSnapshot> {
     // verification. Read it once, then derive every provider-facing state
     // slice from that same snapshot so a refresh cannot mix generations.
     const config = await loadAppConfig();
-    const [projects, providers] = await Promise.all([
+    const [projects, providers, apiKeys] = await Promise.all([
         loadProjects(),
         getAllProviders(config),
+        loadApiKeysService(config),
     ]);
     return {
         config,
         projects,
         providers,
-        apiKeys: config.providerApiKeys ?? {},
+        apiKeys,
         verifyStatus: config.providerVerifyStatus ?? {},
     };
 }
@@ -302,23 +306,36 @@ export function ConfigProvider({ children }: { children: React.ReactNode }) {
             disabledProviderIds: config.disabledProviderIds,
         };
         const overrides = config.providerPrimaryModels;
+        let resolved: Provider[];
         if (!overrides || Object.keys(overrides).length === 0) {
-            return applyManagedCodexProviderReadiness(
+            resolved = applyManagedCodexProviderReadiness(
                 applyProviderEnablementAndOrder(merged, providerOrderSettings),
                 config,
             );
+        } else {
+            // Apply user's primaryModel override directly on the Provider object
+            // so ALL consumers see the correct value without needing getEffectivePrimaryModel().
+            const withPrimaryOverrides = merged.map(p => {
+                const userPrimary = overrides[p.id];
+                if (!userPrimary || !p.models?.some(m => m.model === userPrimary)) return p;
+                return { ...p, primaryModel: userPrimary };
+            });
+            resolved = applyManagedCodexProviderReadiness(
+                applyProviderEnablementAndOrder(withPrimaryOverrides, providerOrderSettings),
+                config,
+            );
         }
-        // Apply user's primaryModel override directly on the Provider object
-        // so ALL consumers see the correct value without needing getEffectivePrimaryModel()
-        const withPrimaryOverrides = merged.map(p => {
-            const userPrimary = overrides[p.id];
-            if (!userPrimary || !p.models?.some(m => m.model === userPrimary)) return p;
-            return { ...p, primaryModel: userPrimary };
-        });
-        return applyManagedCodexProviderReadiness(
-            applyProviderEnablementAndOrder(withPrimaryOverrides, providerOrderSettings),
-            config,
-        );
+
+        // Focused-product catalog: foreign providers and alternate models are
+        // not merely hidden by Settings; they never enter renderer selection.
+        return resolved
+            .filter(provider => provider.id === XIAOJING_MAIN_AGENT.providerId)
+            .map(provider => ({
+                ...provider,
+                enabled: true,
+                primaryModel: XIAOJING_MAIN_AGENT.model,
+                models: provider.models.filter(model => model.model === XIAOJING_MAIN_AGENT.model),
+            }));
     }, [
         config,
         rawProviders,
@@ -1046,7 +1063,10 @@ export function ConfigProvider({ children }: { children: React.ReactNode }) {
         await saveApiKeyService(providerId, apiKey);
         await rebuildAndPersistAvailableProviders();
         if (acceptLocalDiskWrite()) {
-            setApiKeys((prev) => ({ ...prev, [providerId]: apiKey }));
+            setApiKeys((prev) => ({
+                ...prev,
+                [providerId]: providerId === 'deepseek' ? NATIVE_SECRET_CONFIGURED : apiKey,
+            }));
         }
     }, [acceptLocalDiskWrite]);
 

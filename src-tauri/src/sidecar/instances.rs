@@ -281,6 +281,7 @@ fn start_tab_sidecar_admitted<R: Runtime>(
     if let Some(data_root) = crate::app_dirs::xiaojing_data_dir() {
         cmd.env("XIAOJING_DATA_ROOT", data_root);
     }
+    crate::deepseek_credentials::inject_into_sidecar(&mut cmd)?;
     // Reserve generation identity only after all fallible filesystem setup.
     // Replacement keeps its old manager entry fenced by the private lease.
     // Initial creation inserts a process-less reservation into the same
@@ -1739,6 +1740,83 @@ async fn begin_dead_session_recovery(
     let mut guard = manager.lock().map_err(|error| error.to_string())?;
     guard.finish_session_sidecar_replacement(&drain);
     Ok(())
+}
+
+/// Replace every live Xiaojing Session generation after a native credential
+/// mutation. Owners stay attached to the logical Session while the old
+/// generation is dispatch-closed and a child with the new secret is born.
+#[cfg(windows)]
+pub(crate) async fn restart_xiaojing_session_sidecars<R: Runtime>(
+    app_handle: &AppHandle<R>,
+    manager: &ManagedSidecarManager,
+) -> Result<usize, String> {
+    let session_ids = {
+        let guard = manager.lock().map_err(|error| error.to_string())?;
+        let mut ids = guard
+            .sidecars
+            .iter()
+            .filter_map(|(session_id, sidecar)| {
+                crate::brand_workspace::is_brand_workspace_path(&sidecar.workspace_path)
+                    .then(|| session_id.clone())
+            })
+            .collect::<Vec<_>>();
+        ids.sort();
+        ids.dedup();
+        ids
+    };
+
+    let mut restarted = 0usize;
+    for session_id in session_ids {
+        let _lifecycle = acquire_session_lifecycle(&[&session_id]).await;
+        begin_dead_session_recovery(manager, &session_id).await?;
+        let restart_identity = {
+            let guard = manager.lock().map_err(|error| error.to_string())?;
+            guard.recovery_restart_identity(&session_id, std::time::Instant::now())
+        };
+        let Some(restart_identity) = restart_identity else {
+            continue;
+        };
+
+        let recovery_epoch = restart_identity.epoch;
+        let first_owner = restart_identity.owner;
+        let workspace = restart_identity.workspace_path;
+        let pinned_runtime = restart_identity.runtime;
+        let pinned_runtime_source = restart_identity.runtime_source;
+        let mgr = manager.clone();
+        let app = app_handle.clone();
+        let sid = session_id.clone();
+        let result = tauri::async_runtime::spawn_blocking(move || {
+            ensure_session_sidecar_with_runtime_identity_override(
+                &app,
+                &mgr,
+                &sid,
+                &workspace,
+                first_owner,
+                pinned_runtime,
+                pinned_runtime_source,
+                Some(recovery_epoch),
+            )
+        })
+        .await
+        .map_err(|error| format!("小鲸 Session 重启任务失败: {error}"))??;
+
+        let installed = manager.lock().ok().is_some_and(|guard| {
+            guard.is_live(&session_id, result.generation)
+                && !guard.has_session_recovery(&session_id)
+        });
+        if !installed {
+            return Err(format!("小鲸 Session {session_id} 的新凭据进程未能提交"));
+        }
+        restarted += 1;
+        let _ = app_handle.emit(
+            "session-sidecar:restarted",
+            serde_json::json!({
+                "sessionId": session_id,
+                "port": result.port,
+            }),
+        );
+    }
+    Ok(restarted)
 }
 
 #[cfg(test)]

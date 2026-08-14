@@ -367,6 +367,12 @@ fn resolve_expected_runtime_identity(
     runtime_override: Option<&str>,
     runtime_source_override: Option<&str>,
 ) -> RuntimeIdentity {
+    // Brand workspaces have one product runtime. Persisted metadata, caller
+    // overrides, and agent config cannot opt a Xiaojing Session into a CLI
+    // runtime before the process is born.
+    if crate::brand_workspace::is_brand_workspace_path(workspace_path) {
+        return RuntimeIdentity::new(Some("builtin"), None);
+    }
     // Existing Session metadata is authoritative for desktop-style owners.
     // A metadata creator has no Session row yet, so it follows the exact same
     // override -> Agent resolution that the spawn path uses. Live IM owners
@@ -1003,6 +1009,18 @@ fn create_new_session_sidecar<'a, R: Runtime>(
     let mgmt_port = crate::management_api::get_management_port();
     if mgmt_port > 0 {
         cmd.env("MYAGENTS_MANAGEMENT_PORT", mgmt_port.to_string());
+    }
+    if let Some(data_root) = crate::app_dirs::xiaojing_data_dir() {
+        cmd.env("XIAOJING_DATA_ROOT", data_root);
+    }
+    if crate::brand_workspace::is_brand_workspace_path(workspace_path) {
+        crate::deepseek_credentials::inject_into_sidecar(&mut cmd)?;
+        cmd.env("XIAOJING_MAIN_AGENT", "1");
+        cmd.env_remove("MYAGENTS_RUNTIME");
+        cmd.env_remove("MYAGENTS_RUNTIME_SOURCE");
+    } else {
+        cmd.env_remove(crate::deepseek_credentials::SIDECAR_SECRET_ENV);
+        cmd.env_remove("XIAOJING_MAIN_AGENT");
     }
 
     // Reuse validation and process spawn consume the same identity snapshot for

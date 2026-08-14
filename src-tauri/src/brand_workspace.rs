@@ -17,6 +17,10 @@ const BRAND_DIRS: [&str; 5] = [
     "exports",
 ];
 
+pub(crate) fn is_brand_workspace_path(path: &Path) -> bool {
+    crate::app_dirs::xiaojing_data_dir().is_some_and(|root| path.starts_with(root.join("brands")))
+}
+
 fn catalog_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))

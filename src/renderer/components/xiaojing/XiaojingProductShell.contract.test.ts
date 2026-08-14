@@ -17,6 +17,28 @@ describe("Xiaojing product shell contract", () => {
     expect(app).not.toContain("<GlobalSidebar");
     expect(app).not.toContain("onOpenTaskCenter={handleOpenTaskCenter}");
     expect(app).not.toContain("onOpenCapabilities={handleOpenCapabilities}");
+    expect(app).toContain("<XiaojingWelcome");
+    expect(app).not.toContain("<Launcher");
+  });
+
+  it("does not start retired automation or IM products against a legacy data root", () => {
+    const nativeApp = source("src-tauri/src/lib.rs");
+    const titleGenerator = source("src/server/title-generator.ts");
+    expect(nativeApp).not.toContain("cron_task::initialize_cron_manager(");
+    expect(nativeApp).not.toContain("im::schedule_auto_start(");
+    expect(nativeApp).not.toContain("im::schedule_agent_auto_start(");
+    expect(nativeApp).not.toContain("im::monitor_agent_channels(");
+    expect(titleGenerator).toContain("process.env.XIAOJING_DATA_ROOT");
+  });
+
+  it("injects the native DeepSeek secret only into brand Session sidecars", () => {
+    const lifecycle = source("src-tauri/src/sidecar/session_lifecycle.rs");
+    expect(lifecycle).toMatch(
+      /if crate::brand_workspace::is_brand_workspace_path\(workspace_path\) \{\s*crate::deepseek_credentials::inject_into_sidecar/,
+    );
+    expect(lifecycle).toMatch(
+      /else \{\s*cmd\.env_remove\(crate::deepseek_credentials::SIDECAR_SECRET_ENV\)/,
+    );
   });
 
   it("keeps the workbench honest without inventing GeoOperation state", () => {

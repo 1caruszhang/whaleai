@@ -150,6 +150,8 @@ toast 报错。选中标记紧跟主题名称，light/dark 色块保持在行尾
 
 小鲸同学主窗口与浮窗统一使用 `XiaojingThemeRuntime`，固定解析 `xiaojing/dark`；`ConfigProvider` 仍拥有其它 durable config，但不再裁决当前产品的 Theme。`ConfiguredThemeRuntime` 与 `FloatingThemeRuntime` 仅保留给 expand 阶段旧产品代码编译，不在小鲸入口挂载。
 
+`XiaojingThemeRuntime` 默认只负责当前 Webview 的 root 与 React context。只有主窗口入口显式声明 `ownsMainWindowBridge`，才广播 selection 并把 resolved `--paper` 同步到 native Window；透明浮窗不得拥有这两个进程级副作用。
+
 `main.tsx` 在创建 React root 前调用 `primeXiaojingThemeRuntime()`，不读取历史 Theme snapshot，经 production Registry resolve 后激活 `xiaojing` stylesheet 与 dark root scheme。可选 package 仍不在
 模块加载时产生 CSS side effect，但首个 React paint 已使用已验证的目标 Theme；未知 ID 继续整套
 回退 canonical。
@@ -169,15 +171,12 @@ runtime 一次 resolve 后同步投影：
 
 ### 5.2 pre-React bootstrap
 
-`index.html` 只读取 `myagents:theme-bootstrap`：
-
-```json
-{ "version": 2, "themeId": "myagents-light", "appearanceMode": "system", "themeSelectionExplicit": false }
-```
-
-快照不得包含 AppConfig、API key 或 MCP env。新快照不存在时可一次读取 legacy localStorage `theme`；durable runtime 第一次发布后删除 legacy key。快照损坏/版本不支持时首帧回退 default + system，应用不能因此阻断。
-
-runtime 写入的是 registry 已解析的 Theme ID，并同时写入显式选择状态；因此未知 durable ID 的下一次冷启动也直接得到 canonical fallback，而未选择用户会按当前编译版本的产品默认重算，不会被旧快照钉死。
+`index.html` 在 React 执行前幂等地写入 `xiaojing/dark`、`.dark` 与
+`color-scheme: dark`。小鲸同学 v1 不读取历史 `myagents:theme-bootstrap` 或 legacy `theme`：
+无论快照损坏、storage 不可用、存在未来 Theme ID，还是旧的非显式默认选择，
+首帧都必须保持完整的小鲸深色 root 状态，再由 `primeXiaojingThemeRuntime()` 激活已验证的
+Theme stylesheet。expand 阶段若恢复多 Theme 产品入口，应在对应入口恢复快照读取，
+不能改变小鲸主窗口的固定首帧契约。
 
 Tauri 主窗口还存在一个早于 `index.html` 的原生空白 surface。Rust 在创建主窗口前只读取
 `config.json` 中归一后的非敏感 `appearanceMode`，不在读取边界写盘；随后：

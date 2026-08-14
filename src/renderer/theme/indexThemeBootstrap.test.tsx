@@ -24,27 +24,28 @@ describe('pre-React Theme bootstrap', () => {
     vi.unstubAllGlobals();
   });
 
-  it('establishes default system-dark root state even when the snapshot JSON is malformed', () => {
+  it('establishes the fixed Xiaojing dark root state even when the legacy snapshot is malformed', () => {
     localStorage.setItem('myagents:theme-bootstrap', '{');
     runBootstrap();
 
-    expect(document.documentElement.dataset.themeId).toBe('myagents-light');
+    expect(document.documentElement.dataset.themeId).toBe('xiaojing');
     expect(document.documentElement.dataset.colorScheme).toBe('dark');
     expect(document.documentElement).toHaveClass('dark');
     expect(document.documentElement.style.colorScheme).toBe('dark');
   });
 
-  it('establishes the same safe root state when storage access throws', () => {
+  it('establishes the same fixed root state without depending on storage access', () => {
     vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => {
       throw new Error('storage disabled');
     });
     runBootstrap();
 
-    expect(document.documentElement.dataset.themeId).toBe('myagents-light');
+    expect(document.documentElement.dataset.themeId).toBe('xiaojing');
     expect(document.documentElement.dataset.colorScheme).toBe('dark');
+    expect(document.documentElement).toHaveClass('dark');
   });
 
-  it('preserves a future Theme ID for runtime resolution while still setting a complete scheme', () => {
+  it('ignores a legacy future Theme ID for the fixed Xiaojing product shell', () => {
     localStorage.setItem('myagents:theme-bootstrap', JSON.stringify({
       version: 1,
       themeId: 'future-partner-theme',
@@ -52,12 +53,12 @@ describe('pre-React Theme bootstrap', () => {
     }));
     runBootstrap();
 
-    expect(document.documentElement.dataset.themeId).toBe('future-partner-theme');
-    expect(document.documentElement.dataset.colorScheme).toBe('light');
-    expect(document.documentElement).not.toHaveClass('dark');
+    expect(document.documentElement.dataset.themeId).toBe('xiaojing');
+    expect(document.documentElement.dataset.colorScheme).toBe('dark');
+    expect(document.documentElement).toHaveClass('dark');
   });
 
-  it('uses the current product default when the snapshot is not an explicit choice', () => {
+  it('ignores a legacy non-explicit default selection', () => {
     localStorage.setItem('myagents:theme-bootstrap', JSON.stringify({
       version: 2,
       themeId: 'myagents-default',
@@ -66,7 +67,8 @@ describe('pre-React Theme bootstrap', () => {
     }));
     runBootstrap();
 
-    expect(document.documentElement.dataset.themeId).toBe('myagents-light');
-    expect(document.documentElement.dataset.colorScheme).toBe('light');
+    expect(document.documentElement.dataset.themeId).toBe('xiaojing');
+    expect(document.documentElement.dataset.colorScheme).toBe('dark');
+    expect(document.documentElement).toHaveClass('dark');
   });
 });

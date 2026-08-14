@@ -30,22 +30,24 @@ export type InteractionScenario =
       sourceType?: 'issue-delivery';
     };
 
-// ===== Runtime display name =====
-// Maps internal runtime ids to human-readable names injected into the L1 base identity
-// so the AI can correctly answer "what runtime am I running on?" questions regardless
-// of which CLI is driving it.
 function getRuntimeDisplayName(runtime: RuntimeType | undefined): string {
   switch (runtime) {
     case 'claude-code': return 'Anthropic Claude Code CLI';
-    case 'codex':       return 'OpenAI Codex CLI';
-    case 'gemini':      return 'Google Gemini CLI';
+    case 'codex': return 'OpenAI Codex CLI';
+    case 'gemini': return 'Google Gemini CLI';
     case 'builtin':
-    default:
-      return 'MyAgents 内置 Claude Agent SDK';
+    default: return 'MyAgents 内置 Claude Agent SDK';
   }
 }
 
 // ===== Inline templates =====
+
+const TMPL_XIAOJING_IDENTITY = `<xiaojing-identity>
+你是「小鲸同学」，一位懂品牌、会创作、能跟进的 GEO 营销助手。
+你负责理解用户目标、组织分析过程，并仅通过产品登记的 GEO 能力执行任务。
+不要声称自己是 Claude、Claude Code、Anthropic 产品或通用开发 Agent，也不要向用户展示底层 SDK、模型路由或内部运行时名称。
+当能力不足时，清楚说明当前缺少哪项 GEO 能力，并请求用户确认下一步；不要尝试终端、Git、任意文件读写、通用 MCP、插件、Skill 或外部 Runtime。
+</xiaojing-identity>`;
 
 const TMPL_BASE_IDENTITY = `<myagents-identity>
 你正运行在 MyAgents —— 一款通用的桌面端 AI Agent 应用中。用户通过 MyAgents 调用你,
@@ -122,6 +124,8 @@ export interface SystemPromptOptions {
    * identity line in L1. Defaults to 'builtin' (Claude Agent SDK) if omitted.
    */
   runtime?: RuntimeType;
+  /** Native host classified this as a Xiaojing brand main-Agent Session. */
+  xiaojingMainAgent?: boolean;
   /**
    * Append the `myagents` CLI capability hints (cron / IM media) to the
    * prompt. Set by ALL runtime paths in v0.2.11+ — builtin and external —
@@ -152,9 +156,11 @@ export function buildSystemPromptAppend(scenario: InteractionScenario, options?:
   const parts: string[] = [];
 
   // L1: Base identity (always) — rendered with current runtime's display name.
-  parts.push(renderTemplate(TMPL_BASE_IDENTITY, {
-    runtimeName: getRuntimeDisplayName(options?.runtime),
-  }));
+  parts.push(options?.xiaojingMainAgent
+    ? TMPL_XIAOJING_IDENTITY
+    : renderTemplate(TMPL_BASE_IDENTITY, {
+        runtimeName: getRuntimeDisplayName(options?.runtime),
+      }));
 
   // L2: Interaction channel (mutually exclusive)
   if (scenario.type === 'im' || scenario.type === 'agent-channel') {
@@ -201,13 +207,13 @@ export function buildSystemPromptAppend(scenario: InteractionScenario, options?:
   // L3: Generative UI widget guidance — universal across runtimes for desktop
   // scenarios. Both builtin SDK and external CLIs load the design contract via
   // `myagents widget readme <module>` invoked through their shell tool.
-  const widgetSection = buildWidgetSection(scenario);
+  const widgetSection = options?.xiaojingMainAgent ? '' : buildWidgetSection(scenario);
   if (widgetSection) parts.push(widgetSection);
 
   // L3: Session Inbox guidance (PRD 0.2.18 §4.1) — universal across runtimes
   // and scenarios. Emitted next to widget guidance for the same reason: it's
   // a capability the AI should notice without needing to load the skill doc.
-  const sessionInboxSection = buildSessionInboxSection(scenario);
+  const sessionInboxSection = options?.xiaojingMainAgent ? '' : buildSessionInboxSection(scenario);
   if (sessionInboxSection) parts.push(sessionInboxSection);
 
   // L3: Browser storage state save instruction (when Playwright with --caps=storage is active)

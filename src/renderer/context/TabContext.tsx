@@ -28,8 +28,9 @@ import type { SessionMetadata } from '@/api/sessionClient';
 import type { ContextUsage } from '../../shared/types/context-usage';
 import type { SlashCommand } from '../../shared/slashCommands';
 import type { ProviderRoute } from '../../shared/providerRoute';
+import type { ManagedProviderCredential } from '../../shared/config-types';
 
-type ChatProviderEnv = { providerId?: string; providerName?: string; baseUrl?: string; apiKey?: string; authType?: 'auth_token' | 'api_key' | 'both' | 'auth_token_clear_api_key'; apiProtocol?: 'anthropic' | 'openai'; maxOutputTokens?: number; maxOutputTokensParamName?: 'max_tokens' | 'max_completion_tokens' | 'max_output_tokens'; upstreamFormat?: 'chat_completions' | 'responses'; modelAliases?: { fable?: string; sonnet?: string; opus?: string; haiku?: string } };
+type ChatProviderEnv = { providerId?: string; providerName?: string; baseUrl?: string; apiKey?: string; authType?: 'auth_token' | 'api_key' | 'both' | 'auth_token_clear_api_key'; apiProtocol?: 'anthropic' | 'openai'; maxOutputTokens?: number; maxOutputTokensParamName?: 'max_tokens' | 'max_completion_tokens' | 'max_output_tokens'; upstreamFormat?: 'chat_completions' | 'responses'; modelAliases?: { fable?: string; sonnet?: string; opus?: string; haiku?: string }; credentialSource?: ManagedProviderCredential };
 
 export interface AdoptMigratedSessionOptions {
     /**

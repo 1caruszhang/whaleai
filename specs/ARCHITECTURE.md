@@ -96,6 +96,10 @@ Global Sidecar 同样把“应用仍需要它运行”与“当前候选进程�
 
 小鲸同学以 `BrandWorkspace` 为唯一品牌业务边界，以 `Session` 为独立聊天上下文边界；一个 Session 可以创建多个 `GeoOperation`，多个 Session 也可以并发操作同一品牌。共享权威数据的业务裁决属于 Node/TypeScript GEO 领域模块，持久化、原子文件操作、凭据和确定性调度属于 Rust。可执行行为基线由 `src/shared/geo/portContract.ts` 持有，完整来源与迁移规则见 `tech_docs/geo_port_contract.md`。
 
+小鲸主 Agent 的执行身份由 Rust 在品牌 Session Sidecar 出生时固化：runtime 固定为 builtin，模型固定为 `deepseek-v4-pro`，原生 DeepSeek 凭据只从 Windows Credential Manager 注入并在 Node 入口立即从环境删除。凭据保存或删除由同一个 Rust owner dispatch-close 现有品牌 Session generation、保留全部 owner，并以新凭据替换进程；Renderer、品牌数据库、config 与 transcript 只持有非 secret 的 configured 状态。Sidecar 在 SDK Query 出生前再次校验官方 DeepSeek Anthropic endpoint、应用托管路由、非必要流量禁用和国外云 selector 清空。
+
+主 Agent 的执行能力只有 host `AskUserQuestion` 与内置 `xiaojing-geo` MCP。该 MCP 由产品策略直接注册，不接受 Renderer 或工作区配置替换；当前提供真实的品牌/Session 上下文检查，后续 GEO 切片只能沿这一服务器扩展。终端、Git、任意文件 IO、通用 MCP、插件、Skill、子 Agent 与 external Runtime 同时在目录可见性、Query options 和最终 tool gate 上 fail closed。
+
 | 概念 | 含义 | 决策 Owner | 持久化 / 执行 Owner |
 |------|------|------------|---------------------|
 | `BrandWorkspace` | 一个品牌及其知识、产品线、Session、产物、发布与观测数据 | GEO domain | Rust brand store |
@@ -608,7 +612,7 @@ Managed Codex 的产品扩展也必须沿同一条链路进入：route 只调用
 
 新增“config 同步 / 注入 user 消息 / 等待 turn 完成 / session read / session operation”的 Sidecar endpoint 时，MUST 走 `SessionEngine` facade；不要在 route handler 里直接手写 builtin/external 分流。Phase5 已迁移的代表路径包括 `/api/session-state`、`/api/session-latest-result`、`/chat/stream`、`GET /sessions/:id`、`/chat/rewind`、`/sessions/fork`、proof-bearing `/api/session/surface-migration`、`/api/mcp/set`、`/api/agents/set`、`/api/provider/set`、`/api/session/config`。IM `/new` 只在 Rust owner/binding authority 内轮换，不调用 Node reset endpoint。`/chat/external-retry` 等只适用于 external Runtime 的操作由 `selector.ts` 的显式 helper 校验后调用原生实现，不进入公共 `SessionEngine` 接口，也不允许 route 直接 import `external-session.ts`。
 
-**测试防线：** server 测试必须显式后缀分层：`*.unit.test.ts`（pure policy / parser / boundary）、`*.integration.test.ts`（credential-free stateful server 集成，singleFork）、`*.credentialed.test.ts`（真实 Provider / SDK / upstream smoke，显式本地跑）。`unit` / `integration` 都加载 `src/test/setup-no-egress.ts`，阻断 fetch / undici / http(s) / net / tls / dns 非 loopback 出站；`npm run test:classification` 用实际 Vitest project list 扫描并禁止裸 `src/server/**/*.test.ts`。External runtime 的回归主路径通过 `external-session-mock.integration.test.ts` 在测试层 mock `runtimes/factory.ts`，fake runtime 伪装为真实 `RuntimeType`（如 `codex`），穿过 `SessionEngine` 覆盖正常 turn、failed turn、queue、permission response，不在生产代码里增加 mock runtime 类型。
+**测试防线：** server 测试必须显式后缀分层：`*.unit.test.ts`（pure policy / parser / boundary）、`*.integration.test.ts`（credential-free stateful server 集成，文件串行且 fork 隔离）、`*.credentialed.test.ts`（真实 Provider / SDK / upstream smoke，显式本地跑）。`unit` / `integration` 都加载 `src/test/setup-no-egress.ts`，阻断 fetch / undici / http(s) / net / tls / dns 非 loopback 出站；`npm run test:classification` 用实际 Vitest project list 扫描并禁止裸 `src/server/**/*.test.ts`。External runtime 的回归主路径通过 `external-session-mock.integration.test.ts` 在测试层 mock `runtimes/factory.ts`，fake runtime 伪装成真实 `RuntimeType`（如 `codex`），穿过 `SessionEngine` 覆盖正常 turn、failed turn、queue、permission response，不在生产代码里增加 mock runtime 类型。
 
 详见 `tech_docs/multi_agent_runtime.md`。
 

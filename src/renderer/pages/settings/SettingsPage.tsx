@@ -2254,7 +2254,6 @@ export default function Settings({ mode = 'settings', initialSection, navigation
         console.log('[verifyProvider] Provider:', provider.id, provider.name, `(gen=${gen})`);
         console.log('[verifyProvider] baseUrl:', provider.config.baseUrl);
         console.log('[verifyProvider] model:', provider.primaryModel);
-        console.log('[verifyProvider] apiKey:', apiKey.slice(0, 10) + '...');
 
         setVerifyLoading((prev) => ({ ...prev, [provider.id]: true }));
         setVerifyError((prev) => { const next = { ...prev }; delete next[provider.id]; return next; });

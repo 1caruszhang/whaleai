@@ -55,3 +55,18 @@ registerBuiltinMcpMeta({
     };
   },
 });
+
+// --- Focused product builtin ---
+// Xiaojing Sessions receive this server from native product policy rather than
+// a user-toggleable config row. It is still registered here so the same lazy
+// instance boundary and startup diagnostics apply to every in-process MCP.
+registerBuiltinMcpMeta({
+  id: 'xiaojing-geo',
+  load: async () => {
+    const m = await import('./xiaojing-geo-tool');
+    return {
+      server: await m.createXiaojingGeoServer(),
+      configure: m.configureXiaojingGeo,
+    };
+  },
+});

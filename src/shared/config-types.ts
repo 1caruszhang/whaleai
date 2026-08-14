@@ -347,10 +347,16 @@ export type SubscriptionAuthPolicy =
   | { kind: 'runtime-managed' };
 
 /** Non-secret reference carried by builtin ProviderEnv for host-owned OAuth. */
-export type ManagedProviderCredential = {
-  kind: 'managed-oauth';
-  providerId: typeof XAI_SUBSCRIPTION_PROVIDER_ID;
-};
+export type ManagedProviderCredential =
+  | {
+      kind: 'managed-oauth';
+      providerId: typeof XAI_SUBSCRIPTION_PROVIDER_ID;
+    }
+  | {
+      /** Secret is owned by the native host and injected into the Sidecar. */
+      kind: 'native-secret';
+      providerId: 'deepseek';
+    };
 
 /**
  * Service provider configuration

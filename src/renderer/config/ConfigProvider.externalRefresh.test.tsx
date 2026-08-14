@@ -15,6 +15,7 @@ const mocks = vi.hoisted(() => ({
   loadAppConfig: vi.fn(),
   loadProjects: vi.fn(),
   getAllProviders: vi.fn(),
+  loadApiKeys: vi.fn(),
   atomicModifyCustomProvider: vi.fn(),
   reconcileIdentities: vi.fn(),
   ensureBundledWorkspace: vi.fn(),
@@ -50,7 +51,8 @@ vi.mock('./services/appConfigService', () => ({
 
 vi.mock('./services/providerService', () => ({
   getAllProviders: mocks.getAllProviders,
-  loadApiKeys: vi.fn(async () => ({})),
+  loadApiKeys: mocks.loadApiKeys,
+  NATIVE_SECRET_CONFIGURED: '__xiaojing_native_secret_configured__',
   saveApiKey: vi.fn(),
   deleteApiKey: vi.fn(),
   loadProviderVerifyStatus: vi.fn(async () => ({})),
@@ -81,17 +83,18 @@ vi.mock('./services/agentConfigService', () => ({
 }));
 
 function provider(id: string): Provider {
+  const model = id === 'deepseek' ? 'deepseek-v4-pro' : `${id}-model`;
   return {
     id,
     name: id,
     vendor: id,
     cloudProvider: '',
     type: 'api',
-    primaryModel: `${id}-model`,
+    primaryModel: model,
     isBuiltin: false,
     config: { baseUrl: 'https://provider.example' },
     authType: 'api_key',
-    models: [{ model: `${id}-model`, modelName: `${id} model`, modelSeries: id }],
+    models: [{ model, modelName: `${id} model`, modelSeries: id }],
   };
 }
 
@@ -144,10 +147,13 @@ describe('ConfigProvider external config invalidation', () => {
       },
     };
     mocks.projects = [project('old-project', 'Old', '/old')];
-    mocks.providers = [provider('old-provider')];
+    mocks.providers = [provider('deepseek')];
     mocks.loadAppConfig.mockImplementation(async () => mocks.config);
     mocks.loadProjects.mockImplementation(async () => mocks.projects);
     mocks.getAllProviders.mockImplementation(async () => mocks.providers);
+    mocks.loadApiKeys.mockImplementation(async (config: AppConfig) => ({
+      ...(config.providerApiKeys ?? {}),
+    }));
     mocks.atomicModifyCustomProvider.mockImplementation(async (
       providerId: string,
       modify: (current: Provider) => Provider,
@@ -286,7 +292,7 @@ describe('ConfigProvider external config invalidation', () => {
       },
     };
     mocks.projects = [project('new-project', 'New', '/new')];
-    mocks.providers = [provider('new-provider')];
+    mocks.providers = [provider('deepseek')];
 
     await act(async () => {
       mocks.listeners.get('app:config-changed')?.();
@@ -300,7 +306,7 @@ describe('ConfigProvider external config invalidation', () => {
       apiKeys: ['new-provider'],
       verified: ['new-provider'],
     });
-    expect(snapshot.providers).toEqual(expect.arrayContaining(['new-provider']));
+    expect(snapshot.providers).toEqual(['deepseek']);
     expect(mocks.getAllProviders).toHaveBeenLastCalledWith(mocks.config);
   });
 

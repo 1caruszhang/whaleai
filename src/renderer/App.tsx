@@ -23,6 +23,7 @@ import CustomTitleBar from '@/components/CustomTitleBar';
 import type { CapabilitySection } from '@/components/global-sidebar/GlobalSidebar';
 import XiaojingGeoWorkbench from '@/components/xiaojing/XiaojingGeoWorkbench';
 import XiaojingSidebar from '@/components/xiaojing/XiaojingSidebar';
+import XiaojingWelcome from '@/components/xiaojing/XiaojingWelcome';
 import type { BrandSession, BrandSessionDeletionPreview, BrandWorkspace } from '@/api/brandWorkspaceClient';
 import LinkContextMenuProvider from '@/components/LinkContextMenuProvider';
 import TabBar from '@/components/TabBar';
@@ -38,7 +39,6 @@ import { useBrandWorkspaces } from '@/hooks/useBrandWorkspaces';
 import { useSpaceBuildCapability } from '@/hooks/useSpaceBuildCapability';
 import { useTabSwipeGesture } from '@/hooks/useTabSwipeGesture';
 import { actions as taskCenterActions } from '@/hooks/taskCenterStore';
-import Launcher from '@/pages/Launcher'; // eager: default first view → no cold-start fallback
 // Route-split (P1): heavy / non-initial pages load on demand. lazy-Chat moves the
 // entire markdown/mermaid/katex/syntax-highlighter chain out of the entry chunk
 // (reachable only via Chat). Launcher stays eager (default first view → no
@@ -72,6 +72,7 @@ import { tabContentKind } from '@/utils/tabContentKind';
 import { runAfterNextPaint } from '@/utils/afterPaint';
 import { perfMark } from '@/utils/perfMark';
 import { RENDERER_PERF_PHASE } from '../shared/perfTrace';
+import { XIAOJING_MAIN_AGENT } from '../shared/xiaojing-main-agent-policy';
 import type { ImageAttachment } from '@/components/SimpleChatInput';
 import { type CronRecoverySummaryPayload, type CronTaskRecoveredPayload, CRON_EVENTS } from '@/types/cronEvents';
 import { isBrowserDevMode, isTauriEnvironment } from '@/utils/browserMock';
@@ -170,11 +171,25 @@ function projectFromBrandWorkspace(workspace: BrandWorkspace): Project {
     name: workspace.name,
     displayName: workspace.name,
     path: workspace.rootPath,
-    providerId: null,
-    permissionMode: null,
+    providerId: XIAOJING_MAIN_AGENT.providerId,
+    model: XIAOJING_MAIN_AGENT.model,
+    permissionMode: XIAOJING_MAIN_AGENT.permissionMode,
+    mcpEnabledServers: [XIAOJING_MAIN_AGENT.geoMcpServerId],
     lastOpened: workspace.updatedAt,
   };
 }
+
+const XIAOJING_SESSION_BIRTH_HINT: LaunchSessionBirthHint = {
+  permissionMode: XIAOJING_MAIN_AGENT.permissionMode,
+  builtinSelection: {
+    providerId: XIAOJING_MAIN_AGENT.providerId,
+    model: XIAOJING_MAIN_AGENT.model,
+  },
+  reasoningEffort: XIAOJING_MAIN_AGENT.reasoningEffort,
+  mcpEnabledServers: [XIAOJING_MAIN_AGENT.geoMcpServerId],
+  enabledPluginIds: [],
+  enabledOfficialToolIds: [],
+};
 
 function normalizeStringSetting(value: unknown): string | undefined {
   const trimmed = typeof value === 'string' ? value.trim() : '';
@@ -303,12 +318,12 @@ interface TabContentProps {
 
 // Exported for focused content-mount behavior tests.
 export const MemoizedTabContent = memo(function TabContent({
-  tab, isActive, isWindowFocused, isLoading, error, isDeferredMount,
-  onLaunchProject, onOpenHistorySession, onNewSession,
+  tab, isActive, isWindowFocused, isDeferredMount,
+  onLaunchProject,
+  onOpenHistorySession, onNewSession,
   onUpdateGenerating, onUpdateTitle, onUpdateUnread, onRenameSession, onForkSession, onUpdateSessionId, onClearInitialMessage,
   claimSessionOpeningTransition,
   onSidecarConfigAdopted, onFilePreviewIntentConsumed,
-  onLauncherWorkspaceSelectionChange,
   settingsInitialSection,
   capabilityInitialSection,
   capabilityNavigationNonce,
@@ -329,10 +344,6 @@ export const MemoizedTabContent = memo(function TabContent({
   taskCenterCurrentSessionId,
 }: TabContentProps) {
   const kind = tabContentKind(tab, isDeferredMount);
-  const handleLauncherWorkspaceChange = useCallback(
-    (workspacePath: string | null) => onLauncherWorkspaceSelectionChange(tab.id, workspacePath),
-    [onLauncherWorkspaceSelectionChange, tab.id],
-  );
   const claimTabSessionOpeningTransition = useCallback(
     (sessionId: string) => claimSessionOpeningTransition(sessionId, tab.id),
     [claimSessionOpeningTransition, tab.id],
@@ -349,16 +360,12 @@ export const MemoizedTabContent = memo(function TabContent({
         // openNewTabDeferred).
         <div className="h-full w-full bg-[var(--paper)]" />
       ) : kind === 'launcher' ? (
-        <Launcher
-          onLaunchProject={onLaunchProject}
-          isStarting={isLoading}
-          startError={error}
-          isActive={isActive}
-          attachmentSessionId={createPendingSessionId(tab.id)}
-          selectedWorkspacePath={tab.launcherWorkspacePath}
-          onWorkspaceSelectionChange={handleLauncherWorkspaceChange}
-        />
-      ) : kind === 'settings' || kind === 'capabilities' ? (
+        <XiaojingWelcome onLaunchProject={onLaunchProject} />
+      ) : kind === 'settings' ? (
+        <Suspense fallback={PAGE_FALLBACK}>
+          <Settings mode="settings" />
+        </Suspense>
+      ) : kind === 'capabilities' ? (
         <Suspense fallback={PAGE_FALLBACK}>
           <Settings
             mode={kind}
@@ -2595,7 +2602,7 @@ export default function App() {
       await handleLaunchProject(project, initialMessage, {
         surface: 'global_sidebar',
         entryIntent,
-      });
+      }, XIAOJING_SESSION_BIRTH_HINT);
       return tabsRef.current.some((tab) => tab.id === launchTab.id);
     } catch (error) {
       console.error('[App] Failed to open workspace from global sidebar:', error);
@@ -2643,7 +2650,7 @@ export default function App() {
     void handleLaunchProject(projectFromBrandWorkspace(workspace), undefined, {
       surface: 'global_sidebar',
       entryIntent: 'open_workspace',
-    });
+    }, XIAOJING_SESSION_BIRTH_HINT);
   }, [brandState.currentWorkspace, brandState.isLoading, configLoading, handleLaunchProject, setActiveTabId]);
 
   // Handle tab reordering via drag and drop

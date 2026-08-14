@@ -1,6 +1,7 @@
 // Provider management — custom providers, API keys, verify status, provider availability
 import { exists, lstat, readDir, readTextFile, remove } from '@tauri-apps/plugin-fs';
 import { join } from '@tauri-apps/api/path';
+import { invoke } from '@tauri-apps/api/core';
 
 import type { Provider, ProviderVerifyStatus, AppConfig, Project } from '../types';
 import {
@@ -208,7 +209,23 @@ export async function deleteCustomProvider(providerId: string): Promise<void> {
 
 // ============= API Keys =============
 
+/** Non-secret availability marker. It must never be sent as provider auth. */
+export const NATIVE_SECRET_CONFIGURED = '__xiaojing_native_secret_configured__';
+
+type NativeCredentialStatus = { configured: boolean; source: string };
+
 export async function saveApiKey(providerId: string, apiKey: string): Promise<void> {
+    if (providerId === 'deepseek') {
+        await invoke<NativeCredentialStatus>('cmd_deepseek_credential_save', { apiKey });
+        // Native storage is authoritative. Remove a possible legacy plaintext
+        // only after the secure write succeeds, without ever writing the new key.
+        await atomicModifyConfig(c => {
+            const providerApiKeys = { ...(c.providerApiKeys ?? {}) };
+            delete providerApiKeys.deepseek;
+            return { ...c, providerApiKeys };
+        });
+        return;
+    }
     await atomicModifyConfig(c => ({
         ...c,
         providerApiKeys: { ...(c.providerApiKeys ?? {}), [providerId]: apiKey },
@@ -216,12 +233,24 @@ export async function saveApiKey(providerId: string, apiKey: string): Promise<vo
     console.log('[configService] Saved API key for provider:', providerId);
 }
 
-export async function loadApiKeys(): Promise<Record<string, string>> {
-    const config = await loadAppConfig();
-    return config.providerApiKeys ?? {};
+export async function loadApiKeys(configSnapshot?: AppConfig): Promise<Record<string, string>> {
+    const config = configSnapshot ?? await loadAppConfig();
+    const apiKeys = { ...(config.providerApiKeys ?? {}) };
+    // DeepSeek is never projected from config.json, including legacy values.
+    delete apiKeys.deepseek;
+    try {
+        const status = await invoke<NativeCredentialStatus>('cmd_deepseek_credential_status');
+        if (status.configured) apiKeys.deepseek = NATIVE_SECRET_CONFIGURED;
+    } catch {
+        // Browser-only tests and non-Tauri previews have no native credential owner.
+    }
+    return apiKeys;
 }
 
 export async function deleteApiKey(providerId: string): Promise<void> {
+    if (providerId === 'deepseek') {
+        await invoke<NativeCredentialStatus>('cmd_deepseek_credential_delete');
+    }
     await atomicModifyConfig(c => {
         const apiKeys = { ...c.providerApiKeys };
         delete apiKeys[providerId];

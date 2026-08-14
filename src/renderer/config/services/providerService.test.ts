@@ -1,4 +1,15 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+
+const { invoke, atomicModifyConfig } = vi.hoisted(() => ({
+    invoke: vi.fn(),
+    atomicModifyConfig: vi.fn(),
+}));
+vi.mock('@tauri-apps/api/core', () => ({ invoke }));
+vi.mock('./appConfigService', () => ({
+    atomicModifyConfig,
+    loadAppConfig: vi.fn(),
+    mergePresetCustomModels: vi.fn((provider: unknown) => provider),
+}));
 
 import {
     CODEX_SUBSCRIPTION_PROVIDER_ID,
@@ -9,12 +20,58 @@ import {
     type Provider,
 } from '../types';
 import {
+    NATIVE_SECRET_CONFIGURED,
     getFirstAvailableProvider,
     isImageUnderstandingSelectionAvailable,
     isProviderAvailable,
     resolveBuiltinSelection,
     resolveProvider,
+    loadApiKeys,
+    saveApiKey,
 } from './providerService';
+
+describe('Xiaojing native credential projection', () => {
+    it('replaces any legacy DeepSeek plaintext with a non-secret availability marker', async () => {
+        invoke.mockResolvedValueOnce({ configured: true, source: 'windows-credential-manager' });
+
+        const apiKeys = await loadApiKeys({
+            ...DEFAULT_CONFIG,
+            providerApiKeys: {
+                deepseek: 'legacy-plaintext-must-not-project',
+                alpha: 'alpha-test-value',
+            },
+        });
+
+        expect(apiKeys).toEqual({
+            deepseek: NATIVE_SECRET_CONFIGURED,
+            alpha: 'alpha-test-value',
+        });
+        expect(invoke).toHaveBeenCalledWith('cmd_deepseek_credential_status');
+    });
+
+    it('removes legacy plaintext after native save without persisting the new key', async () => {
+        invoke.mockResolvedValueOnce({ configured: true, source: 'windows-credential-manager' });
+        atomicModifyConfig.mockImplementationOnce(async (modify: (config: typeof DEFAULT_CONFIG) => typeof DEFAULT_CONFIG) => (
+            modify({
+                ...DEFAULT_CONFIG,
+                providerApiKeys: {
+                    deepseek: 'legacy-plaintext',
+                    alpha: 'alpha-test-value',
+                },
+            })
+        ));
+
+        await saveApiKey('deepseek', 'new-key-for-native-owner');
+
+        expect(invoke).toHaveBeenCalledWith('cmd_deepseek_credential_save', {
+            apiKey: 'new-key-for-native-owner',
+        });
+        expect(atomicModifyConfig).toHaveReturnedWith(expect.any(Promise));
+        await expect(atomicModifyConfig.mock.results[0]?.value).resolves.toMatchObject({
+            providerApiKeys: { alpha: 'alpha-test-value' },
+        });
+    });
+});
 
 const makeProvider = (id: string, primaryModel = `${id}-model`): Provider => ({
     id,

@@ -647,7 +647,9 @@ export default function Chat({ isWindowFocused, onNewSession, onOpenSession, onO
       providerId: provider.id,
       providerName: provider.name,
       baseUrl: provider.config.baseUrl,
-      apiKey: apiKeysRef.current[provider.id],
+      ...(provider.id === 'deepseek'
+        ? { credentialSource: { kind: 'native-secret' as const, providerId: 'deepseek' as const } }
+        : { apiKey: apiKeysRef.current[provider.id] }),
       authType: provider.authType,
       apiProtocol: provider.apiProtocol,
       maxOutputTokens: provider.maxOutputTokens,
@@ -1413,7 +1415,7 @@ export default function Chat({ isWindowFocused, onNewSession, onOpenSession, onO
     currentRuntime,
     managedProviderRuntimeActive,
   });
-  const showLegacyRuntimeSelector = multiAgentRuntimeEnabled;
+  const showLegacyRuntimeSelector = false;
   const showBuiltinSdkSlashCommands = shouldShowBuiltinSdkSlashCommands(currentRuntime);
   const visibleSdkSlashCommands = useMemo(
     () => showBuiltinSdkSlashCommands ? sdkSlashCommands : [],
