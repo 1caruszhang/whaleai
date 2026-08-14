@@ -66,6 +66,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve, extname, sep } 
 import { homedir } from 'os';
 import { randomUUID } from 'crypto';
 import { elapsedMs, emitPerfTrace, nowMs } from './utils/perf-trace';
+import { getAppDataDir } from './utils/app-data-dir';
 import { CrashDiagnostics } from './crash-diagnostics';
 import { fetchWithGeneralProxy } from './utils/cancellation';
 import { startOAuthMaintenanceForSidecarRole } from './mcp-oauth';
@@ -184,7 +185,7 @@ async function writeSpaceSkillExportPackages(
 ): Promise<SpaceSkillExportPackage[]> {
   const { default: AdmZip } = await import('adm-zip');
   const exportId = randomUUID();
-  const exportDir = join(homedir(), '.myagents', 'tmp', 'skill-url-export', exportId);
+  const exportDir = join(getAppDataDir(), 'tmp', 'skill-url-export', exportId);
   ensureDirSync(exportDir);
 
   const usedFileNames = new Map<string, number>();
@@ -827,8 +828,7 @@ interface SkillsConfig {
 }
 
 function getSkillsConfigPath(): string {
-  const homeDir = getHomeDirOrNull() || '';
-  return join(homeDir, '.myagents', 'skills-config.json');
+  return join(getAppDataDir(), 'skills-config.json');
 }
 
 function readSkillsConfig(): SkillsConfig {
@@ -983,8 +983,7 @@ function seedBundledSkills(): void {
     }
 
     const config = readSkillsConfig();
-    const homeDir = getHomeDirOrNull() || '';
-    const userSkillsDir = join(homeDir, '.myagents', 'skills');
+    const userSkillsDir = join(getAppDataDir(), 'skills');
 
     ensureDirSync(userSkillsDir);
 
@@ -1089,12 +1088,7 @@ function seedBundledSkills(): void {
  */
 function ensurePluginsDirs(): void {
   try {
-    const homeDir = getHomeDirOrNull();
-    if (!homeDir) {
-      console.warn('[plugins] HOME not resolvable — skipping ensurePluginsDirs');
-      return;
-    }
-    const root = join(homeDir, '.myagents', 'plugins');
+    const root = join(getAppDataDir(), 'plugins');
     const dataRoot = join(root, 'data');
     ensureDirSync(root);
     ensureDirSync(dataRoot);
@@ -1631,7 +1625,7 @@ function startupBeacon(step: string): void {
     const y = now.getFullYear();
     const m = String(now.getMonth() + 1).padStart(2, '0');
     const d = String(now.getDate()).padStart(2, '0');
-    const logsDir = join(homedir(), '.myagents', 'logs');
+    const logsDir = join(getAppDataDir(), 'logs');
     ensureDirSync(logsDir);
     const filePath = join(logsDir, `unified-${y}-${m}-${d}.log`);
     const h = String(now.getHours()).padStart(2, '0');

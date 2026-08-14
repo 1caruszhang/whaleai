@@ -38,7 +38,7 @@ import {
     type SessionMetadata,
 } from '@/api/sessionClient';
 import { getAllCronTasks, getBackgroundSessions } from '@/api/cronTaskClient';
-import { getUserSchedulerLifecycleSnapshot } from '@/api/tauriClient';
+import { getUserSchedulerLifecycleSnapshot, type BrandSessionDeletionAdmission } from '@/api/tauriClient';
 import { loadAppConfig } from '@/config/configService';
 import { i18n } from '@/i18n';
 import { isTauriEnvironment } from '@/utils/browserMock';
@@ -97,6 +97,7 @@ export interface TaskCenterActions {
     deleteSession: (
         sessionId: string,
         releasableTabIds?: readonly string[],
+        brandDeletion?: BrandSessionDeletionAdmission,
     ) => ReturnType<typeof deleteSessionApi>;
     setSessionFavorite: (sessionId: string, favorite: boolean) => Promise<boolean>;
     refreshSessions: () => void;
@@ -777,8 +778,10 @@ export const refresh = (scope: TaskCenterRefreshScope = 'all', options: TaskCent
 };
 
 export const actions: TaskCenterActions = {
-    deleteSession: async (sessionId: string, releasableTabIds = []) => {
-        const result = await deleteSessionApi(sessionId, releasableTabIds);
+    deleteSession: async (sessionId: string, releasableTabIds = [], brandDeletion) => {
+        const result = brandDeletion
+            ? await deleteSessionApi(sessionId, releasableTabIds, brandDeletion)
+            : await deleteSessionApi(sessionId, releasableTabIds);
         if (!result.deleted && result.reason !== 'not-found') {
             if (result.reason === 'in-use') {
                 refresh('cronTasks', { force: true, reason: 'delete-session-in-use', silent: true });

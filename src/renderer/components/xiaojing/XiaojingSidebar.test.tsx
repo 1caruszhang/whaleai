@@ -42,7 +42,7 @@ function state(overrides: Partial<BrandWorkspaceState> = {}): BrandWorkspaceStat
     renameSession: vi.fn(),
     archiveSession: vi.fn(),
     previewDeletion: vi.fn(),
-    confirmDeletion: vi.fn(),
+    removeDeletedSessionProjection: vi.fn(),
     ...overrides,
   };
 }
@@ -64,12 +64,12 @@ describe('XiaojingSidebar brand session lifecycle', () => {
       confirmationToken: 'one-use-token',
     };
     const previewDeletion = vi.fn(async () => preview);
-    const confirmDeletion = vi.fn(async () => undefined);
+    const removeDeletedSessionProjection = vi.fn();
     const onDeleteSession = vi.fn(async () => true);
 
     render(
       <XiaojingSidebar
-        brandState={state({ previewDeletion, confirmDeletion })}
+        brandState={state({ previewDeletion, removeDeletedSessionProjection })}
         activeTab={undefined}
         onOpenWorkspace={vi.fn(async () => true)}
         onOpenSession={vi.fn(async () => true)}
@@ -94,12 +94,8 @@ describe('XiaojingSidebar brand session lifecycle', () => {
     fireEvent.click(confirmButton);
 
     await waitFor(() => {
-      expect(onDeleteSession).toHaveBeenCalledWith(session.id);
-      expect(confirmDeletion).toHaveBeenCalledWith(
-        workspace.id,
-        session.id,
-        preview.confirmationToken,
-      );
+      expect(onDeleteSession).toHaveBeenCalledWith(preview);
+      expect(removeDeletedSessionProjection).toHaveBeenCalledWith(workspace.id, session.id);
     });
   });
 

@@ -1569,6 +1569,8 @@ pub async fn cmd_delete_session_if_unowned(
     im_state: tauri::State<'_, crate::im::ManagedImBots>,
     sessionId: String,
     releasableTabIds: Vec<String>,
+    brandWorkspaceId: Option<String>,
+    brandDeletionConfirmationToken: Option<String>,
 ) -> Result<SessionDeleteCommandResult, String> {
     if !is_canonical_session_id(&sessionId) {
         return Ok(SessionDeleteCommandResult::refused("invalid-session-id"));
@@ -1639,37 +1641,59 @@ pub async fn cmd_delete_session_if_unowned(
             Err(_) => return Ok(SessionDeleteCommandResult::refused("authority-unavailable")),
         };
         drop(manager);
-        let client = crate::local_http::blocking_builder()
-            .timeout(Duration::from_secs(15))
-            .build()
-            .map_err(|error| format!("Failed to create local HTTP client: {error}"))?;
-        let delete_url = delete_dispatch.url_for_path(&format!("/sessions/{sessionId}"))?;
-        let response = client
-            .delete(delete_url)
-            .header(SESSION_DELETE_AUTHORITY_HEADER, delete_authority)
-            .send()
-            .map_err(|error| format!("Failed to delete session: {error}"))?;
-        let status = response.status();
-        let body = response
-            .text()
-            .unwrap_or_else(|_| "<unreadable response>".to_string());
-        // The lease ends at response-body materialization, before any later
-        // owner release or Tauri/WebKit IPC delivery.
-        drop(delete_dispatch);
-        let result = if status.is_success() {
-            SessionDeleteCommandResult::deleted()
-        } else {
-            match status.as_u16() {
-                403 => return Ok(SessionDeleteCommandResult::refused("protected-session")),
-                404 => SessionDeleteCommandResult::refused("not-found"),
-                409 => return Ok(SessionDeleteCommandResult::refused("in-use")),
-                _ => {
-                    return Err(format!(
+        let delete_transcript = || -> Result<(SessionDeleteCommandResult, bool), String> {
+            let client = crate::local_http::blocking_builder()
+                .timeout(Duration::from_secs(15))
+                .build()
+                .map_err(|error| format!("Failed to create local HTTP client: {error}"))?;
+            let delete_url = delete_dispatch.url_for_path(&format!("/sessions/{sessionId}"))?;
+            let response = client
+                .delete(delete_url)
+                .header(SESSION_DELETE_AUTHORITY_HEADER, delete_authority)
+                .send()
+                .map_err(|error| format!("Failed to delete session: {error}"))?;
+            let status = response.status();
+            let body = response
+                .text()
+                .unwrap_or_else(|_| "<unreadable response>".to_string());
+            if status.is_success() {
+                Ok((SessionDeleteCommandResult::deleted(), true))
+            } else {
+                match status.as_u16() {
+                    403 => Ok((
+                        SessionDeleteCommandResult::refused("protected-session"),
+                        false,
+                    )),
+                    404 => Ok((SessionDeleteCommandResult::refused("not-found"), true)),
+                    409 => Ok((SessionDeleteCommandResult::refused("in-use"), false)),
+                    _ => Err(format!(
                         "Global Sidecar failed to delete session (HTTP {status}): {body}"
-                    ))
+                    )),
                 }
             }
         };
+        let (result, terminal) = match (
+            brandWorkspaceId.as_deref(),
+            brandDeletionConfirmationToken.as_deref(),
+        ) {
+            (Some(workspace_id), Some(confirmation_token)) => {
+                let store = crate::brand_workspace::production_store()?;
+                store.with_confirmed_session_deletion(
+                    workspace_id,
+                    &sessionId,
+                    confirmation_token,
+                    delete_transcript,
+                )?
+            }
+            (None, None) => delete_transcript()?,
+            _ => return Err("Brand deletion requires workspace and confirmation token".into()),
+        };
+        // The lease ends after both storage authorities have accepted the
+        // deletion, before owner release or Tauri/WebKit IPC delivery.
+        drop(delete_dispatch);
+        if !terminal {
+            return Ok(result);
+        }
 
         // Success and not-found are both terminal/idempotent outcomes. Release
         // only the App-authorized Tab owners after storage has reached that

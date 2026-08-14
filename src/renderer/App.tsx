@@ -23,7 +23,7 @@ import CustomTitleBar from '@/components/CustomTitleBar';
 import type { CapabilitySection } from '@/components/global-sidebar/GlobalSidebar';
 import XiaojingGeoWorkbench from '@/components/xiaojing/XiaojingGeoWorkbench';
 import XiaojingSidebar from '@/components/xiaojing/XiaojingSidebar';
-import type { BrandSession, BrandWorkspace } from '@/api/brandWorkspaceClient';
+import type { BrandSession, BrandSessionDeletionPreview, BrandWorkspace } from '@/api/brandWorkspaceClient';
 import LinkContextMenuProvider from '@/components/LinkContextMenuProvider';
 import TabBar from '@/components/TabBar';
 import { SessionDeletionContext } from '@/context/SessionDeletionContext';
@@ -3308,7 +3308,10 @@ export default function App() {
     setCapabilityInitialSelect(undefined);
   }, []);
 
-  const handleDeleteSession = useCallback(async (sessionId: string) => {
+  const handleDeleteSession = useCallback(async (
+    sessionId: string,
+    brandDeletion?: { workspaceId: string; confirmationToken: string },
+  ) => {
     const releaseTransition = tryClaimSessionResourceTransition(
       sessionResourceTransitionsRef.current,
       sessionId,
@@ -3334,7 +3337,7 @@ export default function App() {
         handoffMountedSessionActivity: startBackgroundCompletionForDeletion,
         stopSseProxy,
         deletePersistedSession: (targetSessionId, releasableTabIds) => (
-          taskCenterActions.deleteSession(targetSessionId, releasableTabIds)
+          taskCenterActions.deleteSession(targetSessionId, releasableTabIds, brandDeletion)
         ),
       });
     } finally {
@@ -3342,8 +3345,11 @@ export default function App() {
     }
   }, []);
 
-  const handleDeleteBrandSession = useCallback(async (sessionId: string) => {
-    const result = await handleDeleteSession(sessionId);
+  const handleDeleteBrandSession = useCallback(async (preview: BrandSessionDeletionPreview) => {
+    const result = await handleDeleteSession(preview.sessionId, {
+      workspaceId: preview.workspaceId,
+      confirmationToken: preview.confirmationToken,
+    });
     if (!result.deleted) {
       toastRef.current.error('会话仍在运行或被后台任务占用，暂时无法删除');
     }

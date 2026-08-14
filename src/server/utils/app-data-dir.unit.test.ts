@@ -1,8 +1,8 @@
-import { homedir } from 'os';
-import { join, resolve } from 'path';
+import { homedir, platform } from 'os';
+import { resolve } from 'path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { getAppDataDir } from './app-data-dir';
+import { getAppDataDir, resolveLocalDataDir } from './app-data-dir';
 
 describe('getAppDataDir', () => {
   afterEach(() => {
@@ -22,7 +22,21 @@ describe('getAppDataDir', () => {
 
     const dataDir = getAppDataDir();
 
-    expect(dataDir).toBe(join(homedir(), 'Xiaojing'));
+    expect(dataDir).toBe(resolveLocalDataDir(platform(), process.env, homedir()));
     expect(dataDir).not.toContain('.myagents');
+  });
+});
+
+describe('resolveLocalDataDir', () => {
+  it('matches the Windows LOCALAPPDATA authority', () => {
+    expect(resolveLocalDataDir('win32', { LOCALAPPDATA: 'C:\\Users\\test\\AppData\\Local' }, 'C:\\Users\\test'))
+      .toBe('C:\\Users\\test\\AppData\\Local/Xiaojing');
+  });
+
+  it('matches the macOS and Linux local-data conventions', () => {
+    expect(resolveLocalDataDir('darwin', {}, '/Users/test'))
+      .toBe('/Users/test/Library/Application Support/Xiaojing');
+    expect(resolveLocalDataDir('linux', { XDG_DATA_HOME: '/data/local' }, '/home/test'))
+      .toBe('/data/local/Xiaojing');
   });
 });

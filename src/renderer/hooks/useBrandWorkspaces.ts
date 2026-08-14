@@ -4,7 +4,6 @@ import {
   archiveBrandSession,
   bootstrapBrandWorkspaces,
   commitBrandSession,
-  confirmBrandSessionDeletion,
   createBrandWorkspace,
   listBrandSessions,
   previewBrandSessionDeletion,
@@ -34,11 +33,7 @@ export interface BrandWorkspaceState {
   renameSession: (workspaceId: string, sessionId: string, title: string) => Promise<void>;
   archiveSession: (workspaceId: string, sessionId: string, archived: boolean) => Promise<void>;
   previewDeletion: (workspaceId: string, sessionId: string) => Promise<BrandSessionDeletionPreview>;
-  confirmDeletion: (
-    workspaceId: string,
-    sessionId: string,
-    confirmationToken: string,
-  ) => Promise<void>;
+  removeDeletedSessionProjection: (workspaceId: string, sessionId: string) => void;
 }
 
 function errorMessage(error: unknown): string {
@@ -154,12 +149,7 @@ export function useBrandWorkspaces(): BrandWorkspaceState {
     previewBrandSessionDeletion(workspaceId, sessionId)
   ), []);
 
-  const confirmDeletion = useCallback(async (
-    workspaceId: string,
-    sessionId: string,
-    confirmationToken: string,
-  ) => {
-    await confirmBrandSessionDeletion(workspaceId, sessionId, confirmationToken);
+  const removeDeletedSessionProjection = useCallback((workspaceId: string, sessionId: string) => {
     if (currentWorkspaceRef.current?.id === workspaceId) {
       setSessions((current) => current.filter((item) => item.id !== sessionId));
     }
@@ -178,6 +168,6 @@ export function useBrandWorkspaces(): BrandWorkspaceState {
     renameSession,
     archiveSession,
     previewDeletion,
-    confirmDeletion,
+    removeDeletedSessionProjection,
   };
 }

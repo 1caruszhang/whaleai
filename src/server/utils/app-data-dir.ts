@@ -1,4 +1,4 @@
-import { homedir } from 'os';
+import { homedir, platform } from 'os';
 import { join, resolve } from 'path';
 
 /**
@@ -17,5 +17,19 @@ export function getAppDataDir(): string {
   if (process.env.NODE_ENV === 'test' || process.env.VITEST) {
     return join(homedir(), '.myagents');
   }
-  return join(homedir(), 'Xiaojing');
+  return resolveLocalDataDir(platform(), process.env, homedir());
+}
+
+export function resolveLocalDataDir(
+  currentPlatform: NodeJS.Platform,
+  environment: NodeJS.ProcessEnv,
+  homeDirectory: string,
+): string {
+  if (currentPlatform === 'win32') {
+    return join(environment.LOCALAPPDATA || join(homeDirectory, 'AppData', 'Local'), 'Xiaojing');
+  }
+  if (currentPlatform === 'darwin') {
+    return join(homeDirectory, 'Library', 'Application Support', 'Xiaojing');
+  }
+  return join(environment.XDG_DATA_HOME || join(homeDirectory, '.local', 'share'), 'Xiaojing');
 }

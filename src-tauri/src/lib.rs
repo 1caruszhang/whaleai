@@ -422,7 +422,6 @@ pub fn run() {
             brand_workspace::cmd_brand_session_rename,
             brand_workspace::cmd_brand_session_archive,
             brand_workspace::cmd_brand_session_delete_preview,
-            brand_workspace::cmd_brand_session_delete_confirm,
             logger::cmd_record_renderer_boot_event,
             i18n::cmd_get_ui_language_state,
             i18n::cmd_sync_ui_language_from_config,

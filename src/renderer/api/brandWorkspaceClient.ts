@@ -113,15 +113,3 @@ export function previewBrandSessionDeletion(
 ): Promise<BrandSessionDeletionPreview> {
   return invoke('cmd_brand_session_delete_preview', { workspaceId, sessionId });
 }
-
-export function confirmBrandSessionDeletion(
-  workspaceId: string,
-  sessionId: string,
-  confirmationToken: string,
-): Promise<void> {
-  return invoke('cmd_brand_session_delete_confirm', {
-    workspaceId,
-    sessionId,
-    confirmationToken,
-  });
-}

@@ -384,6 +384,26 @@ impl BrandWorkspaceStore {
         session_id: &str,
         confirmation_token: &str,
     ) -> Result<(), String> {
+        self.with_confirmed_session_deletion(workspace_id, session_id, confirmation_token, || {
+            Ok(((), true))
+        })
+        .map(|_| ())
+    }
+
+    /// Run transcript deletion and brand-index deletion under one admission.
+    /// A refused or failed transcript mutation rolls the SQLite transaction
+    /// back, so callers can never consume the confirmation or remove the
+    /// BrandSession projection before the lifecycle owner accepts deletion.
+    pub(crate) fn with_confirmed_session_deletion<T, F>(
+        &self,
+        workspace_id: &str,
+        session_id: &str,
+        confirmation_token: &str,
+        operation: F,
+    ) -> Result<(T, bool), String>
+    where
+        F: FnOnce() -> Result<(T, bool), String>,
+    {
         validate_session_id(session_id)?;
         let workspace = self.workspace(workspace_id)?;
         let mut connection = open_database(&workspace)?;
@@ -406,9 +426,17 @@ impl BrandWorkspaceStore {
         if deleted != 1 {
             return Err("会话不存在".to_string());
         }
-        transaction
-            .commit()
-            .map_err(|error| format!("commit brand session deletion: {error}"))
+        let (result, accepted) = operation()?;
+        if accepted {
+            transaction
+                .commit()
+                .map_err(|error| format!("commit brand session deletion: {error}"))?;
+        } else {
+            transaction
+                .rollback()
+                .map_err(|error| format!("rollback refused brand session deletion: {error}"))?;
+        }
+        Ok((result, accepted))
     }
 
     fn session(
@@ -646,107 +674,131 @@ fn retained_scope(
     })
 }
 
-fn production_store() -> Result<BrandWorkspaceStore, String> {
+pub(crate) fn production_store() -> Result<BrandWorkspaceStore, String> {
     crate::app_dirs::xiaojing_data_dir()
         .map(BrandWorkspaceStore::at)
         .ok_or_else(|| "无法定位小鲸同学本地数据目录".to_string())
 }
 
 #[tauri::command]
-pub fn cmd_brand_workspace_bootstrap() -> Result<BrandWorkspaceBootstrap, String> {
-    let store = production_store()?;
-    Ok(BrandWorkspaceBootstrap {
-        data_root: store.root().to_path_buf(),
-        workspaces: store.list_workspaces()?,
-        current_workspace: store.current_workspace()?,
+pub async fn cmd_brand_workspace_bootstrap() -> Result<BrandWorkspaceBootstrap, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let store = production_store()?;
+        Ok(BrandWorkspaceBootstrap {
+            data_root: store.root().to_path_buf(),
+            workspaces: store.list_workspaces()?,
+            current_workspace: store.current_workspace()?,
+        })
     })
+    .await
+    .map_err(|error| format!("brand workspace bootstrap task failed: {error}"))?
 }
 
 #[tauri::command]
 #[allow(non_snake_case)]
-pub fn cmd_brand_workspace_create(
+pub async fn cmd_brand_workspace_create(
     name: String,
     productLines: Vec<String>,
 ) -> Result<BrandWorkspace, String> {
-    production_store()?.create_workspace(&name, productLines)
+    tauri::async_runtime::spawn_blocking(move || {
+        production_store()?.create_workspace(&name, productLines)
+    })
+    .await
+    .map_err(|error| format!("brand workspace create task failed: {error}"))?
 }
 
 #[tauri::command]
 #[allow(non_snake_case)]
-pub fn cmd_brand_workspace_switch(workspaceId: String) -> Result<BrandWorkspace, String> {
-    production_store()?.switch_workspace(&workspaceId)
+pub async fn cmd_brand_workspace_switch(workspaceId: String) -> Result<BrandWorkspace, String> {
+    tauri::async_runtime::spawn_blocking(move || production_store()?.switch_workspace(&workspaceId))
+        .await
+        .map_err(|error| format!("brand workspace switch task failed: {error}"))?
 }
 
 #[tauri::command]
 #[allow(non_snake_case)]
-pub fn cmd_brand_session_draft(workspaceId: String) -> Result<SessionDraft, String> {
-    production_store()?.new_session_draft(&workspaceId)
+pub async fn cmd_brand_session_draft(workspaceId: String) -> Result<SessionDraft, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        production_store()?.new_session_draft(&workspaceId)
+    })
+    .await
+    .map_err(|error| format!("brand session draft task failed: {error}"))?
 }
 
 #[tauri::command]
 #[allow(non_snake_case)]
-pub fn cmd_brand_session_commit(
+pub async fn cmd_brand_session_commit(
     workspaceId: String,
     sessionId: String,
     title: String,
     titleSource: SessionTitleSource,
 ) -> Result<BrandSession, String> {
-    production_store()?.commit_session(
-        &workspaceId,
-        SessionCommit {
-            id: sessionId,
-            title,
-            title_source: titleSource,
-        },
-    )
+    tauri::async_runtime::spawn_blocking(move || {
+        production_store()?.commit_session(
+            &workspaceId,
+            SessionCommit {
+                id: sessionId,
+                title,
+                title_source: titleSource,
+            },
+        )
+    })
+    .await
+    .map_err(|error| format!("brand session commit task failed: {error}"))?
 }
 
 #[tauri::command]
 #[allow(non_snake_case)]
-pub fn cmd_brand_session_list(
+pub async fn cmd_brand_session_list(
     workspaceId: String,
     includeArchived: bool,
 ) -> Result<Vec<BrandSession>, String> {
-    production_store()?.list_sessions(&workspaceId, includeArchived)
+    tauri::async_runtime::spawn_blocking(move || {
+        production_store()?.list_sessions(&workspaceId, includeArchived)
+    })
+    .await
+    .map_err(|error| format!("brand session list task failed: {error}"))?
 }
 
 #[tauri::command]
 #[allow(non_snake_case)]
-pub fn cmd_brand_session_rename(
+pub async fn cmd_brand_session_rename(
     workspaceId: String,
     sessionId: String,
     title: String,
 ) -> Result<BrandSession, String> {
-    production_store()?.rename_session(&workspaceId, &sessionId, &title)
+    tauri::async_runtime::spawn_blocking(move || {
+        production_store()?.rename_session(&workspaceId, &sessionId, &title)
+    })
+    .await
+    .map_err(|error| format!("brand session rename task failed: {error}"))?
 }
 
 #[tauri::command]
 #[allow(non_snake_case)]
-pub fn cmd_brand_session_archive(
+pub async fn cmd_brand_session_archive(
     workspaceId: String,
     sessionId: String,
     archived: bool,
 ) -> Result<BrandSession, String> {
-    production_store()?.archive_session(&workspaceId, &sessionId, archived)
+    tauri::async_runtime::spawn_blocking(move || {
+        production_store()?.archive_session(&workspaceId, &sessionId, archived)
+    })
+    .await
+    .map_err(|error| format!("brand session archive task failed: {error}"))?
 }
 
 #[tauri::command]
 #[allow(non_snake_case)]
-pub fn cmd_brand_session_delete_preview(
+pub async fn cmd_brand_session_delete_preview(
     workspaceId: String,
     sessionId: String,
 ) -> Result<SessionDeletionPreview, String> {
-    production_store()?.preview_session_deletion(&workspaceId, &sessionId)
-}
-
-#[tauri::command]
-#[allow(non_snake_case)]
-pub fn cmd_brand_session_delete_confirm(
-    workspaceId: String,
-    sessionId: String,
-    confirmationToken: String,
-) -> Result<(), String> {
-    production_store()?.delete_session(&workspaceId, &sessionId, &confirmationToken)
+    tauri::async_runtime::spawn_blocking(move || {
+        production_store()?.preview_session_deletion(&workspaceId, &sessionId)
+    })
+    .await
+    .map_err(|error| format!("brand session deletion preview task failed: {error}"))?
 }
 
 #[cfg(test)]
@@ -890,6 +942,17 @@ mod tests {
         assert!(store
             .delete_session(&brand.id, "session-a", "wrong-token")
             .is_err());
+
+        let refused = store
+            .with_confirmed_session_deletion(
+                &brand.id,
+                "session-a",
+                &preview.confirmation_token,
+                || Ok(("refused", false)),
+            )
+            .unwrap();
+        assert_eq!(refused, ("refused", false));
+        assert_eq!(store.list_sessions(&brand.id, true).unwrap().len(), 1);
 
         store
             .delete_session(&brand.id, "session-a", &preview.confirmation_token)

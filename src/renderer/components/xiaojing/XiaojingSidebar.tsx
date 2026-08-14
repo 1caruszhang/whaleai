@@ -12,16 +12,19 @@ import {
   X,
 } from 'lucide-react';
 import { memo, useCallback, useState } from 'react';
+import { createPortal } from 'react-dom';
 
 import type {
   BrandSession,
   BrandSessionDeletionPreview,
   BrandWorkspace,
 } from '@/api/brandWorkspaceClient';
+import OverlayBackdrop from '@/components/OverlayBackdrop';
+import { useCloseLayer } from '@/hooks/useCloseLayer';
 import xiaojingLogo from '@/assets/brand/xiaojing-logo.png';
 import type { BrandWorkspaceState } from '@/hooks/useBrandWorkspaces';
+import { useResolvedTheme } from '@/theme';
 import type { Tab } from '@/types/tab';
-import { XIAOJING_PRODUCT } from '../../../shared/product';
 
 interface XiaojingSidebarProps {
   brandState: BrandWorkspaceState;
@@ -29,7 +32,7 @@ interface XiaojingSidebarProps {
   onOpenWorkspace: (workspace: BrandWorkspace) => Promise<boolean>;
   onOpenSession: (session: BrandSession, workspace: BrandWorkspace) => Promise<boolean>;
   onRenameSession: (session: BrandSession, workspace: BrandWorkspace, title: string) => Promise<void>;
-  onDeleteSession: (sessionId: string) => Promise<boolean>;
+  onDeleteSession: (preview: BrandSessionDeletionPreview) => Promise<boolean>;
 }
 
 export default memo(function XiaojingSidebar({
@@ -40,6 +43,7 @@ export default memo(function XiaojingSidebar({
   onRenameSession,
   onDeleteSession,
 }: XiaojingSidebarProps) {
+  const resolvedTheme = useResolvedTheme();
   const {
     workspaces,
     currentWorkspace,
@@ -50,7 +54,7 @@ export default memo(function XiaojingSidebar({
     switchWorkspace,
     archiveSession,
     previewDeletion,
-    confirmDeletion,
+    removeDeletedSessionProjection,
   } = brandState;
   const [brandMenuOpen, setBrandMenuOpen] = useState(false);
   const [createOpen, setCreateOpen] = useState(false);
@@ -62,6 +66,27 @@ export default memo(function XiaojingSidebar({
   const [renameValue, setRenameValue] = useState('');
   const [deletionPreview, setDeletionPreview] = useState<BrandSessionDeletionPreview | null>(null);
   const [deleteConfirmation, setDeleteConfirmation] = useState('');
+
+  const closeCreateDialog = useCallback(() => {
+    if (busy) return;
+    setCreateOpen(false);
+  }, [busy]);
+  const closeDeletionDialog = useCallback(() => {
+    if (busy) return;
+    setDeletionPreview(null);
+    setDeleteConfirmation('');
+  }, [busy]);
+
+  useCloseLayer(() => {
+    if (!deletionPreview) return false;
+    closeDeletionDialog();
+    return true;
+  }, 210);
+  useCloseLayer(() => {
+    if (!createOpen) return false;
+    closeCreateDialog();
+    return true;
+  }, 200);
 
   const openBrand = useCallback(async (workspace: BrandWorkspace) => {
     if (busy) return;
@@ -122,26 +147,22 @@ export default memo(function XiaojingSidebar({
     if (!deletionPreview || deleteConfirmation !== '永久删除' || busy) return;
     setBusy(true);
     try {
-      const deleted = await onDeleteSession(deletionPreview.sessionId);
+      const deleted = await onDeleteSession(deletionPreview);
       if (!deleted) return;
-      await confirmDeletion(
-        deletionPreview.workspaceId,
-        deletionPreview.sessionId,
-        deletionPreview.confirmationToken,
-      );
+      removeDeletedSessionProjection(deletionPreview.workspaceId, deletionPreview.sessionId);
       setDeletionPreview(null);
       setDeleteConfirmation('');
     } finally {
       setBusy(false);
     }
-  }, [busy, confirmDeletion, deleteConfirmation, deletionPreview, onDeleteSession]);
+  }, [busy, deleteConfirmation, deletionPreview, onDeleteSession, removeDeletedSessionProjection]);
 
   return (
     <aside aria-label="小鲸同学品牌与会话" className="relative z-40 flex h-screen w-[248px] shrink-0 flex-col border-r border-[var(--line)] bg-[var(--global-sidebar-bg)] text-[var(--ink)]" data-xiaojing-sidebar>
       <div className="custom-titlebar h-11 shrink-0" data-tauri-drag-region />
       <div className="flex items-center gap-3 px-4 pb-5 pt-2">
         <div className="flex h-10 w-10 items-center justify-center overflow-hidden rounded-xl bg-white shadow-sm"><img src={xiaojingLogo} alt="" className="h-9 w-9 object-contain" /></div>
-        <div className="min-w-0"><p className="truncate text-base font-semibold tracking-wide">{XIAOJING_PRODUCT.displayName}</p><p className="mt-0.5 text-xs font-medium uppercase tracking-[0.18em] text-[var(--accent)]">GEO 营销</p></div>
+        <div className="min-w-0"><p className="theme-product-wordmark truncate text-base font-semibold">{resolvedTheme.hero.productName}</p><p className="mt-0.5 truncate text-xs font-medium text-[var(--accent)]">{resolvedTheme.hero.slogans['zh-CN']}</p></div>
       </div>
 
       <div className="px-3">
@@ -177,7 +198,7 @@ export default memo(function XiaojingSidebar({
                   return (
                     <div key={session.id} className="group relative mb-1">
                       {renamingId === session.id ? (
-                        <form onSubmit={(event) => { event.preventDefault(); void submitRename(session); }} className="flex items-center gap-1 px-2 py-1"><input autoFocus value={renameValue} onChange={(event) => setRenameValue(event.target.value)} maxLength={120} className="min-w-0 flex-1 rounded-lg border border-[var(--accent)] bg-[var(--paper-elevated)] px-2 py-1.5 text-sm outline-none" /><button type="button" onClick={() => setRenamingId(null)} className="p-1 text-[var(--ink-muted)]"><X className="h-4 w-4" /></button></form>
+                        <form onSubmit={(event) => { event.preventDefault(); void submitRename(session); }} className="flex items-center gap-1 px-2 py-1"><input autoFocus value={renameValue} onChange={(event) => setRenameValue(event.target.value)} maxLength={120} className="min-w-0 flex-1 rounded-lg border border-[var(--accent)] bg-[var(--paper-elevated)] px-2 py-1.5 text-sm outline-none" /><button type="button" aria-label="取消重命名" onClick={() => setRenamingId(null)} className="p-1 text-[var(--ink-muted)]"><X className="h-4 w-4" /></button></form>
                       ) : (
                         <button type="button" onClick={() => currentWorkspace && void onOpenSession(session, currentWorkspace)} aria-current={active ? 'page' : undefined} className={`flex w-full items-center gap-2 rounded-lg px-3 py-2 pr-9 text-left transition-colors ${active ? 'bg-[var(--accent-warm-subtle)] text-[var(--ink)]' : 'text-[var(--ink-secondary)] hover:bg-[var(--hover-bg)]'}`}><span className={`h-1.5 w-1.5 shrink-0 rounded-full ${active ? 'bg-[var(--accent)]' : 'bg-[var(--ink-faint)]'}`} /><span className="min-w-0 flex-1 truncate text-sm">{session.title || '新会话'}</span></button>
                       )}
@@ -196,26 +217,28 @@ export default memo(function XiaojingSidebar({
       </section>
       <div className="border-t border-[var(--line-subtle)] px-4 py-3 text-xs tracking-wide text-[var(--ink-subtle)]">小鲸同学 · 本地品牌工作台</div>
 
-      {createOpen && (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/45 p-4 backdrop-blur-sm">
+      {createOpen && createPortal(
+        <OverlayBackdrop onClose={closeCreateDialog} className="z-[200] p-4">
           <form onSubmit={(event) => { event.preventDefault(); void submitBrand(); }} className="w-full max-w-md rounded-2xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5 shadow-xl">
-            <div className="flex items-center justify-between"><h2 className="text-base font-semibold">创建品牌</h2><button type="button" onClick={() => setCreateOpen(false)} className="p-1 text-[var(--ink-muted)]"><X className="h-4 w-4" /></button></div>
+            <div className="flex items-center justify-between"><h2 className="text-base font-semibold">创建品牌</h2><button type="button" aria-label="关闭创建品牌" onClick={closeCreateDialog} className="p-1 text-[var(--ink-muted)]"><X className="h-4 w-4" /></button></div>
             <label className="mt-5 block text-sm text-[var(--ink-secondary)]">品牌名称<input autoFocus value={brandName} onChange={(event) => setBrandName(event.target.value)} maxLength={80} className="mt-2 w-full rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-2 outline-none focus:border-[var(--accent)]" /></label>
             <label className="mt-4 block text-sm text-[var(--ink-secondary)]">产品线（可选，用逗号分隔）<textarea value={productLines} onChange={(event) => setProductLines(event.target.value)} className="mt-2 min-h-20 w-full resize-none rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-2 outline-none focus:border-[var(--accent)]" /></label>
-            <div className="mt-5 flex justify-end gap-2"><button type="button" onClick={() => setCreateOpen(false)} className="rounded-lg px-4 py-2 text-sm text-[var(--ink-muted)] hover:bg-[var(--hover-bg)]">取消</button><button type="submit" disabled={!brandName.trim() || busy} className="rounded-lg bg-[var(--button-primary-bg)] px-4 py-2 text-sm font-semibold text-[var(--button-primary-text)] disabled:opacity-50">创建并进入</button></div>
+            <div className="mt-5 flex justify-end gap-2"><button type="button" onClick={closeCreateDialog} className="rounded-lg px-4 py-2 text-sm text-[var(--ink-muted)] hover:bg-[var(--hover-bg)]">取消</button><button type="submit" disabled={!brandName.trim() || busy} className="rounded-lg bg-[var(--button-primary-bg)] px-4 py-2 text-sm font-semibold text-[var(--button-primary-text)] disabled:opacity-50">创建并进入</button></div>
           </form>
-        </div>
+        </OverlayBackdrop>,
+        document.body,
       )}
 
-      {deletionPreview && (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/50 p-4 backdrop-blur-sm">
+      {deletionPreview && createPortal(
+        <OverlayBackdrop onClose={closeDeletionDialog} className="z-[210] p-4" variant="dark">
           <div className="w-full max-w-lg rounded-2xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5 shadow-xl">
             <h2 className="text-base font-semibold text-[var(--error)]">永久删除“{deletionPreview.title}”</h2>
             <p className="mt-3 text-sm leading-6 text-[var(--ink-secondary)]">将删除 {deletionPreview.scope.sessionRecords} 条 Session 索引和 {deletionPreview.scope.chatTranscripts} 份聊天记录。关联的品牌知识 {deletionPreview.retained.knowledgeFacts} 条、Operation {deletionPreview.retained.operations} 个、产物 {deletionPreview.retained.artifacts} 个、订单 {deletionPreview.retained.publishOrders} 个、观测 {deletionPreview.retained.observations} 条会完整保留。</p>
             <label className="mt-4 block text-sm text-[var(--ink-secondary)]">输入“永久删除”完成二次确认<input value={deleteConfirmation} onChange={(event) => setDeleteConfirmation(event.target.value)} className="mt-2 w-full rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-2 outline-none focus:border-[var(--error)]" /></label>
-            <div className="mt-5 flex justify-end gap-2"><button type="button" onClick={() => setDeletionPreview(null)} className="rounded-lg px-4 py-2 text-sm text-[var(--ink-muted)] hover:bg-[var(--hover-bg)]">取消</button><button type="button" onClick={() => void confirmDelete()} disabled={deleteConfirmation !== '永久删除' || busy} className="rounded-lg bg-[var(--error)] px-4 py-2 text-sm font-semibold text-[var(--on-error)] disabled:opacity-50">永久删除</button></div>
+            <div className="mt-5 flex justify-end gap-2"><button type="button" onClick={closeDeletionDialog} className="rounded-lg px-4 py-2 text-sm text-[var(--ink-muted)] hover:bg-[var(--hover-bg)]">取消</button><button type="button" onClick={() => void confirmDelete()} disabled={deleteConfirmation !== '永久删除' || busy} className="rounded-lg bg-[var(--error)] px-4 py-2 text-sm font-semibold text-[var(--on-error)] disabled:opacity-50">永久删除</button></div>
           </div>
-        </div>
+        </OverlayBackdrop>,
+        document.body,
       )}
     </aside>
   );
