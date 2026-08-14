@@ -28,29 +28,41 @@ jobs:
         with:
           node-version: 24
           cache: npm
-      - run: npm ci
-      - run: npm run typecheck
-      - run: npm run lint
-      - run: npm run test:classification
-      - run: npm run test:build-scripts
+      - name: Install JavaScript dependencies
+        run: npm ci
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Lint
+        run: npm run lint
+      - name: Verify test classification
+        run: npm run test:classification
+      - name: Build-script contracts
+        run: npm run test:build-scripts
       # Keep js_ai behavioral parity visible as its own product gate. These
       # tests are also part of the unit project, but the named step makes a GEO
       # regression immediately identifiable in Actions instead of hiding it
       # among thousands of unrelated unit assertions.
       - name: GEO behavior contract
         run: npm run test:geo-contract
-      - run: npm run test:unit
+      - name: Unit tests
+        run: npm run test:unit
       # `dom` project (jsdom, no secrets) holds security-invariant tests —
       # externalResourceGuard (zero-egress) + WidgetRenderer (about:srcdoc
       # transport). Must gate too, else those regressions wouldn't block a merge.
-      - run: npm run test:dom
-      - run: npm run test:integration
+      - name: DOM tests
+        run: npm run test:dom
+      - name: Integration tests
+        run: npm run test:integration
       # Typecheck does not exercise esbuild/Vite bundling, raw imports, or
       # runtime entrypoint packaging. These cheap smoke builds catch that class.
-      - run: npm run build:server
-      - run: npm run build:bridge
-      - run: npm run build:cli
-      - run: npm run build:web
+      - name: Build server bundle
+        run: npm run build:server
+      - name: Build plugin bridge
+        run: npm run build:bridge
+      - name: Build CLI bundle
+        run: npm run build:cli
+      - name: Build renderer
+        run: npm run build:web
 
   # Rust gate: cargo test plus project redline Clippy rules. We only deny
   # disallowed_methods/macros here; ordinary Clippy warnings stay non-fatal

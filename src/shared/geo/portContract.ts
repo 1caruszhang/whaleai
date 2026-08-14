@@ -977,7 +977,7 @@ export function mergeGeoChannelPathHits(
     (left, right) =>
       right.score - left.score ||
       right.hitCount - left.hitCount ||
-      left.name.localeCompare(right.name),
+      left.resourceId - right.resourceId,
   );
 }
 

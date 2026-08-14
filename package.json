@@ -48,7 +48,7 @@
     "test:unit": "vitest run --project unit",
     "test:geo-contract": "vitest run --project unit src/shared/geo",
     "test:dom": "vitest run --project dom",
-    "test:integration": "vitest run --project integration",
+    "test:integration": "vitest run --project integration --maxWorkers=1",
     "test:credentialed": "vitest run --project credentialed",
     "test:changed": "vitest run --changed --project unit --project dom --project integration",
     "test:watch": "vitest --project unit --project dom --project integration",
