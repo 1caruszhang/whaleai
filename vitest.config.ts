@@ -20,7 +20,9 @@ const alias = [
 //                 Target: < 5s, run on every save (`npm run test:unit`).
 //  - `integration`: credential-free stateful server tests. May touch module
 //                 globals, loopback ports, scratch HOME, or SessionStore, but
-//                 MUST NOT talk to real upstream network. Runs singleFork serial.
+//                 MUST NOT talk to real upstream network. Runs one file at a
+//                 time in isolated forks so process globals cannot leak across
+//                 files.
 //  - `credentialed`: real SDK/provider/network smoke. Explicit only; not part
 //                 of default npm test or public CI.
 //
@@ -82,7 +84,12 @@ export default defineConfig({
           testTimeout: 120_000,
           hookTimeout: 120_000,
           pool: 'forks',
-          poolOptions: { forks: { singleFork: true } },
+          // Stateful files must stay serial, but they cannot share one process:
+          // tests replace HOME, module singletons, and mocks. A singleFork lets
+          // those process-global mutations leak into later files. The npm script
+          // supplies --maxWorkers=1 because worker counts are workspace-level
+          // Vitest options and cannot be set on an individual project here.
+          poolOptions: { forks: { isolate: true } },
         },
       },
       {
