@@ -37,9 +37,9 @@ MyAgents 是基于 Tauri v2 的桌面 AI Agent 客户端，提供 Claude Agent S
 ├──────────────────────────────────────────────────────────────────────────────┤
 │                              React Frontend                                  │
 │  ┌────────────────┐ ┌────────────────────────────────────────────────────┐  │
-│  │ GlobalSidebar  │ │ Active Tab Workspace                               │  │
-│  │ App Shell      │ │ Tab1 / Tab2 / Settings / Launcher / Capabilities   │  │
-│  │ nav + resource │ │ TaskCenter / Space                                 │  │
+│  │ XiaojingSidebar│ │ Active Tab Workspace             │ GEO Workbench    │  │
+│  │ brand/session  │ │ Tab1 / Tab2 / Settings / Chat    │ operation view   │  │
+│  │ projection     │ │ legacy surfaces remain compiled  │ collapsible      │  │
 │  │ projection     │ └───────────────────────┬────────────────────────────┘  │
 │  └───────┬────────┘                         │                               │
 │          │                 ┌────────────────┴───────────────────────────┐   │
@@ -363,7 +363,7 @@ Tab 内 MUST 用 `useTabState()` 的 `apiGet` / `apiPost`，禁止全局 `apiPos
 
 #### App Shell 与 Tab authority
 
-`GlobalSidebar` 挂在 `App` 的 Tab Workspace 之外，是应用级导航和资源投影，不是新的页面容器或 Session owner。顶部 Tab 仍是所有主内容页面的唯一 authority：active、关闭、恢复、拖拽、Sidecar owner token 与 pending-session birth 都继续由现有 Tab 状态机管理。
+当前默认产品壳在 `App` 的 Tab Workspace 两侧挂载 `XiaojingSidebar` 与 `XiaojingGeoWorkbench`：左侧只投影品牌与当前品牌 Session，右侧投影当前品牌摘要、GEO 操作空态和启动意图；两者都不是新的页面容器、Session owner 或 GeoOperation owner。旧 `GlobalSidebar` 保留给 expand 阶段编译兼容，但不再挂载。顶部 Tab 仍是所有主内容页面的唯一 authority：active、关闭、恢复、拖拽、Sidecar owner token 与 pending-session birth 都继续由现有 Tab 状态机管理。
 
 - 桌面主窗口 focus 以 Tauri `onFocusChanged` 为持续事件 authority；`App` 启动时用 renderer 当前 foreground 状态播种一次，之后只持有一个布尔投影并只让 active Chat 响应。focus 只负责保存/恢复滚动意图，不能充当窗口可见性或 geometry authority：仍在展示的 active Chat 即使失焦也持续把 live 消息交给 Virtuoso。只有 App 确实以 `content-visibility:hidden` 隐藏的 internal inactive Tab 才冻结 Virtuoso 输入；TabProvider/Sidecar 生命周期始终不受两者影响。
 - 侧栏只从既有 `ConfigProvider`、任务中心 store、Session 索引与当前 Tab 派生工作区/Session 展示；active 高亮是 projection，不持久化第二份“当前页面”。该投影保持单一持久选中面：Launcher 选择工作区时高亮工作区行，Chat 已进入具体 Session 时只高亮 Session 行，父工作区仅保留层级上下文而不同时涂底或声明 `aria-current`。工作区配置和 Session mutation 分别调用现有 Config / Task Center authority，不在侧栏另存领域状态。
@@ -911,19 +911,16 @@ Tailwind，否则 utility 会静默回退 framework default。`build:web` 后的
 启动与窗口数据流：
 
 ```text
-Rust 读取归一后的非敏感 disk appearance
-  → 隐藏构建主窗口 + native canonical --paper 首帧投影
-  → one-shot initialization script 对齐 versioned localStorage snapshot
-    （Theme ID 只保留 renderer registry 已解析值；同进程 reload 不覆盖新快照）
-  → index.html 在 React 前应用 html[data-theme-id][data-color-scheme] + .dark
-  → durable AppConfig 加载后 ConfiguredThemeRuntime 校正并刷新 snapshot
+Rust 构建小鲸同学主窗口
+  → index.html 在 React 前固定 html[data-theme-id=xiaojing][data-color-scheme=dark] + .dark
+  → primeXiaojingThemeRuntime 经 Registry 激活已校验的 xiaojing stylesheet
+  → 主窗口与 Floating Webview 都挂 XiaojingThemeRuntime + 简体中文同步
   → ThemeRuntime 激活已校验的实际 stylesheet + ResolvedTheme Context + root CSS Token selector
     + 把当前 resolved --paper 投影到 main native Window background
   → CSS surface / Launcher / xterm / Monaco / Mermaid / Prism / Widget
-  → Tauri theme:selection-changed → FloatingThemeRuntime 即时重解析
 ```
 
-浮球 Webview 保持轻量 tree，不挂完整 `ConfigProvider`：先用 snapshot 保证首帧，随后先完成精简事件 listener 注册、再异步读 durable config；hydration 期间收到的 live event 具有更高 freshness，旧磁盘结果不能反向覆盖。`system` 由每个 Webview 的 `useSyncExternalStore(matchMedia)` 订阅；`.dark` 只是 Tailwind 兼容投影，不再是 React consumer 的反向状态源。
+浮球 Webview 保持轻量 tree，不挂完整 `ConfigProvider`，但与主窗口共享固定的 `xiaojing/dark` 和 `zh-CN` 投影。旧 snapshot/durable appearance 同步代码保留给 expand 阶段编译，不参与当前产品入口；`.dark` 只是 Tailwind 兼容投影，不是 React consumer 的反向状态源。
 
 Space 与其它 renderer CSS surface 一样直接继承 `<html>` 上当前 Theme 的语义 Token；不维护局部 Theme ID、独立 palette 或 portal scope 传播。Space 的布局、业务状态机、三方 Logo、用户内容和纯 alpha 遮罩仍不属于 Theme 身份，但 paper、文字、字体、圆角、阴影、动作色和业务状态色必须随全局 Theme / scheme 原子切换。
 

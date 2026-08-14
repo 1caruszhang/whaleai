@@ -1,6 +1,6 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
-  "productName": "MyAgents",
+  "productName": "小鲸同学",
   "version": "0.4.8",
   "identifier": "com.myagents.app",
   "build": {

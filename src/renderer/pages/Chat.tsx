@@ -5478,6 +5478,7 @@ export default function Chat({ isWindowFocused, onNewSession, onOpenSession, onO
               事件意外触发面板（PRD D15）。onJumpToTool 由 Chat 实现是因为
               具体滚动由 ChatScrollController 统一处理。 */}
           <SimpleChatInput
+            capabilitySurface="geo"
             ref={chatInputRef}
             onSend={handleSendMessage}
             onStop={handleStop}

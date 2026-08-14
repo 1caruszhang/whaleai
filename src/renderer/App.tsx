@@ -20,7 +20,9 @@ import { stopTabSidecar, startGlobalSidecar, initGlobalSidecarReadyPromise, mark
 import ConfirmDialog from '@/components/ConfirmDialog';
 import BugReportOverlay from '@/components/BugReportOverlay';
 import CustomTitleBar from '@/components/CustomTitleBar';
-import GlobalSidebar, { type CapabilitySection } from '@/components/global-sidebar/GlobalSidebar';
+import type { CapabilitySection } from '@/components/global-sidebar/GlobalSidebar';
+import XiaojingGeoWorkbench from '@/components/xiaojing/XiaojingGeoWorkbench';
+import XiaojingSidebar from '@/components/xiaojing/XiaojingSidebar';
 import LinkContextMenuProvider from '@/components/LinkContextMenuProvider';
 import TabBar from '@/components/TabBar';
 import { SessionDeletionContext } from '@/context/SessionDeletionContext';
@@ -3234,12 +3236,6 @@ export default function App() {
     setCapabilityInitialSelect(undefined);
   }, []);
 
-  const handleOpenGeneralSettings = useCallback(() => {
-    void handleOpenSettings('general');
-  }, [handleOpenSettings]);
-
-  const handleOpenBugReport = useCallback(() => setShowBugReport(true), []);
-
   const handleOpenSidebarSession = useCallback((session: SessionMetadata, project: Project) => (
     handleOpenTargetSession(
       session.id,
@@ -3378,19 +3374,12 @@ export default function App() {
   return (
     <SessionDeletionContext.Provider value={handleDeleteSession}>
     <LinkContextMenuProvider>
-    <div className="flex h-screen bg-[var(--paper)]">
-      <GlobalSidebar
+    <div className="xiaojing-product-shell flex h-screen bg-[var(--paper)]">
+      <XiaojingSidebar
         tabs={tabs}
         activeTab={activeTab}
         activeWorkspacePath={activeWorkspacePath}
-        sessionNotificationBadgeCounts={sessionNotificationBadgeCounts}
-        teamSpaceAvailable={teamSpaceAvailable}
         onNewTab={handleSidebarNewChat}
-        onOpenTaskCenter={handleOpenTaskCenter}
-        onOpenSpace={handleOpenSpace}
-        onOpenCapabilities={handleOpenCapabilities}
-        onOpenSettings={handleOpenGeneralSettings}
-        onOpenBugReport={handleOpenBugReport}
         onOpenWorkspace={handleOpenWorkspaceFromSidebar}
         onOpenSession={handleOpenSidebarSession}
       />
@@ -3416,8 +3405,9 @@ export default function App() {
         />
       </CustomTitleBar>
 
+      <div className="flex min-h-0 flex-1">
       {/* Tab content - only Chat views need TabProvider for sidecar communication */}
-      <div ref={contentRef} className="relative flex-1 overflow-hidden" data-tab-content-workspace>
+      <div ref={contentRef} className="relative min-w-0 flex-1 overflow-hidden" data-tab-content-workspace>
         {tabs.map((tab) => (
           <MemoizedTabContent
             key={tab.id}
@@ -3461,6 +3451,11 @@ export default function App() {
             taskCenterCurrentSessionId={taskCenterCurrentSessionId}
           />
         ))}
+      </div>
+      <XiaojingGeoWorkbench
+        activeWorkspacePath={activeWorkspacePath}
+        onOpenWorkspace={handleOpenWorkspaceFromSidebar}
+      />
       </div>
       </div>
 

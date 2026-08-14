@@ -104,6 +104,15 @@ export function primeThemeRuntimeFromBootstrap(
   return resolvedTheme;
 }
 
+export function primeXiaojingThemeRuntime(
+  registry: ThemeRegistry = themeRegistry,
+): ResolvedTheme {
+  const resolvedTheme = registry.resolve("xiaojing", "dark", true);
+  activateThemeStylesheet(resolvedTheme);
+  applyRootTheme(resolvedTheme);
+  return resolvedTheme;
+}
+
 export interface ThemeRuntimeProviderProps {
   children: React.ReactNode;
   /** null keeps the pre-React snapshot authoritative until durable config loads. */
@@ -202,6 +211,24 @@ export function ConfiguredThemeRuntime({ children }: { children: React.ReactNode
     <ThemeRuntimeProvider
       selection={selection}
       selectionExplicit={config.themeSelectionExplicit === true}
+      broadcastSelection
+      syncNativeWindowBackground
+    >
+      {children}
+    </ThemeRuntimeProvider>
+  );
+}
+
+/** Focused Xiaojing product runtime intentionally exposes one visual mode. */
+export function XiaojingThemeRuntime({ children }: { children: React.ReactNode }) {
+  const selection = useMemo<ThemeSelection>(() => ({
+    themeId: 'xiaojing',
+    appearanceMode: 'dark',
+  }), []);
+  return (
+    <ThemeRuntimeProvider
+      selection={selection}
+      selectionExplicit
       broadcastSelection
       syncNativeWindowBackground
     >

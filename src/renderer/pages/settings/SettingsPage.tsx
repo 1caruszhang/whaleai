@@ -105,7 +105,6 @@ import { workspacePathsEqual } from '../../../shared/workspacePath';
 import { normalizeProxyScope } from '../../../shared/proxyScope';
 import { describeProxyScopeSummary } from './proxyScopePresentation';
 import { formatSubscriptionVerifyError } from '../../../shared/subscription';
-import type { UiLanguage } from '../../../shared/i18n';
 import ProviderEnableOrderDialog from '@/components/ProviderEnableOrderDialog';
 import FloatingBallPetSettings from '@/components/FloatingBallPetSettings';
 import {
@@ -128,9 +127,6 @@ import {
     getManagedCodexUpdateRefreshAction,
     type ManagedCodexRuntimeBusyAction,
 } from './managedCodexRuntimePresentation';
-import { AppearanceModeControl } from './components/AppearanceModeControl';
-import { ThemePresetSelect } from './components/ThemePresetSelect';
-import { useResolvedTheme } from '@/theme';
 import type {
     NetworkProbeResult,
     ProviderVerifyError,
@@ -268,9 +264,7 @@ export default function Settings({ mode = 'settings', initialSection, navigation
     } = useConfig();
     const spaceBuildCapability = useSpaceBuildCapability(config.spaceEnvironment);
     const toast = useToast();
-    const resolvedTheme = useResolvedTheme();
     const { t: tSettings } = useTranslation('settings');
-    const { t: tCommon } = useTranslation('common');
     // Stabilize toast reference to avoid unnecessary effect re-runs
     const toastRef = useRef(toast);
     toastRef.current = toast;
@@ -283,11 +277,6 @@ export default function Settings({ mode = 'settings', initialSection, navigation
         () => normalizeClaudeTranscriptCleanupPeriodDays(config.claudeTranscriptCleanupPeriodDays),
         [config.claudeTranscriptCleanupPeriodDays],
     );
-    const languageOptions = useMemo(() => [
-        { value: 'system', label: tCommon('language.system') },
-        { value: 'zh-CN', label: tCommon('language.zhCN') },
-        { value: 'en-US', label: tCommon('language.enUS') },
-    ], [tCommon]);
     const availableSpaceEnvironments = useMemo(
         () => new Set(spaceBuildCapability.environments ?? ['production']),
         [spaceBuildCapability.environments],
@@ -4346,54 +4335,6 @@ export default function Settings({ mode = 'settings', initialSection, navigation
                                 <p className="mt-1 text-xs text-[var(--ink-muted)]">
                                     {tSettings('general.description')}
                                 </p>
-                            </div>
-
-                            <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
-                                <h3 className="text-base font-medium text-[var(--ink)]">{tSettings('general.appearanceTitle')}</h3>
-
-                                <div className="mt-4 flex items-center justify-between gap-4">
-                                    <div className="flex-1 pr-4">
-                                        <p className="text-sm font-medium text-[var(--ink)]">{tSettings('general.languageTitle')}</p>
-                                        <p className="text-xs text-[var(--ink-muted)]">
-                                            {tSettings('general.languageDescription')}
-                                        </p>
-                                    </div>
-                                    <CustomSelect
-                                        value={config.uiLanguage ?? 'system'}
-                                        options={languageOptions}
-                                        onChange={async (value) => {
-                                            await updateConfig({ uiLanguage: value as UiLanguage });
-                                            toast.success(tSettings('general.languageChanged'));
-                                        }}
-                                        triggerIcon={<Globe className="h-3.5 w-3.5" />}
-                                        className="w-[220px]"
-                                    />
-                                </div>
-
-                                <AppearanceModeControl
-                                    value={config.appearanceMode}
-                                    onChange={(mode) => { void updateConfig({ appearanceMode: mode }); }}
-                                />
-
-                                <div className="mt-4 flex items-center justify-between gap-4 border-t border-[var(--line)] pt-4">
-                                    <div className="min-w-0 flex-1 pr-4">
-                                        <p className="text-sm font-medium text-[var(--ink)]">{tSettings('general.themeTitle')}</p>
-                                        <p className="mt-0.5 text-xs text-[var(--ink-muted)]">
-                                            {tSettings('general.themeDescription')}
-                                        </p>
-                                    </div>
-                                    <ThemePresetSelect
-                                        value={resolvedTheme.themeId}
-                                        onPersistTheme={(themeId) => updateConfig({
-                                            themeId,
-                                            themeSelectionExplicit: true,
-                                        })}
-                                        onPersistError={(error) => {
-                                            const message = error instanceof Error ? error.message : String(error);
-                                            toast.error(tSettings('general.themeSaveFailed', { message }));
-                                        }}
-                                    />
-                                </div>
                             </div>
 
                             {/* Startup Settings */}

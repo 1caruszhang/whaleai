@@ -68,7 +68,7 @@ describe('Theme architecture guardrails', () => {
 
   it('keeps every optional package scoped, side-effect free, and independent from Space', () => {
     const optionalThemeIds = [
-      'myagents-light', 'default-black', 'sage', 'absolutely', 'linear', 'proof', 'codex', 'raycast',
+      'xiaojing', 'myagents-light', 'default-black', 'sage', 'absolutely', 'linear', 'proof', 'codex', 'raycast',
     ];
     for (const themeId of optionalThemeIds) {
       const manifest = source(`src/renderer/theme/themes/${themeId}.ts`);
@@ -96,6 +96,8 @@ describe('Theme architecture guardrails', () => {
       'src/renderer/components/CustomTitleBar.tsx',
       'src/renderer/components/TabBar.tsx',
       'src/renderer/components/global-sidebar/GlobalSidebar.tsx',
+      'src/renderer/components/xiaojing/XiaojingGeoWorkbench.tsx',
+      'src/renderer/components/xiaojing/XiaojingSidebar.tsx',
     ]);
   });
 
@@ -333,14 +335,17 @@ describe('Theme architecture guardrails', () => {
     expect(source('src/renderer/components/SettingsHelperInbox.tsx')).toContain('bg-[var(--ink)]/70 text-[var(--paper)]');
   });
 
-  it('keeps Settings on the disk-first Theme and appearance write paths', () => {
+  it('removes language and appearance selection from the focused Xiaojing product', () => {
     const settings = source('src/renderer/pages/settings/SettingsPage.tsx');
-    expect(settings).toContain('updateConfig({ appearanceMode: mode })');
-    expect(settings).toContain('themeSelectionExplicit: true');
-    expect(settings).toContain("tSettings('general.themeTitle')");
-    expect(settings).not.toContain("tSettings('about.developer.themeTitle')");
-    expect(settings).not.toContain('updateConfig({ theme:');
-    expect(settings).not.toContain('colorTheme');
+    const runtime = source('src/renderer/theme/ThemeRuntime.tsx');
+    const main = source('src/renderer/main.tsx');
+    expect(settings).not.toContain('AppearanceModeControl');
+    expect(settings).not.toContain('ThemePresetSelect');
+    expect(settings).not.toContain('languageOptions');
+    expect(runtime).toContain("themeId: 'xiaojing'");
+    expect(runtime).toContain("appearanceMode: 'dark'");
+    expect(main).toContain('<XiaojingThemeRuntime>');
+    expect(main).toContain('<XiaojingI18nSync />');
   });
 
   it('keeps product default selection separate from canonical fallback', () => {

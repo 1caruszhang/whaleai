@@ -214,6 +214,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
   workspaceSlashCommands,
   sdkSlashCommands = [],
   mode = 'chat',
+  capabilitySurface = 'general',
   toolbarPrefix,
   contextIndicator,
   // Whether this input belongs to the currently active tab. Used to gate document-level
@@ -234,6 +235,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
 }, ref) {
   const { t } = useTranslation('chat');
   const isLauncherMode = mode === 'launcher';
+  const isGeoSurface = capabilitySurface === 'geo';
   // Launcher-vs-Chat minimum row count, referenced by both the auto-resize
   // effect and the textarea `rows` / min/max style props. Keep as a single
   // derived constant so a later tweak (e.g. bump to 4) propagates everywhere
@@ -1792,7 +1794,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                   <AtSign className="h-4 w-4" />
                   {t('input.referenceFile')}
                 </button>
-                <button
+                {!isGeoSurface && <button
                   type="button"
                   // Same focus-steal guard as 引用文件 above.
                   onMouseDown={retainFocusOnMouseDown}
@@ -1817,7 +1819,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                 >
                   <span className="inline-flex h-4 w-4 items-center justify-center font-medium text-[var(--ink-muted)]">/</span>
                   {t('input.useSkill')}
-                </button>
+                </button>}
                 <button
                   type="button"
                   onClick={(e) => {
@@ -1829,7 +1831,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                   <Paperclip className="h-4 w-4" />
                   {t('input.uploadFile')}
                 </button>
-                {onCronButtonClick && (
+                {!isGeoSurface && onCronButtonClick && (
                   <button
                     type="button"
                     aria-disabled={configControlsLocked}
@@ -1864,7 +1866,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
               />
 
               {/* Runtime Selector (v0.1.59) */}
-              {runtimeDetections && onRuntimeChange && !isLauncherMode && (
+              {!isGeoSurface && runtimeDetections && onRuntimeChange && !isLauncherMode && (
                 <RuntimeSelector
                   value={runtime}
                   detections={runtimeDetections}
@@ -1932,7 +1934,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
               </Popover>
 
               {/* Tool/MCP Dropdown */}
-              <>
+              {!isGeoSurface && (<>
               <button
                 ref={toolBtnRef}
                 type="button"
@@ -2200,7 +2202,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                     </>
                     )}
               </Popover>
-              </>
+              </>)}
 
             </div>
 

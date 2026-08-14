@@ -40,6 +40,7 @@ function presetTokens(
 
 describe('ThemeRegistry', () => {
   const productionThemeIds = [
+    'xiaojing',
     'myagents-light',
     'myagents-default',
     'default-black',
@@ -51,9 +52,10 @@ describe('ThemeRegistry', () => {
     'raycast',
   ];
 
-  it('ships nine complete production Themes in product order', () => {
+  it('ships ten complete production Themes in product order', () => {
     expect(themeRegistry.getProductionIds()).toEqual(productionThemeIds);
     expect(themeRegistry.getAcceptedDefinitions().map(definition => definition.displayName)).toEqual([
+      '小鲸同学',
       'MyAgents Light',
       'MyAgents Classic',
       'MyAgents Classic2',
@@ -104,9 +106,15 @@ describe('ThemeRegistry', () => {
     for (const definition of themeRegistry.getAcceptedDefinitions()) {
       for (const scheme of ['light', 'dark'] as const) {
         const resolved = themeRegistry.resolve(definition.id, scheme, false);
-        expect(resolved.hero.productName).toBe('MyAgents');
-        expect(resolved.hero.slogans['zh-CN']).toBe('每个人都应享受智能的推背感，欢迎来到言出法随的世界');
-        expect(resolved.hero.slogans['en-US']).toBe('Your intent, amplified');
+        if (definition.id === 'xiaojing') {
+          expect(resolved.hero.productName).toBe('小鲸同学');
+          expect(resolved.hero.slogans['zh-CN']).toBe('懂品牌、会创作、能跟进的 GEO 营销助手');
+          expect(resolved.hero.slogans['en-US']).toBe('Your GEO marketing teammate');
+        } else {
+          expect(resolved.hero.productName).toBe('MyAgents');
+          expect(resolved.hero.slogans['zh-CN']).toBe('每个人都应享受智能的推背感，欢迎来到言出法随的世界');
+          expect(resolved.hero.slogans['en-US']).toBe('Your intent, amplified');
+        }
         expect(resolved.adapters.xterm.palette.cursor).toBeTruthy();
         expect(resolved.adapters.monaco.data.colors['editorCursor.foreground']).toBeTruthy();
         expect(resolved.adapters.mermaid.themeVariables.primaryColor).toBeTruthy();

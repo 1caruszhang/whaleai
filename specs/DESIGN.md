@@ -1,7 +1,7 @@
-# MyAgents Design Guide
+# 小鲸同学 Design Guide
 
-> **Version**: 2.8.47
-> **Last Updated**: 2026-08-04
+> **Version**: 2.9.0
+> **Last Updated**: 2026-08-14
 > **Status**: Active
 > **Platform**: macOS / Windows Desktop Client
 
@@ -32,7 +32,7 @@ MyAgents 是一款 AI Agent 桌面客户端，采用**温暖纸张质感**的设
 
 MyAgents 的视觉由完整 `Theme` 管理；light / dark / system 是 `AppearanceMode`，不是三套 Theme。一套 Theme 必须同时交付并验收 light 与 dark，system 只跟随 OS 解析其中一套。
 
-Production catalog 当前包含九套完整 Theme：MyAgents Light、MyAgents Classic、MyAgents Classic2、
+Production catalog 当前包含十套完整 Theme：小鲸同学、MyAgents Light、MyAgents Classic、MyAgents Classic2、
 Sage、Claude、Linear、Proof、Codex、Raycast。`myagents-default`（用户可见名 MyAgents Classic）仍是 canonical
 fallback；它的物理 owner 是：
 
@@ -52,10 +52,11 @@ fallback；它的物理 owner 是：
 
 可主题化：宿主与 Space 的色彩/字体/材质、Launcher Hero 两行内容和可选 bundled 背景、语法/图表/终端/编辑器/Widget iframe、Floating Ball。非主题化：布局与信息架构、业务状态机、原生窗口按钮、Browser 子 Webview 网页、用户内容、三方品牌 Logo/二维码、宠物 spritesheet。Space 不维护第二套 palette；其 paper、文字、圆角、阴影、动作色与业务状态色直接继承当前全局 Theme。
 
-九套 Theme 的产品顺序和动作语义：
+十套 Theme 的产品顺序和动作语义：
 
 | Theme | 主要视觉角色 |
 |---|---|
+| 小鲸同学 | 当前产品固定使用的鲸蓝深色营销工作台；不向用户暴露 Theme/Appearance 切换 |
 | MyAgents Light | Claude 的柔和中性色表面与陶土强调色；当前产品默认，light 主按钮使用中性黑 |
 | MyAgents Classic / MyAgents Classic2 | 暖纸张、陶土橙；Classic2 仅将 Classic 的 light 主按钮改为中性黑，本章色值表仍只描述 canonical Theme |
 | Sage | PR #441 的鼠尾草绿与自然纸面 |
@@ -1264,7 +1265,9 @@ v2.0 移除了所有旧别名。以下是唯一保留的等价关系：
 
 ## 15. 全局 App Shell 与 Launcher 规范
 
-MyAgents 使用“双层注意力导航”：全局侧边栏回答“产品能力和资源在哪里”，顶部 Tab 回答“哪些窗口正在占用注意力”。侧边栏属于 `App` Shell，不属于 Launcher；所有占据主内容区的页面仍由 Tab 拥有。
+小鲸同学 v1 使用稳定三栏壳：左侧 248px 品牌/会话投影，中间保留既有 Tab 与聊天 authority，右侧 320px GEO 工作台可折叠为 48px。左右两栏都只投影既有品牌、Session 与操作入口，不成为新的数据 owner；无当前 GEO 操作时，右栏只展示当前品牌摘要与可启动能力，不伪造指标。
+
+以下旧 `GlobalSidebar` 双层注意力规范继续约束 expand 阶段保留的通用产品代码，但它不再是默认产品入口。顶部 Tab 仍回答“哪些窗口正在占用注意力”，所有主内容页继续由 Tab 拥有。
 
 ### 15.1 布局结构
 
@@ -1290,7 +1293,7 @@ MyAgents 使用“双层注意力导航”：全局侧边栏回答“产品能�
 
 展开态从上到下依次为：原生窗口 chrome 与固定收起控制、独立产品身份行、新对话/搜索/任务/团队/技能与工具的连续主导航、Agent 工作区树、底部小助理/设置；其中团队入口仅在 Team Space 实验室开关开启且当前构建能力可用时出现，关闭后展开态与 rail 均不保留失效入口。主导航项与底部入口使用 36px 命中高度且不添加行间距；从主导航到 Agent 工作区、再到底部入口均不使用横分割线，主要层级只依靠 8–12px 组间留白、工作区标题和选中面，不将每组包成卡片。
 
-全局侧栏根面与顶部 Tab 标题栏共同消费 Theme-owned `--global-sidebar-bg`。九套 Theme 的 light/dark 均在自身 `--paper` 与 `--paper-inset` 之间提供一个略深于页面的值，使两块 App Shell chrome 同时能与右侧 `--paper` 页面和 `--paper-elevated` 对话面形成克制分区；该色差独立承担分区，不再叠加侧栏右侧竖线或标题栏底部横线。该结构 Token 不替代通用 Paper 层级：右侧页面、卡片与弹层继续使用原有 Token，工作区/Session hover 与 active 也不随侧栏底色重算。
+全局侧栏根面与顶部 Tab 标题栏共同消费 Theme-owned `--global-sidebar-bg`；小鲸品牌侧栏和 GEO 工作台也属于同一 App Shell chrome surface。十套 Theme 的 light/dark 均在自身 `--paper` 与 `--paper-inset` 之间提供一个略深于页面的值；该结构 Token 不替代通用 Paper 层级，普通页面、卡片与弹层继续使用原有 Token。
 
 ```
 展开态 256px:

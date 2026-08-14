@@ -12,8 +12,8 @@
 | 外观偏好 | `AppearanceMode` | durable `AppConfig.appearanceMode` | `system / light / dark` |
 | 已解析明暗 | `ResolvedColorScheme` | 每个 Webview 的 Theme runtime | 当前实际使用的 `light / dark` |
 
-Production registry 的展示顺序与 canonical 注册顺序解耦，当前九套完整 Theme 的产品顺序为：
-`myagents-light`（用户可见名 `MyAgents Light`）、`myagents-default`（`MyAgents Classic`）、
+Production registry 的展示顺序与 canonical 注册顺序解耦，当前十套完整 Theme 的产品顺序为：
+`xiaojing`（用户可见名 `小鲸同学`）、`myagents-light`（`MyAgents Light`）、`myagents-default`（`MyAgents Classic`）、
 `default-black`（`MyAgents Classic2`）、`sage`、`absolutely`（`Claude`）、`linear`、`proof`、
 `codex`、`raycast`。canonical package 仍先注册并独立承担 fail-fast fallback。
 不得把 light/dark 拆成两个 Theme，也不得重新用 `theme` 字段表达 appearance。
@@ -138,7 +138,7 @@ Theme 语义色生成并在各自代码背景上满足正文对比度；CodeBloc
 
 ### 5.0 设置选择入口
 
-公开的“设置 → 通用设置 → 界面外观”卡片末尾提供 Theme `CustomSelect`。它从
+旧通用产品壳的“设置 → 通用设置 → 界面外观”卡片曾提供 Theme `CustomSelect`。小鲸同学 v1 固定简体中文与 `xiaojing/dark`，该卡片及 appearance/language 控件不再从当前产品入口可达；旧控件源码保留给 expand 阶段编译兼容。旧选择器从
 `themeRegistry.getAcceptedDefinitions()` 读取实际已校验列表，并直接按 Registry 产品顺序显示为
 单层列表。每个选项右侧的两枚色块分别展示 light/dark `--button-primary-bg`；颜色由 Registry 从
 Theme package stylesheet 解析，不在 Settings 维护第二份 palette。选择时只
@@ -148,10 +148,9 @@ toast 报错。选中标记紧跟主题名称，light/dark 色块保持在行尾
 
 ### 5.1 主窗口
 
-`ConfigProvider → ConfiguredThemeRuntime → App`。Config 尚未加载时，runtime 保留 bootstrap snapshot；durable config 就绪后才校正选择，避免先闪 default light。
+小鲸同学主窗口与浮窗统一使用 `XiaojingThemeRuntime`，固定解析 `xiaojing/dark`；`ConfigProvider` 仍拥有其它 durable config，但不再裁决当前产品的 Theme。`ConfiguredThemeRuntime` 与 `FloatingThemeRuntime` 仅保留给 expand 阶段旧产品代码编译，不在小鲸入口挂载。
 
-`main.tsx` 在创建 React root 前调用 `primeThemeRuntimeFromBootstrap()`：它从 versioned snapshot
-解析并经 production Registry resolve 后激活可选 stylesheet 与 root scheme。可选 package 仍不在
+`main.tsx` 在创建 React root 前调用 `primeXiaojingThemeRuntime()`，不读取历史 Theme snapshot，经 production Registry resolve 后激活 `xiaojing` stylesheet 与 dark root scheme。可选 package 仍不在
 模块加载时产生 CSS side effect，但首个 React paint 已使用已验证的目标 Theme；未知 ID 继续整套
 回退 canonical。
 
@@ -259,13 +258,13 @@ Space 是全局 Theme 的标准 CSS host surface：组件直接消费 root seman
 - component DOM：Hero、xterm、Monaco、Mermaid、Prism、Widget 原位更新；
 - floating DOM：snapshot → durable config → Tauri live event；
 - architecture unit + dependency-cruiser：禁止 consumer 直引 internals、禁止本地 palette/MutationObserver 回流；
-- preset contract：accepted IDs/名称/顺序精确等于九套，设置下拉直接映射 Registry 的显式产品顺序；七套 preset-built
+- preset contract：accepted IDs/名称/顺序精确等于十套；小鲸产品不暴露设置下拉，但 Registry 顺序仍供完整性测试与旧代码使用；八套 preset-built
   Theme 的正文和实色主动作对比度不低于 4.5:1，`myagents-light` / `default-black` 分别验证新增黑色主按钮对比度并
   逐 Token 锁定其余值等于 Claude / canonical；`verify:theme-presets` 先按 Vite production 使用的
-  esbuild CSS minifier 序列化八套实际 optional stylesheet，再经 optional factory 完成精确九套 Registry
+  esbuild CSS minifier 序列化九套实际 optional stylesheet，再经 optional factory 完成精确十套 Registry
   注册并逐套 resolve light/dark；
-- structural surface contract：九套生产 Theme 的 light/dark 都必须让 `--global-sidebar-bg` 的亮度严格位于 `--paper` 与 `--paper-inset` 之间，并与 `--paper-elevated` 保持不同值；`GlobalSidebar` 是唯一宿主消费点，右侧页面、卡片和顶部 Tab 栏不随该 Token 改写；
-- dark control contrast：九套 Theme 的 Primary 正常/hover 均验证 4.5:1，深色 action
+- structural surface contract：十套生产 Theme 的 light/dark 都必须让 `--global-sidebar-bg` 的亮度严格位于 `--paper` 与 `--paper-inset` 之间，并与 `--paper-elevated` 保持不同值；消费点限定为 App Shell chrome，以及小鲸品牌侧栏和 GEO 工作台，普通页面与卡片不得借用该结构 Token；
+- dark control contrast：十套 Theme 的 Primary 正常/hover 均验证 4.5:1，深色 action
   surface 锁定白色/近白前景；全部 production Theme 的 dark Switch thumb 锁定为白色/近白控制面；
 - build smoke：`build:web` 串行执行 `verify:theme-css` 与 `verify:theme-presets`；前者读取实际
   `dist/assets/*.css`，验证 font/radius/shadow/duration utility 仍引用 runtime Theme Token，且 bundle

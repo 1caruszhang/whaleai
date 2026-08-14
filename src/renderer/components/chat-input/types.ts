@@ -133,6 +133,8 @@ export interface SimpleChatInputProps {
   workspaceSlashCommands?: SlashCommand[];
   sdkSlashCommands?: SlashCommand[];
   mode?: 'chat' | 'launcher';
+  /** Product surface controls which composer capabilities are intentionally exposed. */
+  capabilitySurface?: 'general' | 'geo';
   toolbarPrefix?: React.ReactNode;
   contextIndicator?: React.ReactNode;
   runtime?: RuntimeType;
