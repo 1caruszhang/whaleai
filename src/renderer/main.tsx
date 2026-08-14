@@ -180,7 +180,7 @@ if (tauriWindowLabel === 'fb-ball') {
     <AppErrorBoundary>
       <BootCommitMarker />
       <ConfigProvider>
-        <XiaojingThemeRuntime>
+        <XiaojingThemeRuntime ownsMainWindowBridge>
           <XiaojingI18nSync />
           <ToastProvider>
             <ImagePreviewProvider>

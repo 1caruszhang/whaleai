@@ -186,10 +186,27 @@ describe('Theme architecture guardrails', () => {
     const launcher = source('src/renderer/components/launcher/BrandSection.tsx');
     const settings = source('src/renderer/pages/settings/SettingsPage.tsx');
     const sidebar = source('src/renderer/components/global-sidebar/GlobalSidebar.tsx');
+    const xiaojingSidebar = source('src/renderer/components/xiaojing/XiaojingSidebar.tsx');
     expect(launcher).toContain('<h1 className="theme-product-wordmark theme-launcher-hero-title">');
     expect(settings).toContain('className="theme-product-wordmark theme-launcher-hero-title cursor-default select-none"');
     expect(sidebar).toContain('className="theme-product-wordmark global-sidebar-copy min-w-0 truncate text-sm font-medium"');
+    expect(xiaojingSidebar).toContain('className="theme-product-wordmark truncate text-base font-semibold"');
+    expect(settings).toContain('resolvedTheme.hero.productName');
+    expect(settings).toContain("resolvedTheme.hero.slogans['zh-CN']");
     expect(settings).not.toContain('className="brand-title');
+  });
+
+  it('keeps Xiaojing transparent endpoints on the same RGB as their dark surfaces', () => {
+    const stylesheet = source('src/renderer/theme/themes/xiaojing.css');
+    for (const declaration of [
+      '--global-sidebar-bg-a0: rgb(16 18 22 / 0)',
+      '--paper-a0: rgb(19 21 24 / 0)',
+      '--paper-elevated-a0: rgb(29 32 35 / 0)',
+      '--message-user-bg-a0: rgb(34 38 42 / 0)',
+      '--paper-inset-a0: rgb(13 15 18 / 0)',
+    ]) {
+      expect(stylesheet).toContain(declaration);
+    }
   });
 
   it('keeps Space inside the app-level Theme scope', () => {
@@ -344,7 +361,9 @@ describe('Theme architecture guardrails', () => {
     expect(settings).not.toContain('languageOptions');
     expect(runtime).toContain("themeId: 'xiaojing'");
     expect(runtime).toContain("appearanceMode: 'dark'");
+    expect(runtime).toContain('ownsMainWindowBridge = false');
     expect(main).toContain('<XiaojingThemeRuntime>');
+    expect(main).toContain('<XiaojingThemeRuntime ownsMainWindowBridge>');
     expect(main).toContain('<XiaojingI18nSync />');
   });
 

@@ -242,6 +242,84 @@ vi.mock('@/components/global-sidebar/GlobalSidebar', () => ({
   },
 }));
 
+vi.mock('@/components/xiaojing/XiaojingSidebar', () => ({
+  default: function MockXiaojingSidebar(props: {
+    onOpenWorkspace: (workspace: {
+      id: string;
+      name: string;
+      productLines: string[];
+      rootPath: string;
+      createdAt: string;
+      updatedAt: string;
+    }) => Promise<boolean>;
+    onOpenSession: (
+      session: {
+        id: string;
+        workspaceId: string;
+        title: string;
+        titleSource: 'user';
+        createdAt: string;
+        lastActiveAt: string;
+      },
+      workspace: {
+        id: string;
+        name: string;
+        productLines: string[];
+        rootPath: string;
+        createdAt: string;
+        updatedAt: string;
+      },
+    ) => Promise<boolean>;
+  }) {
+    const deleteSession = useContext(SessionDeletionContext);
+    const asWorkspace = (project: typeof mocks.project) => ({
+      id: project.id,
+      name: project.displayName,
+      productLines: [],
+      rootPath: project.path,
+      createdAt: '2026-08-14T00:00:00.000Z',
+      updatedAt: '2026-08-14T00:00:00.000Z',
+    });
+    mocks.sidebarProps.push({
+      onOpenCapabilities: () => window.dispatchEvent(new CustomEvent(CUSTOM_EVENTS.OPEN_SETTINGS, {
+        detail: { section: 'skills' },
+      })),
+      onOpenSettings: () => window.dispatchEvent(new CustomEvent(CUSTOM_EVENTS.OPEN_SETTINGS, {
+        detail: { section: 'general' },
+      })),
+      onOpenTaskCenter: () => window.dispatchEvent(new CustomEvent(CUSTOM_EVENTS.OPEN_TASK_CENTER)),
+      onOpenSpace: () => window.dispatchEvent(new CustomEvent(CUSTOM_EVENTS.OPEN_SPACE)),
+      onOpenWorkspace: (project: typeof mocks.project) => props.onOpenWorkspace(asWorkspace(project)),
+      onOpenSession: (
+        session: {
+          id: string;
+          title: string;
+          createdAt: string;
+          lastActiveAt: string;
+        },
+        project: typeof mocks.project,
+      ) => props.onOpenSession({
+        ...session,
+        workspaceId: project.id,
+        titleSource: 'user',
+      }, asWorkspace(project)),
+    });
+    return (
+      <aside data-testid="xiaojing-sidebar">
+        <button
+          data-testid="app-delete-session"
+          onClick={() => {
+            if (!mocks.deleteTargetSessionId || !deleteSession) return;
+            void deleteSession(mocks.deleteTargetSessionId).then((result) => {
+              mocks.deleteResults.push(result);
+            });
+          }}
+        />
+      </aside>
+    );
+  },
+}));
+
 vi.mock('@/components/LinkContextMenuProvider', () => ({
   default: ({ children }: { children: React.ReactNode }) => <>{children}</>,
 }));
@@ -444,7 +522,16 @@ vi.mock('@/config/services/agentConfigService', () => ({
   getAgentById: vi.fn(() => mocks.agent),
 }));
 
-import App from './App';
+import { XiaojingThemeRuntime } from '@/theme';
+import ProductApp from './App';
+
+function App() {
+  return (
+    <XiaojingThemeRuntime>
+      <ProductApp />
+    </XiaojingThemeRuntime>
+  );
+}
 
 describe('App helper launch', () => {
   afterEach(() => {
@@ -514,9 +601,8 @@ describe('App helper launch', () => {
 
   function latestSidebarProps() {
     const props = mocks.sidebarProps.at(-1);
-    if (!props) throw new Error('GlobalSidebar props were not captured');
+    if (!props) throw new Error('Sidebar props were not captured');
     return props as {
-      onNewTab: () => void;
       onOpenCapabilities: () => void;
       onOpenSettings: () => void;
       onOpenTaskCenter: () => void;
@@ -549,7 +635,7 @@ describe('App helper launch', () => {
     return props;
   }
 
-  it('reuses the leftmost Launcher from the sidebar while the Tab plus keeps creating', () => {
+  it('keeps the Tab plus creating independent Launcher tabs', () => {
     render(<App />);
     const firstLauncherId = latestTabbarProps().tabs[0].id;
 
@@ -557,16 +643,12 @@ describe('App helper launch', () => {
     expect(latestTabbarProps().tabs).toHaveLength(2);
     expect(latestTabbarProps().activeTabId).not.toBe(firstLauncherId);
 
-    act(() => latestSidebarProps().onNewTab());
-    expect(latestTabbarProps().tabs).toHaveLength(2);
-    expect(latestTabbarProps().activeTabId).toBe(firstLauncherId);
-
     act(() => latestTabbarProps().onNewTab());
     expect(latestTabbarProps().tabs).toHaveLength(3);
     expect(latestTabbarProps().activeTabId).toBe(latestTabbarProps().tabs[2].id);
   });
 
-  it('creates a Launcher from the sidebar when no Launcher Tab exists', async () => {
+  it('creates a Launcher from the Tab plus when no Launcher Tab exists', async () => {
     render(<App />);
 
     await act(async () => {
@@ -574,7 +656,7 @@ describe('App helper launch', () => {
     });
     expect(latestTabbarProps().tabs.some((tab) => tab.view === 'launcher')).toBe(false);
 
-    act(() => latestSidebarProps().onNewTab());
+    act(() => latestTabbarProps().onNewTab());
     const current = latestTabbarProps();
     expect(current.tabs).toHaveLength(2);
     expect(current.tabs.find((tab) => tab.id === current.activeTabId)?.view).toBe('launcher');

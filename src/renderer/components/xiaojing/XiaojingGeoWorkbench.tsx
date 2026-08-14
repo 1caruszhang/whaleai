@@ -153,7 +153,7 @@ export default memo(function XiaojingGeoWorkbench({
             </h3>
             <p className="mt-2 text-xs leading-5 text-[var(--ink-muted)]">
               {currentWorkspace
-                ? "当前没有运行中的 GEO 操作。你可以在下方选择一项能力，小鲸会先和你确认目标。"
+                ? "选择一项能力后，小鲸会先在会话中确认目标，再创建受控的 GEO 操作。"
                 : "先在左侧选择品牌，再启动 GEO 能力。"}
             </p>
           </div>
@@ -177,7 +177,7 @@ export default memo(function XiaojingGeoWorkbench({
                   void startCapability(capability);
                 }}
                 disabled={!currentWorkspace || startingPrompt !== null}
-                className="group flex w-full items-start gap-3 rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-3 text-left transition-[border-color,background-color,transform] hover:-translate-y-px hover:border-[var(--accent)]/45 hover:bg-[var(--hover-bg)] disabled:translate-y-0 disabled:opacity-55"
+                className="flex w-full items-start gap-3 rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-3 text-left transition-shadow hover:shadow-sm disabled:opacity-55"
               >
                 <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-[var(--accent-warm-subtle)] text-[var(--accent)]">
                   <Icon
@@ -192,7 +192,7 @@ export default memo(function XiaojingGeoWorkbench({
                     {capability.description}
                   </span>
                 </span>
-                <ChevronRight className="mt-2 h-3.5 w-3.5 shrink-0 text-[var(--ink-subtle)] transition-transform group-hover:translate-x-0.5 group-hover:text-[var(--accent)]" />
+                <ChevronRight className="mt-2 h-3.5 w-3.5 shrink-0 text-[var(--ink-subtle)]" />
               </button>
             );
           })}

@@ -1,4 +1,5 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import type { ComponentProps } from 'react';
 import { describe, expect, it, vi } from 'vitest';
 
 import type {
@@ -7,7 +8,16 @@ import type {
   BrandWorkspace,
 } from '@/api/brandWorkspaceClient';
 import type { BrandWorkspaceState } from '@/hooks/useBrandWorkspaces';
-import XiaojingSidebar from './XiaojingSidebar';
+import { XiaojingThemeRuntime } from '@/theme';
+import ProductSidebar from './XiaojingSidebar';
+
+function XiaojingSidebar(props: ComponentProps<typeof ProductSidebar>) {
+  return (
+    <XiaojingThemeRuntime>
+      <ProductSidebar {...props} />
+    </XiaojingThemeRuntime>
+  );
+}
 
 const workspace: BrandWorkspace = {
   id: 'brand-alpha',

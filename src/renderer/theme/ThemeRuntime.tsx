@@ -220,7 +220,13 @@ export function ConfiguredThemeRuntime({ children }: { children: React.ReactNode
 }
 
 /** Focused Xiaojing product runtime intentionally exposes one visual mode. */
-export function XiaojingThemeRuntime({ children }: { children: React.ReactNode }) {
+export function XiaojingThemeRuntime({
+  children,
+  ownsMainWindowBridge = false,
+}: {
+  children: React.ReactNode;
+  ownsMainWindowBridge?: boolean;
+}) {
   const selection = useMemo<ThemeSelection>(() => ({
     themeId: 'xiaojing',
     appearanceMode: 'dark',
@@ -229,8 +235,8 @@ export function XiaojingThemeRuntime({ children }: { children: React.ReactNode }
     <ThemeRuntimeProvider
       selection={selection}
       selectionExplicit
-      broadcastSelection
-      syncNativeWindowBackground
+      broadcastSelection={ownsMainWindowBridge}
+      syncNativeWindowBackground={ownsMainWindowBridge}
     >
       {children}
     </ThemeRuntimeProvider>

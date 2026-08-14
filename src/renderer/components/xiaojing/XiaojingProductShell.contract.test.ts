@@ -19,16 +19,19 @@ describe("Xiaojing product shell contract", () => {
     expect(app).not.toContain("onOpenCapabilities={handleOpenCapabilities}");
   });
 
-  it("keeps the empty-operation workbench honest and actionable", () => {
+  it("keeps the workbench honest without inventing GeoOperation state", () => {
     const workbench = source(
       "src/renderer/components/xiaojing/XiaojingGeoWorkbench.tsx",
     );
-    expect(workbench).toContain("当前没有运行中的 GEO 操作");
+    expect(workbench).not.toContain("当前没有运行中的 GEO 操作");
+    expect(workbench).toContain("选择一项能力后，小鲸会先在会话中确认目标");
     expect(workbench).toContain("xiaojing:geo-workbench-collapsed");
     expect(workbench).toContain("完整 GEO 优化");
     expect(workbench).toContain("问题机会发现");
     expect(workbench).toContain("生成 GEO 内容");
     expect(workbench).toContain("GEO 效果检测");
+    expect(workbench).not.toContain("hover:-translate-y-px");
+    expect(workbench).not.toContain("hover:border-[var(--accent)]/45");
     expect(workbench).toMatch(/await onOpenWorkspace\(\s*currentWorkspace,\s*\{ text: capability\.prompt \}/);
   });
 
@@ -63,6 +66,8 @@ describe("Xiaojing product shell contract", () => {
     expect(product).toMatch(/internalName:\s*["']Xiaojing["']/);
     expect(launcher).toContain("variant === 'xiaojing'");
     expect(launcher).toContain('capabilitySurface="geo"');
+    expect(launcher).toContain('resolvedTheme.hero.productName');
+    expect(launcher).toContain("resolvedTheme.hero.slogans['zh-CN']");
     expect(input).toContain("const isGeoSurface = capabilitySurface === 'geo'");
     expect(input).toContain("{!isGeoSurface && (");
     expect(entry).toContain('lang="zh-CN"');
@@ -70,5 +75,6 @@ describe("Xiaojing product shell contract", () => {
     expect(entry).not.toContain("localStorage.getItem('myagents:theme-bootstrap')");
     expect(main).toContain('<XiaojingI18nSync />');
     expect(main).toContain('<XiaojingThemeRuntime>');
+    expect(main).toContain('<XiaojingThemeRuntime ownsMainWindowBridge>');
   });
 });

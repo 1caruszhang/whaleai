@@ -39,7 +39,6 @@ import type { Thought } from '../../../shared/types/thought';
 import type { OfficialToolDefinition, OfficialToolId } from '../../../shared/official-tools';
 import { useResolvedTheme } from '@/theme';
 import xiaojingWhale from '@/assets/brand/xiaojing-whale.svg';
-import { XIAOJING_PRODUCT } from '../../../shared/product';
 
 interface BrandSectionProps {
     variant?: 'default' | 'xiaojing';
@@ -569,8 +568,8 @@ export default memo(function BrandSection({
                 <div className="mb-7 flex max-w-[680px] flex-col items-center text-center">
                     <img src={xiaojingWhale} alt="" className="h-20 w-20 rounded-2xl shadow-[var(--shadow-lg)]" />
                     <span className="mt-5 rounded-full border border-[var(--accent)]/25 bg-[var(--accent-warm-subtle)] px-3 py-1 text-xs font-semibold tracking-[0.18em] text-[var(--accent)]">GEO 营销</span>
-                    <h1 className="mt-4 text-3xl font-semibold tracking-tight text-[var(--ink)]">你好，我是{XIAOJING_PRODUCT.displayName}</h1>
-                    <p className="mt-2 text-sm text-[var(--ink-muted)]">{XIAOJING_PRODUCT.tagline}</p>
+                    <h1 className="theme-product-wordmark mt-4 text-3xl font-semibold">你好，我是{resolvedTheme.hero.productName}</h1>
+                    <p className="mt-2 text-sm text-[var(--ink-muted)]">{resolvedTheme.hero.slogans['zh-CN']}</p>
                 </div>
 
                 <div className="mb-4 grid w-full max-w-[680px] grid-cols-2 gap-2.5">

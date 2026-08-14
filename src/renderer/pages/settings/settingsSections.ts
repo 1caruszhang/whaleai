@@ -27,8 +27,8 @@ export const VALID_SECTIONS: SettingsSection[] = [
   'about',
 ];
 
-export const MYAGENTS_GITHUB_URL = 'https://github.com/hAcKlyc/MyAgents';
-export const MYAGENTS_RELEASES_URL = `${MYAGENTS_GITHUB_URL}/releases`;
+export const WHALEAI_GITHUB_URL = 'https://github.com/1caruszhang/whaleai';
+export const WHALEAI_RELEASES_URL = `${WHALEAI_GITHUB_URL}/releases`;
 
 export const PLAYWRIGHT_DEVICE_PRESETS = [
   'iPhone 15 Pro',

@@ -68,6 +68,7 @@ import {
     rebuildAndPersistAvailableProviders,
 } from '@/config/configService';
 import { useConfig } from '@/hooks/useConfig';
+import { useResolvedTheme } from '@/theme';
 import { useSpaceBuildCapability } from '@/hooks/useSpaceBuildCapability';
 import { SpaceEnvironmentSwitch } from './components/SpaceEnvironmentSwitch';
 import { actions as spaceActions } from '@/pages/space/spaceStore';
@@ -112,8 +113,8 @@ import {
     setNativeFloatingBallEnabled,
 } from '@/floating-ball/nativeFloatingBall';
 import {
-    MYAGENTS_GITHUB_URL,
-    MYAGENTS_RELEASES_URL,
+    WHALEAI_GITHUB_URL,
+    WHALEAI_RELEASES_URL,
     PLAYWRIGHT_DEVICE_PRESETS,
 } from './settingsSections';
 import {
@@ -264,6 +265,7 @@ export default function Settings({ mode = 'settings', initialSection, navigation
     } = useConfig();
     const spaceBuildCapability = useSpaceBuildCapability(config.spaceEnvironment);
     const toast = useToast();
+    const resolvedTheme = useResolvedTheme();
     const { t: tSettings } = useTranslation('settings');
     // Stabilize toast reference to avoid unnecessary effect re-runs
     const toastRef = useRef(toast);
@@ -4865,7 +4867,7 @@ export default function Settings({ mode = 'settings', initialSection, navigation
                                         className="theme-product-wordmark theme-launcher-hero-title cursor-default select-none"
                                         onClick={handleLogoTap}
                                     >
-                                        MyAgents
+                                        {resolvedTheme.hero.productName}
                                     </h1>
                                     <div className="mt-1 flex items-center gap-2">
                                         <p className="text-sm font-medium text-[var(--ink-muted)]">
@@ -4900,14 +4902,14 @@ export default function Settings({ mode = 'settings', initialSection, navigation
                                             </button>
                                         )}
                                         <ExternalLink
-                                            href={MYAGENTS_RELEASES_URL}
+                                            href={WHALEAI_RELEASES_URL}
                                             className="rounded-lg bg-[var(--paper-inset)] px-2 py-0.5 text-xs text-[var(--ink-secondary)] transition-colors hover:bg-[var(--paper-elevated)]"
                                         >
                                             {tSettings('about.releaseNotes')}
                                         </ExternalLink>
                                     </div>
                                     <p className="mt-3 text-base text-[var(--ink-secondary)]">
-                                        {tSettings('about.slogan')}
+                                        {resolvedTheme.hero.slogans['zh-CN']}
                                     </p>
                                     {updateDownloading && propUpdateVersion && (
                                         <div className="mt-3 space-y-2">
@@ -5113,10 +5115,10 @@ export default function Settings({ mode = 'settings', initialSection, navigation
                                     <div>
                                         <p className="text-xs font-medium uppercase tracking-wider text-[var(--ink-muted)]">GitHub</p>
                                         <ExternalLink
-                                            href={MYAGENTS_GITHUB_URL}
+                                            href={WHALEAI_GITHUB_URL}
                                             className="mt-1 block text-[var(--accent)] hover:underline"
                                         >
-                                            github.com/hAcKlyc/MyAgents
+                                            github.com/1caruszhang/whaleai
                                         </ExternalLink>
                                     </div>
                                 </div>
