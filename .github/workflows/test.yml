@@ -33,6 +33,12 @@ jobs:
       - run: npm run lint
       - run: npm run test:classification
       - run: npm run test:build-scripts
+      # Keep js_ai behavioral parity visible as its own product gate. These
+      # tests are also part of the unit project, but the named step makes a GEO
+      # regression immediately identifiable in Actions instead of hiding it
+      # among thousands of unrelated unit assertions.
+      - name: GEO behavior contract
+        run: npm run test:geo-contract
       - run: npm run test:unit
       # `dom` project (jsdom, no secrets) holds security-invariant tests —
       # externalResourceGuard (zero-egress) + WidgetRenderer (about:srcdoc
