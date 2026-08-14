@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 const CATALOG_FILE: &str = "brands.json";
+const SESSION_DELETION_ADMISSION_STALE_SECONDS: i64 = 60;
 const BRAND_DIRS: [&str; 5] = [
     "materials",
     "operations",
@@ -347,13 +348,34 @@ impl BrandWorkspaceStore {
             .transaction()
             .map_err(|error| format!("start deletion preview: {error}"))?;
         let token = Uuid::new_v4().to_string();
-        let expires_at = Utc::now().timestamp() + 300;
+        let now = Utc::now().timestamp();
+        let expires_at = now + 300;
         transaction
             .execute(
-                "DELETE FROM session_deletion_intents WHERE session_id = ?1 OR expires_at < ?2",
-                params![session_id, Utc::now().timestamp()],
+                "DELETE FROM session_deletion_intents
+                 WHERE (admitted_at IS NULL AND expires_at < ?1)
+                    OR admitted_at < ?2",
+                params![now, now - SESSION_DELETION_ADMISSION_STALE_SECONDS],
             )
             .map_err(|error| format!("clear stale deletion preview: {error}"))?;
+        let in_progress: i64 = transaction
+            .query_row(
+                "SELECT COUNT(*) FROM session_deletion_intents
+                 WHERE session_id = ?1 AND admitted_at IS NOT NULL",
+                [session_id],
+                |row| row.get(0),
+            )
+            .map_err(|error| format!("check deletion admission: {error}"))?;
+        if in_progress > 0 {
+            return Err("会话删除正在进行中".to_string());
+        }
+        transaction
+            .execute(
+                "DELETE FROM session_deletion_intents
+                 WHERE session_id = ?1 AND admitted_at IS NULL",
+                [session_id],
+            )
+            .map_err(|error| format!("replace deletion preview: {error}"))?;
         transaction
             .execute(
                 "INSERT INTO session_deletion_intents (token, session_id, expires_at)
@@ -378,47 +400,105 @@ impl BrandWorkspaceStore {
         })
     }
 
-    pub fn delete_session(
+    #[cfg(test)]
+    fn delete_session(
         &self,
         workspace_id: &str,
         session_id: &str,
         confirmation_token: &str,
     ) -> Result<(), String> {
-        self.with_confirmed_session_deletion(workspace_id, session_id, confirmation_token, || {
-            Ok(((), true))
-        })
-        .map(|_| ())
+        self.admit_session_deletion(workspace_id, session_id, confirmation_token)?;
+        self.mark_session_transcript_deleted(workspace_id, session_id, confirmation_token)?;
+        self.finalize_session_deletion(workspace_id, session_id, confirmation_token)
     }
 
-    /// Run transcript deletion and brand-index deletion under one admission.
-    /// A refused or failed transcript mutation rolls the SQLite transaction
-    /// back, so callers can never consume the confirmation or remove the
-    /// BrandSession projection before the lifecycle owner accepts deletion.
-    pub(crate) fn with_confirmed_session_deletion<T, F>(
+    /// Persist a one-use deletion admission without holding a database lock
+    /// across the transcript mutation owned by the Session lifecycle fence.
+    pub(crate) fn admit_session_deletion(
         &self,
         workspace_id: &str,
         session_id: &str,
         confirmation_token: &str,
-        operation: F,
-    ) -> Result<(T, bool), String>
-    where
-        F: FnOnce() -> Result<(T, bool), String>,
-    {
+    ) -> Result<(), String> {
         validate_session_id(session_id)?;
         let workspace = self.workspace(workspace_id)?;
-        let mut connection = open_database(&workspace)?;
-        let transaction = connection
-            .transaction()
-            .map_err(|error| format!("start brand session deletion: {error}"))?;
-        let admitted = transaction
+        let connection = open_database(&workspace)?;
+        let admitted = connection
             .execute(
-                "DELETE FROM session_deletion_intents
-                 WHERE token = ?1 AND session_id = ?2 AND expires_at >= ?3",
+                "UPDATE session_deletion_intents
+                 SET admitted_at = ?3, transcript_deleted_at = NULL
+                 WHERE token = ?1 AND session_id = ?2 AND expires_at >= ?3
+                   AND admitted_at IS NULL",
                 params![confirmation_token, session_id, Utc::now().timestamp()],
             )
             .map_err(|error| format!("verify deletion confirmation: {error}"))?;
         if admitted != 1 {
             return Err("删除确认已失效，请重新确认关联范围".to_string());
+        }
+        Ok(())
+    }
+
+    pub(crate) fn cancel_session_deletion_admission(
+        &self,
+        workspace_id: &str,
+        session_id: &str,
+        confirmation_token: &str,
+    ) -> Result<(), String> {
+        let workspace = self.workspace(workspace_id)?;
+        let connection = open_database(&workspace)?;
+        connection
+            .execute(
+                "DELETE FROM session_deletion_intents
+                 WHERE token = ?1 AND session_id = ?2 AND transcript_deleted_at IS NULL",
+                params![confirmation_token, session_id],
+            )
+            .map_err(|error| format!("cancel deletion admission: {error}"))?;
+        Ok(())
+    }
+
+    pub(crate) fn mark_session_transcript_deleted(
+        &self,
+        workspace_id: &str,
+        session_id: &str,
+        confirmation_token: &str,
+    ) -> Result<(), String> {
+        let workspace = self.workspace(workspace_id)?;
+        let connection = open_database(&workspace)?;
+        let changed = connection
+            .execute(
+                "UPDATE session_deletion_intents
+                 SET transcript_deleted_at = ?3
+                 WHERE token = ?1 AND session_id = ?2 AND admitted_at IS NOT NULL",
+                params![confirmation_token, session_id, Utc::now().timestamp()],
+            )
+            .map_err(|error| format!("mark transcript deletion: {error}"))?;
+        if changed != 1 {
+            return Err("删除 admission 不存在".to_string());
+        }
+        Ok(())
+    }
+
+    pub(crate) fn finalize_session_deletion(
+        &self,
+        workspace_id: &str,
+        session_id: &str,
+        confirmation_token: &str,
+    ) -> Result<(), String> {
+        let workspace = self.workspace(workspace_id)?;
+        let mut connection = open_database(&workspace)?;
+        let transaction = connection
+            .transaction()
+            .map_err(|error| format!("start brand deletion finalize: {error}"))?;
+        let ready: i64 = transaction
+            .query_row(
+                "SELECT COUNT(*) FROM session_deletion_intents
+                 WHERE token = ?1 AND session_id = ?2 AND transcript_deleted_at IS NOT NULL",
+                params![confirmation_token, session_id],
+                |row| row.get(0),
+            )
+            .map_err(|error| format!("verify transcript deletion: {error}"))?;
+        if ready != 1 {
+            return Err("聊天记录删除尚未完成".to_string());
         }
         let deleted = transaction
             .execute("DELETE FROM brand_sessions WHERE id = ?1", [session_id])
@@ -426,17 +506,9 @@ impl BrandWorkspaceStore {
         if deleted != 1 {
             return Err("会话不存在".to_string());
         }
-        let (result, accepted) = operation()?;
-        if accepted {
-            transaction
-                .commit()
-                .map_err(|error| format!("commit brand session deletion: {error}"))?;
-        } else {
-            transaction
-                .rollback()
-                .map_err(|error| format!("rollback refused brand session deletion: {error}"))?;
-        }
-        Ok((result, accepted))
+        transaction
+            .commit()
+            .map_err(|error| format!("commit brand session deletion: {error}"))
     }
 
     fn session(
@@ -586,10 +658,24 @@ fn initialize_database(workspace: &BrandWorkspace) -> Result<(), String> {
              CREATE TABLE IF NOT EXISTS session_deletion_intents (
                 token TEXT PRIMARY KEY,
                 session_id TEXT NOT NULL REFERENCES brand_sessions(id) ON DELETE CASCADE,
-                expires_at INTEGER NOT NULL
+                expires_at INTEGER NOT NULL,
+                admitted_at INTEGER,
+                transcript_deleted_at INTEGER
              );",
         )
         .map_err(|error| format!("initialize brand database: {error}"))?;
+    ensure_column(
+        &connection,
+        "session_deletion_intents",
+        "admitted_at",
+        "INTEGER",
+    )?;
+    ensure_column(
+        &connection,
+        "session_deletion_intents",
+        "transcript_deleted_at",
+        "INTEGER",
+    )?;
     connection
         .execute(
             "INSERT OR REPLACE INTO brand_workspace
@@ -607,6 +693,40 @@ fn initialize_database(workspace: &BrandWorkspace) -> Result<(), String> {
     Ok(())
 }
 
+fn ensure_column(
+    connection: &Connection,
+    table: &str,
+    column: &str,
+    declaration: &str,
+) -> Result<(), String> {
+    if column_exists(connection, table, column)? {
+        return Ok(());
+    }
+    if let Err(error) = connection.execute_batch(&format!(
+        "ALTER TABLE {table} ADD COLUMN {column} {declaration}"
+    )) {
+        // Another Session process may have completed the same idempotent
+        // migration after our PRAGMA read but before ALTER acquired the schema
+        // lock. Re-read before surfacing the error.
+        if !column_exists(connection, table, column)? {
+            return Err(format!("upgrade brand database schema: {error}"));
+        }
+    }
+    Ok(())
+}
+
+fn column_exists(connection: &Connection, table: &str, column: &str) -> Result<bool, String> {
+    let mut statement = connection
+        .prepare(&format!("PRAGMA table_info({table})"))
+        .map_err(|error| format!("inspect brand database schema: {error}"))?;
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(|error| format!("read brand database schema: {error}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("collect brand database schema: {error}"))?;
+    Ok(columns.iter().any(|candidate| candidate == column))
+}
+
 fn open_database(workspace: &BrandWorkspace) -> Result<Connection, String> {
     let connection = Connection::open(workspace.root_path.join("project.sqlite"))
         .map_err(|error| format!("open brand database: {error}"))?;
@@ -616,6 +736,28 @@ fn open_database(workspace: &BrandWorkspace) -> Result<Connection, String> {
     connection
         .execute_batch("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;")
         .map_err(|error| format!("configure brand database: {error}"))?;
+    let has_deletion_intents: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master
+             WHERE type = 'table' AND name = 'session_deletion_intents'",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|error| format!("inspect brand database migration state: {error}"))?;
+    if has_deletion_intents == 1 {
+        ensure_column(
+            &connection,
+            "session_deletion_intents",
+            "admitted_at",
+            "INTEGER",
+        )?;
+        ensure_column(
+            &connection,
+            "session_deletion_intents",
+            "transcript_deleted_at",
+            "INTEGER",
+        )?;
+    }
     Ok(connection)
 }
 
@@ -943,17 +1085,21 @@ mod tests {
             .delete_session(&brand.id, "session-a", "wrong-token")
             .is_err());
 
-        let refused = store
-            .with_confirmed_session_deletion(
-                &brand.id,
-                "session-a",
-                &preview.confirmation_token,
-                || Ok(("refused", false)),
-            )
+        store
+            .admit_session_deletion(&brand.id, "session-a", &preview.confirmation_token)
             .unwrap();
-        assert_eq!(refused, ("refused", false));
+        assert_eq!(store.list_sessions(&brand.id, true).unwrap().len(), 1);
+        store
+            .rename_session(&brand.id, "session-a", "并发写仍可提交")
+            .unwrap();
+        store
+            .cancel_session_deletion_admission(&brand.id, "session-a", &preview.confirmation_token)
+            .unwrap();
         assert_eq!(store.list_sessions(&brand.id, true).unwrap().len(), 1);
 
+        let preview = store
+            .preview_session_deletion(&brand.id, "session-a")
+            .unwrap();
         store
             .delete_session(&brand.id, "session-a", &preview.confirmation_token)
             .unwrap();

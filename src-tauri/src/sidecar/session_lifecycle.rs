@@ -1636,11 +1636,41 @@ pub async fn cmd_delete_session_if_unowned(
             };
             delete_authority
         };
-        let delete_dispatch = match manager.acquire_global_dispatch() {
-            Ok(dispatch) => dispatch,
-            Err(_) => return Ok(SessionDeleteCommandResult::refused("authority-unavailable")),
-        };
         drop(manager);
+        let brand_deletion = match (
+            brandWorkspaceId.as_deref(),
+            brandDeletionConfirmationToken.as_deref(),
+        ) {
+            (Some(workspace_id), Some(confirmation_token)) => {
+                let store = crate::brand_workspace::production_store()?;
+                store.admit_session_deletion(workspace_id, &sessionId, confirmation_token)?;
+                Some((store, workspace_id, confirmation_token))
+            }
+            (None, None) => None,
+            _ => return Err("Brand deletion requires workspace and confirmation token".into()),
+        };
+        let cancel_brand_admission = || {
+            if let Some((store, workspace_id, confirmation_token)) = &brand_deletion {
+                if let Err(error) = store.cancel_session_deletion_admission(
+                    workspace_id,
+                    &sessionId,
+                    confirmation_token,
+                ) {
+                    ulog_warn!("[brand-workspace] failed to cancel deletion admission: {error}");
+                }
+            }
+        };
+        let delete_dispatch = {
+            let mut manager = sidecars.lock().map_err(|error| error.to_string())?;
+            match manager.acquire_global_dispatch() {
+                Ok(dispatch) => dispatch,
+                Err(_) => {
+                    drop(manager);
+                    cancel_brand_admission();
+                    return Ok(SessionDeleteCommandResult::refused("authority-unavailable"));
+                }
+            }
+        };
         let delete_transcript = || -> Result<(SessionDeleteCommandResult, bool), String> {
             let client = crate::local_http::blocking_builder()
                 .timeout(Duration::from_secs(15))
@@ -1672,27 +1702,23 @@ pub async fn cmd_delete_session_if_unowned(
                 }
             }
         };
-        let (result, terminal) = match (
-            brandWorkspaceId.as_deref(),
-            brandDeletionConfirmationToken.as_deref(),
-        ) {
-            (Some(workspace_id), Some(confirmation_token)) => {
-                let store = crate::brand_workspace::production_store()?;
-                store.with_confirmed_session_deletion(
-                    workspace_id,
-                    &sessionId,
-                    confirmation_token,
-                    delete_transcript,
-                )?
-            }
-            (None, None) => delete_transcript()?,
-            _ => return Err("Brand deletion requires workspace and confirmation token".into()),
-        };
-        // The lease ends after both storage authorities have accepted the
-        // deletion, before owner release or Tauri/WebKit IPC delivery.
+        let deletion = delete_transcript();
+        // The dispatch lease covers only request/response materialization.
         drop(delete_dispatch);
+        let (result, terminal) = match deletion {
+            Ok(deletion) => deletion,
+            Err(error) => {
+                cancel_brand_admission();
+                return Err(error);
+            }
+        };
         if !terminal {
+            cancel_brand_admission();
             return Ok(result);
+        }
+        if let Some((store, workspace_id, confirmation_token)) = &brand_deletion {
+            store.mark_session_transcript_deleted(workspace_id, &sessionId, confirmation_token)?;
+            store.finalize_session_deletion(workspace_id, &sessionId, confirmation_token)?;
         }
 
         // Success and not-found are both terminal/idempotent outcomes. Release

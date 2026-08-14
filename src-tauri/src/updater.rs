@@ -84,18 +84,17 @@ struct PendingUpdateMeta {
     version: String,
 }
 
-/// Get the ~/.myagents/ directory path
+/// Get the Xiaojing application-owned local-data directory.
 #[cfg(target_os = "windows")]
-fn get_myagents_dir() -> Result<std::path::PathBuf, String> {
-    let home = dirs::home_dir().ok_or("Cannot determine home directory")?;
-    Ok(home.join(".myagents"))
+fn get_xiaojing_dir() -> Result<std::path::PathBuf, String> {
+    crate::app_dirs::xiaojing_data_dir().ok_or("Cannot determine local data directory".into())
 }
 
 /// Atomically save pending update bytes + metadata to disk
 /// Writes to .tmp first, then renames to avoid partial files
 #[cfg(target_os = "windows")]
 fn save_pending_update_to_disk(version: &str, bytes: &[u8]) -> Result<(), String> {
-    let dir = get_myagents_dir()?;
+    let dir = get_xiaojing_dir()?;
     std::fs::create_dir_all(&dir).map_err(|e| format!("Failed to create dir: {}", e))?;
 
     let bin_path = dir.join("pending_update.bin");
@@ -128,7 +127,7 @@ fn save_pending_update_to_disk(version: &str, bytes: &[u8]) -> Result<(), String
 /// to prevent. Bundle the reset so callers can't forget.
 #[cfg(target_os = "windows")]
 fn clear_pending_update_from_disk() {
-    if let Ok(dir) = get_myagents_dir() {
+    if let Ok(dir) = get_xiaojing_dir() {
         let _ = std::fs::remove_file(dir.join("pending_update.bin"));
         let _ = std::fs::remove_file(dir.join("pending_update.bin.tmp"));
         let _ = std::fs::remove_file(dir.join("pending_update.json"));
@@ -142,7 +141,7 @@ fn clear_pending_update_from_disk() {
 /// Read the version of the pending update from disk metadata (None if not present or corrupt)
 #[cfg(target_os = "windows")]
 fn read_pending_update_version() -> Option<String> {
-    let dir = get_myagents_dir().ok()?;
+    let dir = get_xiaojing_dir().ok()?;
     let meta_path = dir.join("pending_update.json");
     let bin_path = dir.join("pending_update.bin");
     if !meta_path.exists() || !bin_path.exists() {
@@ -919,7 +918,7 @@ pub async fn install_pending_update(
         logger::info(&app, "[Updater] install_pending_update called");
 
         // Step 1: Read update bytes and version from disk
-        let dir = get_myagents_dir()?;
+        let dir = get_xiaojing_dir()?;
         let bin_path = dir.join("pending_update.bin");
         let meta_path = dir.join("pending_update.json");
 
