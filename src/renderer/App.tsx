@@ -23,6 +23,7 @@ import CustomTitleBar from '@/components/CustomTitleBar';
 import type { CapabilitySection } from '@/components/global-sidebar/GlobalSidebar';
 import XiaojingGeoWorkbench from '@/components/xiaojing/XiaojingGeoWorkbench';
 import XiaojingSidebar from '@/components/xiaojing/XiaojingSidebar';
+import type { BrandSession, BrandWorkspace } from '@/api/brandWorkspaceClient';
 import LinkContextMenuProvider from '@/components/LinkContextMenuProvider';
 import TabBar from '@/components/TabBar';
 import { SessionDeletionContext } from '@/context/SessionDeletionContext';
@@ -33,6 +34,7 @@ import { useUpdater } from '@/hooks/useUpdater';
 import { useTrayEvents } from '@/hooks/useTrayEvents';
 import { useHelperAgentModelDefaults } from '@/hooks/useHelperAgentModelDefaults';
 import { useConfig } from '@/hooks/useConfig';
+import { useBrandWorkspaces } from '@/hooks/useBrandWorkspaces';
 import { useSpaceBuildCapability } from '@/hooks/useSpaceBuildCapability';
 import { useTabSwipeGesture } from '@/hooks/useTabSwipeGesture';
 import { actions as taskCenterActions } from '@/hooks/taskCenterStore';
@@ -124,7 +126,6 @@ import {
   originFromSessionMetadataLike,
 } from '../shared/session-origin';
 import { buildRuntimeBackedInitialSessionBirth } from '@/utils/providerSwitchSessionBirth';
-import { resolveGlobalSidebarWorkspace } from '@/utils/globalSidebarProjection';
 
 // ============================================================
 // User Support Prompt Builder
@@ -161,6 +162,18 @@ function resolveInitialPermissionMode(args: {
   return normalizeInitialPermissionMode(args.agent?.permissionMode)
     ?? normalizeInitialPermissionMode(args.project.permissionMode)
     ?? normalizeInitialPermissionMode(args.defaultPermissionMode);
+}
+
+function projectFromBrandWorkspace(workspace: BrandWorkspace): Project {
+  return {
+    id: workspace.id,
+    name: workspace.name,
+    displayName: workspace.name,
+    path: workspace.rootPath,
+    providerId: null,
+    permissionMode: null,
+    lastOpened: workspace.updatedAt,
+  };
 }
 
 function normalizeStringSetting(value: unknown): string | undefined {
@@ -470,6 +483,9 @@ export default function App() {
   // App config for tray behavior (shared via ConfigProvider — no CONFIG_CHANGED event needed)
   // Also get projects + CRUD actions for bug report (ensureSelfAwarenessWorkspace needs them)
   const { config, isLoading: configLoading, providers: appProviders, apiKeys: appApiKeys, providerVerifyStatus: appProviderVerifyStatus, projects: configProjects, addProject: configAddProject, patchProject: configPatchProject } = useConfig();
+  const brandState = useBrandWorkspaces();
+  const brandStateRef = useRef(brandState);
+  brandStateRef.current = brandState;
   const spaceBuildCapability = useSpaceBuildCapability(config.spaceEnvironment);
   const teamSpaceAvailable = spaceBuildCapability.available && config.teamSpaceEnabled === true;
   const [isWindowFocused, setIsWindowFocused] = useState(isRendererForegrounded);
@@ -1325,6 +1341,15 @@ export default function App() {
   // Update tab title (called from TabProvider when auto-title or rename occurs)
   const updateTabTitle = useCallback((tabId: string, title: string) => {
     setTabs(prev => prev.map(t => t.id === tabId ? { ...t, title } : t));
+    const tab = tabsRef.current.find((candidate) => candidate.id === tabId);
+    const workspace = tab?.agentDir
+      ? brandStateRef.current.workspaces.find((candidate) => workspacePathsEqual(candidate.rootPath, tab.agentDir))
+      : undefined;
+    if (workspace && tab?.sessionId && !isPendingSessionId(tab.sessionId)) {
+      void brandStateRef.current
+        .commitSession(workspace.id, tab.sessionId, title, 'auto')
+        .catch((error) => console.error('[App] Failed to project automatic brand session title:', error));
+    }
   }, []);
 
   // Update tab unread state (called from TabProvider when message completes on non-active tab)
@@ -1457,6 +1482,14 @@ export default function App() {
           t.id === tabId ? { ...t, sessionId: newSessionId } : t
         ));
       });
+      const workspace = currentTab.agentDir
+        ? brandStateRef.current.workspaces.find((candidate) => workspacePathsEqual(candidate.rootPath, currentTab.agentDir!))
+        : undefined;
+      if (workspace && !isPendingSessionId(newSessionId)) {
+        void brandStateRef.current
+          .commitSession(workspace.id, newSessionId, currentTab.title || '新会话', 'default')
+          .catch((error) => console.error('[App] Failed to commit brand session identity:', error));
+      }
       return true;
     } finally {
       releaseTargetTransition?.();
@@ -1997,6 +2030,13 @@ export default function App() {
       updateSession(tab.sessionId, { title: newTitle, titleSource: 'user' })
         .then(() => window.dispatchEvent(new CustomEvent(CUSTOM_EVENTS.SESSION_TITLE_CHANGED)))
         .catch(err => console.error('[App] Failed to persist renamed title:', err));
+      const workspace = tab.agentDir
+        ? brandStateRef.current.workspaces.find((candidate) => workspacePathsEqual(candidate.rootPath, tab.agentDir!))
+        : undefined;
+      if (workspace && !isPendingSessionId(tab.sessionId)) {
+        void brandStateRef.current.renameSession(workspace.id, tab.sessionId, newTitle)
+          .catch((error) => console.error('[App] Failed to rename brand session projection:', error));
+      }
     }
   }, [updateTabTitle]);
 
@@ -2539,16 +2579,6 @@ export default function App() {
     track('tab_new', { tab_count: currentLength + 1 });
   }, [openNewTabDeferred]);
 
-  const handleSidebarNewChat = useCallback(() => {
-    const currentTabs = tabsRef.current;
-    const leftmostLauncher = currentTabs.find((tab) => tab.view === 'launcher');
-    if (leftmostLauncher) {
-      setActiveTabId(leftmostLauncher.id, currentTabs);
-      return;
-    }
-    handleNewTab();
-  }, [handleNewTab, setActiveTabId]);
-
   const handleOpenWorkspaceFromSidebar = useCallback(async (
     project: Project,
     initialMessage?: InitialMessage,
@@ -2573,6 +2603,48 @@ export default function App() {
       return false;
     }
   }, [handleLaunchProject, openLaunchTabNow, removeUnusedPrecreatedLaunchTab, t]);
+
+  const handleOpenBrandWorkspace = useCallback((workspace: BrandWorkspace) => (
+    handleOpenWorkspaceFromSidebar(projectFromBrandWorkspace(workspace))
+  ), [handleOpenWorkspaceFromSidebar]);
+
+  const handleOpenBrandSession = useCallback((
+    session: BrandSession,
+    workspace: BrandWorkspace,
+  ) => handleOpenTargetSession(
+    session.id,
+    workspace.rootPath,
+    session.title || '新会话',
+    'global_sidebar',
+  ), [handleOpenTargetSession]);
+
+  const handleRenameBrandSession = useCallback(async (
+    session: BrandSession,
+    workspace: BrandWorkspace,
+    title: string,
+  ) => {
+    await updateSession(session.id, { title, titleSource: 'user' });
+    await brandStateRef.current.renameSession(workspace.id, session.id, title);
+    setTabs((current) => current.map((tab) => (
+      tab.sessionId === session.id ? { ...tab, title } : tab
+    )));
+    window.dispatchEvent(new CustomEvent(CUSTOM_EVENTS.SESSION_TITLE_CHANGED));
+  }, []);
+
+  const normalBrandStartupHandledRef = useRef(false);
+  useEffect(() => {
+    if (configLoading || brandState.isLoading || normalBrandStartupHandledRef.current) return;
+    normalBrandStartupHandledRef.current = true;
+    const workspace = brandState.currentWorkspace;
+    if (!workspace) return;
+    const launcher = tabsRef.current.find((tab) => tab.view === 'launcher');
+    if (!launcher) return;
+    setActiveTabId(launcher.id, tabsRef.current);
+    void handleLaunchProject(projectFromBrandWorkspace(workspace), undefined, {
+      surface: 'global_sidebar',
+      entryIntent: 'open_workspace',
+    });
+  }, [brandState.currentWorkspace, brandState.isLoading, configLoading, handleLaunchProject, setActiveTabId]);
 
   // Handle tab reordering via drag and drop
   const handleReorderTabs = useCallback((activeId: string, overId: string) => {
@@ -3236,15 +3308,6 @@ export default function App() {
     setCapabilityInitialSelect(undefined);
   }, []);
 
-  const handleOpenSidebarSession = useCallback((session: SessionMetadata, project: Project) => (
-    handleOpenTargetSession(
-      session.id,
-      project.path,
-      getSessionDisplayText(session),
-      'global_sidebar',
-    )
-  ), [handleOpenTargetSession]);
-
   const handleDeleteSession = useCallback(async (sessionId: string) => {
     const releaseTransition = tryClaimSessionResourceTransition(
       sessionResourceTransitionsRef.current,
@@ -3278,6 +3341,14 @@ export default function App() {
       releaseTransition();
     }
   }, []);
+
+  const handleDeleteBrandSession = useCallback(async (sessionId: string) => {
+    const result = await handleDeleteSession(sessionId);
+    if (!result.deleted) {
+      toastRef.current.error('会话仍在运行或被后台任务占用，暂时无法删除');
+    }
+    return result.deleted;
+  }, [handleDeleteSession]);
 
   // System tray event handling (minimize to tray, exit confirmation)
   useTrayEvents({
@@ -3369,19 +3440,17 @@ export default function App() {
     return () => ac.abort();
   }, [acknowledgeNotificationTarget, handleSelectTab, updateTabUnread]);
 
-  const activeWorkspacePath = resolveGlobalSidebarWorkspace(activeTab);
-
   return (
     <SessionDeletionContext.Provider value={handleDeleteSession}>
     <LinkContextMenuProvider>
     <div className="xiaojing-product-shell flex h-screen bg-[var(--paper)]">
       <XiaojingSidebar
-        tabs={tabs}
+        brandState={brandState}
         activeTab={activeTab}
-        activeWorkspacePath={activeWorkspacePath}
-        onNewTab={handleSidebarNewChat}
-        onOpenWorkspace={handleOpenWorkspaceFromSidebar}
-        onOpenSession={handleOpenSidebarSession}
+        onOpenWorkspace={handleOpenBrandWorkspace}
+        onOpenSession={handleOpenBrandSession}
+        onRenameSession={handleRenameBrandSession}
+        onDeleteSession={handleDeleteBrandSession}
       />
       <div className="flex min-w-0 flex-1 flex-col" data-tab-workspace>
       {/* Chrome-style titlebar with tabs */}
@@ -3453,8 +3522,14 @@ export default function App() {
         ))}
       </div>
       <XiaojingGeoWorkbench
-        activeWorkspacePath={activeWorkspacePath}
-        onOpenWorkspace={handleOpenWorkspaceFromSidebar}
+        currentWorkspace={brandState.currentWorkspace}
+        onOpenWorkspace={(workspace, initialMessage, entryIntent) => (
+          handleOpenWorkspaceFromSidebar(
+            projectFromBrandWorkspace(workspace),
+            initialMessage,
+            entryIntent,
+          )
+        )}
       />
       </div>
       </div>

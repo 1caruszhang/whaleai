@@ -10,21 +10,17 @@ import {
 import {
   memo,
   useCallback,
-  useMemo,
   useState,
   type ComponentType,
 } from "react";
 
-import { useConfig } from "@/hooks/useConfig";
-import type { Project } from "@/config/types";
-import { isProjectActiveForUser, isProjectVisibleToUser } from "@/config/types";
+import type { BrandWorkspace } from "@/api/brandWorkspaceClient";
 import type { InitialMessage } from "@/types/tab";
-import { workspacePathsEqual } from "../../../shared/workspacePath";
 
 interface XiaojingGeoWorkbenchProps {
-  activeWorkspacePath: string | null;
+  currentWorkspace: BrandWorkspace | null;
   onOpenWorkspace: (
-    project: Project,
+    workspace: BrandWorkspace,
     initialMessage?: InitialMessage,
     entryIntent?: "open_workspace" | "workspace_init",
   ) => Promise<boolean>;
@@ -66,43 +62,16 @@ const GEO_CAPABILITIES: readonly GeoCapability[] = [
   },
 ] as const;
 
-function brandName(project: Project): string {
-  return project.displayName?.trim() || project.name;
-}
-
 export default memo(function XiaojingGeoWorkbench({
-  activeWorkspacePath,
+  currentWorkspace,
   onOpenWorkspace,
 }: XiaojingGeoWorkbenchProps) {
-  const { config, projects } = useConfig();
   const [collapsed, setCollapsed] = useState(
     () =>
       typeof localStorage !== "undefined" &&
       localStorage.getItem("xiaojing:geo-workbench-collapsed") === "true",
   );
   const [startingPrompt, setStartingPrompt] = useState<string | null>(null);
-
-  const brands = useMemo(
-    () =>
-      projects.filter(isProjectVisibleToUser).filter(isProjectActiveForUser),
-    [projects],
-  );
-  const currentBrand = useMemo(
-    () =>
-      brands.find(
-        (project) =>
-          activeWorkspacePath &&
-          workspacePathsEqual(project.path, activeWorkspacePath),
-      ) ??
-      brands.find(
-        (project) =>
-          config.defaultWorkspacePath &&
-          workspacePathsEqual(project.path, config.defaultWorkspacePath),
-      ) ??
-      brands[0] ??
-      null,
-    [activeWorkspacePath, brands, config.defaultWorkspacePath],
-  );
 
   const toggleCollapsed = useCallback(() => {
     setCollapsed((value) => {
@@ -114,11 +83,11 @@ export default memo(function XiaojingGeoWorkbench({
 
   const startCapability = useCallback(
     async (capability: GeoCapability) => {
-      if (!currentBrand || startingPrompt) return;
+      if (!currentWorkspace || startingPrompt) return;
       setStartingPrompt(capability.prompt);
       try {
         await onOpenWorkspace(
-          currentBrand,
+          currentWorkspace,
           { text: capability.prompt },
           "open_workspace",
         );
@@ -126,7 +95,7 @@ export default memo(function XiaojingGeoWorkbench({
         setStartingPrompt(null);
       }
     },
-    [currentBrand, onOpenWorkspace, startingPrompt],
+    [currentWorkspace, onOpenWorkspace, startingPrompt],
   );
 
   if (collapsed) {
@@ -180,10 +149,10 @@ export default memo(function XiaojingGeoWorkbench({
               当前品牌
             </p>
             <h3 className="mt-2 truncate text-base font-semibold">
-              {currentBrand ? brandName(currentBrand) : "尚未创建品牌"}
+              {currentWorkspace?.name ?? "尚未创建品牌"}
             </h3>
             <p className="mt-2 text-xs leading-5 text-[var(--ink-muted)]">
-              {currentBrand
+              {currentWorkspace
                 ? "当前没有运行中的 GEO 操作。你可以在下方选择一项能力，小鲸会先和你确认目标。"
                 : "先在左侧选择品牌，再启动 GEO 能力。"}
             </p>
@@ -207,7 +176,7 @@ export default memo(function XiaojingGeoWorkbench({
                 onClick={() => {
                   void startCapability(capability);
                 }}
-                disabled={!currentBrand || startingPrompt !== null}
+                disabled={!currentWorkspace || startingPrompt !== null}
                 className="group flex w-full items-start gap-3 rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-3 text-left transition-[border-color,background-color,transform] hover:-translate-y-px hover:border-[var(--accent)]/45 hover:bg-[var(--hover-bg)] disabled:translate-y-0 disabled:opacity-55"
               >
                 <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-[var(--accent-warm-subtle)] text-[var(--accent)]">

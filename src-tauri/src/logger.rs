@@ -239,13 +239,14 @@ pub fn with_sync_log_context<R>(ctx: LogContext, f: impl FnOnce() -> R) -> R {
     })
 }
 
-/// Get logs directory path (~/.myagents/logs/)
+/// Get the Xiaojing local logs directory.
 fn get_logs_dir() -> PathBuf {
     static LOGS_DIR: OnceLock<PathBuf> = OnceLock::new();
     LOGS_DIR
         .get_or_init(|| {
-            let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-            home.join(".myagents").join("logs")
+            crate::app_dirs::xiaojing_data_dir()
+                .unwrap_or_else(|| PathBuf::from("Xiaojing"))
+                .join("logs")
         })
         .clone()
 }

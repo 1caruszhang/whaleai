@@ -3,6 +3,7 @@
 
 pub mod app_dirs;
 pub mod attachment_protocol;
+pub mod brand_workspace;
 pub mod browser;
 pub mod cli;
 mod commands;
@@ -412,6 +413,16 @@ pub fn run() {
             commands::cmd_get_platform,
             commands::cmd_get_device_id,
             commands::cmd_get_device_identity,
+            brand_workspace::cmd_brand_workspace_bootstrap,
+            brand_workspace::cmd_brand_workspace_create,
+            brand_workspace::cmd_brand_workspace_switch,
+            brand_workspace::cmd_brand_session_draft,
+            brand_workspace::cmd_brand_session_commit,
+            brand_workspace::cmd_brand_session_list,
+            brand_workspace::cmd_brand_session_rename,
+            brand_workspace::cmd_brand_session_archive,
+            brand_workspace::cmd_brand_session_delete_preview,
+            brand_workspace::cmd_brand_session_delete_confirm,
             logger::cmd_record_renderer_boot_event,
             i18n::cmd_get_ui_language_state,
             i18n::cmd_sync_ui_language_from_config,

@@ -20,6 +20,7 @@ import {
   lstatSync,
 } from 'fs';
 import { resolve } from 'path';
+import { getAppDataDir } from './app-data-dir';
 import { getHomeDirOrNull } from './platform';
 import { stripBom } from '../../shared/utils';
 import { workspacePathsEqual } from '../../shared/workspacePath';
@@ -85,9 +86,7 @@ import { lookupModelModalitySupport } from './model-capabilities';
 // ---------------------------------------------------------------------------
 
 function getConfigDir(): string {
-  const home = getHomeDirOrNull();
-  if (!home) throw new Error('Cannot determine home directory');
-  return resolve(home, '.myagents');
+  return getAppDataDir();
 }
 
 function getConfigPath(): string {

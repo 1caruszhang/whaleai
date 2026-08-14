@@ -53,14 +53,14 @@ impl RuntimeIdentity {
     }
 }
 
-/// Look up the `runtime` field from the agent config in ~/.myagents/config.json
+/// Look up the `runtime` field from the Xiaojing app config.
 /// matching the given workspace path. Returns None for "builtin" (the default).
 /// Used for NEW sessions (the agent config decides the default runtime for new conversations)
 /// and for IM/Agent sidecar paths that don't have a session_id yet.
 pub(crate) fn resolve_agent_runtime_identity_from_config(
     workspace_path: &std::path::Path,
 ) -> Option<RuntimeIdentity> {
-    let config_dir = dirs::home_dir()?.join(".myagents");
+    let config_dir = crate::app_dirs::xiaojing_data_dir()?;
     let config_path = config_dir.join("config.json");
     let content = std::fs::read_to_string(&config_path).ok()?;
     let cfg: serde_json::Value = serde_json::from_str(strip_bom(&content)).ok()?;
@@ -72,7 +72,7 @@ pub(crate) fn resolve_agent_runtime_identity_from_config(
 pub(crate) fn resolve_agent_runtime_identity_by_id_from_config(
     agent_id: &str,
 ) -> Option<RuntimeIdentity> {
-    let config_path = dirs::home_dir()?.join(".myagents").join("config.json");
+    let config_path = crate::app_dirs::xiaojing_data_dir()?.join("config.json");
     let content = std::fs::read_to_string(config_path).ok()?;
     let cfg: serde_json::Value = serde_json::from_str(strip_bom(&content)).ok()?;
     resolve_agent_runtime_identity_by_id_from_value(&cfg, agent_id)
@@ -200,7 +200,7 @@ fn workspace_paths_match(agent_path: &str, workspace_path: &std::path::Path) -> 
         == crate::cron_task::normalize_path(&workspace_path.to_string_lossy())
 }
 
-/// Look up the `runtime` field from session metadata in ~/.myagents/sessions.json.
+/// Look up the `runtime` field from Xiaojing session metadata.
 /// Returns Some("builtin") for builtin/missing-runtime sessions that are found,
 /// and None only when no authoritative session metadata is available.
 ///
@@ -216,7 +216,7 @@ pub fn resolve_session_runtime_identity(session_id: &str) -> Option<String> {
 }
 
 pub fn resolve_session_runtime_identity_full(session_id: &str) -> Option<RuntimeIdentity> {
-    let sessions_path = dirs::home_dir()?.join(".myagents").join("sessions.json");
+    let sessions_path = crate::app_dirs::xiaojing_data_dir()?.join("sessions.json");
     let content = std::fs::read_to_string(&sessions_path).ok()?;
     resolve_session_runtime_identity_full_from_json(session_id, &content)
 }
@@ -251,7 +251,7 @@ pub(super) fn resolve_session_runtime_identity_full_from_json(
 /// Lazy validation for tab restore (Issue #232 / PRD 0.2.25).
 ///
 /// A restored "cold" chat tab is only activatable if (a) its session still
-/// exists in `~/.myagents/sessions.json` and (b) its workspace directory still
+/// exists in Xiaojing's `sessions.json` and (b) its workspace directory still
 /// exists on disk. This is read-only and reads the disk directly — it does NOT
 /// depend on the global sidecar being up (which is async + flaky on startup),
 /// matching the PRD's "validate lazily at first activation, decoupled from
@@ -270,7 +270,8 @@ pub fn cmd_can_restore_session(sessionId: String, agentDir: String) -> bool {
     if crate::workspace_files::path_safety::validate_workspace_root(&agentDir).is_err() {
         return false;
     }
-    let Some(sessions_path) = dirs::home_dir().map(|h| h.join(".myagents").join("sessions.json"))
+    let Some(sessions_path) =
+        crate::app_dirs::xiaojing_data_dir().map(|root| root.join("sessions.json"))
     else {
         return false;
     };

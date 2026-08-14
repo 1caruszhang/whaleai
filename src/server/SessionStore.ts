@@ -15,7 +15,6 @@
  */
 
 import { existsSync, linkSync, mkdirSync, readFileSync, writeFileSync, unlinkSync, appendFileSync, statSync, renameSync, truncateSync, openSync, readSync, closeSync } from 'fs';
-import { homedir } from 'os';
 import { join } from 'path';
 
 import type { PendingConversationMutation, SessionMetadata, SessionData, SessionMessage, SessionStats } from './types/session';
@@ -35,8 +34,9 @@ import { withFileLock } from './utils/file-lock';
 import { elapsedMs, emitPerfTrace, nowMs } from './utils/perf-trace';
 import { normalizeSessionRuntimeIdentity } from './utils/session-runtime-identity';
 import { resolveLastVisibleTurnPreview } from './utils/session-message-preview';
+import { getAppDataDir } from './utils/app-data-dir';
 
-const MYAGENTS_DIR = join(homedir(), '.myagents');
+const MYAGENTS_DIR = getAppDataDir();
 const SESSIONS_FILE = join(MYAGENTS_DIR, 'sessions.json');
 const SESSIONS_DIR = join(MYAGENTS_DIR, 'sessions');
 const ATTACHMENTS_DIR = join(MYAGENTS_DIR, 'attachments');

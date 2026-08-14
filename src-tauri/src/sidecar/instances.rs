@@ -278,6 +278,9 @@ fn start_tab_sidecar_admitted<R: Runtime>(
     if mgmt_port > 0 {
         cmd.env("MYAGENTS_MANAGEMENT_PORT", mgmt_port.to_string());
     }
+    if let Some(data_root) = crate::app_dirs::xiaojing_data_dir() {
+        cmd.env("XIAOJING_DATA_ROOT", data_root);
+    }
     // Reserve generation identity only after all fallible filesystem setup.
     // Replacement keeps its old manager entry fenced by the private lease.
     // Initial creation inserts a process-less reservation into the same

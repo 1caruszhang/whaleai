@@ -29,7 +29,24 @@ describe("Xiaojing product shell contract", () => {
     expect(workbench).toContain("问题机会发现");
     expect(workbench).toContain("生成 GEO 内容");
     expect(workbench).toContain("GEO 效果检测");
-    expect(workbench).toMatch(/await onOpenWorkspace\(\s*currentBrand,\s*\{ text: capability\.prompt \}/);
+    expect(workbench).toMatch(/await onOpenWorkspace\(\s*currentWorkspace,\s*\{ text: capability\.prompt \}/);
+  });
+
+  it("uses the Rust BrandWorkspace authority instead of legacy project projection", () => {
+    const app = source("src/renderer/App.tsx");
+    const sidebar = source(
+      "src/renderer/components/xiaojing/XiaojingSidebar.tsx",
+    );
+    const store = source("src-tauri/src/brand_workspace.rs");
+    expect(app).toContain("useBrandWorkspaces()");
+    expect(sidebar).toContain("createWorkspace");
+    expect(sidebar).toContain("switchWorkspace");
+    expect(sidebar).toContain("输入“永久删除”完成二次确认");
+    expect(store).toContain('"project.sqlite"');
+    expect(store).toContain("PRAGMA journal_mode = WAL");
+    expect(store).toContain("session_deletion_intents");
+    expect(sidebar).not.toContain("useConfig");
+    expect(sidebar).not.toContain("useGlobalSidebarTaskCenterData");
   });
 
   it("uses the Xiaojing identity and removes generic product controls from GEO chat chrome", () => {
