@@ -133,12 +133,14 @@ pub(crate) fn load_for_sidecar() -> Result<Option<String>, String> {
 
     #[cfg(debug_assertions)]
     {
-        return Ok(std::env::var(DEVELOPMENT_SECRET_ENV)
+        Ok(std::env::var(DEVELOPMENT_SECRET_ENV)
             .ok()
-            .and_then(|value| validate_secret(&value).ok().map(str::to_owned)));
+            .and_then(|value| validate_secret(&value).ok().map(str::to_owned)))
     }
     #[cfg(not(debug_assertions))]
-    Ok(None)
+    {
+        Ok(None)
+    }
 }
 
 pub(crate) fn inject_into_sidecar(command: &mut std::process::Command) -> Result<(), String> {
@@ -225,10 +227,11 @@ pub async fn cmd_deepseek_credential_verify() -> Result<DeepseekCredentialVerify
             error: Some("尚未配置 DeepSeek API Key".to_string()),
         });
     };
-    let client = crate::proxy_config::build_client_with_proxy_for_provider(
-        reqwest::Client::builder().timeout(Duration::from_secs(20)),
-        "deepseek",
-    )?;
+    // This client intentionally targets the external DeepSeek host. Localhost
+    // control-plane callers must continue through crate::local_http::builder().
+    #[allow(clippy::disallowed_methods)]
+    let builder = reqwest::Client::builder().timeout(Duration::from_secs(20));
+    let client = crate::proxy_config::build_client_with_proxy_for_provider(builder, "deepseek")?;
     let response = client
         .post("https://api.deepseek.com/anthropic/v1/messages")
         .header("x-api-key", secret)
