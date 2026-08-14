@@ -43,7 +43,7 @@ mod platform {
     use super::{validate_secret, CREDENTIAL_TARGET};
     use std::{ptr, slice};
     use windows_sys::Win32::{
-        Foundation::{GetLastError, ERROR_NOT_FOUND},
+        Foundation::{GetLastError, ERROR_NOT_FOUND, FILETIME},
         Security::Credentials::{
             CredDeleteW, CredFree, CredReadW, CredWriteW, CREDENTIALW, CRED_PERSIST_LOCAL_MACHINE,
             CRED_TYPE_GENERIC,
@@ -90,7 +90,10 @@ mod platform {
             Type: CRED_TYPE_GENERIC,
             TargetName: target.as_mut_ptr(),
             Comment: ptr::null_mut(),
-            LastWritten: Default::default(),
+            LastWritten: FILETIME {
+                dwLowDateTime: 0,
+                dwHighDateTime: 0,
+            },
             CredentialBlobSize: blob.len() as u32,
             CredentialBlob: blob.as_mut_ptr(),
             Persist: CRED_PERSIST_LOCAL_MACHINE,
