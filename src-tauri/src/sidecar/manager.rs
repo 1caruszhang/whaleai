@@ -361,6 +361,29 @@ impl SidecarManager {
         session_process_is_live || global_process_is_live
     }
 
+    /// Bind a brand-domain Management API call to the immutable process birth
+    /// identity and the current logical Session/workspace. This prevents a
+    /// live Sidecar from addressing another brand's project.sqlite merely by
+    /// supplying a different workspace id in its JSON payload.
+    pub fn is_live_brand_process(
+        &self,
+        sidecar_id: &str,
+        generation: u64,
+        session_id: &str,
+        workspace_path: &std::path::Path,
+    ) -> bool {
+        self.sidecars.get(session_id).is_some_and(|sidecar| {
+            sidecar.management_id == sidecar_id
+                && self.sidecar_generations.get(session_id).copied() == Some(generation)
+                && crate::workspace_path::normalize_workspace_path_identity(
+                    &sidecar.workspace_path.to_string_lossy(),
+                ) == crate::workspace_path::normalize_workspace_path_identity(
+                    &workspace_path.to_string_lossy(),
+                )
+                && crate::brand_workspace::is_brand_workspace_path(&sidecar.workspace_path)
+        })
+    }
+
     /// Allocate the next instance ID and stash it as this session's current
     /// generation. The ID comes from the process-global atomic counter, so
     /// it is unique for the whole process lifetime — repeated sidecars under

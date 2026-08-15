@@ -6,6 +6,8 @@ export const GOAL_CONTINUATION_TAG = 'GOAL_CONTINUATION';
 export const GOAL_CONTEXT_TAG = 'GOAL_CONTEXT';
 export const LOCAL_COMMAND_OUTPUT_TAG = 'LOCAL_COMMAND_OUTPUT';
 export const SESSION_EVENT_TAG = 'myagents-session-event';
+export const KNOWLEDGE_DECISION_TAG = 'XIAOJING_KNOWLEDGE_DECISION';
+export const QUESTION_POOL_DECISION_TAG = 'XIAOJING_QUESTION_POOL_DECISION';
 
 export interface ParsedLeadingSystemReminder {
   hasReminder: boolean;
@@ -45,6 +47,23 @@ export interface GoalReminderInput {
 
 export interface GoalContextReminderInput extends GoalReminderInput {
   visibleUserMessage: string;
+}
+
+export interface KnowledgeDecisionReminderInput {
+  candidateId: string;
+  decision: string;
+  status: string;
+  factKey: string;
+  currentVersion?: number | null;
+  brandKnowledgeVersion?: number | null;
+}
+
+export interface QuestionPoolDecisionReminderInput {
+  poolId: string;
+  decisionId: string;
+  revision: number;
+  selectedCount: number;
+  knowledgeVersion: number;
 }
 
 function trimmed(value: string | null | undefined): string {
@@ -202,6 +221,60 @@ export function buildFloatingBallContextReminder(input: FloatingBallContextRemin
 
   parts.push(`</${FLOATING_BALL_CONTEXT_TAG}>`, SYSTEM_REMINDER_CLOSE);
   return parts.join('\n');
+}
+
+/**
+ * Notify the current Agent about an already-committed knowledge-card decision.
+ * This is a pure hidden event: the Renderer does not manufacture a user bubble,
+ * while the Agent can acknowledge the outcome in its own natural response.
+ */
+export function buildKnowledgeDecisionReminder(input: KnowledgeDecisionReminderInput): string {
+  const version = Number.isInteger(input.currentVersion) && (input.currentVersion ?? -1) >= 0
+    ? String(input.currentVersion)
+    : 'none';
+  const brandKnowledgeVersion = Number.isInteger(input.brandKnowledgeVersion)
+    && (input.brandKnowledgeVersion ?? -1) >= 0
+    ? String(input.brandKnowledgeVersion)
+    : 'none';
+  return [
+    SYSTEM_REMINDER_OPEN,
+    `<${KNOWLEDGE_DECISION_TAG}>`,
+    '<instruction>',
+    'A user completed a structured brand-knowledge card decision. Acknowledge the committed outcome naturally and continue from the authoritative result. Do not claim that this hidden event is a typed user message.',
+    '</instruction>',
+    '<decision-result>',
+    `<candidate-id>${escapeSystemReminderText(input.candidateId)}</candidate-id>`,
+    `<decision>${escapeSystemReminderText(input.decision)}</decision>`,
+    `<status>${escapeSystemReminderText(input.status)}</status>`,
+    `<fact-key>${escapeSystemReminderText(input.factKey)}</fact-key>`,
+    `<current-version>${version}</current-version>`,
+    `<brand-knowledge-version>${brandKnowledgeVersion}</brand-knowledge-version>`,
+    '</decision-result>',
+    `</${KNOWLEDGE_DECISION_TAG}>`,
+    SYSTEM_REMINDER_CLOSE,
+  ].join('\n');
+}
+
+/** Hidden event emitted only after the append-only question selection commits. */
+export function buildQuestionPoolDecisionReminder(
+  input: QuestionPoolDecisionReminderInput,
+): string {
+  return [
+    SYSTEM_REMINDER_OPEN,
+    `<${QUESTION_POOL_DECISION_TAG}>`,
+    '<instruction>',
+    'A user confirmed a structured GEO question-pool selection. Acknowledge the committed selection naturally and continue from this artifact. Do not describe this hidden event as a typed user message.',
+    '</instruction>',
+    '<decision-result>',
+    `<pool-id>${escapeSystemReminderText(input.poolId)}</pool-id>`,
+    `<decision-id>${escapeSystemReminderText(input.decisionId)}</decision-id>`,
+    `<revision>${Math.max(0, Math.trunc(input.revision))}</revision>`,
+    `<selected-count>${Math.max(0, Math.trunc(input.selectedCount))}</selected-count>`,
+    `<knowledge-version>${Math.max(0, Math.trunc(input.knowledgeVersion))}</knowledge-version>`,
+    '</decision-result>',
+    `</${QUESTION_POOL_DECISION_TAG}>`,
+    SYSTEM_REMINDER_CLOSE,
+  ].join('\n');
 }
 
 function goalStateLines(input: GoalReminderInput): string[] {

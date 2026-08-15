@@ -12,6 +12,9 @@ describe('buildSystemPromptAppend Xiaojing identity', () => {
     expect(prompt).not.toContain('Claude Agent SDK');
     expect(prompt).not.toContain('Anthropic Claude');
     expect(prompt).not.toContain('通用的桌面端 AI Agent');
+    expect(prompt).toContain('model-inferred + chat-observation');
+    expect(prompt).toContain('尚未写入权威知识');
+    expect(prompt).toContain('结构化卡片中裁决');
   });
 });
 

@@ -17,8 +17,9 @@ describe('Xiaojing GEO builtin boundary', () => {
       sessionId: 'session-04',
       capabilities: [
         { id: 'inspect-brand-context', status: 'available' },
-        { id: 'brand-knowledge', status: 'planned' },
-        { id: 'question-opportunities', status: 'planned' },
+        { id: 'brand-knowledge', status: 'available' },
+        { id: 'brand-material-import', status: 'available' },
+        { id: 'question-opportunities', status: 'available' },
         { id: 'content-production', status: 'planned' },
         { id: 'geo-observation', status: 'planned' },
       ],

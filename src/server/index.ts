@@ -111,6 +111,14 @@ import {
 } from './plugins/store';
 import { handleQrCodeAssetRoute } from './routes/qr-code-asset';
 import { shouldLogHttpRequest } from './http-log-policy';
+import { createKnowledgeAuthority, type KnowledgeDecision } from './geo/knowledge-authority';
+import { createBrandMaterialPort, MaterialImportService } from './geo/material-import';
+import { getXiaojingGeoProviderCapabilities } from './geo/provider-runtime';
+import {
+  createQuestionPoolPort,
+  QuestionPoolService,
+} from './geo/question-pool';
+import type { QuestionPoolQuestion } from '../shared/geo/questionPool';
 
 type SpaceSkillExportPackage = {
   tempId: string;
@@ -252,6 +260,10 @@ import {
   type BackgroundAgentPermissionMode,
 } from '../shared/config-types';
 import { workspacePathsEqual } from '../shared/workspacePath';
+import {
+  buildKnowledgeDecisionReminder,
+  buildQuestionPoolDecisionReminder,
+} from '../shared/systemReminder';
 import { ensureDirSync, ensureDir, isDirEntry } from './utils/fs-utils';
 import {
   buildMemoryUpdateReminder,
@@ -264,6 +276,31 @@ import { setImCronContext } from './tools/im-cron-tool';
 type AdminApiModule = typeof import('./admin-api');
 let _adminApi: Promise<AdminApiModule> | null = null;
 const getAdminApi = (): Promise<AdminApiModule> => (_adminApi ??= import('./admin-api'));
+
+let xiaojingQuestionPoolRuntime: {
+  identity: string;
+  service: QuestionPoolService;
+} | null = null;
+
+function getXiaojingQuestionPoolService(identity: {
+  workspaceId: string;
+  sessionId: string;
+}): QuestionPoolService {
+  const key = `${identity.workspaceId}:${identity.sessionId}`;
+  if (xiaojingQuestionPoolRuntime?.identity === key) {
+    return xiaojingQuestionPoolRuntime.service;
+  }
+  const capabilities = getXiaojingGeoProviderCapabilities();
+  const service = new QuestionPoolService(
+    identity,
+    createQuestionPoolPort(identity),
+    capabilities.keywordSearch,
+    capabilities.generation,
+    capabilities.embedding,
+  );
+  xiaojingQuestionPoolRuntime = { identity: key, service };
+  return service;
+}
 import { setImMediaContext } from './tools/im-media-tool';
 import { ensureImBridgeToolSurface } from './tools/im-bridge-tools';
 import { normalizeHostInteractionCapability } from './host-interaction';
@@ -4156,6 +4193,311 @@ async function main() {
         } catch (error) {
           console.error('[api/permission] Error:', error);
           return jsonResponse({ success: false, error: String(error) }, 500);
+        }
+      }
+
+      // User actions on a GEO knowledge card remain a structured control
+      // request. The Renderer cannot write project.sqlite and cannot choose an
+      // actor identity; this Session-scoped route delegates to the sole Node
+      // KnowledgeAuthority and Rust authenticates the process generation.
+      if (pathname === '/api/xiaojing/knowledge/decide' && request.method === 'POST') {
+        try {
+          const payload = await request.json() as {
+            workspaceId: string;
+            sessionId: string;
+            candidateId: string;
+            decision: KnowledgeDecision;
+            expectedCurrentVersion: number;
+            reason?: string;
+            splitKey?: {
+              subject: string;
+              predicate: string;
+              scope?: Record<string, string | number | boolean | null>;
+              effectiveFrom?: string | null;
+              effectiveTo?: string | null;
+            };
+          };
+          const runtimeSessionId = getRuntimeSessionIdForRequest();
+          const workspaceId = basename(resolve(agentDir));
+          if (process.env.XIAOJING_MAIN_AGENT !== '1'
+            || payload.workspaceId !== workspaceId
+            || payload.sessionId !== runtimeSessionId) {
+            return jsonResponse({
+              success: false,
+              error: 'Knowledge decision identity does not match this brand Session.',
+            }, 403);
+          }
+          const result = await createKnowledgeAuthority({ workspaceId, sessionId: runtimeSessionId }).decide({
+            candidateId: payload.candidateId,
+            decision: payload.decision,
+            expectedCurrentVersion: payload.expectedCurrentVersion,
+            actorId: 'desktop-user',
+            reason: payload.reason,
+            splitKey: payload.splitKey,
+          });
+          // The decision is already durably committed. Reuse the existing
+          // SessionEngine + hidden system-reminder path so the Agent can
+          // respond naturally without a fabricated visible user message.
+          // Notification admission is best-effort and cannot roll back or
+          // obscure the authoritative knowledge result.
+          const engine = getSessionEngine();
+          const sessionConfig = resolveWorkspaceConfig(
+            agentDir,
+            getSessionMetadata(runtimeSessionId),
+            { includeMcp: false },
+          );
+          const notification = await engine.sendDesktopMessage({
+            text: buildKnowledgeDecisionReminder({
+              candidateId: payload.candidateId,
+              decision: payload.decision,
+              status: result.status,
+              factKey: result.factKey,
+              currentVersion: result.current?.version,
+              brandKnowledgeVersion: result.knowledgeVersion,
+            }),
+            permissionMode: sessionConfig.permissionMode,
+            sessionId: runtimeSessionId,
+            workspacePath: agentDir,
+            scenario: { type: 'desktop' },
+            analyticsOrigin: { kind: 'automation', surface: 'unknown' },
+          });
+          return jsonResponse({
+            success: true,
+            result,
+            notificationQueued: notification.success,
+            ...(!notification.success && notification.error
+              ? { notificationError: notification.error }
+              : {}),
+          });
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          const status = message.includes('knowledge_version_conflict') ? 409 : 400;
+          return jsonResponse({ success: false, error: message }, status);
+        }
+      }
+
+      // Brand material ingestion is a structured Session control operation.
+      // Local paths are only forwarded to Rust, which performs the no-follow
+      // read and atomic copy; Node never opens them. Raw website/paste content
+      // is persisted before the extraction capability is invoked.
+      if (pathname === '/api/xiaojing/materials/import' && request.method === 'POST') {
+        try {
+          const payload = await request.json() as {
+            workspaceId: string;
+            sessionId: string;
+            input:
+              | { kind: 'files'; sourcePaths: string[] }
+              | { kind: 'pasted-text'; text: string; displayName?: string }
+              | { kind: 'website-url'; url: string };
+          };
+          const runtimeSessionId = getRuntimeSessionIdForRequest();
+          const workspaceId = basename(resolve(agentDir));
+          if (process.env.XIAOJING_MAIN_AGENT !== '1'
+            || payload.workspaceId !== workspaceId
+            || payload.sessionId !== runtimeSessionId) {
+            return jsonResponse({ success: false, error: 'material_identity_mismatch' }, 403);
+          }
+          const identity = { workspaceId, sessionId: runtimeSessionId };
+          const service = new MaterialImportService(
+            identity,
+            createBrandMaterialPort(identity),
+            getXiaojingGeoProviderCapabilities().extraction,
+            createKnowledgeAuthority(identity),
+          );
+          let result;
+          switch (payload.input.kind) {
+            case 'files':
+              if (payload.input.sourcePaths.length === 0 || payload.input.sourcePaths.length > 20) {
+                return jsonResponse({ success: false, error: 'material_file_count_invalid' }, 400);
+              }
+              result = await service.importFiles(payload.input.sourcePaths);
+              break;
+            case 'pasted-text':
+              result = await service.importPastedText(payload.input.text, payload.input.displayName);
+              break;
+            case 'website-url':
+              result = await service.importWebsite(payload.input.url, request.signal);
+              break;
+            default:
+              return jsonResponse({ success: false, error: 'material_input_kind_invalid' }, 400);
+          }
+          return jsonResponse({ success: true, result });
+        } catch {
+          return jsonResponse({ success: false, error: 'material_import_failed' }, 400);
+        }
+      }
+
+      if (pathname === '/api/xiaojing/materials/retry' && request.method === 'POST') {
+        try {
+          const payload = await request.json() as {
+            workspaceId: string;
+            sessionId: string;
+            materialId: string;
+          };
+          const runtimeSessionId = getRuntimeSessionIdForRequest();
+          const workspaceId = basename(resolve(agentDir));
+          if (process.env.XIAOJING_MAIN_AGENT !== '1'
+            || payload.workspaceId !== workspaceId
+            || payload.sessionId !== runtimeSessionId) {
+            return jsonResponse({ success: false, error: 'material_identity_mismatch' }, 403);
+          }
+          const identity = { workspaceId, sessionId: runtimeSessionId };
+          const result = await new MaterialImportService(
+            identity,
+            createBrandMaterialPort(identity),
+            getXiaojingGeoProviderCapabilities().extraction,
+            createKnowledgeAuthority(identity),
+          ).process(payload.materialId);
+          return jsonResponse({ success: true, result });
+        } catch {
+          return jsonResponse({ success: false, error: 'material_retry_failed' }, 400);
+        }
+      }
+
+      // Question opportunities are a brand-scoped GeoArtifact operation. The
+      // Session route owns provider execution; Rust owns immutable knowledge
+      // snapshots, attempt/checkpoint CAS, and append-only user decisions.
+      if (pathname === '/api/xiaojing/question-pools/latest' && request.method === 'POST') {
+        try {
+          const payload = await request.json() as {
+            workspaceId: string;
+            sessionId: string;
+            productLine?: string;
+          };
+          const runtimeSessionId = getRuntimeSessionIdForRequest();
+          const workspaceId = basename(resolve(agentDir));
+          if (process.env.XIAOJING_MAIN_AGENT !== '1'
+            || payload.workspaceId !== workspaceId
+            || payload.sessionId !== runtimeSessionId) {
+            return jsonResponse({ success: false, error: 'question_pool_identity_mismatch' }, 403);
+          }
+          const pool = await getXiaojingQuestionPoolService({
+            workspaceId,
+            sessionId: runtimeSessionId,
+          }).latest({ ...payload, workspaceId, sessionId: runtimeSessionId });
+          return jsonResponse({ success: true, pool });
+        } catch (error) {
+          return jsonResponse({
+            success: false,
+            error: error instanceof Error ? error.message : String(error),
+          }, 400);
+        }
+      }
+
+      if (pathname === '/api/xiaojing/question-pools/generate' && request.method === 'POST') {
+        try {
+          const payload = await request.json() as {
+            workspaceId: string;
+            sessionId: string;
+            productLine: string;
+            targetRegion: string;
+            idempotencyKey: string;
+            generationParameters?: {
+              candidateLimit?: number;
+              recentSelectionLimit?: number;
+            };
+            retry?: boolean;
+          };
+          const runtimeSessionId = getRuntimeSessionIdForRequest();
+          const workspaceId = basename(resolve(agentDir));
+          if (process.env.XIAOJING_MAIN_AGENT !== '1'
+            || payload.workspaceId !== workspaceId
+            || payload.sessionId !== runtimeSessionId) {
+            return jsonResponse({ success: false, error: 'question_pool_identity_mismatch' }, 403);
+          }
+          const identity = { workspaceId, sessionId: runtimeSessionId };
+          const pool = await getXiaojingQuestionPoolService(identity).generate({
+            ...payload,
+            ...identity,
+          }, request.signal);
+          return jsonResponse({ success: true, pool });
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          const status = message.includes('revision_conflict') ? 409 : 400;
+          return jsonResponse({ success: false, error: message }, status);
+        }
+      }
+
+      if (pathname === '/api/xiaojing/question-pools/cancel' && request.method === 'POST') {
+        try {
+          const payload = await request.json() as {
+            workspaceId: string;
+            sessionId: string;
+            idempotencyKey: string;
+          };
+          const runtimeSessionId = getRuntimeSessionIdForRequest();
+          const workspaceId = basename(resolve(agentDir));
+          if (process.env.XIAOJING_MAIN_AGENT !== '1'
+            || payload.workspaceId !== workspaceId
+            || payload.sessionId !== runtimeSessionId) {
+            return jsonResponse({ success: false, error: 'question_pool_identity_mismatch' }, 403);
+          }
+          const pool = await getXiaojingQuestionPoolService({
+            workspaceId,
+            sessionId: runtimeSessionId,
+          }).cancel(payload.idempotencyKey);
+          return jsonResponse({ success: true, pool });
+        } catch (error) {
+          return jsonResponse({
+            success: false,
+            error: error instanceof Error ? error.message : String(error),
+          }, 400);
+        }
+      }
+
+      if (pathname === '/api/xiaojing/question-pools/confirm' && request.method === 'POST') {
+        try {
+          const payload = await request.json() as {
+            workspaceId: string;
+            sessionId: string;
+            poolId: string;
+            expectedRevision: number;
+            questions: QuestionPoolQuestion[];
+          };
+          const runtimeSessionId = getRuntimeSessionIdForRequest();
+          const workspaceId = basename(resolve(agentDir));
+          if (process.env.XIAOJING_MAIN_AGENT !== '1'
+            || payload.workspaceId !== workspaceId
+            || payload.sessionId !== runtimeSessionId) {
+            return jsonResponse({ success: false, error: 'question_pool_identity_mismatch' }, 403);
+          }
+          const identity = { workspaceId, sessionId: runtimeSessionId };
+          const decision = await getXiaojingQuestionPoolService(identity).confirm({
+            ...payload,
+            ...identity,
+          });
+          const engine = getSessionEngine();
+          const sessionConfig = resolveWorkspaceConfig(
+            agentDir,
+            getSessionMetadata(runtimeSessionId),
+            { includeMcp: false },
+          );
+          const notification = await engine.sendDesktopMessage({
+            text: buildQuestionPoolDecisionReminder({
+              poolId: decision.poolId,
+              decisionId: decision.decisionId,
+              revision: decision.revision,
+              selectedCount: decision.selectedQuestionIds.length,
+              knowledgeVersion: decision.knowledgeVersion,
+            }),
+            permissionMode: sessionConfig.permissionMode,
+            sessionId: runtimeSessionId,
+            workspacePath: agentDir,
+            scenario: { type: 'desktop' },
+            analyticsOrigin: { kind: 'automation', surface: 'unknown' },
+          });
+          return jsonResponse({
+            success: true,
+            decision,
+            notificationQueued: notification.success,
+            ...(!notification.success && notification.error
+              ? { notificationError: notification.error }
+              : {}),
+          });
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          return jsonResponse({ success: false, error: message },
+            message.includes('revision_conflict') ? 409 : 400);
         }
       }
 

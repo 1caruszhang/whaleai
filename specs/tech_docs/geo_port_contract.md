@@ -26,6 +26,8 @@ GitHub Actions 在通用 unit gate 之前单独执行该入口，使 js_ai 行�
 - Managed Task 仅保存监测唤醒引用，不复制 GEO 阶段、Operation 或产物状态，也不形成 Task Center 产品界面。
 - `PublishScheduler` 确定性拥有付费订单的幂等、排期、提交、同步与重试；模型不能临场替代它。
 
+品牌知识切片的可执行边界由 [`knowledge_authority.md`](./knowledge_authority.md) 细化：事实 identity 由标准化 `subject / predicate / scope / effectiveFrom / effectiveTo` 共同决定；模型推断、用户陈述和普通聊天发现都先停在待确认候选。用户只可通过结构化卡片选择 `keep-current / adopt-new / split-scope / reject-candidate`；确认 `adopt-new` 后，同键同值只合并来源，同键异值才替换并升版。所有成功裁决都带 expected current version 并进入审计。
+
 ## 阶段、依赖与确认门
 
 首次移植保持以下语义链，而不是照搬旧 UI 的 Active Project 全局指针：

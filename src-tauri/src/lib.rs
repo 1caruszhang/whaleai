@@ -14,6 +14,7 @@ pub mod deepseek_credentials;
 pub mod device_identity;
 pub mod floating_ball;
 pub mod floating_ball_pets;
+pub mod geo_provider_credentials;
 mod global_shortcut;
 pub mod grok_auth;
 pub mod i18n;
@@ -417,6 +418,10 @@ pub fn run() {
             deepseek_credentials::cmd_deepseek_credential_save,
             deepseek_credentials::cmd_deepseek_credential_delete,
             deepseek_credentials::cmd_deepseek_credential_verify,
+            geo_provider_credentials::cmd_geo_provider_capability_status,
+            geo_provider_credentials::cmd_geo_provider_credentials_save,
+            geo_provider_credentials::cmd_geo_provider_credentials_delete,
+            geo_provider_credentials::cmd_geo_provider_capability_verify,
             brand_workspace::cmd_brand_workspace_bootstrap,
             brand_workspace::cmd_brand_workspace_create,
             brand_workspace::cmd_brand_workspace_switch,

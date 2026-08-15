@@ -527,7 +527,7 @@ function clampGeoScore(value: number): number {
   return Math.max(0, Math.min(100, Math.round(finiteValue)));
 }
 
-function geoCosineSimilarity(
+export function geoCosineSimilarity(
   left: readonly number[],
   right: readonly number[],
 ): number {

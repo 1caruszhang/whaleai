@@ -133,6 +133,8 @@ instruction、cron output 都只给模型看。
 
 `MEMORY_UPDATE` 当前是内部纯隐藏场景，不属于有 badge 的可复用展示协议。若要让它
 或新 tag 出现在用户气泡上，先补 `systemTagLabel()`、文案资源和渲染测试。
+`XIAOJING_KNOWLEDGE_DECISION` 同样是内部纯隐藏场景：品牌知识卡已由
+KnowledgeAuthority 提交后，用它唤醒当前 Agent 自然确认结果，不生成用户消息。
 
 ## 生产使用点
 
@@ -147,6 +149,7 @@ instruction、cron output 都只给模型看。
 | 浮球消息 | `src/shared/systemReminder.ts::buildFloatingBallContextReminder`，调用方 `src/renderer/floating-ball/useFloatingSession.ts` | `<system-reminder><FLOATING_BALL_CONTEXT>...</FLOATING_BALL_CONTEXT></system-reminder>` + 用户文本 |
 | Space IssueDelivery（0.3.2 v2） | `src-tauri/src/space_cloud.rs::build_space_issue_delivery_message_for_locale` | `<system-reminder><myagents-space-issue><registered-agent-context>…</registered-agent-context><registered-agent-instruction>…</registered-agent-instruction><operating-guidance>…</operating-guidance><deliveries>…</deliveries></myagents-space-issue></system-reminder>` + 本地化可见提示 |
 | Cron 结果投送 IM session | `src/server/utils/cron-event-relay.ts::buildCronEventRelayMessage` | `<system-reminder><HEARTBEAT>...</HEARTBEAT></system-reminder>` + `[System]收到来自系统投送的信息` |
+| 小鲸知识卡裁决 | `src/shared/systemReminder.ts::buildKnowledgeDecisionReminder`，调用方 `/api/xiaojing/knowledge/decide` | `<system-reminder><XIAOJING_KNOWLEDGE_DECISION>...</XIAOJING_KNOWLEDGE_DECISION></system-reminder>`，纯隐藏 |
 
 command Trigger 命中时仍使用 `CRON_TASK` 这一兼容 tag；builder 在 hidden payload 中追加规范化 `<activation-event>`，只包含 event id/kind/time、reason code 与 untrusted handoff。Detector checkpoint、stderr、命令路径和 harness error 永不进入 Session。handoff 来自外部事实，必须被 XML escape 并明确作为不可信上下文；它不能覆盖 `task.md`、消息 role 或 Session/Runtime 配置。没有 Activation Event 的 always Task 保持原 reminder wire shape。
 

@@ -100,17 +100,26 @@ Global Sidecar 同样把“应用仍需要它运行”与“当前候选进程�
 
 主 Agent 的执行能力只有 host `AskUserQuestion` 与内置 `xiaojing-geo` MCP。该 MCP 由产品策略直接注册，不接受 Renderer 或工作区配置替换；当前提供真实的品牌/Session 上下文检查，后续 GEO 切片只能沿这一服务器扩展。终端、Git、任意文件 IO、通用 MCP、插件、Skill、子 Agent 与 external Runtime 同时在目录可见性、Query options 和最终 tool gate 上 fail closed。
 
+GEO Provider 不是通用模型目录，而是 `main-agent / extraction / keyword-search / generation / reflection / embedding / object-storage / distribution` 八个固定能力槽位。Rust Credential Manager owner 持有应用级服务凭据并只在品牌 Session Sidecar 出生时一次性注入；Node 在组合产品 MCP 时捕获后立即删除传输变量。GEO 领域步骤只消费 `src/server/geo/provider-capabilities.ts` 的类型化 ports，Renderer 只消费 `src/shared/geo/providerCapabilities.ts` 的非 secret catalog/status。全部品牌复用服务能力，但任何品牌知识、产物和订单访问仍必须显式携带 workspace identity。完整路由与测试边界见 `tech_docs/geo_provider_capabilities.md`。
+
 | 概念 | 含义 | 决策 Owner | 持久化 / 执行 Owner |
 |------|------|------------|---------------------|
 | `BrandWorkspace` | 一个品牌及其知识、产品线、Session、产物、发布与观测数据 | GEO domain | Rust brand store |
 | `Session` | 独立聊天与 Agent 上下文；不拥有共享品牌事实 | Session runtime | Rust Session store + Session Sidecar |
 | `GeoOperation` | 一次具体 GEO 动作；不是固定的“一个 Session 一个 Run” | GEO domain | Rust brand store |
+| `BrandMaterial` | 当前品牌的可追溯原文件/粘贴文本/官网响应；只产生候选事实 | Material import policy | Rust brand store + `materials/` |
 | `KnowledgeAuthority` | 权威品牌事实的唯一接受入口；模型/UI 只能提交候选或决策 | Knowledge authority policy | Rust brand store |
 | `GeoArtifact` | 带版本、来源和知识版本的问题、计划、文章、订单、观测或报告 | GEO domain | Rust brand store / Blob assets |
 | Managed Task | 仅唤醒监测 Operation 的隐藏调度基础设施 | Task scheduler | Rust `TaskStore`；不拥有 GEO 状态 |
 | `PublishScheduler` | 付费发布的幂等、排期、提交、同步和重试 | Publish scheduler policy | Rust deterministic scheduler；模型不可替代 |
 
-跨 Session 写共享品牌事实必须经过 `KnowledgeAuthority` 的版本检查；Task Center 不能复制 GEO 阶段或产物；模型只能提出分发计划，只有用户确认后的 `PublishScheduler` 可以提交付费订单。
+跨 Session 写共享品牌事实必须经过 `src/server/geo/knowledge-authority.ts::KnowledgeAuthority`：Renderer 只向当前 Session Sidecar 提交四类结构化卡片决策，`xiaojing-geo` MCP 只提交候选或读取当前值，二者都不能直接写库。Rust `BrandWorkspaceStore` 在对应品牌的 `project.sqlite` 中分离保存 raw input、candidate、current、history、source 与 decision audit，并用 `fact_key` 主键和事务内 expected version CAS 保证唯一当前值。Management API 还会把 `(sidecar management id, generation, sessionId, workspace path)` 与请求的 workspace identity 一起校验，拒绝跨品牌地址。详细契约见 `tech_docs/knowledge_authority.md`。
+
+品牌材料导入沿现有 Session 控制面进入 Node `MaterialImportService`，普通文件读取、原子复制、哈希、材料状态与 `project.sqlite` 只由 Rust 执行。Node 只能按显式 material identity 读取 Rust 返回的有界字节并调用 `extraction` typed port，随后把所有 Profile 事实交给上述 `KnowledgeAuthority`。官网响应也必须先成为原始材料；支持类型、SSRF/重定向护栏、来源层级、最小重试与日志边界见 `tech_docs/material_import.md`。
+
+关键词/问题池生成继续沿当前 Tab 的 Session 控制面进入 Node `QuestionPoolService`：它只消费 `keyword-search` / `generation` / `embedding` 类型能力，并以 Rust 返回的 immutable knowledge snapshot 为唯一知识输入。Rust `BrandWorkspaceStore` 在同一 `project.sqlite` 中持有 pool / attempt / checkpoint / append-only decision，每个 `question-pool` `GeoArtifact` 必须绑定 knowledge version、产品线、地域、参数与来源证据。同一 identity 且知识版本仍有效时直接复用；确认后不可覆写。阶段 CAS、计费幂等键、PRED-1 评分阈值与 UI 决策协议见 `tech_docs/question_pool.md`。
+
+Task Center 不能复制 GEO 阶段或产物；模型只能提出分发计划，只有用户确认后的 `PublishScheduler` 可以提交付费订单。
 
 ### Sidecar Owner 模型
 
@@ -284,6 +293,9 @@ Global control request
 | `/api/mcp/remove-references` | Task 中删除 custom MCP identity 的持久引用 | `admin-api.ts` MCP remove cascade |
 | `/api/app/config-changed` | 将 disk-first AppConfig 失效信号广播到所有 WebView（空 payload，不携带 secret） | `admin-api.ts` model / MCP mutation |
 | `/api/runtime/sdk-child/{admit,settle}` | Rust-owned Claude SDK native child launch circuit；按 executable identity 限流 deterministic exec denial | Global / Session Sidecar 的 `createGuardedSdkQuery()` |
+| `/api/brand-knowledge/*` | `KnowledgeAuthority` 的当前值读取、候选存储与 CAS 裁决持久化；请求绑定品牌 Session generation | `xiaojing-geo` MCP / 小鲸结构化冲突卡经 Session Sidecar |
+| `/api/brand-materials/*` | 品牌材料上下文、Rust-owned 导入/哈希/状态与按 material ID 有界读取；不向 Renderer 暴露本机路径 | 当前品牌 Session Sidecar 的 `MaterialImportService` |
+| `/api/brand-question-pools/*` | Rust-owned pool / attempt / checkpoint / append-only decision；身份绑定 knowledge version、产品线、地域与参数 | 当前品牌 Session Sidecar 的 `QuestionPoolService` |
 | `/api/thought/*`（2 条） | 想法 create / list | CLI、`admin-api.ts` |
 | `/api/im/*` + `/api/im-bridge/*` | IM Bot 唤醒 + 媒体下发 + Plugin Bridge 回调 | Node.js / 社区插件 Bridge |
 | `/api/plugin/*`（3 条） | OpenClaw 插件 CRUD | CLI |

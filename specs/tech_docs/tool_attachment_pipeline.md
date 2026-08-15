@@ -207,6 +207,11 @@ undici 自有 `fetch` + `withAbortSignal`，**不是**红线表里的 `cancellab
 不进 SSE / 不写 SessionStore**——绝对路径 / `~/.codex/sessions/<id>` 等敏感信息只
 留在 server log。
 
+品牌官网材料抓取不是 tool attachment，但复用本模块导出的
+`buildSsrfGuardedDispatcher` 与 `isUrlSchemeSafe`，避免维护第二份 DNS/IP policy。其业务差异由
+`material_import.md` 固定：manual redirect 最多 3 次且每跳重新校验/钉 IP、15 秒超时、
+2 MiB 解压后流式上限、仅文本 content type，并且响应必须先由 Rust 保存为 BrandMaterial。
+
 ---
 
 ## 5. 异步落盘 & Placeholder 生命周期

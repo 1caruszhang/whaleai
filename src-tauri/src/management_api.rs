@@ -3,8 +3,13 @@
 // Only accessible from 127.0.0.1 (Bun Sidecar processes)
 
 use axum::{
+    body::Body,
     extract::{DefaultBodyLimit, Query},
-    http::{header::CACHE_CONTROL, HeaderMap, HeaderValue},
+    http::{
+        header::{CACHE_CONTROL, CONTENT_TYPE},
+        HeaderMap, HeaderValue, StatusCode,
+    },
+    response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };
@@ -112,6 +117,75 @@ pub async fn start_management_api() -> Result<u16, String> {
         .route(
             "/api/runtime/sdk-child/settle",
             post(sdk_child_settle_handler),
+        )
+        .route(
+            "/api/brand-knowledge/current",
+            post(brand_knowledge_current_handler),
+        )
+        .route(
+            "/api/brand-knowledge/candidate/submit",
+            post(brand_knowledge_candidate_submit_handler),
+        )
+        .route(
+            "/api/brand-knowledge/candidate/get",
+            post(brand_knowledge_candidate_get_handler),
+        )
+        .route(
+            "/api/brand-knowledge/candidate/decide",
+            post(brand_knowledge_candidate_decide_handler),
+        )
+        .route(
+            "/api/brand-materials/context",
+            post(brand_material_context_handler),
+        )
+        .route(
+            "/api/brand-materials/import-file",
+            post(brand_material_import_file_handler),
+        )
+        .route(
+            "/api/brand-materials/import-text",
+            post(brand_material_import_text_handler),
+        )
+        .route("/api/brand-materials/get", post(brand_material_get_handler))
+        .route(
+            "/api/brand-materials/content",
+            post(brand_material_content_handler),
+        )
+        .route(
+            "/api/brand-materials/processing/start",
+            post(brand_material_processing_start_handler),
+        )
+        .route(
+            "/api/brand-materials/processing/finish",
+            post(brand_material_processing_finish_handler),
+        )
+        .route(
+            "/api/brand-question-pools/latest",
+            post(brand_question_pool_latest_handler),
+        )
+        .route(
+            "/api/brand-question-pools/prepare",
+            post(brand_question_pool_prepare_handler),
+        )
+        .route(
+            "/api/brand-question-pools/step/claim",
+            post(brand_question_pool_step_claim_handler),
+        )
+        .route(
+            "/api/brand-question-pools/step/finish",
+            post(brand_question_pool_step_finish_handler),
+        )
+        .route(
+            "/api/brand-question-pools/persist",
+            post(brand_question_pool_persist_handler),
+        )
+        .route(
+            "/api/brand-question-pools/cancel",
+            post(brand_question_pool_cancel_handler),
+        )
+        .route(
+            "/api/brand-question-pools/decide",
+            post(brand_question_pool_decide_handler),
         )
         .route("/api/cron/create", post(create_cron_handler))
         .route("/api/cron/list", get(list_cron_handler))
@@ -329,6 +403,449 @@ fn validate_current_sidecar_request(
         }));
     }
     Ok(())
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BrandKnowledgeEnvelope<T> {
+    sidecar_id: String,
+    workspace_id: String,
+    session_id: String,
+    payload: T,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BrandKnowledgeCurrentPayload {
+    fact_key: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BrandKnowledgeCandidatePayload {
+    candidate_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BrandMaterialPayload {
+    material_id: String,
+}
+
+fn validate_brand_knowledge_request<T>(
+    headers: &HeaderMap,
+    request: &BrandKnowledgeEnvelope<T>,
+) -> Result<crate::brand_workspace::BrandWorkspaceStore, serde_json::Value> {
+    let generation = request_sidecar_generation(headers).map_err(|Json(value)| value)?;
+    let store = crate::brand_workspace::production_store().map_err(|error| {
+        serde_json::json!({ "ok": false, "code": "management_unavailable", "error": error })
+    })?;
+    let workspace = store
+        .list_workspaces()
+        .map_err(|error| serde_json::json!({ "ok": false, "error": error }))?
+        .into_iter()
+        .find(|workspace| workspace.id == request.workspace_id)
+        .ok_or_else(|| serde_json::json!({ "ok": false, "code": "invalid_workspace", "error": "Brand workspace does not exist" }))?;
+    let Some(sidecars) = get_sidecar_state() else {
+        return Err(serde_json::json!({
+            "ok": false,
+            "code": "management_unavailable",
+            "error": "Sidecar manager is not initialized",
+        }));
+    };
+    let matches = sidecars
+        .lock()
+        .map(|manager| {
+            manager.is_live_brand_process(
+                &request.sidecar_id,
+                generation,
+                &request.session_id,
+                &workspace.root_path,
+            )
+        })
+        .map_err(|error| {
+            serde_json::json!({
+                "ok": false,
+                "code": "management_unavailable",
+                "error": format!("Sidecar lock poisoned: {error}"),
+            })
+        })?;
+    if !matches {
+        return Err(serde_json::json!({
+            "ok": false,
+            "code": "stale_or_mismatched_brand_sidecar",
+            "error": "Brand knowledge caller identity does not match the current Session generation and workspace",
+        }));
+    }
+    Ok(store)
+}
+
+async fn brand_knowledge_current_handler(
+    headers: HeaderMap,
+    Json(request): Json<BrandKnowledgeEnvelope<BrandKnowledgeCurrentPayload>>,
+) -> Json<serde_json::Value> {
+    let store = match validate_brand_knowledge_request(&headers, &request) {
+        Ok(store) => store,
+        Err(error) => return Json(error),
+    };
+    match store.knowledge_current(
+        &request.workspace_id,
+        &request.session_id,
+        &request.payload.fact_key,
+    ) {
+        Ok(current) => Json(serde_json::json!({ "ok": true, "current": current })),
+        Err(error) => Json(serde_json::json!({ "ok": false, "error": error })),
+    }
+}
+
+async fn brand_knowledge_candidate_submit_handler(
+    headers: HeaderMap,
+    Json(request): Json<
+        BrandKnowledgeEnvelope<crate::brand_workspace::KnowledgeCandidateSubmission>,
+    >,
+) -> Json<serde_json::Value> {
+    let store = match validate_brand_knowledge_request(&headers, &request) {
+        Ok(store) => store,
+        Err(error) => return Json(error),
+    };
+    if request.payload.workspace_id != request.workspace_id
+        || request.payload.session_id != request.session_id
+    {
+        return Json(serde_json::json!({
+            "ok": false,
+            "code": "identity_mismatch",
+            "error": "Knowledge payload identity must match its authenticated envelope",
+        }));
+    }
+    match store.submit_knowledge_candidate(request.payload) {
+        Ok(candidate) => Json(serde_json::json!({ "ok": true, "candidate": candidate })),
+        Err(error) => Json(serde_json::json!({ "ok": false, "error": error })),
+    }
+}
+
+async fn brand_knowledge_candidate_get_handler(
+    headers: HeaderMap,
+    Json(request): Json<BrandKnowledgeEnvelope<BrandKnowledgeCandidatePayload>>,
+) -> Json<serde_json::Value> {
+    let store = match validate_brand_knowledge_request(&headers, &request) {
+        Ok(store) => store,
+        Err(error) => return Json(error),
+    };
+    match store.knowledge_candidate(
+        &request.workspace_id,
+        &request.session_id,
+        &request.payload.candidate_id,
+    ) {
+        Ok(candidate) => Json(serde_json::json!({ "ok": true, "candidate": candidate })),
+        Err(error) => Json(serde_json::json!({ "ok": false, "error": error })),
+    }
+}
+
+async fn brand_knowledge_candidate_decide_handler(
+    headers: HeaderMap,
+    Json(request): Json<BrandKnowledgeEnvelope<crate::brand_workspace::KnowledgeDecisionRequest>>,
+) -> Json<serde_json::Value> {
+    let store = match validate_brand_knowledge_request(&headers, &request) {
+        Ok(store) => store,
+        Err(error) => return Json(error),
+    };
+    if request.payload.workspace_id != request.workspace_id
+        || request.payload.session_id != request.session_id
+    {
+        return Json(serde_json::json!({
+            "ok": false,
+            "code": "identity_mismatch",
+            "error": "Knowledge decision identity must match its authenticated envelope",
+        }));
+    }
+    match store.decide_knowledge_candidate(request.payload) {
+        Ok(result) => Json(serde_json::json!({ "ok": true, "result": result })),
+        Err(error) => Json(serde_json::json!({ "ok": false, "error": error })),
+    }
+}
+
+async fn brand_material_context_handler(
+    headers: HeaderMap,
+    Json(request): Json<BrandKnowledgeEnvelope<serde_json::Value>>,
+) -> Json<serde_json::Value> {
+    let store = match validate_brand_knowledge_request(&headers, &request) {
+        Ok(store) => store,
+        Err(error) => return Json(error),
+    };
+    match store.material_context(&request.workspace_id, &request.session_id) {
+        Ok(context) => Json(serde_json::json!({ "ok": true, "context": context })),
+        Err(error) => Json(serde_json::json!({ "ok": false, "error": error })),
+    }
+}
+
+async fn brand_material_import_file_handler(
+    headers: HeaderMap,
+    Json(request): Json<BrandKnowledgeEnvelope<crate::brand_workspace::ImportBrandFileRequest>>,
+) -> Json<serde_json::Value> {
+    let store = match validate_brand_knowledge_request(&headers, &request) {
+        Ok(store) => store,
+        Err(error) => return Json(error),
+    };
+    if request.payload.workspace_id != request.workspace_id
+        || request.payload.session_id != request.session_id
+    {
+        return Json(serde_json::json!({
+            "ok": false,
+            "code": "identity_mismatch",
+            "error": "Material payload identity must match its authenticated envelope",
+        }));
+    }
+    match store.import_brand_file(request.payload) {
+        Ok(material) => Json(serde_json::json!({ "ok": true, "material": material })),
+        Err(error) => Json(serde_json::json!({ "ok": false, "error": error })),
+    }
+}
+
+async fn brand_material_import_text_handler(
+    headers: HeaderMap,
+    Json(request): Json<BrandKnowledgeEnvelope<crate::brand_workspace::ImportBrandTextRequest>>,
+) -> Json<serde_json::Value> {
+    let store = match validate_brand_knowledge_request(&headers, &request) {
+        Ok(store) => store,
+        Err(error) => return Json(error),
+    };
+    if request.payload.workspace_id != request.workspace_id
+        || request.payload.session_id != request.session_id
+    {
+        return Json(serde_json::json!({
+            "ok": false,
+            "code": "identity_mismatch",
+            "error": "Material payload identity must match its authenticated envelope",
+        }));
+    }
+    match store.import_brand_text(request.payload) {
+        Ok(material) => Json(serde_json::json!({ "ok": true, "material": material })),
+        Err(error) => Json(serde_json::json!({ "ok": false, "error": error })),
+    }
+}
+
+async fn brand_material_get_handler(
+    headers: HeaderMap,
+    Json(request): Json<BrandKnowledgeEnvelope<BrandMaterialPayload>>,
+) -> Json<serde_json::Value> {
+    let store = match validate_brand_knowledge_request(&headers, &request) {
+        Ok(store) => store,
+        Err(error) => return Json(error),
+    };
+    match store.brand_material(
+        &request.workspace_id,
+        &request.session_id,
+        &request.payload.material_id,
+    ) {
+        Ok(material) => Json(serde_json::json!({ "ok": true, "material": material })),
+        Err(error) => Json(serde_json::json!({ "ok": false, "error": error })),
+    }
+}
+
+// Internal Node→Rust material data plane. The request is a small authenticated
+// control envelope; Rust performs the only filesystem read and streams bounded
+// app-owned bytes back to the GEO parser. No local path crosses the response.
+async fn brand_material_content_handler(
+    headers: HeaderMap,
+    Json(request): Json<BrandKnowledgeEnvelope<BrandMaterialPayload>>,
+) -> Response {
+    let store = match validate_brand_knowledge_request(&headers, &request) {
+        Ok(store) => store,
+        Err(error) => return (StatusCode::FORBIDDEN, Json(error)).into_response(),
+    };
+    match store.read_brand_material_bytes(
+        &request.workspace_id,
+        &request.session_id,
+        &request.payload.material_id,
+    ) {
+        Ok((material, bytes)) => {
+            let mut response_headers = HeaderMap::new();
+            response_headers.insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
+            if let Ok(value) = HeaderValue::from_str(&material.media_type) {
+                response_headers.insert(CONTENT_TYPE, value);
+            }
+            (response_headers, Body::from(bytes)).into_response()
+        }
+        Err(error) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "ok": false, "error": error })),
+        )
+            .into_response(),
+    }
+}
+
+async fn brand_material_processing_start_handler(
+    headers: HeaderMap,
+    Json(request): Json<BrandKnowledgeEnvelope<BrandMaterialPayload>>,
+) -> Json<serde_json::Value> {
+    let store = match validate_brand_knowledge_request(&headers, &request) {
+        Ok(store) => store,
+        Err(error) => return Json(error),
+    };
+    match store.begin_material_processing(
+        &request.workspace_id,
+        &request.session_id,
+        &request.payload.material_id,
+    ) {
+        Ok(attempt) => Json(serde_json::json!({ "ok": true, "attempt": attempt })),
+        Err(error) => Json(serde_json::json!({ "ok": false, "error": error })),
+    }
+}
+
+async fn brand_material_processing_finish_handler(
+    headers: HeaderMap,
+    Json(request): Json<BrandKnowledgeEnvelope<crate::brand_workspace::MaterialProcessingFinish>>,
+) -> Json<serde_json::Value> {
+    let store = match validate_brand_knowledge_request(&headers, &request) {
+        Ok(store) => store,
+        Err(error) => return Json(error),
+    };
+    match store.finish_material_processing(
+        &request.workspace_id,
+        &request.session_id,
+        request.payload,
+    ) {
+        Ok(material) => Json(serde_json::json!({ "ok": true, "material": material })),
+        Err(error) => Json(serde_json::json!({ "ok": false, "error": error })),
+    }
+}
+
+async fn brand_question_pool_prepare_handler(
+    headers: HeaderMap,
+    Json(request): Json<BrandKnowledgeEnvelope<crate::brand_workspace::QuestionPoolPrepareRequest>>,
+) -> Json<serde_json::Value> {
+    let store = match validate_brand_knowledge_request(&headers, &request) {
+        Ok(store) => store,
+        Err(error) => return Json(error),
+    };
+    if request.payload.workspace_id != request.workspace_id
+        || request.payload.session_id != request.session_id
+    {
+        return Json(serde_json::json!({
+            "ok": false,
+            "code": "identity_mismatch",
+            "error": "Question pool payload identity must match its authenticated envelope",
+        }));
+    }
+    match store.prepare_question_pool(request.payload) {
+        Ok(preparation) => Json(serde_json::json!({ "ok": true, "preparation": preparation })),
+        Err(error) => Json(serde_json::json!({ "ok": false, "error": error })),
+    }
+}
+
+async fn brand_question_pool_latest_handler(
+    headers: HeaderMap,
+    Json(request): Json<BrandKnowledgeEnvelope<crate::brand_workspace::QuestionPoolLatestRequest>>,
+) -> Json<serde_json::Value> {
+    let store = match validate_brand_knowledge_request(&headers, &request) {
+        Ok(store) => store,
+        Err(error) => return Json(error),
+    };
+    match store.latest_valid_question_pool(
+        &request.workspace_id,
+        &request.session_id,
+        request.payload,
+    ) {
+        Ok(pool) => Json(serde_json::json!({ "ok": true, "pool": pool })),
+        Err(error) => Json(serde_json::json!({ "ok": false, "error": error })),
+    }
+}
+
+async fn brand_question_pool_step_claim_handler(
+    headers: HeaderMap,
+    Json(request): Json<
+        BrandKnowledgeEnvelope<crate::brand_workspace::QuestionPoolStepClaimRequest>,
+    >,
+) -> Json<serde_json::Value> {
+    let store = match validate_brand_knowledge_request(&headers, &request) {
+        Ok(store) => store,
+        Err(error) => return Json(error),
+    };
+    match store.claim_question_pool_step(
+        &request.workspace_id,
+        &request.session_id,
+        request.payload,
+    ) {
+        Ok(claim) => Json(serde_json::json!({ "ok": true, "claim": claim })),
+        Err(error) => Json(serde_json::json!({ "ok": false, "error": error })),
+    }
+}
+
+async fn brand_question_pool_step_finish_handler(
+    headers: HeaderMap,
+    Json(request): Json<
+        BrandKnowledgeEnvelope<crate::brand_workspace::QuestionPoolStepFinishRequest>,
+    >,
+) -> Json<serde_json::Value> {
+    let store = match validate_brand_knowledge_request(&headers, &request) {
+        Ok(store) => store,
+        Err(error) => return Json(error),
+    };
+    match store.finish_question_pool_step(
+        &request.workspace_id,
+        &request.session_id,
+        request.payload,
+    ) {
+        Ok(checkpoint) => Json(serde_json::json!({ "ok": true, "checkpoint": checkpoint })),
+        Err(error) => Json(serde_json::json!({ "ok": false, "error": error })),
+    }
+}
+
+async fn brand_question_pool_persist_handler(
+    headers: HeaderMap,
+    Json(request): Json<BrandKnowledgeEnvelope<crate::brand_workspace::QuestionPoolPersistRequest>>,
+) -> Json<serde_json::Value> {
+    let store = match validate_brand_knowledge_request(&headers, &request) {
+        Ok(store) => store,
+        Err(error) => return Json(error),
+    };
+    match store.persist_question_pool(&request.workspace_id, &request.session_id, request.payload) {
+        Ok(pool) => Json(serde_json::json!({ "ok": true, "pool": pool })),
+        Err(error) => Json(serde_json::json!({ "ok": false, "error": error })),
+    }
+}
+
+async fn brand_question_pool_cancel_handler(
+    headers: HeaderMap,
+    Json(request): Json<BrandKnowledgeEnvelope<crate::brand_workspace::QuestionPoolCancelRequest>>,
+) -> Json<serde_json::Value> {
+    let store = match validate_brand_knowledge_request(&headers, &request) {
+        Ok(store) => store,
+        Err(error) => return Json(error),
+    };
+    match store.cancel_question_pool_attempt(
+        &request.workspace_id,
+        &request.session_id,
+        request.payload,
+    ) {
+        Ok(pool) => Json(serde_json::json!({ "ok": true, "pool": pool })),
+        Err(error) => Json(serde_json::json!({ "ok": false, "error": error })),
+    }
+}
+
+async fn brand_question_pool_decide_handler(
+    headers: HeaderMap,
+    Json(request): Json<
+        BrandKnowledgeEnvelope<crate::brand_workspace::QuestionPoolDecisionRequest>,
+    >,
+) -> Json<serde_json::Value> {
+    let store = match validate_brand_knowledge_request(&headers, &request) {
+        Ok(store) => store,
+        Err(error) => return Json(error),
+    };
+    if request.payload.workspace_id != request.workspace_id
+        || request.payload.session_id != request.session_id
+    {
+        return Json(serde_json::json!({
+            "ok": false,
+            "code": "identity_mismatch",
+            "error": "Question pool decision identity must match its authenticated envelope",
+        }));
+    }
+    match store.decide_question_pool(request.payload) {
+        Ok(result) => Json(serde_json::json!({ "ok": true, "result": result })),
+        Err(error) => Json(serde_json::json!({ "ok": false, "error": error })),
+    }
 }
 
 fn is_executable_identity(value: &str) -> bool {

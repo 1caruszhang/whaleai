@@ -360,7 +360,7 @@ export function isUrlSchemeSafe(parsed: URL): { ok: true } | { ok: false; reason
  * Agent. Caller MUST `.close()` it after the body is consumed (per-request
  * agent; leaving it open leaks sockets).
  */
-async function buildSsrfGuardedDispatcher(parsed: URL): Promise<Agent | undefined> {
+export async function buildSsrfGuardedDispatcher(parsed: URL): Promise<Agent | undefined> {
   const host = parsed.hostname.replace(/^\[|\]$/g, '');
   if (isIP(host) !== 0) return undefined; // literal IP — already vetted, no re-resolution risk
   let addresses: { address: string; family: number }[];

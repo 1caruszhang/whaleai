@@ -107,6 +107,7 @@ assembler。调用方传入：
 | XML-like block                           | 主要内容                                                | 注入条件                                           |
 | ---------------------------------------- | ------------------------------------------------------- | -------------------------------------------------- |
 | `myagents-identity`                      | 产品身份、准确 Runtime 名称、`~/.myagents`、时间检查    | 全部场景                                           |
+| `xiaojing-identity`                      | 小鲸产品身份、受控 GEO 能力与品牌知识候选/确认边界     | 小鲸品牌 Session；替代普通 `myagents-identity`     |
 | `myagents-interaction-channel`           | 桌面或 IM/Channel 入口、平台、私聊/群聊、Bot 昵称       | 全部场景；渠道互斥                                 |
 | `myagents-cron-task-instructions`        | Task ID、触发间隔、可选自结束说明                       | `cron`                                             |
 | `myagents-heartbeat-instructions`        | 如何处理周期 Heartbeat                                  | `im`、`agent-channel`                              |
@@ -228,6 +229,7 @@ payload，而 UI 只展示 envelope 后的 visible tail 或 badge。它适合 Tu
 - Space IssueDelivery；
 - IM Heartbeat、群聊身份/回复规则和群聊自定义指令；
 - Memory Update、watchdog resume、跨 Session 事件。
+- 小鲸品牌知识卡裁决后的 Session 内部结果通知。
 
 生产、解析、escaping、badge、搜索/标题/预览过滤及前端接入 Checklist 全部以
 [`system_reminder_protocol.md`](./system_reminder_protocol.md) 为准。这里只保留选择边界：

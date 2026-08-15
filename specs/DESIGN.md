@@ -1267,6 +1267,12 @@ v2.0 移除了所有旧别名。以下是唯一保留的等价关系：
 
 小鲸同学 v1 使用稳定三栏壳：左侧 248px 品牌/会话投影，中间保留既有 Tab 与聊天 authority，右侧 320px GEO 工作台可折叠为 48px。左右两栏都只投影既有品牌、Session 与操作入口，不成为新的数据 owner；无当前 GEO 操作时，右栏只展示当前品牌摘要与可启动能力，不伪造指标。
 
+品牌材料入口位于真实聊天 Tab 内的右侧 GEO 工作台，和该 Tab 的 `TabProvider` 共用固化的 Sidecar/Session identity。只有 Tab 的 workspace path 精确匹配某个 `BrandWorkspace` 且已建立真实 Session 时，文件、粘贴资料和官网 URL 操作才可用；pending Session 展示建立会话的引导，不回退到全局 current workspace。文件按钮调用系统文件选择器，Renderer 只传递选择结果而不读文件；每份材料独立展示处理中、成功或失败、`materialId` 与候选数，已有 `materialId` 的失败项只提供单项重试，不生成聊天消息或伪造 GEO 操作。
+
+关键词/问题池也位于同一真实 Tab 的 GEO 工作台。用户只需选择产品线、填写生成必需的目标地域；当前知识版本已有有效池时自动进入选择态，不再触发 Provider。选择态必须支持勾选、编辑、删除、新增和显示三因子优先级；生成中可取消，失败后只从同 attempt 的失败阶段重试。“确认本轮问题”提交结构化 decision，不往 transcript 伪造用户消息。
+
+小鲸设置页的服务区使用固定能力卡片展示主 Agent、抽取、关键词搜索、生成、反思、Embedding、对象存储和分发的未配置/验证中/可用/限流/失败状态；下面按 DeepSeek、ARK、Embedding、OSS、超级媒介五组收集应用级配置。页面不提供新增 Provider、模型列表、Runtime 选择或市场入口，已保存值只显示占位而不回填明文。
+
 以下旧 `GlobalSidebar` 双层注意力规范继续约束 expand 阶段保留的通用产品代码，但它不再是默认产品入口。顶部 Tab 仍回答“哪些窗口正在占用注意力”，所有主内容页继续由 Tab 拥有。
 
 ### 15.1 布局结构

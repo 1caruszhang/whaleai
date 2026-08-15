@@ -21,6 +21,7 @@ import WebFetchTool from './tools/WebFetchTool';
 import WebSearchTool from './tools/WebSearchTool';
 import WriteTool from './tools/WriteTool';
 import CronTaskCard from './scheduled-tasks/CronTaskCard';
+import KnowledgeConflictCard, { parseKnowledgeConflictCard } from './xiaojing/KnowledgeConflictCard';
 
 
 /** Parse cron tool result JSON, returning structured data for card rendering or null on failure */
@@ -148,6 +149,11 @@ function renderToolBody(tool: ToolUseSimple): React.JSX.Element {
             />
           );
         }
+      }
+
+      if (tool.name === 'mcp__xiaojing-geo__propose_brand_fact' && tool.result) {
+        const knowledgeCard = parseKnowledgeConflictCard(tool.result);
+        if (knowledgeCard) return <KnowledgeConflictCard data={knowledgeCard} />;
       }
 
       // Fallback for unknown tools - show raw JSON

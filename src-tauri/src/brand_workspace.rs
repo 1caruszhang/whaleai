@@ -7,6 +7,13 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+mod knowledge;
+mod materials;
+mod question_pools;
+pub use knowledge::*;
+pub use materials::*;
+pub use question_pools::*;
+
 const CATALOG_FILE: &str = "brands.json";
 const SESSION_DELETION_ADMISSION_STALE_SECONDS: i64 = 60;
 const BRAND_DIRS: [&str; 5] = [
@@ -645,6 +652,7 @@ fn initialize_database(workspace: &BrandWorkspace) -> Result<(), String> {
                 operation_id TEXT REFERENCES geo_operations(id) ON DELETE SET NULL,
                 session_id TEXT REFERENCES brand_sessions(id) ON DELETE SET NULL,
                 kind TEXT NOT NULL,
+                knowledge_version INTEGER,
                 created_at TEXT NOT NULL
              );
              CREATE TABLE IF NOT EXISTS publish_orders (
@@ -740,6 +748,19 @@ fn open_database(workspace: &BrandWorkspace) -> Result<Connection, String> {
     connection
         .execute_batch("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;")
         .map_err(|error| format!("configure brand database: {error}"))?;
+    knowledge::ensure_schema(&connection)?;
+    materials::ensure_schema(&connection)?;
+    question_pools::ensure_schema(&connection)?;
+    let has_geo_artifacts: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='geo_artifacts'",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|error| format!("inspect artifact schema state: {error}"))?;
+    if has_geo_artifacts == 1 {
+        ensure_column(&connection, "geo_artifacts", "knowledge_version", "INTEGER")?;
+    }
     let has_deletion_intents: i64 = connection
         .query_row(
             "SELECT COUNT(*) FROM sqlite_master

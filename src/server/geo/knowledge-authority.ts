@@ -1,0 +1,348 @@
+import { managementApi } from '../utils/management-api-client';
+
+export type KnowledgeCandidateOrigin = 'user-stated' | 'model-inferred';
+export type KnowledgeRequestIntent = 'knowledge-update' | 'chat-observation';
+export type KnowledgeDecision =
+  | 'keep-current'
+  | 'adopt-new'
+  | 'split-scope'
+  | 'reject-candidate';
+
+export interface FactKeyInput {
+  subject: string;
+  predicate: string;
+  scope?: Record<string, string | number | boolean | null>;
+  effectiveFrom?: string | null;
+  effectiveTo?: string | null;
+}
+
+export interface NormalizedFactKey {
+  subject: string;
+  predicate: string;
+  scopeJson: string;
+  effectiveFrom?: string | null;
+  effectiveTo?: string | null;
+  identity: string;
+}
+
+export interface KnowledgeSourceInput {
+  materialId?: string | null;
+  excerpt: string;
+  confidence: number;
+  profileProvenance?: 'extracted' | 'asked' | 'inferred' | null;
+}
+
+export interface KnowledgeFactSource {
+  rawInputId: string;
+  materialId?: string | null;
+  excerpt: string;
+  confidence: number;
+  profileProvenance?: 'extracted' | 'asked' | 'inferred' | null;
+  origin: KnowledgeCandidateOrigin;
+  createdAt: string;
+}
+
+export interface KnowledgeCurrentFact {
+  key: NormalizedFactKey;
+  normalizedValueJson: string;
+  unit?: string | null;
+  version: number;
+  confirmedBy: string;
+  confirmedAt: string;
+  sources: KnowledgeFactSource[];
+}
+
+export interface KnowledgeCandidate {
+  id: string;
+  workspaceId: string;
+  sessionId: string;
+  key: NormalizedFactKey;
+  valueJson: string;
+  normalizedValueJson: string;
+  unit?: string | null;
+  source: KnowledgeSourceInput;
+  origin: KnowledgeCandidateOrigin;
+  intent: KnowledgeRequestIntent;
+  status: 'awaiting-confirmation' | 'conflict' | 'adopted' | 'kept-current' | 'split-scope' | 'rejected';
+  baseVersion: number;
+  proposedAt: string;
+  current?: KnowledgeCurrentFact | null;
+}
+
+export interface KnowledgeDecisionResult {
+  candidateId: string;
+  factKey: string;
+  decision: KnowledgeDecision;
+  status: string;
+  current?: KnowledgeCurrentFact | null;
+  knowledgeVersion?: number | null;
+}
+
+interface CandidateSubmission {
+  workspaceId: string;
+  sessionId: string;
+  rawInput: string;
+  origin: KnowledgeCandidateOrigin;
+  intent: KnowledgeRequestIntent;
+  key: NormalizedFactKey;
+  valueJson: string;
+  normalizedValueJson: string;
+  unit?: string | null;
+  source: KnowledgeSourceInput;
+  expectedCurrentVersion: number;
+  disposition: 'awaiting-confirmation' | 'conflict';
+}
+
+interface DecisionSubmission {
+  workspaceId: string;
+  sessionId: string;
+  candidateId: string;
+  decision: KnowledgeDecision;
+  expectedCurrentVersion: number;
+  actorId: string;
+  reason?: string | null;
+  splitKey?: NormalizedFactKey | null;
+  splitExpectedVersion?: number | null;
+}
+
+export interface KnowledgeAuthorityPort {
+  current(factKey: string): Promise<KnowledgeCurrentFact | null>;
+  submit(request: CandidateSubmission): Promise<KnowledgeCandidate>;
+  candidate(candidateId: string): Promise<KnowledgeCandidate>;
+  decide(request: DecisionSubmission): Promise<KnowledgeDecisionResult>;
+}
+
+export interface KnowledgeProposalInput {
+  rawInput: string;
+  origin: KnowledgeCandidateOrigin;
+  intent: KnowledgeRequestIntent;
+  key: FactKeyInput;
+  value: unknown;
+  unit?: string | null;
+  source: KnowledgeSourceInput;
+}
+
+export interface KnowledgeDecisionInput {
+  candidateId: string;
+  decision: KnowledgeDecision;
+  expectedCurrentVersion: number;
+  actorId: string;
+  reason?: string;
+  splitKey?: FactKeyInput;
+}
+
+function normalizedToken(value: string, label: string): string {
+  const normalized = value.trim().replace(/\s+/g, ' ').toLocaleLowerCase('zh-CN');
+  if (!normalized || normalized.length > 200) {
+    throw new Error(`${label} must be 1-200 characters`);
+  }
+  return normalized;
+}
+
+function normalizedEffectiveTime(value: string | null | undefined, label: string): string | null {
+  if (!value?.trim()) return null;
+  const trimmed = value.trim();
+  const timestamp = Date.parse(trimmed);
+  if (!Number.isFinite(timestamp)) throw new Error(`${label} must be an ISO date or timestamp`);
+  return /^\d{4}-\d{2}-\d{2}$/.test(trimmed)
+    ? trimmed
+    : new Date(timestamp).toISOString();
+}
+
+function canonicalize(value: unknown): unknown {
+  if (typeof value === 'string') return value.trim().replace(/\s+/g, ' ');
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value)) throw new Error('fact value cannot contain a non-finite number');
+    return Object.is(value, -0) ? 0 : value;
+  }
+  if (value === null || typeof value === 'boolean') return value;
+  if (Array.isArray(value)) return value.map(canonicalize);
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value as Record<string, unknown>)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, child]) => [normalizedToken(key, 'value key'), canonicalize(child)]));
+  }
+  throw new Error('fact value must be JSON-compatible');
+}
+
+function canonicalJson(value: unknown): string {
+  return JSON.stringify(canonicalize(value));
+}
+
+const UNIT_ALIASES: Record<string, string> = {
+  '元': 'cny', '人民币': 'cny', 'rmb': 'cny', '￥': 'cny', '¥': 'cny',
+  '美元': 'usd', '$': 'usd', '百分比': 'percent', '%': 'percent',
+};
+
+export function normalizeUnit(unit: string | null | undefined): string | null {
+  if (!unit?.trim()) return null;
+  const token = unit.trim().replace(/\s+/g, ' ').toLocaleLowerCase('zh-CN');
+  return UNIT_ALIASES[token] ?? token;
+}
+
+export function normalizeFactKey(input: FactKeyInput): NormalizedFactKey {
+  const subject = normalizedToken(input.subject, 'subject');
+  const predicate = normalizedToken(input.predicate, 'predicate');
+  const scope = Object.fromEntries(Object.entries(input.scope ?? {})
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([key, value]) => [normalizedToken(key, 'scope key'), canonicalize(value)]));
+  const scopeJson = JSON.stringify(scope);
+  const effectiveFrom = normalizedEffectiveTime(input.effectiveFrom, 'effectiveFrom');
+  const effectiveTo = normalizedEffectiveTime(input.effectiveTo, 'effectiveTo');
+  if (effectiveFrom && effectiveTo && Date.parse(effectiveFrom) >= Date.parse(effectiveTo)) {
+    throw new Error('effectiveTo must be later than effectiveFrom');
+  }
+  const identity = JSON.stringify({ subject, predicate, scope, effectiveFrom, effectiveTo });
+  return { subject, predicate, scopeJson, effectiveFrom, effectiveTo, identity };
+}
+
+export function normalizeFactValue(value: unknown, unit?: string | null): {
+  valueJson: string;
+  normalizedValueJson: string;
+  unit: string | null;
+} {
+  const valueJson = JSON.stringify(value);
+  if (valueJson === undefined) throw new Error('fact value must be JSON-compatible');
+  return { valueJson, normalizedValueJson: canonicalJson(value), unit: normalizeUnit(unit) };
+}
+
+export function classifyKnowledgeCandidate(
+  current: KnowledgeCurrentFact | null,
+  normalizedValueJson: string,
+  unit: string | null,
+  _origin: KnowledgeCandidateOrigin,
+  _intent: KnowledgeRequestIntent,
+): CandidateSubmission['disposition'] {
+  if (!current) return 'awaiting-confirmation';
+  const same = current.normalizedValueJson === normalizedValueJson
+    && normalizeUnit(current.unit) === unit;
+  if (same) return 'awaiting-confirmation';
+  return 'conflict';
+}
+
+export class KnowledgeAuthority {
+  constructor(
+    private readonly identity: { workspaceId: string; sessionId: string },
+    private readonly port: KnowledgeAuthorityPort,
+  ) {}
+
+  async propose(input: KnowledgeProposalInput): Promise<KnowledgeCandidate> {
+    const key = normalizeFactKey(input.key);
+    const value = normalizeFactValue(input.value, input.unit);
+    const excerpt = input.source.excerpt.trim();
+    if (!excerpt || excerpt.length > 4_000) throw new Error('source excerpt must be 1-4000 characters');
+    if (!Number.isFinite(input.source.confidence) || input.source.confidence < 0 || input.source.confidence > 1) {
+      throw new Error('source confidence must be between 0 and 1');
+    }
+    if (input.source.profileProvenance
+      && !['extracted', 'asked', 'inferred'].includes(input.source.profileProvenance)) {
+      throw new Error('invalid profile provenance');
+    }
+    const rawInput = input.rawInput.trim();
+    if (!rawInput || rawInput.length > 20_000) throw new Error('raw input must be 1-20000 characters');
+
+    // Re-read and retry once if another Session commits between classification
+    // and the Rust IMMEDIATE transaction. Rust remains the final CAS fence.
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const current = await this.port.current(key.identity);
+      try {
+        return await this.port.submit({
+          ...this.identity,
+          rawInput,
+          origin: input.origin,
+          intent: input.intent,
+          key,
+          ...value,
+          source: { ...input.source, excerpt },
+          expectedCurrentVersion: current?.version ?? 0,
+          disposition: classifyKnowledgeCandidate(
+            current,
+            value.normalizedValueJson,
+            value.unit,
+            input.origin,
+            input.intent,
+          ),
+        });
+      } catch (error) {
+        if (attempt === 0 && String(error).includes('knowledge_version_conflict')) continue;
+        throw error;
+      }
+    }
+    throw new Error('knowledge candidate retry exhausted');
+  }
+
+  inspect(key: FactKeyInput): Promise<KnowledgeCurrentFact | null> {
+    return this.port.current(normalizeFactKey(key).identity);
+  }
+
+  async decide(input: KnowledgeDecisionInput): Promise<KnowledgeDecisionResult> {
+    const candidate = await this.port.candidate(input.candidateId);
+    if (candidate.workspaceId !== this.identity.workspaceId || candidate.sessionId !== this.identity.sessionId) {
+      throw new Error('knowledge candidate does not belong to the current brand Session');
+    }
+    let splitKey: NormalizedFactKey | null = null;
+    let splitExpectedVersion: number | null = null;
+    if (input.decision === 'split-scope') {
+      if (!input.splitKey) throw new Error('split-scope requires a structured key');
+      splitKey = normalizeFactKey(input.splitKey);
+      if (splitKey.identity === candidate.key.identity) {
+        throw new Error('split-scope must change scope or effective time');
+      }
+      splitExpectedVersion = (await this.port.current(splitKey.identity))?.version ?? 0;
+    } else if (input.splitKey) {
+      throw new Error('splitKey is only valid for split-scope');
+    }
+    return this.port.decide({
+      ...this.identity,
+      candidateId: input.candidateId,
+      decision: input.decision,
+      expectedCurrentVersion: input.expectedCurrentVersion,
+      actorId: input.actorId,
+      reason: input.reason,
+      splitKey,
+      splitExpectedVersion,
+    });
+  }
+}
+
+function managementError(result: Record<string, unknown>): Error {
+  return new Error(typeof result.error === 'string' ? result.error : 'Brand knowledge persistence failed');
+}
+
+export class RustKnowledgeAuthorityPort implements KnowledgeAuthorityPort {
+  constructor(private readonly identity: { workspaceId: string; sessionId: string; sidecarId: string }) {}
+
+  private envelope(payload: Record<string, unknown>): Record<string, unknown> {
+    return { ...this.identity, payload };
+  }
+
+  async current(factKey: string): Promise<KnowledgeCurrentFact | null> {
+    const result = await managementApi('/api/brand-knowledge/current', 'POST', this.envelope({ factKey }));
+    if (result.ok !== true) throw managementError(result);
+    return (result.current as KnowledgeCurrentFact | null | undefined) ?? null;
+  }
+
+  async submit(request: CandidateSubmission): Promise<KnowledgeCandidate> {
+    const result = await managementApi('/api/brand-knowledge/candidate/submit', 'POST', this.envelope(request as unknown as Record<string, unknown>));
+    if (result.ok !== true) throw managementError(result);
+    return result.candidate as KnowledgeCandidate;
+  }
+
+  async candidate(candidateId: string): Promise<KnowledgeCandidate> {
+    const result = await managementApi('/api/brand-knowledge/candidate/get', 'POST', this.envelope({ candidateId }));
+    if (result.ok !== true) throw managementError(result);
+    return result.candidate as KnowledgeCandidate;
+  }
+
+  async decide(request: DecisionSubmission): Promise<KnowledgeDecisionResult> {
+    const result = await managementApi('/api/brand-knowledge/candidate/decide', 'POST', this.envelope(request as unknown as Record<string, unknown>));
+    if (result.ok !== true) throw managementError(result);
+    return result.result as KnowledgeDecisionResult;
+  }
+}
+
+export function createKnowledgeAuthority(identity: { workspaceId: string; sessionId: string }): KnowledgeAuthority {
+  const sidecarId = process.env.MYAGENTS_SIDECAR_ID?.trim();
+  if (!sidecarId) throw new Error('Brand knowledge requires an authenticated Sidecar identity');
+  return new KnowledgeAuthority(identity, new RustKnowledgeAuthorityPort({ ...identity, sidecarId }));
+}

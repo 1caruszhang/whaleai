@@ -56,6 +56,73 @@ export async function managementApi(
   }
 }
 
+/**
+ * Bounded internal data-plane read from the Rust Management API. The request
+ * remains a small authenticated JSON envelope; Rust owns the filesystem read
+ * and returns app-owned bytes without exposing a local path to Node.
+ */
+export async function managementApiBytes(
+  path: string,
+  body: Record<string, unknown>,
+  options?: { timeoutMs?: number; maxBytes?: number; parentSignal?: AbortSignal },
+): Promise<{ bytes: Uint8Array; contentType: string }> {
+  if (!MGMT_PORT) throw new Error('material_management_unavailable');
+  const response = await cancellableFetch(
+    `http://127.0.0.1:${MGMT_PORT}${path}`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(SIDECAR_GENERATION
+          ? { 'X-MyAgents-Sidecar-Generation': SIDECAR_GENERATION }
+          : {}),
+      },
+      body: JSON.stringify(body),
+    },
+    {
+      timeoutMs: options?.timeoutMs ?? ADMIN_LOOPBACK_TIMEOUT_MS,
+      parentSignal: options?.parentSignal,
+    },
+  );
+  if (!response.ok) throw new Error('material_content_unavailable');
+  const maxBytes = options?.maxBytes ?? 20 * 1024 * 1024;
+  const declared = Number(response.headers.get('content-length'));
+  if (Number.isFinite(declared) && declared > maxBytes) {
+    throw new Error('material_too_large');
+  }
+  if (!response.body) {
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    if (bytes.byteLength > maxBytes) throw new Error('material_too_large');
+    return {
+      bytes,
+      contentType: response.headers.get('content-type')?.split(';')[0] ?? 'application/octet-stream',
+    };
+  }
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.byteLength;
+    if (size > maxBytes) {
+      await reader.cancel().catch(() => {});
+      throw new Error('material_too_large');
+    }
+    chunks.push(value);
+  }
+  const bytes = new Uint8Array(size);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return {
+    bytes,
+    contentType: response.headers.get('content-type')?.split(';')[0] ?? 'application/octet-stream',
+  };
+}
+
 export type ManagedOAuthResolveIntent =
   | { reason: 'request' }
   | { reason: 'auth_recovery'; rejectedCredentialVersion: number }

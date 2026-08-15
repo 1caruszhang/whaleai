@@ -282,6 +282,12 @@ fn start_tab_sidecar_admitted<R: Runtime>(
         cmd.env("XIAOJING_DATA_ROOT", data_root);
     }
     crate::deepseek_credentials::inject_into_sidecar(&mut cmd)?;
+    for name in crate::geo_provider_credentials::SIDECAR_ENV_NAMES {
+        cmd.env_remove(name);
+    }
+    for name in crate::geo_provider_credentials::DEVELOPMENT_SOURCE_ENV_NAMES {
+        cmd.env_remove(name);
+    }
     // Reserve generation identity only after all fallible filesystem setup.
     // Replacement keeps its old manager entry fenced by the private lease.
     // Initial creation inserts a process-less reservation into the same

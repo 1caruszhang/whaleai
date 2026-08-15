@@ -1,7 +1,7 @@
 // Focused behavior tests for App's content slots. Restored persisted Sessions
 // always mount TabProvider, while the heavy Chat child may stay deferred until
 // the active shell has painted.
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { useState } from 'react';
 import { describe, expect, it, vi } from 'vitest';
 
@@ -42,6 +42,16 @@ vi.mock('@/pages/TaskCenter', () => ({ default: () => <div data-testid="taskcent
 vi.mock('@/components/ChatBootOverlay', () => ({
   default: () => <div data-testid="chat-boot-overlay" />,
 }));
+vi.mock('@/components/xiaojing/XiaojingMaterialImportPanel', () => ({
+  default: ({ workspaceId }: { workspaceId: string }) => (
+    <div data-testid="material-import-entry">{workspaceId}</div>
+  ),
+}));
+vi.mock('@/components/xiaojing/XiaojingQuestionPoolPanel', () => ({
+  default: ({ workspaceId }: { workspaceId: string }) => (
+    <div data-testid="question-pool-entry">{workspaceId}</div>
+  ),
+}));
 
 import { MemoizedTabContent } from '@/App';
 
@@ -58,6 +68,7 @@ function restoredTab(over: Partial<Tab> = {}): Tab {
 }
 
 const noopProps = {
+  brandWorkspace: null,
   isWindowFocused: true,
   isLoading: false,
   error: null,
@@ -69,6 +80,7 @@ const noopProps = {
   capabilityInitialOfficialToolId: undefined,
   capabilityInitialSelect: undefined,
   onLauncherWorkspaceSelectionChange: vi.fn(),
+  onOpenBrandWorkspace: vi.fn(async () => true),
   onLaunchProject: vi.fn(),
   onOpenHistorySession: vi.fn(async () => {}),
   onNewSession: vi.fn(async () => true),
@@ -116,6 +128,41 @@ describe('restored live chat tab', () => {
     expect(screen.getByTestId('tab-provider')).toBeInTheDocument();
     expect(screen.getByTestId('chat-boot-overlay')).toBeInTheDocument();
     expect(screen.queryByTestId('chat')).not.toBeInTheDocument();
+  });
+
+  it('mounts the brand material and question-pool entries inside the current TabProvider only after chat deferral clears', async () => {
+    const brandWorkspace = {
+      id: 'brand-07',
+      name: '鲸跃科技',
+      productLines: [],
+      rootPath: '/ws/a',
+      createdAt: '2026-08-15T00:00:00Z',
+      updatedAt: '2026-08-15T00:00:00Z',
+    };
+    const view = render(
+      <MemoizedTabContent
+        tab={restoredTab()}
+        isActive
+        {...noopProps}
+        brandWorkspace={brandWorkspace}
+        isDeferredMount
+      />,
+    );
+    expect(screen.queryByTestId('material-import-entry')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('question-pool-entry')).not.toBeInTheDocument();
+
+    view.rerender(
+      <MemoizedTabContent
+        tab={restoredTab()}
+        isActive
+        {...noopProps}
+        brandWorkspace={brandWorkspace}
+        isDeferredMount={false}
+      />,
+    );
+    const provider = screen.getByTestId('tab-provider');
+    expect(await within(provider).findByTestId('material-import-entry')).toHaveTextContent('brand-07');
+    expect(await within(provider).findByTestId('question-pool-entry')).toHaveTextContent('brand-07');
   });
 
   it('mounts Chat when deferral clears and keeps it mounted while inactive', async () => {

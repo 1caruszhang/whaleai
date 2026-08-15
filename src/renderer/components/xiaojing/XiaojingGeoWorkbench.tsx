@@ -16,6 +16,8 @@ import {
 
 import type { BrandWorkspace } from "@/api/brandWorkspaceClient";
 import type { InitialMessage } from "@/types/tab";
+import XiaojingMaterialImportPanel from "./XiaojingMaterialImportPanel";
+import XiaojingQuestionPoolPanel from "./XiaojingQuestionPoolPanel";
 
 interface XiaojingGeoWorkbenchProps {
   currentWorkspace: BrandWorkspace | null;
@@ -24,6 +26,7 @@ interface XiaojingGeoWorkbenchProps {
     initialMessage?: InitialMessage,
     entryIntent?: "open_workspace" | "workspace_init",
   ) => Promise<boolean>;
+  materialImportEnabled?: boolean;
 }
 
 interface GeoCapability {
@@ -65,6 +68,7 @@ const GEO_CAPABILITIES: readonly GeoCapability[] = [
 export default memo(function XiaojingGeoWorkbench({
   currentWorkspace,
   onOpenWorkspace,
+  materialImportEnabled = false,
 }: XiaojingGeoWorkbenchProps) {
   const [collapsed, setCollapsed] = useState(
     () =>
@@ -158,6 +162,20 @@ export default memo(function XiaojingGeoWorkbench({
             </p>
           </div>
         </section>
+
+        {materialImportEnabled && currentWorkspace && (
+          <>
+            <XiaojingMaterialImportPanel
+              key={`${currentWorkspace.id}:materials`}
+              workspaceId={currentWorkspace.id}
+            />
+            <XiaojingQuestionPoolPanel
+              key={`${currentWorkspace.id}:question-pool`}
+              workspaceId={currentWorkspace.id}
+              productLines={currentWorkspace.productLines}
+            />
+          </>
+        )}
 
         <div className="mb-3 mt-6 flex items-center justify-between">
           <h3 className="text-xs font-semibold">可启动的 GEO 能力</h3>

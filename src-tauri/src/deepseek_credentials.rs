@@ -16,8 +16,8 @@ const CREDENTIAL_TARGET: &str = "Xiaojing/DeepSeek/main-agent";
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DeepseekCredentialStatus {
-    pub configured: bool,
-    pub source: &'static str,
+    pub(crate) configured: bool,
+    pub(crate) source: &'static str,
 }
 
 #[derive(Debug, Serialize)]
@@ -149,6 +149,7 @@ pub(crate) fn inject_into_sidecar(command: &mut std::process::Command) -> Result
     } else {
         command.env_remove(SIDECAR_SECRET_ENV);
     }
+    command.env_remove(DEVELOPMENT_SECRET_ENV);
     Ok(())
 }
 

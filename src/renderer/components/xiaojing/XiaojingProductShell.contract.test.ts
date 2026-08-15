@@ -52,6 +52,7 @@ describe("Xiaojing product shell contract", () => {
     expect(workbench).toContain("问题机会发现");
     expect(workbench).toContain("生成 GEO 内容");
     expect(workbench).toContain("GEO 效果检测");
+    expect(workbench).toContain("<XiaojingQuestionPoolPanel");
     expect(workbench).not.toContain("hover:-translate-y-px");
     expect(workbench).not.toContain("hover:border-[var(--accent)]/45");
     expect(workbench).toMatch(/await onOpenWorkspace\(\s*currentWorkspace,\s*\{ text: capability\.prompt \}/);
@@ -72,6 +73,25 @@ describe("Xiaojing product shell contract", () => {
     expect(store).toContain("session_deletion_intents");
     expect(sidebar).not.toContain("useConfig");
     expect(sidebar).not.toContain("useGlobalSidebarTaskCenterData");
+  });
+
+  it("mounts material import only inside a tab-scoped Xiaojing workbench", () => {
+    const app = source("src/renderer/App.tsx");
+    const workbench = source(
+      "src/renderer/components/xiaojing/XiaojingGeoWorkbench.tsx",
+    );
+    const materialPanel = source(
+      "src/renderer/components/xiaojing/XiaojingMaterialImportPanel.tsx",
+    );
+    expect(app).toContain("materialImportEnabled={kind !== 'deferred-chat'}");
+    expect(app).toContain("tab.view === 'chat' && tab.agentDir");
+    expect(app).toContain("workspacePathsEqual(workspace.rootPath, tab.agentDir!)");
+    expect(workbench).toContain("<XiaojingMaterialImportPanel");
+    expect(materialPanel).toContain("useTabApi()");
+    expect(materialPanel).toContain("useTabState()");
+    expect(materialPanel).toContain("isPendingSessionId(sessionId)");
+    expect(materialPanel).toContain("import('@tauri-apps/plugin-dialog')");
+    expect(materialPanel).not.toContain("readFile");
   });
 
   it("uses the Xiaojing identity and removes generic product controls from GEO chat chrome", () => {

@@ -1015,11 +1015,19 @@ fn create_new_session_sidecar<'a, R: Runtime>(
     }
     if crate::brand_workspace::is_brand_workspace_path(workspace_path) {
         crate::deepseek_credentials::inject_into_sidecar(&mut cmd)?;
+        crate::geo_provider_credentials::inject_into_sidecar(&mut cmd)?;
         cmd.env("XIAOJING_MAIN_AGENT", "1");
         cmd.env_remove("MYAGENTS_RUNTIME");
         cmd.env_remove("MYAGENTS_RUNTIME_SOURCE");
     } else {
         cmd.env_remove(crate::deepseek_credentials::SIDECAR_SECRET_ENV);
+        cmd.env_remove("DEEPSEEK_API_KEY");
+        for name in crate::geo_provider_credentials::SIDECAR_ENV_NAMES {
+            cmd.env_remove(name);
+        }
+        for name in crate::geo_provider_credentials::DEVELOPMENT_SOURCE_ENV_NAMES {
+            cmd.env_remove(name);
+        }
         cmd.env_remove("XIAOJING_MAIN_AGENT");
     }
 

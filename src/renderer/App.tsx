@@ -260,6 +260,7 @@ export interface LaunchProjectAnalyticsContext {
 
 interface TabContentProps {
   tab: Tab;
+  brandWorkspace: BrandWorkspace | null;
   isActive: boolean;
   isWindowFocused: boolean;
   isLoading: boolean;
@@ -279,6 +280,11 @@ interface TabContentProps {
    */
   isDeferredMount: boolean;
   onLauncherWorkspaceSelectionChange: (tabId: string, workspacePath: string | null) => void;
+  onOpenBrandWorkspace: (
+    workspace: BrandWorkspace,
+    initialMessage?: InitialMessage,
+    entryIntent?: 'open_workspace' | 'workspace_init',
+  ) => Promise<boolean>;
   settingsInitialSection: string | undefined;
   capabilityInitialSection: CapabilitySection;
   capabilityNavigationNonce: number;
@@ -318,8 +324,9 @@ interface TabContentProps {
 
 // Exported for focused content-mount behavior tests.
 export const MemoizedTabContent = memo(function TabContent({
-  tab, isActive, isWindowFocused, isDeferredMount,
+  tab, brandWorkspace, isActive, isWindowFocused, isDeferredMount,
   onLaunchProject,
+  onOpenBrandWorkspace,
   onOpenHistorySession, onNewSession,
   onUpdateGenerating, onUpdateTitle, onUpdateUnread, onRenameSession, onForkSession, onUpdateSessionId, onClearInitialMessage,
   claimSessionOpeningTransition,
@@ -411,28 +418,37 @@ export const MemoizedTabContent = memo(function TabContent({
           onSessionIdChange={(newSessionId, options) => onUpdateSessionId(tab.id, newSessionId, options)}
           claimSessionOpeningTransition={claimTabSessionOpeningTransition}
         >
-          {kind === 'deferred-chat' ? (
-            <ChatBootOverlay />
-          ) : (
-            <Suspense fallback={<ChatBootOverlay />}>
-              <Chat
-                isWindowFocused={isWindowFocused}
-                onOpenSession={(sessionId, title, historyEntrySource) => onOpenHistorySession(tab.id, sessionId, title, historyEntrySource)}
-                onOpenSessionInNewTab={(sessionId, title) => onOpenHistorySession(tab.id, sessionId, title, 'chat_dropdown_new_tab')}
-                onNewSession={() => onNewSession(tab.id)}
-                initialMessage={tab.initialMessage}
-                onInitialMessageConsumed={() => onClearInitialMessage(tab.id)}
-                sidecarConfigDisposition={tab.sidecarConfigDisposition}
-                onSidecarConfigAdopted={() => onSidecarConfigAdopted(tab.id)}
-                pendingFilePreview={tab.pendingFilePreview}
-                onFilePreviewIntentConsumed={(intentId) => onFilePreviewIntentConsumed?.(tab.id, intentId)}
-                sessionTitle={tab.title}
-                onRenameSession={(newTitle: string) => onRenameSession(tab.id, newTitle)}
-                onForkSession={(newSessionId: string, agentDir: string, title: string, initialMessage?: string) => onForkSession(tab.id, newSessionId, agentDir, title, initialMessage)}
-                sessionNotificationBadgeCounts={sessionNotificationBadgeCounts}
-              />
-            </Suspense>
-          )}
+          <div className="flex h-full min-w-0">
+            <div className="min-w-0 flex-1 overflow-hidden">
+              {kind === 'deferred-chat' ? (
+                <ChatBootOverlay />
+              ) : (
+                <Suspense fallback={<ChatBootOverlay />}>
+                  <Chat
+                    isWindowFocused={isWindowFocused}
+                    onOpenSession={(sessionId, title, historyEntrySource) => onOpenHistorySession(tab.id, sessionId, title, historyEntrySource)}
+                    onOpenSessionInNewTab={(sessionId, title) => onOpenHistorySession(tab.id, sessionId, title, 'chat_dropdown_new_tab')}
+                    onNewSession={() => onNewSession(tab.id)}
+                    initialMessage={tab.initialMessage}
+                    onInitialMessageConsumed={() => onClearInitialMessage(tab.id)}
+                    sidecarConfigDisposition={tab.sidecarConfigDisposition}
+                    onSidecarConfigAdopted={() => onSidecarConfigAdopted(tab.id)}
+                    pendingFilePreview={tab.pendingFilePreview}
+                    onFilePreviewIntentConsumed={(intentId) => onFilePreviewIntentConsumed?.(tab.id, intentId)}
+                    sessionTitle={tab.title}
+                    onRenameSession={(newTitle: string) => onRenameSession(tab.id, newTitle)}
+                    onForkSession={(newSessionId: string, agentDir: string, title: string, initialMessage?: string) => onForkSession(tab.id, newSessionId, agentDir, title, initialMessage)}
+                    sessionNotificationBadgeCounts={sessionNotificationBadgeCounts}
+                  />
+                </Suspense>
+              )}
+            </div>
+            <XiaojingGeoWorkbench
+              currentWorkspace={brandWorkspace}
+              onOpenWorkspace={onOpenBrandWorkspace}
+              materialImportEnabled={kind !== 'deferred-chat'}
+            />
+          </div>
         </TabProvider>
       )}
     </div>
@@ -442,6 +458,7 @@ export const MemoizedTabContent = memo(function TabContent({
   // All callbacks are stable (via tabsRef/activeTabIdRef), so we only compare data props
   return (
     prev.tab === next.tab &&
+    prev.brandWorkspace === next.brandWorkspace &&
     prev.isActive === next.isActive &&
     // Desktop focus only affects the active Chat's geometry boundary. Keep
     // inactive heavy Tab subtrees out of every app-switch render.
@@ -2615,6 +2632,16 @@ export default function App() {
     handleOpenWorkspaceFromSidebar(projectFromBrandWorkspace(workspace))
   ), [handleOpenWorkspaceFromSidebar]);
 
+  const handleOpenBrandWorkspaceWithIntent = useCallback((
+    workspace: BrandWorkspace,
+    initialMessage?: InitialMessage,
+    entryIntent: 'open_workspace' | 'workspace_init' = 'open_workspace',
+  ) => handleOpenWorkspaceFromSidebar(
+    projectFromBrandWorkspace(workspace),
+    initialMessage,
+    entryIntent,
+  ), [handleOpenWorkspaceFromSidebar]);
+
   const handleOpenBrandSession = useCallback((
     session: BrandSession,
     workspace: BrandWorkspace,
@@ -3494,12 +3521,18 @@ export default function App() {
           <MemoizedTabContent
             key={tab.id}
             tab={tab}
+            brandWorkspace={tab.view === 'chat' && tab.agentDir
+              ? brandState.workspaces.find((workspace) => (
+                workspacePathsEqual(workspace.rootPath, tab.agentDir!)
+              )) ?? null
+              : null}
             isActive={tab.id === activeTabId}
             isWindowFocused={isWindowFocused}
             isLoading={loadingTabs[tab.id] ?? false}
             error={tabErrors[tab.id] ?? null}
             isDeferredMount={deferredMountTabIds.has(tab.id)}
             onLauncherWorkspaceSelectionChange={handleLauncherWorkspaceSelectionChange}
+            onOpenBrandWorkspace={handleOpenBrandWorkspaceWithIntent}
             settingsInitialSection={tab.view === 'settings' ? settingsInitialSection : undefined}
             capabilityInitialSection={capabilityInitialSection}
             capabilityNavigationNonce={capabilityNavigationNonce}
@@ -3534,16 +3567,12 @@ export default function App() {
           />
         ))}
       </div>
-      <XiaojingGeoWorkbench
-        currentWorkspace={brandState.currentWorkspace}
-        onOpenWorkspace={(workspace, initialMessage, entryIntent) => (
-          handleOpenWorkspaceFromSidebar(
-            projectFromBrandWorkspace(workspace),
-            initialMessage,
-            entryIntent,
-          )
-        )}
-      />
+      {activeTab?.view !== 'chat' && (
+        <XiaojingGeoWorkbench
+          currentWorkspace={brandState.currentWorkspace}
+          onOpenWorkspace={handleOpenBrandWorkspaceWithIntent}
+        />
+      )}
       </div>
       </div>
 
