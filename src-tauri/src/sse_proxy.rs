@@ -1,6 +1,6 @@
 // SSE Proxy module - Connects to sidecar SSE and forwards events via Tauri
 // This bypasses WebView CORS restrictions entirely
-// Supports multiple renderer-surface subscriptions (Chat Tabs and Companion)
+// Supports multiple renderer subscriptions, each bound to one Session owner.
 
 use std::collections::HashMap;
 use std::error::Error;
@@ -56,20 +56,9 @@ const SSE_RETRY_MAX_DELAY_MS: u64 = 5_000;
 const SSE_EVENT_MAX_BYTES: usize = 8 * 1024 * 1024;
 const SSE_EVENT_SEPARATOR_MAX_BYTES: usize = 4;
 const HTTP_PROXY_TIMEOUT_SECS: u64 = 120;
-const HTTP_PROXY_LONG_TIMEOUT_SECS: u64 = 360;
 const CONTROL_DISPATCH_RETRY_DELAYS_MS: &[u64] = &[
     50, 100, 200, 400, 800, 1_500, 2_000, 3_000, 5_000, 5_000, 5_000, 5_000, 5_000,
 ];
-
-/// Endpoints that need the long-timeout budget. Keep this list short — most
-/// sidecar work should finish in seconds, not minutes.
-fn proxy_timeout_for(url_path: &str) -> u64 {
-    if url_path.ends_with("/api/skill/install-from-url") {
-        HTTP_PROXY_LONG_TIMEOUT_SECS
-    } else {
-        HTTP_PROXY_TIMEOUT_SECS
-    }
-}
 
 /// One long-lived SSE subscription for a renderer surface.
 struct SseConnection {
@@ -142,7 +131,6 @@ fn frontend_sidecar_owner(owner_type: &str, owner_id: String) -> Result<SidecarO
     }
     match owner_type {
         "tab" => Ok(SidecarOwner::Tab(owner_id)),
-        "companion" => Ok(SidecarOwner::Companion(owner_id)),
         _ => Err(format!(
             "Unsupported SSE sidecar owner type: {}",
             owner_type
@@ -236,11 +224,13 @@ pub async fn start_sse_proxy(
             &app_handle,
             &manager_for_task,
             &state_for_task,
-            &running,
-            &connection_key_clone,
-            my_gen,
-            &session_id_hint_for_task,
-            &owner_for_task,
+            SseSupervisorIdentity {
+                running: &running,
+                connection_key: &connection_key_clone,
+                subscription_generation: my_gen,
+                session_id_hint: &session_id_hint_for_task,
+                owner: &owner_for_task,
+            },
         )
         .await;
 
@@ -368,20 +358,39 @@ fn next_retry_failure_count_for_outcome(previous: u32, outcome: &SseAttemptOutco
     }
 }
 
+struct SseSupervisorIdentity<'a> {
+    running: &'a AtomicBool,
+    connection_key: &'a str,
+    subscription_generation: u64,
+    session_id_hint: &'a str,
+    owner: &'a SidecarOwner,
+}
+
+struct SseAttemptIdentity<'a> {
+    subscription_generation: u64,
+    url: &'a str,
+    running: &'a AtomicBool,
+    connection_key: &'a str,
+}
+
+struct SseEmission<'a> {
+    connection_key: &'a str,
+    subscription_generation: u64,
+    transport_generation: u64,
+    event_name: String,
+    data: String,
+}
+
 async fn run_sse_supervisor<R: tauri::Runtime>(
     app: &AppHandle<R>,
     sidecar_manager: &ManagedSidecarManager,
     state: &SseProxyState,
-    running: &AtomicBool,
-    connection_key: &str,
-    subscription_generation: u64,
-    session_id_hint: &str,
-    owner: &SidecarOwner,
+    identity: SseSupervisorIdentity<'_>,
 ) {
     let mut consecutive_failures = 0_u32;
     let mut last_binding: Option<FrontendSidecarBinding> = None;
 
-    while running.load(Ordering::SeqCst) {
+    while identity.running.load(Ordering::SeqCst) {
         // Hold the std::sync::Mutex only for the authoritative lookup. Never
         // carry it into an HTTP await or retry sleep.
         let binding = {
@@ -389,7 +398,10 @@ async fn run_sse_supervisor<R: tauri::Runtime>(
                 Ok(manager) => manager,
                 Err(poisoned) => poisoned.into_inner(),
             };
-            manager.resolve_session_sidecar_for_frontend_owner(session_id_hint, owner)
+            manager.resolve_session_sidecar_for_frontend_owner(
+                identity.session_id_hint,
+                identity.owner,
+            )
         };
 
         let binding = match binding {
@@ -397,10 +409,10 @@ async fn run_sse_supervisor<R: tauri::Runtime>(
             Err(reason) => {
                 consecutive_failures = consecutive_failures.saturating_add(1);
                 let delay_ms = retry_delay_ms(consecutive_failures);
-                if consecutive_failures == 1 || consecutive_failures % 10 == 0 {
+                if consecutive_failures == 1 || consecutive_failures.is_multiple_of(10) {
                     ulog_warn!(
                         "[sse-proxy] Subscription {} waiting for Sidecar (attempt={}, retry_delay_ms={}): {}",
-                        connection_key,
+                        identity.connection_key,
                         consecutive_failures,
                         delay_ms,
                         reason
@@ -415,7 +427,7 @@ async fn run_sse_supervisor<R: tauri::Runtime>(
         if last_binding.as_ref() != Some(&binding) {
             ulog_info!(
                 "[sse-proxy] Subscription {} resolved Sidecar endpoint {}",
-                connection_key,
+                identity.connection_key,
                 base_url
             );
             last_binding = Some(binding.clone());
@@ -427,10 +439,12 @@ async fn run_sse_supervisor<R: tauri::Runtime>(
             sidecar_manager,
             &binding,
             state,
-            subscription_generation,
-            &stream_url,
-            running,
-            connection_key,
+            SseAttemptIdentity {
+                subscription_generation: identity.subscription_generation,
+                url: &stream_url,
+                running: identity.running,
+                connection_key: identity.connection_key,
+            },
         )
         .await;
         consecutive_failures = next_retry_failure_count_for_outcome(consecutive_failures, &outcome);
@@ -442,10 +456,10 @@ async fn run_sse_supervisor<R: tauri::Runtime>(
                 ..
             } => {
                 let delay_ms = retry_delay_ms(consecutive_failures);
-                if consecutive_failures == 1 || consecutive_failures % 10 == 0 {
+                if consecutive_failures == 1 || consecutive_failures.is_multiple_of(10) {
                     ulog_warn!(
                         "[sse-proxy] Subscription {} transport disconnected (transport_generation={:?}, attempt={}, retry_delay_ms={}): {}",
-                        connection_key,
+                        identity.connection_key,
                         transport_generation,
                         consecutive_failures,
                         delay_ms,
@@ -463,10 +477,10 @@ async fn run_sse_supervisor<R: tauri::Runtime>(
                 // Log only bounded diagnostics, never the offending payload.
                 // The same first/every-tenth cadence as other disconnects
                 // prevents a broken generation from flooding unified logs.
-                if consecutive_failures == 1 || consecutive_failures % 10 == 0 {
+                if consecutive_failures == 1 || consecutive_failures.is_multiple_of(10) {
                     ulog_warn!(
                         "[sse-proxy] Subscription {} protocol event budget exceeded (transport_generation={}, observed_bytes={}, limit_bytes={}, attempt={}, retry_delay_ms={})",
-                        connection_key,
+                        identity.connection_key,
                         transport_generation,
                         observed_event_bytes,
                         limit_bytes,
@@ -481,7 +495,7 @@ async fn run_sse_supervisor<R: tauri::Runtime>(
 
     ulog_debug!(
         "[sse-proxy] Subscription {} supervisor stopped",
-        connection_key
+        identity.connection_key
     );
 }
 
@@ -510,32 +524,33 @@ async fn emit_sse_event_if_current<R: tauri::Runtime>(
     sidecar_manager: &ManagedSidecarManager,
     sidecar_binding: &FrontendSidecarBinding,
     state: &SseProxyState,
-    connection_key: &str,
-    subscription_generation: u64,
-    transport_generation: u64,
-    event_name: String,
-    data: String,
+    emission: SseEmission<'_>,
 ) -> bool {
     let connections = state.connections.lock().await;
-    let is_current = connections.get(connection_key).is_some_and(|entry| {
-        entry.generation == subscription_generation && entry.running.load(Ordering::SeqCst)
-    });
+    let is_current = connections
+        .get(emission.connection_key)
+        .is_some_and(|entry| {
+            entry.generation == emission.subscription_generation
+                && entry.running.load(Ordering::SeqCst)
+        });
     if !is_current {
         return false;
     }
 
-    if event_name == "chat:message-complete"
-        || event_name == "chat:message-stopped"
-        || event_name == "chat:message-error"
+    if emission.event_name == "chat:message-complete"
+        || emission.event_name == "chat:message-stopped"
+        || emission.event_name == "chat:message-error"
     {
         log_sse_info(
             app,
             format!(
                 "[sse-proxy] Subscription {} emitting critical event: {}",
-                connection_key, event_name
+                emission.connection_key, emission.event_name
             ),
         );
-        if let Some(terminal) = crate::notification::completion_terminal_from_sse_data(&data) {
+        if let Some(terminal) =
+            crate::notification::completion_terminal_from_sse_data(&emission.data)
+        {
             let claim = sidecar_manager
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -563,17 +578,17 @@ async fn emit_sse_event_if_current<R: tauri::Runtime>(
         }
     }
 
-    let prefixed_event = format!("sse:{}:{}", connection_key, event_name);
+    let prefixed_event = format!("sse:{}:{}", emission.connection_key, emission.event_name);
     let envelope = TauriSseEnvelope {
-        transport_generation,
-        data,
+        transport_generation: emission.transport_generation,
+        data: emission.data,
     };
     if let Err(error) = app.emit(&prefixed_event, envelope) {
         log_sse_error(
             app,
             format!(
                 "[sse-proxy] Subscription {} failed to emit {}: {}",
-                connection_key, prefixed_event, error
+                emission.connection_key, prefixed_event, error
             ),
         );
     }
@@ -585,20 +600,14 @@ async fn connect_sse_attempt<R: tauri::Runtime>(
     sidecar_manager: &ManagedSidecarManager,
     sidecar_binding: &FrontendSidecarBinding,
     state: &SseProxyState,
-    subscription_generation: u64,
-    url: &str,
-    running: &AtomicBool,
-    connection_key: &str,
+    identity: SseAttemptIdentity<'_>,
 ) -> SseAttemptOutcome {
     connect_sse_attempt_with_read_timeout(
         app,
         sidecar_manager,
         sidecar_binding,
         state,
-        subscription_generation,
-        url,
-        running,
-        connection_key,
+        identity,
         std::time::Duration::from_secs(SSE_READ_TIMEOUT_SECS),
         SSE_EVENT_MAX_BYTES,
     )
@@ -646,10 +655,7 @@ async fn connect_sse_attempt_with_read_timeout<R: tauri::Runtime>(
     sidecar_manager: &ManagedSidecarManager,
     sidecar_binding: &FrontendSidecarBinding,
     state: &SseProxyState,
-    subscription_generation: u64,
-    url: &str,
-    running: &AtomicBool,
-    connection_key: &str,
+    identity: SseAttemptIdentity<'_>,
     read_timeout: std::time::Duration,
     max_event_bytes: usize,
 ) -> SseAttemptOutcome {
@@ -659,7 +665,7 @@ async fn connect_sse_attempt_with_read_timeout<R: tauri::Runtime>(
         app,
         format!(
             "[sse-proxy] Subscription {} opening transport",
-            connection_key
+            identity.connection_key
         ),
     );
 
@@ -669,7 +675,7 @@ async fn connect_sse_attempt_with_read_timeout<R: tauri::Runtime>(
     // Backend sends heartbeat every 15s, so 60s read_timeout gives 4x margin
     // CRITICAL: Enable tcp_nodelay to disable Nagle's algorithm for immediate packet transmission
     // Without this, small SSE events may be buffered and delayed, causing UI to feel unresponsive
-    // Force HTTP/1.1 for compatibility with Bun server (HTTP/2 may cause connection issues on Windows)
+    // Force HTTP/1.1 for the localhost Sidecar SSE server.
     // Use short-lived connection pool to balance performance and stability
     let client = match crate::local_http::builder()
         .read_timeout(read_timeout)
@@ -690,7 +696,7 @@ async fn connect_sse_attempt_with_read_timeout<R: tauri::Runtime>(
     };
 
     let response = match client
-        .get(url)
+        .get(identity.url)
         .header("Accept", "text/event-stream")
         .send()
         .await
@@ -718,14 +724,14 @@ async fn connect_sse_attempt_with_read_timeout<R: tauri::Runtime>(
         app,
         format!(
             "[sse-proxy] Subscription {} transport connected (transport_generation={})",
-            connection_key, transport_generation
+            identity.connection_key, transport_generation
         ),
     );
 
     let mut stream = response.bytes_stream();
     // Pattern 1 fix #7A: byte-level buffer + CRLF-aware split.
     //
-    // The legacy String-based path called `String::from_utf8_lossy(&chunk)`
+    // A String-based implementation called `String::from_utf8_lossy(&chunk)`
     // per chunk, which corrupts multi-byte UTF-8 sequences split across
     // chunk boundaries (replaced with U+FFFD). Worse, `find("\n\n")` only
     // matched LF-LF, missing CRLF event boundaries that some upstreams emit;
@@ -739,7 +745,7 @@ async fn connect_sse_attempt_with_read_timeout<R: tauri::Runtime>(
     let mut buffer: Vec<u8> = Vec::with_capacity(4096);
     let mut chunk_count: u64 = 0;
 
-    while running.load(Ordering::SeqCst) {
+    while identity.running.load(Ordering::SeqCst) {
         match stream.next().await {
             Some(Ok(chunk)) => {
                 chunk_count += 1;
@@ -778,7 +784,7 @@ async fn connect_sse_attempt_with_read_timeout<R: tauri::Runtime>(
 
                         // Fast local cancellation check before the authoritative
                         // generation fence below.
-                        if !running.load(Ordering::SeqCst) {
+                        if !identity.running.load(Ordering::SeqCst) {
                             return SseAttemptOutcome::Stopped;
                         }
 
@@ -789,11 +795,13 @@ async fn connect_sse_attempt_with_read_timeout<R: tauri::Runtime>(
                                 sidecar_manager,
                                 sidecar_binding,
                                 state,
-                                connection_key,
-                                subscription_generation,
-                                transport_generation,
-                                event_name,
-                                data,
+                                SseEmission {
+                                    connection_key: identity.connection_key,
+                                    subscription_generation: identity.subscription_generation,
+                                    transport_generation,
+                                    event_name,
+                                    data,
+                                },
                             )
                             .await
                             {
@@ -828,18 +836,18 @@ async fn connect_sse_attempt_with_read_timeout<R: tauri::Runtime>(
 /// - "event: name\n" (event type)
 /// - "data: value\n" (data, can have multiple lines)
 /// - "\n" (empty line ends the event)
+///
 /// IMPORTANT: Per spec, only ONE space after the colon should be skipped (if present)
 fn parse_sse_event(event_str: &str) -> Option<(String, String)> {
     let mut event_name = String::from("message");
     let mut data_lines = Vec::new();
 
     for line in event_str.lines() {
-        if line.starts_with("event:") {
+        if let Some(content) = line.strip_prefix("event:") {
             // Event name can be trimmed
-            event_name = line[6..].trim().to_string();
-        } else if line.starts_with("data:") {
+            event_name = content.trim().to_string();
+        } else if let Some(content) = line.strip_prefix("data:") {
             // Per SSE spec: skip exactly one space after "data:" if present
-            let content = &line[5..];
             let data_value = content.strip_prefix(' ').unwrap_or(content);
             data_lines.push(data_value.to_string());
         }
@@ -946,28 +954,45 @@ async fn acquire_session_dispatch_with_wait(
     unreachable!("dispatch retry iterator always contains its final attempt")
 }
 
-pub(crate) async fn acquire_global_dispatch_with_wait(
-    manager: &ManagedSidecarManager,
-) -> Result<crate::sidecar::manager::SidecarHttpDispatch, String> {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    let mut delay_index = 0_usize;
-    loop {
-        let result = manager
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .acquire_global_dispatch();
-        let last_error = match result {
-            Ok(dispatch) => return Ok(dispatch),
-            Err(error) => error,
-        };
-        if std::time::Instant::now() >= deadline {
-            return Err(format!("Global Sidecar was not ready: {last_error}"));
-        }
-        let delay_ms = CONTROL_DISPATCH_RETRY_DELAYS_MS
-            [delay_index.min(CONTROL_DISPATCH_RETRY_DELAYS_MS.len() - 1)];
-        delay_index += 1;
-        tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+/// Build the ambient log-correlation context for one proxied control-plane
+/// request (GD-2 / unified_logging.md: "Rust HTTP client 传播 Xiaojing
+/// request/session/tab headers"). The invoke identity is authoritative; the
+/// inbound `X-Xiaojing-Request-Id` header rides along when the renderer sent
+/// one.
+fn correlation_log_context(
+    session_id_hint: &str,
+    owner_type: &str,
+    owner_id: &str,
+    headers: Option<&std::collections::HashMap<String, String>>,
+) -> crate::logger::LogContext {
+    let mut ctx = crate::logger::LogContext {
+        session_id: (!session_id_hint.trim().is_empty())
+            .then(|| session_id_hint.trim().to_string()),
+        tab_id: None,
+        owner_id: Some(format!("{}:{}", owner_type, owner_id)),
+        request_id: None,
+        turn_id: None,
+        runtime: None,
+    };
+    if owner_type == "tab" && !owner_id.trim().is_empty() {
+        ctx.tab_id = Some(owner_id.trim().to_string());
     }
+    if let Some(headers) = headers {
+        let read = |name: &str| -> Option<String> {
+            headers
+                .get(name)
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty())
+        };
+        ctx.request_id = read("X-Xiaojing-Request-Id");
+        if ctx.session_id.is_none() {
+            ctx.session_id = read("X-Xiaojing-Session-Id");
+        }
+        if ctx.tab_id.is_none() {
+            ctx.tab_id = read("X-Xiaojing-Tab-Id");
+        }
+    }
+    ctx
 }
 
 #[tauri::command]
@@ -980,12 +1005,20 @@ pub async fn session_sidecar_http_request(
     sidecar_owner_id: String,
     request: SidecarHttpRequest,
 ) -> Result<HttpResponse, String> {
+    let log_ctx = correlation_log_context(
+        &session_id_hint,
+        &sidecar_owner_type,
+        sidecar_owner_id.as_str(),
+        request.headers.as_ref(),
+    );
     let owner = frontend_sidecar_owner(&sidecar_owner_type, sidecar_owner_id)?;
     let dispatch =
         acquire_session_dispatch_with_wait(sidecar_manager.inner(), &session_id_hint, &owner)
             .await?;
     let request = request.resolve(&dispatch)?;
-    let response = execute_http_request(app, spill_manager.inner().clone(), request, true).await;
+    let response = crate::logger::LOG_CONTEXT
+        .scope(log_ctx, execute_http_request(app, spill_manager.inner().clone(), request))
+        .await;
     // The generation lease protects only the Sidecar request and response
     // body. Tauri/WebKit IPC delivery is a separate transport phase and must
     // not keep process retirement waiting on the macOS main run loop.
@@ -993,37 +1026,10 @@ pub async fn session_sidecar_http_request(
     response
 }
 
-#[tauri::command]
-pub async fn global_sidecar_http_request(
-    app: AppHandle,
-    sidecar_manager: tauri::State<'_, ManagedSidecarManager>,
-    spill_manager: tauri::State<'_, Arc<ProxySpillManager>>,
-    request: SidecarHttpRequest,
-) -> Result<HttpResponse, String> {
-    let dispatch = acquire_global_dispatch_with_wait(sidecar_manager.inner()).await?;
-    let request = request.resolve(&dispatch)?;
-    let response = execute_http_request(app, spill_manager.inner().clone(), request, true).await;
-    drop(dispatch);
-    response
-}
-
-#[tauri::command]
-pub async fn proxy_analytics_http_request(
-    app: AppHandle,
-    spill_manager: tauri::State<'_, Arc<ProxySpillManager>>,
-    request: HttpRequest,
-) -> Result<HttpResponse, String> {
-    if !request.method.eq_ignore_ascii_case("POST") {
-        return Err("Analytics proxy only accepts POST requests".to_string());
-    }
-    execute_http_request(app, spill_manager.inner().clone(), request, false).await
-}
-
 async fn execute_http_request(
     app: AppHandle,
     spill_manager: Arc<ProxySpillManager>,
     request: HttpRequest,
-    target_is_loopback: bool,
 ) -> Result<HttpResponse, String> {
     use crate::logger;
     use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
@@ -1031,7 +1037,7 @@ async fn execute_http_request(
     // CRITICAL: Validate URL is absolute before forwarding to reqwest.
     // Relative URLs (e.g., "/api/something") cause reqwest to fail with an opaque
     // "relative URL without a base" builder error. This cascades into:
-    //   IPC error → frontend treats as sidecar crash → SSE reconnect → Global Sidecar restart
+    //   IPC error → frontend treats as a process crash → unnecessary reconnect
     //   → full UI re-render (all tabs rebuilt). See: #78
     //
     // This guard catches the issue at the source with a clear error message.
@@ -1047,22 +1053,19 @@ async fn execute_http_request(
         return Err(err);
     }
 
-    // Skip logging for high-frequency polling paths (matches Bun-side skip list).
+    // Skip logging for high-frequency polling paths.
     // Extract path (before '?') from full URL for precise matching.
     let url_path = request.url.split('?').next().unwrap_or(&request.url);
-    let is_noisy_path = url_path.ends_with("/api/unified-log")
-        || url_path.ends_with("/agent/dir")
-        || url_path.ends_with("/sessions");
+    let is_noisy_path = url_path.ends_with("/api/unified-log") || url_path.ends_with("/sessions");
     let start = std::time::Instant::now();
 
     // Build client with configurable timeout
     // Enable tcp_nodelay to disable Nagle's algorithm for faster response times
-    // Force HTTP/1.1 for compatibility with Bun server (HTTP/2 may cause connection issues on Windows)
+    // Force HTTP/1.1 for the localhost Sidecar server.
     // Use short-lived connection pool to balance performance and stability
-    let timeout_secs = proxy_timeout_for(url_path);
-    // Shared tuning for both the loopback and external client. tcp_nodelay +
-    // http1_only mirror the SSE-compat settings; the short-lived pool balances
-    // perf and stability.
+    let timeout_secs = HTTP_PROXY_TIMEOUT_SECS;
+    // tcp_nodelay + http1_only mirror the SSE settings; the short-lived pool
+    // balances performance and stability.
     let tune = |b: reqwest::ClientBuilder| {
         b.timeout(std::time::Duration::from_secs(timeout_secs))
             .tcp_nodelay(true)
@@ -1070,25 +1073,11 @@ async fn execute_http_request(
             .pool_idle_timeout(std::time::Duration::from_secs(5))
             .pool_max_idle_per_host(2)
     };
-    // Control-plane commands select loopback explicitly and MUST bypass the
-    // system proxy. The dedicated analytics command selects the external path
-    // so user-configured/system proxies keep working without exposing a generic
-    // renderer URL proxy for Sidecar control traffic.
-    let client = if target_is_loopback {
-        tune(crate::local_http::builder()).build().map_err(|e| {
-            let err = format!("[proxy] Failed to create client: {}", e);
-            logger::error(&app, &err);
-            err
-        })?
-    } else {
-        // External host — same proxy-aware path as the updater / LiteLLM cache.
-        // The bare builder needs an explicit clippy allow per call site so the
-        // localhost no_proxy trap stays banned everywhere else.
-        #[allow(clippy::disallowed_methods)]
-        let external_builder = tune(reqwest::Client::builder());
-        crate::proxy_config::build_client_with_proxy(external_builder)
-            .inspect_err(|e| logger::error(&app, e))?
-    };
+    let client = tune(crate::local_http::builder()).build().map_err(|e| {
+        let err = format!("[proxy] Failed to create client: {}", e);
+        logger::error(&app, &err);
+        err
+    })?;
 
     let mut req_builder = match request.method.to_uppercase().as_str() {
         "GET" => client.get(&request.url),
@@ -1188,7 +1177,7 @@ async fn execute_http_request(
     let content_length_hint: Option<u64> = resp_headers
         .get("content-length")
         .and_then(|s| s.parse::<u64>().ok());
-    let response_policy = ResponsePolicy::for_target(target_is_loopback);
+    let response_policy = ResponsePolicy::for_target(true);
     if let Err(error) = response_policy.check_content_length(content_length_hint) {
         logger::warn(&app, &error);
         return Err(error);
@@ -1256,7 +1245,7 @@ async fn execute_http_request(
     // Log: single line for success, skip noisy polling endpoints entirely
     if !is_noisy_path {
         let elapsed = start.elapsed().as_millis();
-        if status >= 200 && status < 300 {
+        if (200..300).contains(&status) {
             logger::debug(
                 &app,
                 format!(
@@ -1297,70 +1286,53 @@ async fn execute_http_request(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sidecar::{
-        create_sidecar_manager, DispatchGate, SidecarInstance, GLOBAL_SIDECAR_ID,
-    };
-    use std::process::Stdio;
     use std::sync::atomic::AtomicBool;
     use std::sync::{Arc, Mutex as StdMutex};
     use tauri::Listener;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    #[tokio::test]
-    async fn global_dispatch_waits_for_the_canonical_birth_to_finish() {
-        let manager = create_sidecar_manager();
-        let install_manager = manager.clone();
-        let install_ready_instance = async move {
-            tokio::task::yield_now().await;
-            #[cfg(windows)]
-            let mut command = {
-                let mut command = crate::process_cmd::new("powershell");
-                command.args(["-NoProfile", "-Command", "Start-Sleep -Seconds 60"]);
-                command
-            };
-            #[cfg(not(windows))]
-            let mut command = {
-                let mut command = crate::process_cmd::new("sleep");
-                command.arg("60");
-                command
-            };
-            command
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null());
-            install_manager
-                .lock()
-                .expect("sidecar manager lock")
-                .insert_instance(
-                    GLOBAL_SIDECAR_ID.to_string(),
-                    SidecarInstance {
-                        process: Some(
-                            crate::process_cmd::spawn_tree(&mut command)
-                                .expect("spawn test Global process"),
-                        ),
-                        generation: 7,
-                        port: 31419,
-                        agent_dir: None,
-                        healthy: true,
-                        is_global: true,
-                        session_delete_authority: None,
-                        dispatch_gate: DispatchGate::new(),
-                        created_at: std::time::Instant::now(),
-                    },
-                );
-        };
+    // GD-2 regression — unified_logging.md: "Rust HTTP client 传播 Xiaojing
+    // request/session/tab headers"。The proxy must lift the inbound
+    // correlation headers (plus the dispatch identity it already knows) into
+    // the ambient LOG_CONTEXT so [proxy] log lines carry sid=/tab=/req= tags.
+    #[test]
+    fn correlation_context_maps_invoke_identity_and_inbound_headers() {
+        let mut headers = std::collections::HashMap::new();
+        headers.insert("X-Xiaojing-Request-Id".to_string(), "req-42".to_string());
+        // Renderer-set session/tab headers agree with the invoke args.
+        headers.insert("X-Xiaojing-Session-Id".to_string(), "sess-1".to_string());
+        headers.insert("X-Xiaojing-Tab-Id".to_string(), "tab-9".to_string());
+        let ctx = correlation_log_context("sess-1", "tab", "tab-9", Some(&headers));
+        assert_eq!(ctx.session_id.as_deref(), Some("sess-1"));
+        assert_eq!(ctx.tab_id.as_deref(), Some("tab-9"));
+        assert_eq!(ctx.request_id.as_deref(), Some("req-42"));
+        assert!(ctx.turn_id.is_none());
 
-        let (dispatch, ()) = tokio::join!(
-            acquire_global_dispatch_with_wait(&manager),
-            install_ready_instance,
-        );
-        let dispatch = dispatch.expect("dispatch should join the canonical Global birth");
-        assert_eq!(
-            dispatch
-                .url_for_path("/api/grok/verify")
-                .expect("valid route"),
-            "http://127.0.0.1:31419/api/grok/verify"
-        );
+        // Missing headers degrade to the invoke identity only.
+        let bare = correlation_log_context("sess-2", "background", "bg-1", None);
+        assert_eq!(bare.session_id.as_deref(), Some("sess-2"));
+        assert_eq!(bare.owner_id.as_deref(), Some("background:bg-1"));
+        assert!(bare.request_id.is_none());
+        assert!(bare.tab_id.is_none());
+
+        // The context stamps an entry via LogContext::fill.
+        let mut entry = crate::logger::LogEntry::default();
+        ctx.fill(&mut entry);
+        assert_eq!(entry.session_id.as_deref(), Some("sess-1"));
+        assert_eq!(entry.tab_id.as_deref(), Some("tab-9"));
+        assert_eq!(entry.request_id.as_deref(), Some("req-42"));
+    }
+
+    #[tokio::test]
+    async fn log_context_scope_is_visible_to_nested_ulog_reads() {
+        let ctx = correlation_log_context("sess-x", "tab", "tab-x", None);
+        crate::logger::LOG_CONTEXT
+            .scope(ctx, async {
+                let current = crate::logger::LogContext::current()
+                    .expect("context inside scope");
+                assert_eq!(current.session_id.as_deref(), Some("sess-x"));
+            })
+            .await;
     }
 
     async fn loopback_response(raw_response: &'static [u8]) -> String {
@@ -1470,11 +1442,8 @@ mod tests {
             frontend_sidecar_owner("tab", "tab-a".to_string()),
             Ok(SidecarOwner::Tab("tab-a".to_string()))
         );
-        assert_eq!(
-            frontend_sidecar_owner("companion", "floating-ball".to_string()),
-            Ok(SidecarOwner::Companion("floating-ball".to_string()))
-        );
-        assert!(frontend_sidecar_owner("task", "task-a".to_string()).is_err());
+        assert!(frontend_sidecar_owner("unknown", "invalid-a".to_string()).is_err());
+        assert!(frontend_sidecar_owner("background", "invalid-b".to_string()).is_err());
         assert!(frontend_sidecar_owner("tab", String::new()).is_err());
     }
 
@@ -1576,10 +1545,12 @@ mod tests {
             &manager,
             &binding,
             &state,
-            1,
-            &unavailable_url,
-            &running,
-            "test",
+            SseAttemptIdentity {
+                subscription_generation: 1,
+                url: &unavailable_url,
+                running: &running,
+                connection_key: "test",
+            },
         )
         .await
         {
@@ -1601,10 +1572,12 @@ mod tests {
             &manager,
             &binding,
             &state,
-            1,
-            &status_url,
-            &running,
-            "test",
+            SseAttemptIdentity {
+                subscription_generation: 1,
+                url: &status_url,
+                running: &running,
+                connection_key: "test",
+            },
         )
         .await
         {
@@ -1647,10 +1620,12 @@ mod tests {
             &manager,
             &binding,
             &state,
-            1,
-            &url,
-            &running,
-            "test",
+            SseAttemptIdentity {
+                subscription_generation: 1,
+                url: &url,
+                running: &running,
+                connection_key: "test",
+            },
         )
         .await
         {
@@ -1694,10 +1669,12 @@ mod tests {
             &manager,
             &binding,
             &state,
-            1,
-            &url,
-            &running,
-            "test",
+            SseAttemptIdentity {
+                subscription_generation: 1,
+                url: &url,
+                running: &running,
+                connection_key: "test",
+            },
         )
         .await
         {
@@ -1729,10 +1706,12 @@ mod tests {
             &manager,
             &binding,
             &state,
-            1,
-            &url,
-            &running,
-            "test",
+            SseAttemptIdentity {
+                subscription_generation: 1,
+                url: &url,
+                running: &running,
+                connection_key: "test",
+            },
             std::time::Duration::from_millis(25),
             SSE_EVENT_MAX_BYTES,
         )
@@ -1762,7 +1741,7 @@ mod tests {
         let mut oversized_response =
             b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n"
                 .to_vec();
-        oversized_response.extend_from_slice(&vec![b'x'; 33]);
+        oversized_response.extend_from_slice(&[b'x'; 33]);
         let oversized_url = loopback_owned_response(oversized_response).await;
 
         let breached_generation = match connect_sse_attempt_with_read_timeout(
@@ -1770,10 +1749,12 @@ mod tests {
             &manager,
             &binding,
             &state,
-            1,
-            &oversized_url,
-            &running,
-            "test",
+            SseAttemptIdentity {
+                subscription_generation: 1,
+                url: &oversized_url,
+                running: &running,
+                connection_key: "test",
+            },
             std::time::Duration::from_secs(1),
             32,
         )
@@ -1800,10 +1781,12 @@ mod tests {
             &manager,
             &binding,
             &state,
-            1,
-            &recovered_url,
-            &running,
-            "test",
+            SseAttemptIdentity {
+                subscription_generation: 1,
+                url: &recovered_url,
+                running: &running,
+                connection_key: "test",
+            },
             std::time::Duration::from_secs(1),
             32,
         )
@@ -1840,11 +1823,13 @@ mod tests {
             &manager,
             &binding,
             &state,
-            "fb",
-            1,
-            99,
-            "chat:message-chunk".to_string(),
-            "stale old-session chunk".to_string(),
+            SseEmission {
+                connection_key: "fb",
+                subscription_generation: 1,
+                transport_generation: 99,
+                event_name: "chat:message-chunk".to_string(),
+                data: "stale old-session chunk".to_string(),
+            },
         )
         .await;
 
@@ -1884,11 +1869,13 @@ mod tests {
                     &app_handle,
                     &manager,
                     &state,
-                    &running,
-                    "test",
-                    1,
-                    "session-test",
-                    &owner,
+                    SseSupervisorIdentity {
+                        running: &running,
+                        connection_key: "test",
+                        subscription_generation: 1,
+                        session_id_hint: "session-test",
+                        owner: &owner,
+                    },
                 )
                 .await;
             }

@@ -157,9 +157,10 @@ pub fn cmd_record_renderer_boot_event(
 //
 // Wrap an async unit-of-work with `LOG_CONTEXT.scope(LogContext { ... },
 // async { ... }).await` and any nested `ulog_*!` call inside picks up
-// those fields automatically. Used by the HTTP request handler in
-// `local_http.rs` to propagate `X-Xiaojing-Request-Id /
-// X-Xiaojing-Session-Id / X-Xiaojing-Tab-Id` from inbound headers.
+// those fields automatically. Used by the control-plane proxy handler in
+// `sse_proxy.rs::session_sidecar_http_request` to propagate
+// `X-Xiaojing-Request-Id / X-Xiaojing-Session-Id / X-Xiaojing-Tab-Id`
+// from the invoke identity + inbound headers.
 
 #[derive(Debug, Clone, Default)]
 pub struct LogContext {
