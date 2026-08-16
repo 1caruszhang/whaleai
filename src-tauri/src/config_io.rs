@@ -1,4 +1,4 @@
-//! Shared `~/.myagents/config.json` read-modify-write helper.
+//! Shared Xiaojing local-data `config.json` read-modify-write helper.
 //!
 //! The renderer, Node sidecar, and Rust commands coordinate on the same
 //! `config.json.lock` directory. Directory creation is atomic across processes
@@ -17,64 +17,6 @@ use std::path::{Path, PathBuf};
 use crate::utils::bom::strip_bom;
 use crate::utils::file_lock::{with_file_lock_blocking, FileLockError, FileLockOptions};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ThemeBootstrapSelection {
-    pub appearance_mode: String,
-}
-
-impl Default for ThemeBootstrapSelection {
-    fn default() -> Self {
-        Self {
-            appearance_mode: "system".to_owned(),
-        }
-    }
-}
-
-fn normalize_theme_fields(config: &mut serde_json::Value) {
-    let Some(object) = config.as_object_mut() else {
-        return;
-    };
-
-    let current_mode = object
-        .get("appearanceMode")
-        .and_then(serde_json::Value::as_str)
-        .filter(|value| matches!(*value, "system" | "light" | "dark"));
-    let legacy_mode = object
-        .get("theme")
-        .and_then(serde_json::Value::as_str)
-        .filter(|value| matches!(*value, "system" | "light" | "dark"));
-    let appearance_mode = current_mode.or(legacy_mode).unwrap_or("system").to_owned();
-
-    let stored_theme_id = object
-        .get("themeId")
-        .and_then(serde_json::Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_owned);
-    let theme_selection_explicit = stored_theme_id.as_ref().is_some_and(|theme_id| {
-        object
-            .get("themeSelectionExplicit")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(theme_id != "myagents-default")
-    });
-    let theme_id = if theme_selection_explicit {
-        stored_theme_id.unwrap_or_else(|| "myagents-light".to_owned())
-    } else {
-        "myagents-light".to_owned()
-    };
-
-    object.insert(
-        "appearanceMode".to_owned(),
-        serde_json::Value::String(appearance_mode),
-    );
-    object.insert("themeId".to_owned(), serde_json::Value::String(theme_id));
-    object.insert(
-        "themeSelectionExplicit".to_owned(),
-        serde_json::Value::Bool(theme_selection_explicit),
-    );
-    object.remove("theme");
-}
-
 fn read_config_json(config_path: &Path) -> Result<serde_json::Value, String> {
     if !config_path.exists() {
         return Ok(serde_json::json!({}));
@@ -87,21 +29,6 @@ fn read_config_json(config_path: &Path) -> Result<serde_json::Value, String> {
     // at line 1 column 1" and the caller would fall back to .bak (issue #170 #6).
     serde_json::from_str(strip_bom(&content))
         .map_err(|e| format!("[config-io] Cannot parse config.json: {}", e))
-}
-
-/// Read only the non-sensitive Theme selection needed before the main WebView
-/// exists. This follows the same in-memory normalization as every config write,
-/// but deliberately does not heal disk on the read boundary.
-pub fn read_theme_bootstrap_selection(config_path: &Path) -> ThemeBootstrapSelection {
-    let mut config = read_config_json(config_path).unwrap_or_else(|_| serde_json::json!({}));
-    normalize_theme_fields(&mut config);
-    ThemeBootstrapSelection {
-        appearance_mode: config
-            .get("appearanceMode")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("system")
-            .to_owned(),
-    }
 }
 
 fn write_all_synced(path: &Path, content: &str) -> Result<(), String> {
@@ -156,17 +83,6 @@ fn fsync_parent_dir(_path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Per-platform OpenOptions for the fsync handler — Windows needs
-/// `GENERIC_WRITE` for `FlushFileBuffers`, Unix is fine with read-only
-/// (`fsync(2)` accepts a read-only fd).
-fn opts_for_fsync() -> OpenOptions {
-    let mut opts = OpenOptions::new();
-    opts.read(true);
-    #[cfg(windows)]
-    opts.write(true);
-    opts
-}
-
 /// Re-read `config.json` under lock, apply `mutator`, and atomically publish it.
 ///
 /// `keep_backup` preserves existing `.bak` behavior for call sites that already
@@ -199,10 +115,8 @@ where
         FileLockOptions::default(),
         move || -> Result<serde_json::Value, FileLockError> {
             let mut config = read_config_json(&config_path_owned).map_err(to_io_err)?;
-            normalize_theme_fields(&mut config);
             let before = config.clone();
             mutator(&mut config).map_err(to_io_err)?;
-            normalize_theme_fields(&mut config);
 
             if config == before {
                 return Ok(config);
@@ -237,147 +151,102 @@ where
     })
 }
 
-/// Fsync a file or directory path for renderer-side atomic writes.
-///
-/// Cross-platform note: `File::sync_all()` calls `fsync(2)` on Unix and
-/// `FlushFileBuffers` on Windows. The two have **different access
-/// requirements** — `fsync` accepts a read-only fd, but `FlushFileBuffers`
-/// requires `GENERIC_WRITE`. Pre-fix this command opened the file via
-/// `File::open()` (read-only by default), so on Windows every renderer-side
-/// save (project list, launcher last-used, runtime config) failed with
-/// `os error 5: 拒绝访问 (Access is denied)`. Open with write access on
-/// Windows; keep read-only on Unix where it works and avoids requiring
-/// write perms we don't otherwise need.
-#[tauri::command]
-pub async fn cmd_fsync_path(path: String, directory: bool) -> Result<(), String> {
-    tokio::task::spawn_blocking(move || {
-        let p = PathBuf::from(path);
-        if directory {
-            #[cfg(unix)]
-            {
-                let dir = OpenOptions::new()
-                    .read(true)
-                    .open(&p)
-                    .map_err(|e| format!("[config-io] Cannot open dir for fsync: {}", e))?;
-                dir.sync_all()
-                    .map_err(|e| format!("[config-io] Cannot fsync dir: {}", e))?;
-            }
-            // Windows has no equivalent to fsync(2) on directories;
-            // FlushFileBuffers on a directory handle is a no-op. Skip.
-            Ok(())
-        } else {
-            // Build the OpenOptions per platform: Windows requires write
-            // access for FlushFileBuffers; Unix's fsync(2) is happy with
-            // read-only. Constructing one OpenOptions and branching on
-            // `.write(...)` keeps the import set minimal (no `File`).
-            //
-            // Windows AV / search-indexer race (review-by-cc H3): a process
-            // we can't see — Defender real-time scan, OneDrive syncer,
-            // Backblaze indexer — sometimes opens a file we just wrote
-            // with `FILE_SHARE_NONE` for a brief window. Our open then
-            // returns `ERROR_SHARING_VIOLATION` (os error 32) or
-            // `ERROR_ACCESS_DENIED` (5). The contended window is ms-scale,
-            // so a small backoff loop transparently rides through it. Unix
-            // doesn't have this class of failure (fcntl LOCK_EX would, but
-            // we don't take it).
-            let open_with_retry = || -> std::io::Result<std::fs::File> {
-                #[cfg(windows)]
-                {
-                    let mut last: Option<std::io::Error> = None;
-                    for attempt in 0..4 {
-                        match opts_for_fsync().open(&p) {
-                            Ok(f) => return Ok(f),
-                            Err(e) => {
-                                let code = e.raw_os_error().unwrap_or(0);
-                                let transient = code == 32 || code == 5;
-                                if transient && attempt < 3 {
-                                    std::thread::sleep(std::time::Duration::from_millis(
-                                        25u64 << attempt, // 25, 50, 100ms
-                                    ));
-                                    last = Some(e);
-                                    continue;
-                                }
-                                return Err(e);
-                            }
-                        }
-                    }
-                    Err(last
-                        .unwrap_or_else(|| std::io::Error::other("fsync open: exhausted retries")))
-                }
-                #[cfg(not(windows))]
-                {
-                    opts_for_fsync().open(&p)
-                }
-            };
-            let file = open_with_retry()
-                .map_err(|e| format!("[config-io] Cannot open file for fsync: {}", e))?;
-            file.sync_all()
-                .map_err(|e| format!("[config-io] Cannot fsync file: {}", e))
-        }
-    })
-    .await
-    .map_err(|e| format!("[config-io] fsync task failed: {}", e))?
-}
-
 #[cfg(test)]
-mod theme_tests {
-    use super::{normalize_theme_fields, read_theme_bootstrap_selection};
+mod with_config_lock_tests {
+    use super::with_config_lock;
     use serde_json::json;
     use std::fs;
 
+    fn temp_config(tag: &str, initial: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "xiaojing-config-lock-{}-{}-{}",
+            tag,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        fs::create_dir_all(&dir).expect("create temp dir");
+        let path = dir.join("config.json");
+        fs::write(&path, initial).expect("seed config");
+        path
+    }
+
+    // GD-8① 回归：锁内重读 → mutator → 同目录临时文件原子替换的组合路径。
     #[test]
-    fn migrates_legacy_theme_without_overwriting_other_fields() {
-        let mut config = json!({ "theme": "dark", "other": 42 });
-        normalize_theme_fields(&mut config);
-        assert_eq!(
-            config,
-            json!({
-                "themeId": "myagents-light",
-                "themeSelectionExplicit": false,
-                "appearanceMode": "dark",
-                "other": 42
+    fn rewrites_config_under_lock_and_replaces_atomically() {
+        let path = temp_config("rewrite", r#"{"a":1,"lang":"zh-CN"}"#);
+        let out = with_config_lock(&path, false, |config| {
+            config["lang"] = json!("en-US");
+            config["added"] = json!(true);
+            Ok(())
+        })
+        .expect("locked write succeeds");
+        assert_eq!(out["lang"], "en-US");
+        let disk: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(disk["lang"], "en-US");
+        assert_eq!(disk["added"], true);
+        assert_eq!(disk["a"], 1, "unchanged keys survive the merge");
+        // 同目录临时文件在成功后被 rename 走，不留残片。
+        assert!(!path.with_file_name("config.json.tmp.rust").exists());
+        fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn no_op_mutator_does_not_rewrite_or_keep_backup() {
+        let path = temp_config("noop", r#"{"a":1}"#);
+        let before = fs::read_to_string(&path).unwrap();
+        let out = with_config_lock(&path, true, |config| {
+            let _ = config;
+            Ok(())
+        })
+        .expect("no-op under lock");
+        assert_eq!(out.to_string(), before.trim().replace("\n", "").replace("  ", ""));
+        assert_eq!(fs::read_to_string(&path).unwrap(), before, "file untouched");
+        assert!(!path.with_file_name("config.json.bak").exists());
+        fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn keep_backup_preserves_previous_content() {
+        let path = temp_config("backup", r#"{"v":1}"#);
+        with_config_lock(&path, true, |config| {
+            config["v"] = json!(2);
+            Ok(())
+        })
+        .expect("first write");
+        with_config_lock(&path, true, |config| {
+            config["v"] = json!(3);
+            Ok(())
+        })
+        .expect("second write");
+        let bak: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(path.with_file_name("config.json.bak")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(bak["v"], 2, "backup holds the pre-write content");
+        let cur: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(cur["v"], 3);
+        fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn sequential_locks_re_read_latest_disk_state() {
+        let path = temp_config("reread", r#"{"counter":0}"#);
+        for expected in 1..=2 {
+            with_config_lock(&path, false, |config| {
+                let n = config["counter"].as_i64().unwrap_or(0);
+                config["counter"] = json!(n + 1);
+                Ok(())
             })
-        );
-    }
-
-    #[test]
-    fn current_fields_win_and_invalid_values_normalize() {
-        let mut current = json!({
-            "theme": "dark",
-            "themeId": " partner-theme ",
-            "appearanceMode": "light"
-        });
-        normalize_theme_fields(&mut current);
-        assert_eq!(current["appearanceMode"], "light");
-        assert_eq!(current["themeId"], "partner-theme");
-        assert_eq!(current["themeSelectionExplicit"], true);
-        assert!(current.get("theme").is_none());
-
-        let mut invalid = json!({ "theme": "sepia", "themeId": "" });
-        normalize_theme_fields(&mut invalid);
-        assert_eq!(invalid["appearanceMode"], "system");
-        assert_eq!(invalid["themeId"], "myagents-light");
-        assert_eq!(invalid["themeSelectionExplicit"], false);
-
-        let mut explicit_canonical = json!({
-            "themeId": "myagents-default",
-            "themeSelectionExplicit": true
-        });
-        normalize_theme_fields(&mut explicit_canonical);
-        assert_eq!(explicit_canonical["themeId"], "myagents-default");
-        assert_eq!(explicit_canonical["themeSelectionExplicit"], true);
-    }
-
-    #[test]
-    fn bootstrap_read_normalizes_without_mutating_disk() {
-        let dir = tempfile::tempdir().expect("temp dir");
-        let path = dir.path().join("config.json");
-        let original = r#"{"theme":"dark","themeId":" partner-theme "}"#;
-        fs::write(&path, original).expect("write config");
-
-        let selection = read_theme_bootstrap_selection(&path);
-
-        assert_eq!(selection.appearance_mode, "dark");
-        assert_eq!(fs::read_to_string(path).expect("read config"), original);
+            .expect("increment");
+            let cur: serde_json::Value =
+                serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+            assert_eq!(cur["counter"].as_i64(), Some(expected));
+        }
+        fs::remove_dir_all(path.parent().unwrap()).ok();
     }
 }
