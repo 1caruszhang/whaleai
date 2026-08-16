@@ -7,20 +7,20 @@
 
 // Unified logger for Rust — Pattern 6 (Observability + Correlation IDs).
 //
-// Two usage modes (unchanged from v0.1.x — all existing call sites keep working):
+// Two usage modes:
 //
 // 1. With explicit AppHandle:
 //      emit_log!(app, LogLevel::Info, "Message {}", arg);
 //
 // 2. Via global handle:
-//      ulog_info!("[feishu] Connected");
-//      ulog_warn!("[im] Timeout: {}", err);
+//      ulog_info!("[sidecar] Connected");
+//      ulog_warn!("[geo-monitor] Timeout: {}", err);
 //
-// Pattern 6 additions (backward-compatible):
+// Correlation support:
 //   - Optional kv-pair syntax on `ulog_*!` macros:
-//       ulog_info!("[claude-code] turn done", session_id = sid, turn_id = tid);
+//       ulog_info!("[session] turn done", session_id = sid, turn_id = tid);
 //     The kv pairs are read after a `;` separator. Existing call sites that
-//     don't use the separator continue to work via the `format!` arm.
+//     don't use the separator use the `format!` arm.
 //   - `LogEntry` carries optional `session_id / tab_id / owner_id /
 //     request_id / turn_id / runtime` fields. Populated either explicitly
 //     (kv pairs above) or implicitly from `LogContext::current()`
@@ -44,7 +44,9 @@ use tauri::{AppHandle, Emitter, Runtime};
 /// Log level enum
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum LogLevel {
+    #[default]
     Info,
     Warn,
     Error,
@@ -85,12 +87,6 @@ pub struct LogEntry {
     pub turn_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub runtime: Option<String>,
-}
-
-impl Default for LogLevel {
-    fn default() -> Self {
-        LogLevel::Info
-    }
 }
 
 const RENDERER_BOOT_STAGES: &[&str] = &[
@@ -162,8 +158,8 @@ pub fn cmd_record_renderer_boot_event(
 // Wrap an async unit-of-work with `LOG_CONTEXT.scope(LogContext { ... },
 // async { ... }).await` and any nested `ulog_*!` call inside picks up
 // those fields automatically. Used by the HTTP request handler in
-// `local_http.rs` to propagate `X-MyAgents-Request-Id /
-// X-MyAgents-Session-Id / X-MyAgents-Tab-Id` from inbound headers.
+// `local_http.rs` to propagate `X-Xiaojing-Request-Id /
+// X-Xiaojing-Session-Id / X-Xiaojing-Tab-Id` from inbound headers.
 
 #[derive(Debug, Clone, Default)]
 pub struct LogContext {
@@ -260,10 +256,27 @@ fn ensure_logs_dir() -> std::io::Result<()> {
     Ok(())
 }
 
+/// Per-process file tag `<pid>-<nonce>`. unified_logging.md promises the Rust
+/// shell and every Session Sidecar write separate dated+pid+nonce files; a
+/// shared `unified-<date>.log` let concurrent writers corrupt each other's
+/// size accounting and rotation (GD-1). The nonce (boot-time nanos hashed
+/// with the pid) keeps two boots that reuse a pid from colliding.
+fn process_log_tag() -> &'static str {
+    static TAG: OnceLock<String> = OnceLock::new();
+    TAG.get_or_init(|| {
+        let nanos = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos() as u64 ^ d.as_secs())
+            .unwrap_or(0);
+        let pid = u64::from(std::process::id());
+        format!("{}-{:x}", pid, nanos.rotate_left(20) ^ pid)
+    })
+}
+
 /// Get today's unified log file path
 fn get_log_file_path() -> PathBuf {
     let today = chrono::Local::now().format("%Y-%m-%d").to_string();
-    get_logs_dir().join(format!("unified-{}.log", today))
+    get_logs_dir().join(format!("unified-{}-{}.log", today, process_log_tag()))
 }
 
 // ── Buffered writer (Pattern 6 §6.3.3) ─────────────────────────────────
@@ -275,6 +288,8 @@ fn get_log_file_path() -> PathBuf {
 
 const WRITER_CHANNEL_CAPACITY: usize = 1024;
 const WRITER_FLUSH_INTERVAL_MS: u64 = 200;
+/// Per-file size cap before rotation (mirrors the Node sidecar logger).
+const PER_FILE_MAX_BYTES: u64 = 50 * 1024 * 1024;
 
 static WRITER_SENDER: OnceLock<tokio::sync::mpsc::Sender<String>> = OnceLock::new();
 static SYNC_WRITE_FALLBACK: Mutex<()> = Mutex::new(());
@@ -309,6 +324,9 @@ pub fn init_buffered_writer() {
         // Open the current day's file. Re-open on day rollover.
         let mut current_path = get_log_file_path();
         let mut writer: Option<BufWriter<std::fs::File>> = None;
+        // Bytes already in the active file (seeded from disk on open) — used
+        // to bound the file without a stat per write (GD-1: 有界文件).
+        let mut bytes_written: u64 = 0;
         let mut interval =
             tokio::time::interval(std::time::Duration::from_millis(WRITER_FLUSH_INTERVAL_MS));
 
@@ -323,6 +341,9 @@ pub fn init_buffered_writer() {
                             continue;
                         }
                         current_path = path.clone();
+                        bytes_written = std::fs::metadata(&current_path)
+                            .map(|meta| meta.len())
+                            .unwrap_or(0);
                         writer = OpenOptions::new()
                             .create(true)
                             .append(true)
@@ -333,7 +354,27 @@ pub fn init_buffered_writer() {
                     if let Some(w) = writer.as_mut() {
                         if let Err(e) = w.write_all(line.as_bytes()) {
                             log::error!("Failed to write to log file: {}", e);
+                        } else {
+                            bytes_written += line.len() as u64;
                         }
+                    }
+                    if bytes_written > PER_FILE_MAX_BYTES {
+                        // Rotate: flush, rename to <name>.<timestamp>.log, reopen.
+                        if let Some(mut w) = writer.take() {
+                            let _ = w.flush();
+                        }
+                        let stamp = chrono::Local::now().format("%Y-%m-%dT%H-%M-%S%.3f");
+                        let rotated = current_path.with_extension(format!("{}.log", stamp));
+                        if let Err(e) = std::fs::rename(&current_path, &rotated) {
+                            log::error!("Failed to rotate unified log: {}", e);
+                        }
+                        writer = OpenOptions::new()
+                            .create(true)
+                            .append(true)
+                            .open(&current_path)
+                            .ok()
+                            .map(BufWriter::new);
+                        bytes_written = 0;
                     }
                 }
                 _ = interval.tick() => {
@@ -430,7 +471,7 @@ fn format_line(entry: &LogEntry) -> String {
 /// Append log entry to unified log file (via buffered writer).
 const fn should_persist_logs() -> bool {
     // Rust unit tests share the developer's real HOME by default. Persisting
-    // their synthetic failures into ~/.myagents/logs makes production triage
+    // their synthetic failures into the real Xiaojing log directory makes production triage
     // indistinguishable from test activity. Test output still reaches the
     // normal Rust log capture; only the user-owned unified file sink is off.
     !cfg!(test)
@@ -468,15 +509,20 @@ pub fn create_log_entry(level: LogLevel, message: String) -> LogEntry {
 /// Create a log entry pre-populated with correlation fields, then merge any
 /// remaining undef'd fields from `LogContext::current()`. This is the entry
 /// point used by the kv-pair form of `ulog_*!`.
+#[doc(hidden)]
+pub struct LogCorrelationFields {
+    pub session_id: Option<String>,
+    pub tab_id: Option<String>,
+    pub owner_id: Option<String>,
+    pub request_id: Option<String>,
+    pub turn_id: Option<String>,
+    pub runtime: Option<String>,
+}
+
 pub fn create_log_entry_with_correlation(
     level: LogLevel,
     message: String,
-    session_id: Option<String>,
-    tab_id: Option<String>,
-    owner_id: Option<String>,
-    request_id: Option<String>,
-    turn_id: Option<String>,
-    runtime: Option<String>,
+    correlation: LogCorrelationFields,
 ) -> LogEntry {
     let mut entry = LogEntry {
         source: "rust",
@@ -485,12 +531,12 @@ pub fn create_log_entry_with_correlation(
         timestamp: chrono::Local::now()
             .format("%Y-%m-%d %H:%M:%S%.3f")
             .to_string(),
-        session_id,
-        tab_id,
-        owner_id,
-        request_id,
-        turn_id,
-        runtime,
+        session_id: correlation.session_id,
+        tab_id: correlation.tab_id,
+        owner_id: correlation.owner_id,
+        request_id: correlation.request_id,
+        turn_id: correlation.turn_id,
+        runtime: correlation.runtime,
     };
     if let Some(ctx) = LogContext::current() {
         ctx.fill(&mut entry);
@@ -592,31 +638,20 @@ pub fn unified_log_entry(entry: LogEntry) {
 /// Internal helper used by the kv-pair form of `ulog_*!`. Builds an entry
 /// with explicit correlation fields and emits it.
 #[doc(hidden)]
-pub fn ulog_with_correlation(
-    level: LogLevel,
-    message: String,
-    session_id: Option<String>,
-    tab_id: Option<String>,
-    owner_id: Option<String>,
-    request_id: Option<String>,
-    turn_id: Option<String>,
-    runtime: Option<String>,
-) {
-    let entry = create_log_entry_with_correlation(
-        level, message, session_id, tab_id, owner_id, request_id, turn_id, runtime,
-    );
+pub fn ulog_with_correlation(level: LogLevel, message: String, correlation: LogCorrelationFields) {
+    let entry = create_log_entry_with_correlation(level, message, correlation);
     unified_log_entry(entry);
 }
 
 /// Global unified log macros — no AppHandle needed.
 ///
 /// Two forms supported (Pattern 6):
-///   ulog_info!("[module] message {}", arg);                                  // legacy
+///   ulog_info!("[module] message {}", arg);                                  // plain
 ///   ulog_info!("[module] turn done", session_id = sid, turn_id = tid);       // with kv
 ///
-/// The legacy form continues to compile against all 932 existing call sites.
-/// The kv form lets new code attach correlation values explicitly. Either
-/// way, fields not set on the call site are filled from `LogContext::current()`.
+/// The plain form covers messages without explicit correlation fields. The kv
+/// form attaches them at the call site. Either way, omitted fields are filled
+/// from `LogContext::current()`.
 #[macro_export]
 macro_rules! ulog_info {
     // kv form: format string + args, separated by `;` from key=value pairs.
@@ -627,7 +662,7 @@ macro_rules! ulog_info {
     ($fmt:expr ; $($key:ident = $val:expr),+ $(,)?) => {{
         $crate::__ulog_impl!($crate::logger::LogLevel::Info, ($fmt).to_string(), $($key = $val),+);
     }};
-    // Legacy form: plain format!.
+    // Plain form: format! only.
     ($($arg:tt)*) => {{
         $crate::logger::unified_log($crate::logger::LogLevel::Info, format!($($arg)*));
     }};
@@ -694,12 +729,14 @@ macro_rules! __ulog_impl {
         $crate::logger::ulog_with_correlation(
             $level,
             $msg,
-            __session_id,
-            __tab_id,
-            __owner_id,
-            __request_id,
-            __turn_id,
-            __runtime,
+            $crate::logger::LogCorrelationFields {
+                session_id: __session_id,
+                tab_id: __tab_id,
+                owner_id: __owner_id,
+                request_id: __request_id,
+                turn_id: __turn_id,
+                runtime: __runtime,
+            },
         );
     }};
 }
@@ -753,5 +790,45 @@ mod renderer_boot_tests {
         );
         assert!(format_renderer_boot_event("arbitrary-log", "main", None).is_err());
         assert!(format_renderer_boot_event("react-commit", "bad label", None).is_err());
+    }
+}
+
+#[cfg(test)]
+mod per_process_file_tests {
+    use super::get_log_file_path;
+
+    // unified_logging.md: the Rust shell and every Session Sidecar write
+    // their own "带日期、PID 和 nonce" file — a shared `unified-<date>.log`
+    // let concurrent writers corrupt each other's size accounting and
+    // rotation (GD-1).
+    #[test]
+    fn unified_log_file_is_dated_pid_and_nonce_tagged() {
+        let name = get_log_file_path()
+            .file_name()
+            .expect("file name")
+            .to_string_lossy()
+            .to_string();
+        let parts: Vec<&str> = name.trim_end_matches(".log").split('-').collect();
+        assert!(parts.len() >= 6, "unexpected name {name}");
+        assert_eq!(parts[0], "unified");
+        // date: YYYY-MM-DD
+        for part in &parts[1..=3] {
+            assert!(
+                part.chars().all(|c| c.is_ascii_digit()),
+                "date segment {part} not numeric in {name}"
+            );
+        }
+        let pid: u32 = parts[4].parse().expect("pid segment numeric");
+        assert_eq!(pid as u64, u64::from(std::process::id()));
+        assert!(
+            parts[5].chars().all(|c| c.is_ascii_alphanumeric()),
+            "nonce segment alphanumeric in {name}"
+        );
+        assert!(parts[5].len() >= 4, "nonce too short in {name}");
+    }
+
+    #[test]
+    fn unified_log_file_name_is_stable_within_the_process() {
+        assert_eq!(get_log_file_path(), get_log_file_path());
     }
 }

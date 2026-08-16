@@ -1,18 +1,20 @@
 /**
  * UnifiedLogger — Pattern 6 (Buffered async writer + bounded logs).
  *
- * Persists merged React/Node/Rust logs to ~/.myagents/logs/unified-{date}.log.
+ * Persists merged React/Node/Rust logs to the application unified log.
  *
- * Pattern 6 changes vs v0.1.x:
- *   - Replaced per-call sync writes (Audit F P2 finding — every entry used
- *     to open / write / close inline) with an in-memory queue drained by a
+ * Current invariants:
+ *   - Uses an in-memory queue drained by a
  *     100ms flusher. Bounded queue size; overflow bumps a drop counter
  *     that emits a single warning every 60s.
  *   - The flusher uses a single `openSync` + batched `writeSync` +
  *     `closeSync` per drain — far cheaper than per-entry sync write.
- *   - Per-file 50MB cap → rotate to `unified-<date>.<iso>.log`.
+ *   - Per-file 50MB cap → rotate to `unified-<date>-<pid>-<nonce>.<iso>.log`;
+ *     the active file itself is per-process (`unified-<date>-<pid>-<nonce>.log`)
+ *     so concurrent writers (Rust shell + sibling Sidecars) never share one
+ *     file's size accounting or rotation.
  *   - Directory budget + age retention live in `./log-retention.ts`
- *     (#121, 2026-05) so unified + per-session logs share one coherent
+ *     so unified + per-session logs share one coherent
  *     policy. This module owns the active-write path (queue, flush,
  *     rotation) only.
  *   - Process exit / SIGINT / SIGTERM hook drains the queue using the
@@ -21,8 +23,7 @@
  *   - Exposes `getRecentLogLines(n)` for the crash dumper to capture
  *     last-N tail lines into the crash log bundle.
  *
- * Console.* callers are unaffected: `logger.ts::createAndBroadcast` still
- * calls `appendUnifiedLog(entry)` exactly as before.
+ * Console callers enqueue through `logger.ts`.
  */
 
 import {
@@ -39,7 +40,6 @@ import type { LogEntry } from '../shared/types/log';
 import { LOGS_DIR, ensureLogsDir } from './logUtils';
 import { localDate } from '../shared/logTime';
 import { runLogRetentionSweep } from './log-retention';
-import { getActiveSessionLogPath } from './AgentLogger';
 
 // ── Tunables (Pattern 6 §6.3.5) ────────────────────────────────────────
 const FLUSH_INTERVAL_MS = 100;
@@ -60,6 +60,16 @@ let currentDate: string | null = null;
 let currentFilePath: string | null = null;
 let currentFileSize = 0;
 
+/**
+ * Per-process file tag: `<pid>-<nonce>`. The unified_logging spec promises
+ * each process (Rust shell + every Session Sidecar) writes its own bounded
+ * file; a shared `unified-<date>.log` made K writers each track only their
+ * own bytes against the size cap and let one process' rename-rotation churn
+ * the file out from under the others. The nonce is minted once per process
+ * so two boots that reuse a pid still never collide.
+ */
+const PROCESS_LOG_TAG = `${process.pid}-${Math.random().toString(36).slice(2, 8).padEnd(6, '0')}`;
+
 const queue: string[] = [];
 let dropped = 0;
 let lastDropWarnAt = 0;
@@ -75,7 +85,7 @@ function getLogFilePath(): string {
   const today = localDate();
   if (currentDate !== today) {
     currentDate = today;
-    currentFilePath = join(LOGS_DIR, `unified-${today}.log`);
+    currentFilePath = join(LOGS_DIR, `unified-${today}-${PROCESS_LOG_TAG}.log`);
     // Refresh size cache on day rollover.
     try {
       currentFileSize = existsSync(currentFilePath) ? statSync(currentFilePath).size : 0;
@@ -87,30 +97,17 @@ function getLogFilePath(): string {
 }
 
 // ── Formatting ─────────────────────────────────────────────────────────
-// Map of internal discriminant → on-disk source label. The discriminant
-// `'bun'` is kept as a discriminant for backward-compat parsing of pre-0.2.0
-// unified-log files (see `LogSource` type in `shared/types/log.ts`), but
-// from v0.2.0 the sidecar runs on Node.js and the on-disk log line MUST say
-// `[NODE ]` — both to match reality and because greps in tech_docs already
-// use `[NODE ]`. (See unified log line 92 comment for the intent.)
-const SOURCE_LABEL: Record<string, string> = {
-  bun: 'NODE',
-};
-
 function formatLogEntry(entry: LogEntry): string {
   const level = entry.level.toUpperCase().padEnd(5);
-  const labeled = SOURCE_LABEL[entry.source] ?? entry.source.toUpperCase();
-  const source = labeled.padEnd(5);
+  const source = entry.source.toUpperCase().padEnd(5);
   // Correlation fields are emitted as a compact bracketed suffix when
   // present — keeps existing greps for `[NODE ] [INFO ]` working while
-  // making `sessionId=...` filterable. Order is fixed (sessionId → turnId
-  // → requestId → tabId → runtime → ownerId) so log diffs stay stable.
+  // making `sessionId=...` filterable. Order is fixed so log diffs stay stable.
   const tags: string[] = [];
   if (entry.sessionId) tags.push(`sid=${entry.sessionId}`);
   if (entry.turnId) tags.push(`turn=${entry.turnId}`);
   if (entry.requestId) tags.push(`req=${entry.requestId}`);
   if (entry.tabId) tags.push(`tab=${entry.tabId}`);
-  if (entry.runtime) tags.push(`rt=${entry.runtime}`);
   if (entry.ownerId) tags.push(`owner=${entry.ownerId}`);
   const tagSuffix = tags.length ? ` [${tags.join(' ')}]` : '';
   return `${entry.timestamp} [${source}] [${level}]${tagSuffix} ${entry.message}`;
@@ -147,16 +144,12 @@ export function getActiveUnifiedLogPath(): string | null {
 }
 
 /**
- * Returns ALL active log paths the budget sweep MUST not evict — currently
- * the unified log we're appending to plus the per-session log file (when
- * AgentLogger has one open). Used by `flushNow`'s on-rotation eager sweep
- * so we don't accidentally unlink the file we're holding a WriteStream for.
+ * Returns the active unified log path so retention never evicts the file
+ * receiving the current batch.
  */
 function getProtectedActivePaths(): ReadonlySet<string> {
   const paths = new Set<string>();
   if (currentFilePath) paths.add(currentFilePath);
-  const sessionPath = getActiveSessionLogPath();
-  if (sessionPath) paths.add(sessionPath);
   return paths;
 }
 
