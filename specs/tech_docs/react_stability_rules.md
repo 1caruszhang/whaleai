@@ -124,7 +124,7 @@ const buildProviderEnv = useCallback((provider) => {
 }, []);  // 依赖为空 → 永不重建
 ```
 
-**应用**：`Chat.tsx` 的 `buildProviderEnv`、`handleSendMessage`。
+**应用**：`TabProvider.tsx` 的 ref 同步（`sessionIdRef` / `sessionTitleRef` / `onGeneratingChangeRef` 等，见 `src/renderer/context/TabProvider.tsx`）。
 
 ### 模式 B：isMountedRef 防竞态
 
@@ -145,7 +145,7 @@ loadData().then(result => {
 
 setup 必须显式恢复 `true`：React StrictMode 会执行 effect setup → cleanup → setup 来验证清理对称性；只在初始化器写一次 `true` 会让第二次 setup 永久停留在 `false`，后续合法异步结果全部被误判为 unmounted。
 
-**应用**：`ConfigProvider`、`TabProvider`、`BotPlatformRegistry`。
+**应用**：`FileActionContext.tsx`、`FilePreviewModal.tsx`。
 
 ### 模式 C：Dual Context 分离数据与行为
 
@@ -157,4 +157,4 @@ export const ConfigActionsContext = createContext<ConfigActionsValue>(null);
 ```
 
 **优势**：Actions 保持稳定引用，数据变化不导致 action 消费者重渲染。
-**应用**：`ConfigProvider`（`ConfigDataContext` + `ConfigActionsContext`）。
+**应用**：`TabContext`（`TabContext` 数据面 + `TabApiContext` 行为面，见 `src/renderer/context/TabContext.tsx`）。
