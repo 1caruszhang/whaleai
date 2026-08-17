@@ -45,6 +45,7 @@
       "controlGeoOperation": "Control GEO operation",
       "proposeBrandFact": "Propose brand fact",
       "inspectBrandFact": "Inspect brand fact",
+      "reviseGateContent": "Revise pending content",
       "importPastedMaterial": "Import pasted material",
       "readSessionFile": "Read session file",
       "importWebsiteMaterial": "Import website material",

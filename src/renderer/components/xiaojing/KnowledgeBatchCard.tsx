@@ -48,6 +48,19 @@ function defaultStateOf(candidate: KnowledgeCardCandidate): CandidateState {
   };
 }
 
+/**
+ * 服务端侧候选内容指纹（ADR 0003「服务端胜」）：值、单位、provenance 与
+ * 状态任一变化即视为服务端修订（聊天改/删/增）落地，该行本地暂存失效。
+ */
+function serverFingerprintOf(candidate: KnowledgeCardCandidate): string {
+  return [
+    candidate.status,
+    candidate.normalizedValueJson,
+    candidate.unit ?? '',
+    candidate.source.profileProvenance ?? '',
+  ].join('|');
+}
+
 /** 分层默认（ADR 0003）：conflict 显式二选一；inferred（含未知 provenance）待确认；extracted/asked 已就绪。 */
 function candidateTier(candidate: KnowledgeCardCandidate): 'ready' | 'inferred' | 'conflict' {
   if (candidate.status === 'conflict') return 'conflict';
@@ -202,6 +215,29 @@ export default function KnowledgeBatchCard({ data, onDecided }: KnowledgeBatchCa
     })();
     return () => { cancelled = true; };
   }, [apiPost]);
+
+  // 服务端胜（ADR 0003）：轮询重建的候选若在服务端被修订（聊天改/删/增改
+  // 变值/来源/状态），该行本地暂存（编辑值、冲突选择、视觉确认）按候选 id
+  // 失效并回落 payload 投影；内容未变的轮询不触碰本地暂存。指纹更新在
+  // effect 内完成、setState 走函数式更新，不把 ref 写进渲染路径。
+  const serverSeenRef = useRef<Record<string, string>>({});
+  useEffect(() => {
+    const invalidated: KnowledgeCardCandidate[] = [];
+    for (const candidate of candidates) {
+      const fingerprint = serverFingerprintOf(candidate);
+      const seen = serverSeenRef.current[candidate.id];
+      serverSeenRef.current[candidate.id] = fingerprint;
+      if (seen !== undefined && seen !== fingerprint) invalidated.push(candidate);
+    }
+    if (invalidated.length === 0) return;
+    setStates((current) => {
+      const next = { ...current };
+      for (const candidate of invalidated) {
+        next[candidate.id] = defaultStateOf(candidate);
+      }
+      return next;
+    });
+  }, [candidates]);
 
   const activeCandidates = useMemo(
     () => candidates.filter((candidate) => stateOf(candidate).outcome !== 'settled'),

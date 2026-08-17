@@ -702,4 +702,102 @@ describe('KnowledgeBatchCard（行内「更改」暂存与轮询存活）', () =
     );
     expect(lineDecision.editedValue).toBeUndefined();
   });
+
+  it('服务端修订胜出：聊天改值落地后轮询以服务端值覆盖该行本地暂存', async () => {
+    const sources = [
+      candidateSource({
+        id: 'c-industry',
+        predicate: 'enterprise-profile.industry',
+        valueJson: '"汽车后市场"',
+        normalizedValueJson: '"汽车后市场"',
+        source: { materialId: 'material-1', excerpt: '推断行业', confidence: 0.4, profileProvenance: 'inferred' },
+      }),
+      candidateSource({ id: 'c-fullname', predicate: 'enterprise-profile.fullName', valueJson: '"鲸跃科技"', normalizedValueJson: '"鲸跃科技"' }),
+    ];
+    const view = render(<KnowledgeBatchCard data={cardData(sources)} />);
+
+    // 用户先在卡片上暂存了一个本地更改（若轮询不识别服务端修订，这个值会遮住服务端）。
+    fireEvent.click(screen.getByRole('button', { name: '更改：行业' }));
+    fireEvent.change(screen.getByRole('textbox', { name: '行业' }), { target: { value: '过时的本地编辑' } });
+    fireEvent.click(screen.getByRole('button', { name: '保存：行业' }));
+    expect(screen.getByText('过时的本地编辑')).toBeInTheDocument();
+
+    // 聊天修订落地：值更新且来源升为 asked，3 秒轮询带回新投影（不重挂载卡片）。
+    const revised = [
+      candidateSource({
+        id: 'c-industry',
+        predicate: 'enterprise-profile.industry',
+        valueJson: '"汽车后市场装具"',
+        normalizedValueJson: '"汽车后市场装具"',
+        source: { materialId: 'material-1', excerpt: '推断行业', confidence: 0.4, profileProvenance: 'asked' },
+      }),
+      candidateSource({ id: 'c-fullname', predicate: 'enterprise-profile.fullName', valueJson: '"鲸跃科技"', normalizedValueJson: '"鲸跃科技"' }),
+    ];
+    view.rerender(
+      <XiaojingThemeRuntime>
+        <KnowledgeBatchCard data={cardData(revised)} />
+      </XiaojingThemeRuntime>,
+    );
+
+    // 被修订候选行的本地暂存按候选 id 失效：以服务端值重渲染，徽章回归服务端 provenance。
+    expect(screen.getByText('汽车后市场装具')).toBeInTheDocument();
+    expect(screen.queryByText('过时的本地编辑')).not.toBeInTheDocument();
+    expect(screen.getByText('行业').closest('article')).toHaveAttribute('data-row-tier', 'ready');
+
+    // 整卡确认：该行按 adopt-new 提交服务端值，不再携带本地 editedValue。
+    fireEvent.click(screen.getByRole('button', { name: '确认（采纳全部 2 条）' }));
+    await waitFor(() => expect(mocks.apiPost).toHaveBeenCalledWith(
+      '/api/xiaojing/knowledge/decide-batch',
+      expect.objectContaining({
+        decisions: [
+          expect.objectContaining({ candidateId: 'c-industry', decision: 'adopt-new' }),
+          expect.objectContaining({ candidateId: 'c-fullname', decision: 'adopt-new' }),
+        ],
+      }),
+    ));
+    const industryDecision = mocks.apiPost.mock.calls.at(-1)?.[1]?.decisions?.find(
+      (decision: { candidateId: string }) => decision.candidateId === 'c-industry',
+    );
+    expect(industryDecision.editedValue).toBeUndefined();
+  });
+
+  it('服务端修订胜出：聊天删除落地后该行按候选 id 转为已裁决', () => {
+    const sources = [
+      candidateSource({
+        id: 'c-industry',
+        predicate: 'enterprise-profile.industry',
+        valueJson: '"汽车后市场"',
+        normalizedValueJson: '"汽车后市场"',
+      }),
+      candidateSource({ id: 'c-fullname', predicate: 'enterprise-profile.fullName', valueJson: '"鲸跃科技"', normalizedValueJson: '"鲸跃科技"' }),
+    ];
+    const view = render(<KnowledgeBatchCard data={cardData(sources)} />);
+
+    // 删除前先做本地暂存编辑与逐行确认，验证服务端终结同样覆盖本地状态。
+    fireEvent.click(screen.getByRole('button', { name: '更改：行业' }));
+    fireEvent.change(screen.getByRole('textbox', { name: '行业' }), { target: { value: '本地编辑' } });
+    fireEvent.click(screen.getByRole('button', { name: '保存：行业' }));
+
+    const deleted = [
+      candidateSource({
+        id: 'c-industry',
+        predicate: 'enterprise-profile.industry',
+        valueJson: '"汽车后市场"',
+        normalizedValueJson: '"汽车后市场"',
+        status: 'rejected',
+      }),
+      candidateSource({ id: 'c-fullname', predicate: 'enterprise-profile.fullName', valueJson: '"鲸跃科技"', normalizedValueJson: '"鲸跃科技"' }),
+    ];
+    view.rerender(
+      <XiaojingThemeRuntime>
+        <KnowledgeBatchCard data={cardData(deleted)} />
+      </XiaojingThemeRuntime>,
+    );
+
+    const industryRow = screen.getByText('行业').closest('article') as HTMLElement;
+    expect(within(industryRow).getByText('已拒绝')).toBeInTheDocument();
+    // 该行无「更改」入口（已裁决），整卡确认只剩未决行。
+    expect(within(industryRow).queryByRole('button', { name: '更改：行业' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '确认（采纳全部 1 条）' })).toBeInTheDocument();
+  });
 });

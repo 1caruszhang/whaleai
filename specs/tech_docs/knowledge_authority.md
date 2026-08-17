@@ -18,12 +18,24 @@
    `/api/xiaojing/knowledge/decide-batch`（批量确认卡）的结构化卡片决策；
    `/api/xiaojing/knowledge/candidates` 供卡片在会话重载后水合候选真实状态。
 
+4. `xiaojing-geo` MCP 的通用闸门修订工具 `revise_gate_content`：按用户在聊天中的显式自然语言指令（操作逐条携带 `userInstruction` 原文审计）对当前未决闸门内容执行改/删/增。工具是单一受限入口（参数：闸门类型 + 操作列表），内部分发到各域 handler（见 `src/server/geo/gate-revision.ts`，后续闸门经同一契约接入）；工具描述写死「仅基于用户显式指令；不得自行判断删除」。知识闸门作用于本 Session 的 `awaiting-confirmation`/`conflict` 候选：
+   - **modify**：新值经既有归一化管道写回候选行，provenance 升为 `asked`（只升不降），状态回到 `awaiting-confirmation`——用户显式改值即表达了对新值的选择，整卡确认按 `adopt-new` 提交；
+   - **delete**：候选终结为 `rejected`，材料未决候选清零时与裁决同步置 `processed`；
+   - **add**：走既有 propose 语义（`user-stated` / `knowledge-update` / `asked` 待确认候选），携带材料 id 时把新候选挂回该材料最新处理 attempt 的候选快照，卡片经既有轮询/水合投影重渲染出新行。
+   每次修订写 `knowledge_candidate_revisions` 完整审计（before/after 值快照 + 指令原文），不升品牌知识版本、不投送 `XIAOJING_KNOWLEDGE_DECISION` reminder（reminder 只在裁决提交时投送）。修订按候选 id 覆盖卡片本地暂存编辑（服务端胜），见 ADR 0003。
+
 裁决入口固定为聊天内的结构化卡片：材料导入（`import_pasted_material` /
-`import_website_material` / `retry_brand_material` 的工具结果）渲染一张批量确认卡
-（`knowledge-candidates-card`，候选上限 50，超出记 `overflowCount`），单条提议渲染
-`knowledge-conflict-card`。聊天输入区材料导入入口发起的导入复用同一批量卡组件。用户在卡片上勾选
-（=采用）、取消勾选（无 current 为拒绝、有 current 为保留）、编辑胶囊值（=采用修
-改值）；确认后的权威事实投影在右侧 GEO 工作台常驻的「品牌知识」面板（位于多操作
+`import_website_material` / `retry_brand_material` 的工具结果）渲染一张字段行复核卡
+（`knowledge-candidates-card`，候选上限 50，同字段候选合并为一行、按固定字段序排列，
+被截断的字段在行内提示溢出），单条提议渲染 `knowledge-conflict-card`。聊天输入区材料
+导入入口发起的导入复用同一卡组件。卡片按来源层级分层默认（ADR 0003）：材料原文行
+（`extracted`）视为已就绪、无任何控件；AI 补全行（`inferred`）只带纯视觉的逐行
+「确认」（本地状态，按候选 id 扛住 3s 轮询重建）；冲突行必须显式「采用新值 / 保留
+当前值」，未全部解决前整卡确认禁用；每行可「更改」（内联编辑、暂存不落库），被更改
+行视为「用户补充」（`asked`）、已就绪。行内不展示摘录与置信度，摘录收进展开详情。
+卡片不提供拒绝；整卡一次「确认」即构成对全部未决候选的用户裁决并全量采纳（含从未
+逐条查看的 AI 补全行；改值行提交 `adopt-edited`，其余 `adopt-new`）。确认后的权威
+事实投影在右侧 GEO 工作台常驻的「品牌知识」面板（位于多操作
 切换器与六阶段骨架之间，工作台组成见 `geo_operations.md`），Agent 通过一条聚合
 `XIAOJING_KNOWLEDGE_DECISION` reminder 得到全部结果。
 
@@ -60,7 +72,7 @@ subject + predicate + sorted scope + effectiveFrom + effectiveTo
 | `model-inferred` | 任意 | 始终保存为待确认/冲突候选，不能合并或替换 authority |
 | 任意 | `chat-observation` | 普通聊天建议门；始终待确认/冲突，不能写 authority |
 
-候选提交必须同时保存 raw input、结构化 candidate、来源材料引用、最小原文摘录和置信度。企业 Profile 材料候选还保存 `extracted / asked / inferred` provenance；材料入口的 raw input 只保存 material/field/provenance 标识，不复制整份隐私正文。候选确认前不创建或修改 current fact；同值来源也必须经过用户确认后才合并。
+候选提交必须同时保存 raw input、结构化 candidate、来源材料引用、最小原文摘录和置信度。企业 Profile 材料候选还保存 `extracted / asked / inferred` provenance；材料入口的 raw input 只保存 material/field/provenance 标识，不复制整份隐私正文。候选确认前不创建或修改 current fact；同值来源也必须经过用户确认后才合并（确认粒度为整卡一次确认，见 ADR 0003）。
 
 ## 持久化模型
 
@@ -74,6 +86,7 @@ subject + predicate + sorted scope + effectiveFrom + effectiveTo
 | `knowledge_fact_versions` | 被替换的历史权威版本；不与 current 混存 |
 | `knowledge_fact_sources` | 每一事实版本合并后的材料、摘录、置信度和 origin |
 | `knowledge_decisions` | 决策、actor/Session、expected version、before/after、reason、时间 |
+| `knowledge_candidate_revisions` | 聊天修订审计：action（modify/delete/add）、actor/Session、before/after 值快照、用户指令原文、时间；同一候选可多条 |
 | `knowledge_versions` | 每次采纳/拆分后的品牌级单调版本、触发决策、Session、快照哈希 |
 | `knowledge_version_facts` | 该品牌版本包含的全部 current fact 版本、值、单位与来源快照 |
 
@@ -104,12 +117,13 @@ Agent 自然确认结果；没有 visible tail，因此不会生成虚假用户�
 ## 回归测试
 
 - Node pure policy：`src/server/geo/knowledge-authority.unit.test.ts`；
-- Rust schema/事务/CAS/审计：`src-tauri/src/brand_workspace/knowledge.rs`（含 adopt-edited 与旧库重建迁移）；
+- 通用闸门修订分发与工具纪律：`src/server/geo/gate-revision.unit.test.ts`；
+- Rust schema/事务/CAS/审计：`src-tauri/src/brand_workspace/knowledge.rs`（含 adopt-edited、旧库重建迁移与聊天修订改/删/增）；
 - 批量卡契约与投影：`src/shared/geo/knowledgeCard.test.ts`；
 - 聚合 reminder 结构与注入防护：`src/shared/systemReminder.test.ts`；
 - 原材料、抽取、SSRF、最小重试与日志：`src/server/geo/material-import.unit.test.ts`、`src-tauri/src/brand_workspace/materials.rs`；
 - 结构化四按钮与无聊天消息提交：`KnowledgeConflictCard.test.tsx`；
-- 批量确认卡勾选/胶囊编辑/水合/部分失败：`KnowledgeBatchCard.test.tsx`；
+- 字段行复核卡分层默认/整卡全量采纳/更改暂存/水合/部分失败：`KnowledgeBatchCard.test.tsx`；
 - 工作台权威知识投影：`XiaojingBrandKnowledgePanel.test.tsx`；
 - 品牌档案只读整页（版本史与血缘投影、无动作入口）：`XiaojingBrandArchivePage.test.tsx`；
 - 小鲸 persistent prompt 建议门：`src/server/system-prompt.unit.test.ts`。

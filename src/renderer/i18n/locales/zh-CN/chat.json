@@ -45,6 +45,7 @@
       "controlGeoOperation": "控制 GEO 操作",
       "proposeBrandFact": "提交品牌事实候选",
       "inspectBrandFact": "查询品牌事实",
+      "reviseGateContent": "修订待确认内容",
       "importPastedMaterial": "导入品牌材料",
       "readSessionFile": "读取会话文件",
       "importWebsiteMaterial": "导入网站材料",
