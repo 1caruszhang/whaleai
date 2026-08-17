@@ -4,7 +4,7 @@ Ticket 16 只建立 GEO 领域编排，不建立通用 Workflow Engine、`GeoRun
 
 ## Owner 与 seam
 
-- `src/shared/geo/operation.ts` 是意图到最小能力切片、步骤、确认门和跨语言枚举的纯 policy；`GEO_OPERATION_PHASES` 把步骤映射为六个展示阶段（品牌知识、问题机会、内容生产、渠道计划、发布、监测），阶段名与 Agent 口头汇报的环节名一致，聊天进度卡片与右侧工作台共用同一分组，正文不复述阶段链条。
+- `src/shared/geo/operation.ts` 是意图到最小能力切片、步骤、确认门和跨语言枚举的纯 policy；`GEO_OPERATION_PHASES` 把步骤映射为六个展示阶段（品牌知识、问题机会、内容生产、渠道计划、发布、监测），阶段名与 Agent 口头汇报的环节名一致，聊天进度卡片与右侧工作台共用同一分组，正文不复述阶段链条。工作台据此渲染六阶段竖向手风琴骨架：六个阶段行恒定排列，聚焦操作所处阶段展开显示该阶段产物面板，其余收起为单行（阶段名 + 状态点），点击可展开回看该阶段已生成产物；直接意图未覆盖的阶段行标「已跳过」。
 - `src/server/geo/operation.ts::GeoOperationService` 是 Node 编排 seam。它计划一次 Operation，并把 capability 返回的 artifact reference、checkpoint 和失败写回；它不复制问题、文章、分发、发布或监测算法。
 - 内置 `xiaojing-geo` MCP 只开放创建、读取、下一轮知识分支以及暂停/恢复/重试/取消。主模型选择明确 intent；字符串分类函数只服务测试和非 Agent 导入面，不拦截主聊天消息。
 - Rust `BrandWorkspaceStore` 是 Operation lifecycle、revision CAS、checkpoint 和 lineage 的持久化 owner。Management API 同时校验 immutable Sidecar id、generation、Session 与 workspace path。
@@ -22,7 +22,8 @@ Operation 状态为 `ready / queued / running / awaiting-confirmation / paused /
 ## 多 Session 后台执行与应用级 admission
 
 - 每个 Session 继续使用自己的 1:1 Sidecar、对话 generator 与 GeoOperation revision/generation。品牌切换或工作台 unmount 只终止当次只读 projection 请求，不调用 Operation cancel；窗口可见时工作台以有界轮询刷新，重新显示或重新挂载立即从 Rust truth 重读。Chat turn 已进入后台时继续复用 `BackgroundCompletion` owner，不建立 GEO 专用 owner、port 或 Renderer lifecycle 副本。
-- 操作生命周期控制（暂停/恢复/重试失败单元/取消，经 `/api/xiaojing/geo-operations/control` 提交 revision CAS）与 provider 排队、checkpoint 恢复提示只呈现在聊天进度卡区域：控制按钮按操作状态呈现，provider 排队横幅沿用 `geo-provider-queue-updated` Tauri 事件通道（不新增 SSE 事件）。右侧工作台操作卡是只读投影，不渲染控制按钮与排队/恢复横幅；过程控制只有聊天一个入口。
+- 操作生命周期控制（暂停/恢复/重试失败单元/取消，经 `/api/xiaojing/geo-operations/control` 提交 revision CAS）与 provider 排队、checkpoint 恢复提示只呈现在聊天进度卡区域：控制按钮按操作状态呈现，provider 排队横幅沿用 `geo-provider-queue-updated` Tauri 事件通道（不新增 SSE 事件）。过程控制只有聊天一个入口。
+- 右侧工作台仅在聊天 Tab 挂载（欢迎页/设置页主区全宽），操作视图自上而下只有三段：多操作切换器（「目前所在阶段」跟随聚焦操作）→ 常驻当前已确认品牌知识面板 → 六阶段手风琴骨架。阶段行以状态点+文字表达暂停/出错，阶段总览 grid、最小执行步骤列表、checkpoint、pending/error 明细与原始产物引用等过程块只存在于聊天进度卡，工作台不再渲染；无进行中操作时骨架区显示空态并引导去聊天发起。
 - 所有 typed GEO Provider ports 在真正出站前都向 Rust `GeoProviderLimiter` 申请 permit。该 limiter 是应用进程单一 owner，跨品牌、Session 和 Sidecar 共用 FIFO；Node 的文章 worker / embedding producer 只安排本地最小单元，不能成为全局并发 authority。embedding batch 会拆成单条真实请求逐项 admission，避免一个 permit 内并发多个上游请求。
 - `config.json::geoProviderConcurrencyLimit` 是配置入口，缺省为 5；Rust 对任何磁盘值强制夹在 `[1,16]`。队列最多 512 项，满时返回可见 `resource_exhausted`，不绕过 admission。projection 持久化 `queueReason/queuePosition`；permit release、cancel 或 Sidecar generation retirement 按 FIFO 推进位置。
 - admission 只包裹 GEO typed Provider ports，不进入普通 Chat Provider 路径；因此某个品牌的重型 GEO 排队不会占用其它 Session 的普通聊天执行入口。
@@ -57,4 +58,4 @@ KnowledgeAuthority 采纳产生新知识版本时，在同一 SQLite transaction
 
 ## 测试边界
 
-Shared contract tests覆盖直接 intent、完整组合、下一轮两分支、报告非 authority 和所有 gate；Node tests 从 `GeoOperationService` seam 验证最小计划、分支替换、queue projection、Provider admission 和 Rust UI authority；Rust tests覆盖多 Session 隔离、应用级 FIFO/资源耗尽、revision + generation CAS、退出 checkpoint、crash recovery、stale event、最小 retry、终态、不可逆 gate 与知识引用标记。DOM tests覆盖聊天进度卡的排队原因/位置、恢复提示、控制按钮按操作状态呈现/禁用与 revision CAS 提交，以及工作台操作卡无控制按钮与排队/恢复横幅残留、卸载不产生 cancel。默认测试无网络、无真实凭据、无付款、上传或发布。
+Shared contract tests覆盖直接 intent、完整组合、下一轮两分支、报告非 authority 和所有 gate；Node tests 从 `GeoOperationService` seam 验证最小计划、分支替换、queue projection、Provider admission 和 Rust UI authority；Rust tests覆盖多 Session 隔离、应用级 FIFO/资源耗尽、revision + generation CAS、退出 checkpoint、crash recovery、stale event、最小 retry、终态、不可逆 gate 与知识引用标记。DOM tests覆盖聊天进度卡的排队原因/位置、恢复提示、控制按钮按操作状态呈现/禁用与 revision CAS 提交，工作台阶段骨架的当前阶段展开/收起行点击回看/产物按阶段归属渲染/暂停与出错状态点/空态引导，以及工作台无控制按钮与排队/恢复横幅残留、仅挂载于聊天 Tab、卸载不产生 cancel。默认测试无网络、无真实凭据、无付款、上传或发布。

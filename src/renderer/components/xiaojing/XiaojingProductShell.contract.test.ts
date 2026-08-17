@@ -17,6 +17,13 @@ describe("Xiaojing product shell contract", () => {
     expect(app).toContain("<XiaojingWelcome");
   });
 
+  it("mounts the workbench only inside chat tabs so welcome and settings span full width", () => {
+    const app = source("src/renderer/App.tsx");
+    // 票 28：工作台仅挂载于聊天 Tab；欢迎页/设置页主区全宽。
+    expect(app.match(/<XiaojingGeoWorkbench/g)?.length).toBe(1);
+    expect(app).not.toContain("activeTab?.view !== 'chat'");
+  });
+
   it("registers only focused Session and GEO route families in the Sidecar", () => {
     const composition = source("src/server/sidecar-composition.ts");
     expect(composition).toContain("pathname.startsWith('/api/xiaojing/')");
@@ -45,9 +52,13 @@ describe("Xiaojing product shell contract", () => {
       "src/renderer/components/chat/ChatStarterSuggestions.tsx",
     );
     expect(workbench).not.toContain("当前没有运行中的 GEO 操作");
-    expect(workbench).toContain("在聊天中发起 GEO 目标后，小鲸会先确认事实与目标");
+    expect(workbench).not.toContain("当前品牌");
+    expect(workbench).toContain(
+      "在聊天中发起 GEO 目标后，小鲸会先确认事实与目标",
+    );
     expect(workbench).toContain("xiaojing:geo-workbench-collapsed");
     expect(workbench).toContain("<XiaojingGeoOperationPanel");
+    expect(workbench).toContain("<XiaojingBrandKnowledgePanel");
     expect(workbench).toContain("<XiaojingBrandHistoryPanel");
     expect(operationPanel).toContain("<XiaojingQuestionPoolPanel");
     expect(operationPanel).toContain("<XiaojingTopicPlanPanel");
@@ -56,7 +67,16 @@ describe("Xiaojing product shell contract", () => {
     expect(operationPanel).toContain("<XiaojingPublishSchedulerPanel");
     expect(operationPanel).toContain("<XiaojingPostPublishMonitoringPanel");
     expect(operationPanel).toContain("<XiaojingRealGeoDashboard");
-    expect(operationPanel).toContain('operation.kind === "full-optimization"');
+    // 票 28：骨架按共享六阶段分组渲染手风琴，产物按阶段归属。
+    expect(operationPanel).toContain("GEO_OPERATION_PHASES");
+    expect(operationPanel).toContain('aria-label="GEO 阶段骨架"');
+    // 过程块（阶段总览 grid、执行步骤列表、checkpoint、pending/error
+    // 明细）只存在于聊天进度卡，工作台不再渲染。
+    expect(operationPanel).not.toContain("GEO 阶段总览");
+    expect(operationPanel).not.toContain("最小执行步骤");
+    expect(operationPanel).not.toContain("恢复检查点");
+    expect(operationPanel).not.toContain("待确认事项");
+    expect(operationPanel).not.toContain("已固化产物");
     // Ticket 25：过程控制只有聊天进度卡一个入口——revision CAS 提交钉在
     // 聊天卡上，工作台面板不得再出现任何控制提交路径。
     const eventCard = source(
@@ -118,27 +138,34 @@ describe("Xiaojing product shell contract", () => {
     expect(sidebar).not.toContain("useConfig");
   });
 
-  it("mounts material import only inside a tab-scoped Xiaojing workbench", () => {
+  it("mounts material import only in the tab-scoped chat input area", () => {
     const app = source("src/renderer/App.tsx");
+    const chat = source("src/renderer/pages/Chat.tsx");
+    const materialImport = source(
+      "src/renderer/components/xiaojing/XiaojingChatMaterialImport.tsx",
+    );
     const workbench = source(
       "src/renderer/components/xiaojing/XiaojingGeoWorkbench.tsx",
-    );
-    const materialPanel = source(
-      "src/renderer/components/xiaojing/XiaojingMaterialImportPanel.tsx",
     );
     const operationPanel = source(
       "src/renderer/components/xiaojing/XiaojingGeoOperationPanel.tsx",
     );
-    expect(app).toContain("materialImportEnabled");
+    const gatePanels = source(
+      "src/renderer/components/xiaojing/GeoOperationGatePanels.tsx",
+    );
     expect(app).toContain("tab.view === 'chat' ? workspaceForPath");
     expect(app).toContain("workspacePathsEqual(workspace.rootPath, path)");
-    expect(workbench).toContain("<XiaojingGeoOperationPanel");
-    expect(operationPanel).toContain("<XiaojingMaterialImportPanel");
-    expect(materialPanel).toContain("useTabApi()");
-    expect(materialPanel).toContain("useTabState()");
-    expect(materialPanel).toContain("isPendingSessionId(sessionId)");
-    expect(materialPanel).toContain("import('@tauri-apps/plugin-dialog')");
-    expect(materialPanel).not.toContain("readFile");
+    expect(chat).toContain("useCurrentWorkspace()");
+    expect(chat).toContain("<XiaojingChatMaterialImport");
+    // 票 27：材料入口只存在于聊天输入区；工作台与闸门卡不出现材料面板。
+    expect(workbench).not.toContain("MaterialImport");
+    expect(operationPanel).not.toContain("MaterialImport");
+    expect(gatePanels).not.toContain("MaterialImport");
+    expect(materialImport).toContain("useTabApi()");
+    expect(materialImport).toContain("useTabState()");
+    expect(materialImport).toContain("isPendingSessionId(sessionId)");
+    expect(materialImport).toContain("import('@tauri-apps/plugin-dialog')");
+    expect(materialImport).not.toContain("readFile");
   });
 
   it("uses the Xiaojing identity and removes generic product controls from GEO chat chrome", () => {
@@ -152,10 +179,12 @@ describe("Xiaojing product shell contract", () => {
     expect(input).not.toContain("modelOptions");
     expect(input).not.toContain("pluginOptions");
     expect(entry).toContain('lang="zh-CN"');
-    expect(entry).toContain('<title>小鲸同学</title>');
+    expect(entry).toContain("<title>小鲸同学</title>");
     expect(entry).toContain('data-theme-id="xiaojing"');
-    expect(entry).not.toContain("localStorage.getItem('xiaojing:theme-bootstrap')");
-    expect(main).toContain('<XiaojingI18nSync />');
-    expect(main).toContain('<XiaojingThemeRuntime ownsMainWindowBridge>');
+    expect(entry).not.toContain(
+      "localStorage.getItem('xiaojing:theme-bootstrap')",
+    );
+    expect(main).toContain("<XiaojingI18nSync />");
+    expect(main).toContain("<XiaojingThemeRuntime ownsMainWindowBridge>");
   });
 });

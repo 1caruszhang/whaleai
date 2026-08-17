@@ -14,7 +14,18 @@
 
 1. `xiaojing-geo` MCP 的 `propose_brand_fact` / `inspect_brand_fact`；
 2. `MaterialImportService` 从原始品牌材料抽取的企业 Profile 候选；
-3. 当前 Tab 经 Session Rust proxy 调用 `/api/xiaojing/knowledge/decide` 的结构化卡片决策。
+3. 当前 Tab 经 Session Rust proxy 调用 `/api/xiaojing/knowledge/decide`（单条）或
+   `/api/xiaojing/knowledge/decide-batch`（批量确认卡）的结构化卡片决策；
+   `/api/xiaojing/knowledge/candidates` 供卡片在会话重载后水合候选真实状态。
+
+裁决入口固定为聊天内的结构化卡片：材料导入（`import_pasted_material` /
+`import_website_material` / `retry_brand_material` 的工具结果）渲染一张批量确认卡
+（`knowledge-candidates-card`，候选上限 50，超出记 `overflowCount`），单条提议渲染
+`knowledge-conflict-card`。聊天输入区材料导入入口发起的导入复用同一批量卡组件。用户在卡片上勾选
+（=采用）、取消勾选（无 current 为拒绝、有 current 为保留）、编辑胶囊值（=采用修
+改值）；确认后的权威事实投影在右侧 GEO 工作台常驻的「品牌知识」面板（位于多操作
+切换器与六阶段骨架之间，工作台组成见 `geo_operations.md`），Agent 通过一条聚合
+`XIAOJING_KNOWLEDGE_DECISION` reminder 得到全部结果。
 
 Node 再通过既有 Management API `/api/brand-knowledge/*` 交给 Rust。Rust 同时校验 Sidecar immutable management id、process generation、逻辑 Session id 和品牌 workspace path；JSON 中换一个 `workspaceId` 不能访问另一品牌。
 
@@ -62,7 +73,7 @@ subject + predicate + sorted scope + effectiveFrom + effectiveTo
 
 旧 `knowledge_facts` 是 BrandWorkspace 初始骨架与删除范围兼容表，不是可写的 KnowledgeAuthority；新代码不得使用它建立第二入口。
 
-## 并发与四类裁决
+## 并发与五类裁决
 
 所有候选合并和用户裁决使用 SQLite `IMMEDIATE` transaction。当前不存在时 expected version 为 `0`；存在时必须等于当前版本。`knowledge_current_facts.fact_key` 主键保证唯一当前值，更新 SQL 同时匹配旧 version。任何 Session 在读后被另一 Session 抢先提交，都会得到 `knowledge_version_conflict`，不能 last-write-wins。
 
@@ -70,25 +81,30 @@ subject + predicate + sorted scope + effectiveFrom + effectiveTo
 
 - `keep-current`：保留当前值，候选终结；
 - `adopt-new`：同值只合并来源且版本不变；异值把旧 current 移入 history并让新值版本 `+1`；
+- `adopt-edited`：采用用户在批量确认卡内编辑后的值（Node 先经同一归一化管道）。编辑值与当前权威同值时仅合并来源；候选行保留原始提议值，审计 before/after 可重建"原值→改值"链路；
 - `split-scope`：必须改变 scope 或 effective time，并对目标键执行 version `0` CAS；
 - `reject-candidate`：拒绝候选，不改 current。
 
-四类裁决都写完整 decision audit。卡片请求中的 workspace/session 必须和当前 Sidecar 一致；actor 由 Node Session route 固定生成，Renderer 不能传入或覆盖。
+五类裁决都写完整 decision audit。卡片请求中的 workspace/session 必须和当前 Sidecar 一致；actor 由 Node Session route 固定生成，Renderer 不能传入或覆盖。`knowledge_decisions.decision` 的 CHECK 约束包含全部五类；首版 schema 旧库由 `ensure_decisions_admit_adopt_edited` 幂等重建迁移。批量裁决逐条独立事务提交，部分失败不回滚已提交项，卡片按条目呈现成败并可重试失败条目。
 
-`adopt-new` 或 `split-scope` 在同一事务内生成新的品牌知识版本；同值采纳虽然 fact version 不变，但来源集合发生变化，因此也生成新品牌快照。`keep-current` / `reject-candidate` 不改变权威知识，不升品牌版本。`KnowledgeDecisionResult.knowledgeVersion` 和隐藏 reminder 会返回新版本；`GeoArtifact.knowledge_version` 固化生成时使用的版本，旧快照与旧产物 lineage 永不被后续裁决覆盖。
+`adopt-new`、`adopt-edited` 或 `split-scope` 在同一事务内生成新的品牌知识版本；同值采纳虽然 fact version 不变，但来源集合发生变化，因此也生成新品牌快照。`keep-current` / `reject-candidate` 不改变权威知识，不升品牌版本。`KnowledgeDecisionResult.knowledgeVersion` 和隐藏 reminder 会返回新版本；`GeoArtifact.knowledge_version` 固化生成时使用的版本，旧快照与旧产物 lineage 永不被后续裁决覆盖。
 
-裁决提交成功后，Node 通过既有 `SessionEngine.sendDesktopMessage` 投送纯隐藏
-`XIAOJING_KNOWLEDGE_DECISION` reminder。它只包含已提交结果的结构化标识，供当前
+裁决提交成功后，Node 通过当前 Session message path 投送纯隐藏
+`XIAOJING_KNOWLEDGE_DECISION` reminder（单条决策一条；批量确认卡一次提交只投送
+一条聚合全部条目的 reminder）。它只包含已提交结果的结构化标识，供当前
 Agent 自然确认结果；没有 visible tail，因此不会生成虚假用户气泡。提醒入队失败不会
 回滚已经提交的 SQLite 决策，响应会显式返回 notification 状态。
 
 ## 回归测试
 
 - Node pure policy：`src/server/geo/knowledge-authority.unit.test.ts`；
-- Rust schema/事务/CAS/审计：`src-tauri/src/brand_workspace/knowledge.rs`；
+- Rust schema/事务/CAS/审计：`src-tauri/src/brand_workspace/knowledge.rs`（含 adopt-edited 与旧库重建迁移）；
+- 批量卡契约与投影：`src/shared/geo/knowledgeCard.test.ts`；
+- 聚合 reminder 结构与注入防护：`src/shared/systemReminder.test.ts`；
 - 原材料、抽取、SSRF、最小重试与日志：`src/server/geo/material-import.unit.test.ts`、`src-tauri/src/brand_workspace/materials.rs`；
 - 结构化四按钮与无聊天消息提交：`KnowledgeConflictCard.test.tsx`；
+- 批量确认卡勾选/胶囊编辑/水合/部分失败：`KnowledgeBatchCard.test.tsx`；
+- 工作台权威知识投影：`XiaojingBrandKnowledgePanel.test.tsx`；
 - 小鲸 persistent prompt 建议门：`src/server/system-prompt.unit.test.ts`。
-- 隐藏裁决事件及结构注入防护：`src/shared/systemReminder.test.ts`。
 
 所有默认测试离线运行，不读取真实 Provider credential、用户目录或网络。
