@@ -13,6 +13,8 @@ export function getFixedTabChromeTitle(
       return t('tabs.welcome');
     case 'brand-archive':
       return t('tabs.brandArchive');
+    case 'brand-effect':
+      return t('tabs.brandEffect');
     default:
       return undefined;
   }

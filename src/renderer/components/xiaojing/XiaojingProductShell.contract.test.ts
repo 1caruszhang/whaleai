@@ -24,8 +24,8 @@ describe("Xiaojing product shell contract", () => {
     expect(app).not.toContain("activeTab?.view !== 'chat'");
   });
 
-  // 票 30：一级导航机制——品牌级入口跟随当前选中品牌、不依赖任何 Session。
-  // 「品牌档案」先落地；「效果」由票 31 复用同一机制加入后，四个一级入口
+  // 票 30/票 31：一级导航机制——品牌级入口跟随当前选中品牌、不依赖任何
+  // Session。「品牌档案」（票 30）与「效果」（票 31）落地后，四个一级入口
   // （主聊天、品牌工作台、品牌档案、效果）完整。
   it("hosts brand-level full pages through sidebar primary navigation", () => {
     const app = source("src/renderer/App.tsx");
@@ -35,30 +35,48 @@ describe("Xiaojing product shell contract", () => {
     const archive = source(
       "src/renderer/components/xiaojing/XiaojingBrandArchivePage.tsx",
     );
+    const effectPage = source(
+      "src/renderer/components/xiaojing/XiaojingGeoEffectPage.tsx",
+    );
     const workbench = source(
       "src/renderer/components/xiaojing/XiaojingGeoWorkbench.tsx",
     );
-    // 左侧栏一级导航承载品牌档案；入口只调品牌级回调，不经过任何
+    // 左侧栏一级导航承载品牌档案与效果；入口只调品牌级回调，不经过任何
     // onOpenWorkspace/onOpenSession 会话打开路径。
     expect(sidebar).toContain("onOpenBrandArchive");
     expect(sidebar).toContain("xiaojingSidebar.brandArchive");
     expect(sidebar).toContain("activeTab?.view === 'brand-archive'");
     expect(sidebar).toContain("onClick={onOpenBrandArchive}");
-    // 品牌档案是独立整页 tab 视图（单例复用），跟随当前选中品牌，
+    expect(sidebar).toContain("onOpenBrandEffect");
+    expect(sidebar).toContain("xiaojingSidebar.brandEffect");
+    expect(sidebar).toContain("activeTab?.view === 'brand-effect'");
+    expect(sidebar).toContain("onClick={onOpenBrandEffect}");
+    // 品牌档案与效果是独立整页 tab 视图（单例复用），跟随当前选中品牌，
     // 不绑定任何 Session 身份。
     expect(app).toContain("view: 'brand-archive'");
     expect(app).toContain("<XiaojingBrandArchivePage");
-    expect(app).toContain("tab.view === 'brand-archive'");
+    expect(app).toContain("view: 'brand-effect'");
+    expect(app).toContain("<XiaojingGeoEffectPage");
+    expect(app).toContain("tab.view === 'brand-effect'");
     expect(app).toContain("brandState.currentWorkspace");
-    // 整页只读投影：版本史与产物血缘来自 BrandWorkspace 历史投影，无确认
-    // 或动作入口；工作台不再渲染历史面板。
+    // 品牌档案整页只读投影：版本史与产物血缘来自 BrandWorkspace 历史投影，
+    // 无确认或动作入口。
     expect(archive).toContain("loadBrandHistory");
     expect(archive).toContain('aria-label="品牌知识版本"');
     expect(archive).toContain('aria-label="已批准产物"');
     expect(archive).not.toContain("decideGeoKnowledge");
     expect(archive).not.toContain("controlGeoOperation");
     expect(archive).not.toContain("apiPost");
+    // 效果整页：三面板原样搬迁，控制面借用已打开聊天 Tab 的 Session owner
+    // 身份，不新建 Sidecar owner。
+    expect(effectPage).toContain("<XiaojingGeoEffectPanel");
+    expect(effectPage).toContain("sessionSidecarFetch");
+    expect(effectPage).toContain("TabApiContext.Provider");
+    expect(effectPage).not.toContain("readOnly");
+    // 工作台双页签移除：不再渲染效果面板，历史面板同样在左侧栏整页。
     expect(workbench).not.toContain("BrandHistoryPanel");
+    expect(workbench).not.toContain("XiaojingGeoEffectPanel");
+    expect(workbench).not.toContain('role="tablist"');
   });
 
   it("registers only focused Session and GEO route families in the Sidecar", () => {

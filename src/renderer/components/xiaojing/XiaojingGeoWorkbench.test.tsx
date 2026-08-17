@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { BrandWorkspace } from "@/api/brandWorkspaceClient";
@@ -11,11 +11,6 @@ vi.mock("./XiaojingGeoOperationPanel", () => ({
 }));
 vi.mock("./XiaojingBrandKnowledgePanel", () => ({
   default: () => <section aria-label="品牌知识桩" />,
-}));
-vi.mock("./XiaojingGeoEffectPanel", () => ({
-  default: (props: { workspaceId: string }) => (
-    <section aria-label="效果入口桩" data-workspace={props.workspaceId} />
-  ),
 }));
 
 const workspace: BrandWorkspace = {
@@ -39,23 +34,18 @@ describe("XiaojingGeoWorkbench", () => {
     localStorage.removeItem("xiaojing:geo-workbench-collapsed");
   });
 
-  it("defaults to the operations view and hides the effects entry", () => {
+  // 票 31：工作台「操作/效果」双页签移除，收为单一操作视图；效果三面板
+  // 由左侧栏「效果」一级入口整页呈现。
+  it("renders the single operations view without any view tabs", () => {
     render(<XiaojingGeoWorkbench currentWorkspace={workspace} />);
 
     expect(
       screen.getByRole("region", { name: "操作面板桩" }),
     ).toBeInTheDocument();
-    expect(
-      screen.queryByRole("region", { name: "效果入口桩" }),
-    ).not.toBeInTheDocument();
-    expect(screen.getByRole("tab", { name: "操作" })).toHaveAttribute(
-      "aria-selected",
-      "true",
-    );
-    expect(screen.getByRole("tab", { name: "效果" })).toHaveAttribute(
-      "aria-selected",
-      "false",
-    );
+    expect(screen.queryByRole("tablist")).not.toBeInTheDocument();
+    expect(screen.queryByRole("tab", { name: "操作" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("tab", { name: "效果" })).not.toBeInTheDocument();
+    expect(screen.queryByText(/基线探测按需执行/)).not.toBeInTheDocument();
   });
 
   // 票 28：工作台只保留多操作切换器、当前已确认品牌知识与六阶段骨架；
@@ -81,7 +71,7 @@ describe("XiaojingGeoWorkbench", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("keeps capability launch cards out of the workbench in both views", () => {
+  it("keeps capability launch cards out of the workbench", () => {
     render(<XiaojingGeoWorkbench currentWorkspace={workspace} />);
 
     expect(screen.queryByText("可启动的 GEO 能力")).not.toBeInTheDocument();
@@ -91,39 +81,6 @@ describe("XiaojingGeoWorkbench", () => {
       ).not.toBeInTheDocument();
       expect(screen.queryByText(title)).not.toBeInTheDocument();
     }
-
-    fireEvent.click(screen.getByRole("tab", { name: "效果" }));
-    for (const title of LAUNCH_CARD_TITLES) {
-      expect(screen.queryByText(title)).not.toBeInTheDocument();
-    }
-  });
-
-  it("switches to the brand-level effects entry and back", () => {
-    render(<XiaojingGeoWorkbench currentWorkspace={workspace} />);
-
-    fireEvent.click(screen.getByRole("tab", { name: "效果" }));
-    const entry = screen.getByRole("region", { name: "效果入口桩" });
-    expect(entry).toHaveAttribute("data-workspace", "brand-19");
-    expect(
-      screen.queryByRole("region", { name: "操作面板桩" }),
-    ).not.toBeInTheDocument();
-
-    fireEvent.click(screen.getByRole("tab", { name: "操作" }));
-    expect(
-      screen.getByRole("region", { name: "操作面板桩" }),
-    ).toBeInTheDocument();
-    expect(
-      screen.queryByRole("region", { name: "效果入口桩" }),
-    ).not.toBeInTheDocument();
-  });
-
-  it("explains the effects entry needs a selected brand", () => {
-    render(<XiaojingGeoWorkbench currentWorkspace={null} />);
-
-    fireEvent.click(screen.getByRole("tab", { name: "效果" }));
-    expect(
-      screen.getByText(/先在左侧选择品牌，即可按需执行基线探测/),
-    ).toBeInTheDocument();
   });
 
   it("guides to brand selection and chat when no workspace is active", () => {

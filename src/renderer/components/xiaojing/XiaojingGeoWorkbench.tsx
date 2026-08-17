@@ -1,10 +1,9 @@
-import { BarChart3, ChevronLeft, ChevronRight, Gauge } from "lucide-react";
+import { BarChart3, ChevronLeft, ChevronRight } from "lucide-react";
 import { memo, useCallback, useState } from "react";
 
 import type { BrandWorkspace } from "@/api/brandWorkspaceClient";
 import type { GeoNavigationTarget } from "../../../shared/geo/notification";
 import XiaojingBrandKnowledgePanel from "./XiaojingBrandKnowledgePanel";
-import XiaojingGeoEffectPanel from "./XiaojingGeoEffectPanel";
 import XiaojingGeoOperationPanel from "./XiaojingGeoOperationPanel";
 
 interface XiaojingGeoWorkbenchProps {
@@ -21,7 +20,6 @@ export default memo(function XiaojingGeoWorkbench({
       typeof localStorage !== "undefined" &&
       localStorage.getItem("xiaojing:geo-workbench-collapsed") === "true",
   );
-  const [view, setView] = useState<"operations" | "effects">("operations");
   // A deep-link navigation target always expands the workbench, including on
   // first mount. Adjusting state during render (guarded by the seen value)
   // keeps this a single committed render instead of a cascading setState
@@ -85,56 +83,11 @@ export default memo(function XiaojingGeoWorkbench({
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto p-4">
-        <div
-          role="tablist"
-          aria-label="工作台视图"
-          data-geo-workbench-view={view}
-          className="grid grid-cols-2 gap-1 rounded-xl border border-[var(--line)] bg-[var(--paper-inset)] p-1"
-        >
-          <button
-            type="button"
-            role="tab"
-            aria-selected={view === "operations"}
-            onClick={() => setView("operations")}
-            className={`rounded-lg px-3 py-1.5 text-xs font-medium transition-colors ${
-              view === "operations"
-                ? "bg-[var(--paper-elevated)] text-[var(--accent)] shadow-sm"
-                : "text-[var(--ink-muted)] hover:text-[var(--ink)]"
-            }`}
-          >
-            操作
-          </button>
-          <button
-            type="button"
-            role="tab"
-            aria-selected={view === "effects"}
-            onClick={() => setView("effects")}
-            className={`flex items-center justify-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium transition-colors ${
-              view === "effects"
-                ? "bg-[var(--paper-elevated)] text-[var(--accent)] shadow-sm"
-                : "text-[var(--ink-muted)] hover:text-[var(--ink)]"
-            }`}
-          >
-            <Gauge className="h-3.5 w-3.5" />
-            效果
-          </button>
-        </div>
-
-        {view === "effects" ? (
-          currentWorkspace ? (
-            <XiaojingGeoEffectPanel
-              key={`${currentWorkspace.id}:geo-effect`}
-              workspaceId={currentWorkspace.id}
-            />
-          ) : (
-            <p className="mt-4 rounded-xl border border-dashed border-[var(--line)] p-4 text-xs leading-5 text-[var(--ink-muted)]">
-              先在左侧选择品牌，即可按需执行基线探测、管理发布后监测并查看真实效果看板。
-            </p>
-          )
-        ) : currentWorkspace ? (
-          /* 票 28：工作台只保留多操作切换器、当前已确认品牌知识与六阶段
-              骨架三段结构；品牌信息卡由左侧栏表达，过程块在聊天进度卡；
-              历史面板由左侧栏「品牌档案」一级入口整页呈现（票 30）。 */
+        {currentWorkspace ? (
+          /* 票 28/票 31：工作台收为单一操作视图，只保留多操作切换器、当前
+              已确认品牌知识与六阶段骨架三段结构；品牌信息卡由左侧栏表达，
+              过程块在聊天进度卡；历史面板与效果三面板分别由左侧栏
+              「品牌档案」（票 30）与「效果」（票 31）一级入口整页呈现。 */
           <XiaojingGeoOperationPanel
             key={`${currentWorkspace.id}:geo-operation-workbench`}
             workspace={currentWorkspace}

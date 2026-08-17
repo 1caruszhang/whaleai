@@ -27,6 +27,7 @@ import LinkContextMenuProvider from '@/components/LinkContextMenuProvider';
 import TabBar from '@/components/TabBar';
 import { useToast } from '@/components/Toast';
 import XiaojingBrandArchivePage from '@/components/xiaojing/XiaojingBrandArchivePage';
+import XiaojingGeoEffectPage, { type BrandEffectSessionBinding } from '@/components/xiaojing/XiaojingGeoEffectPage';
 import XiaojingGeoWorkbench from '@/components/xiaojing/XiaojingGeoWorkbench';
 import XiaojingSidebar from '@/components/xiaojing/XiaojingSidebar';
 import XiaojingWelcome from '@/components/xiaojing/XiaojingWelcome';
@@ -39,6 +40,7 @@ import { notificationClickListenerReady, resolveGeoNotificationLocator } from '@
 import { buildChatFlipPatch, createNewTab, MAX_TABS, type InitialMessage, type Tab } from '@/types/tab';
 import { isTauriEnvironment } from '@/utils/browserMock';
 import { listenWithCleanup } from '@/utils/tauriListen';
+import { isPendingSessionId } from '../shared/constants';
 import {
   createSessionResourceTransitionState,
   deleteSessionThroughAppOwner,
@@ -66,6 +68,8 @@ interface TabContentProps {
   claimSessionOpeningTransition: (sessionId: string, ownerId: string) => (() => void) | null;
   onClearInitialMessage: (tabId: string) => void;
   geoNavigationTarget?: GeoNavigationTarget | null;
+  effectSessionBinding?: BrandEffectSessionBinding | null;
+  onOpenBrandSession?: () => void;
 }
 
 /** The complete Renderer route table: product welcome, fixed-Agent chat and settings. */
@@ -81,6 +85,8 @@ export const MemoizedTabContent = memo(function MemoizedTabContent({
   claimSessionOpeningTransition,
   onClearInitialMessage,
   geoNavigationTarget,
+  effectSessionBinding,
+  onOpenBrandSession,
 }: TabContentProps) {
   const kind = tabContentKind(tab, false);
   const claim = useCallback(
@@ -100,6 +106,14 @@ export const MemoizedTabContent = memo(function MemoizedTabContent({
       ) : kind === 'brand-archive' ? (
         /* 票 30：品牌级整页跟随当前选中品牌，不依赖任何 Session。 */
         <XiaojingBrandArchivePage workspace={brandWorkspace} />
+      ) : kind === 'brand-effect' ? (
+        /* 票 31：效果整页同为品牌级整页；三面板控制面借用该品牌已打开
+           聊天 Tab 的 Session Sidecar owner 身份（见 brandEffectSessionBinding）。 */
+        <XiaojingGeoEffectPage
+          workspace={brandWorkspace}
+          sessionBinding={effectSessionBinding ?? null}
+          onOpenBrandSession={onOpenBrandSession ?? (() => undefined)}
+        />
       ) : (
         <TabProvider
           tabId={tab.id}
@@ -314,6 +328,52 @@ export default function App() {
     setActiveTabId(tab.id);
   }, [selectTab, setActiveTabId, setTabs, t]);
 
+  // 票 31：「效果」复用同一品牌级一级导航机制（单例整页 tab）。
+  const openBrandEffect = useCallback(() => {
+    const existing = tabsRef.current.find((tab) => tab.view === 'brand-effect');
+    if (existing) return selectTab(existing.id);
+    if (tabsRef.current.length >= MAX_TABS) return;
+    const tab = { ...createNewTab(), view: 'brand-effect' as const, title: t('tabs.brandEffect') };
+    setTabs((current) => [...current, tab]);
+    setActiveTabId(tab.id);
+  }, [selectTab, setActiveTabId, setTabs, t]);
+
+  // 票 31：效果整页不新建 Sidecar owner——借用该品牌第一个已打开聊天 Tab
+  // 的 Session（读取/控制 authority）；该 Tab 关闭后绑定自动消失，页面回落
+  // 到「先打开会话」引导。绑定对象只依赖基本类型（sessionId/ownerTabId），
+  // 标题/生成状态等无关 Tab 变化不得改变其身份（react_stability_rules 5）。
+  const [effectSessionId, effectOwnerTabId] = useMemo(() => {
+    const workspace = brandState.currentWorkspace;
+    if (!workspace) return [null, null] as const;
+    const chatTab = tabs.find((tab) => (
+      tab.view === 'chat'
+      && tab.sessionId
+      && !isPendingSessionId(tab.sessionId)
+      && workspacePathsEqual(tab.workspacePath, workspace.rootPath)
+    ));
+    return chatTab?.sessionId
+      ? [chatTab.sessionId, chatTab.id] as const
+      : [null, null] as const;
+  }, [brandState.currentWorkspace, tabs]);
+  const brandEffectSessionBinding = useMemo<BrandEffectSessionBinding | null>(
+    () => (
+      effectSessionId && effectOwnerTabId
+        ? { sessionId: effectSessionId, ownerTabId: effectOwnerTabId }
+        : null
+    ),
+    [effectOwnerTabId, effectSessionId],
+  );
+
+  // 效果页引导按钮：优先复用该品牌最近的既有会话，没有才新建，避免产生
+  // 幽灵会话。
+  const openBrandEffectSession = useCallback(() => {
+    const workspace = brandStateRef.current.currentWorkspace;
+    if (!workspace) return;
+    const session = brandStateRef.current.sessions[0];
+    if (session) void openBrandSession(session, workspace);
+    else void openWorkspace(workspace);
+  }, [openBrandSession, openWorkspace]);
+
   useWindowLifecycle({
     onCmdWCloseTab: () => closeTab(activeTabIdRef.current),
     onExitRequested: async () => true,
@@ -466,6 +526,7 @@ export default function App() {
             onDeleteBrand={deleteBrand}
             onOpenSettings={openSettings}
             onOpenBrandArchive={openBrandArchive}
+            onOpenBrandEffect={openBrandEffect}
           />
           <div className="flex min-w-0 flex-1 flex-col" data-tab-workspace>
             <CustomTitleBar
@@ -500,7 +561,7 @@ export default function App() {
                     brandWorkspace={
                       tab.view === 'chat'
                         ? workspaceForPath(brandState.workspaces, tab.workspacePath)
-                        : tab.view === 'brand-archive'
+                        : tab.view === 'brand-archive' || tab.view === 'brand-effect'
                           ? brandState.currentWorkspace
                           : null
                     }
@@ -517,6 +578,8 @@ export default function App() {
                     claimSessionOpeningTransition={claimSessionOpeningTransition}
                     onClearInitialMessage={(tabId) => updateTab(tabId, { initialMessage: undefined })}
                     geoNavigationTarget={tab.sessionId === geoNavigationTarget?.sessionId ? geoNavigationTarget : null}
+                    effectSessionBinding={tab.view === 'brand-effect' ? brandEffectSessionBinding : null}
+                    onOpenBrandSession={tab.view === 'brand-effect' ? openBrandEffectSession : undefined}
                   />
                 ))}
               </div>

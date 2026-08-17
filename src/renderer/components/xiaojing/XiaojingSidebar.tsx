@@ -1,6 +1,7 @@
 import {
   Archive,
   ChevronDown,
+  Gauge,
   LayoutDashboard,
   Loader2,
   MessageSquarePlus,
@@ -60,6 +61,7 @@ interface XiaojingSidebarProps {
   onDeleteBrand: (preview: BrandWorkspaceDeletionPreview) => Promise<SessionDeleteResult>;
   onOpenSettings: () => void;
   onOpenBrandArchive: () => void;
+  onOpenBrandEffect: () => void;
 }
 
 export default memo(function XiaojingSidebar({
@@ -72,6 +74,7 @@ export default memo(function XiaojingSidebar({
   onDeleteBrand,
   onOpenSettings,
   onOpenBrandArchive,
+  onOpenBrandEffect,
 }: XiaojingSidebarProps) {
   const { t, i18n } = useTranslation('common');
   const resolvedTheme = useResolvedTheme();
@@ -265,12 +268,16 @@ export default memo(function XiaojingSidebar({
         <button type="button" onClick={() => currentWorkspace && void onOpenWorkspace(currentWorkspace)} disabled={!currentWorkspace || busy} className="mt-3 flex h-9 w-full items-center gap-2 rounded-lg px-3 text-sm text-[var(--ink-muted)] hover:bg-[var(--hover-bg)] hover:text-[var(--ink)] disabled:opacity-50"><LayoutDashboard className="h-4 w-4" /><span>{t('xiaojingSidebar.brandOverview')}</span></button>
         <button type="button" onClick={() => currentWorkspace && void onOpenWorkspace(currentWorkspace)} disabled={!currentWorkspace || busy} className="mt-1 flex h-10 w-full items-center justify-center gap-2 rounded-xl bg-[var(--button-primary-bg)] px-3 text-sm font-semibold text-[var(--button-primary-text)] hover:bg-[var(--button-primary-bg-hover)] disabled:opacity-60">{busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <MessageSquarePlus className="h-4 w-4" />}{t('xiaojingSidebar.newSession')}</button>
 
-        {/* 票 30：品牌级一级导航。跟随当前选中品牌、不依赖任何 Session；
-            「效果」入口由票 31 复用该机制加入。 */}
+        {/* 票 30/票 31：品牌级一级导航。跟随当前选中品牌、不依赖任何 Session；
+            「品牌档案」与「效果」各自承载品牌级整页。 */}
         <nav aria-label={t('xiaojingSidebar.primaryNav')} className="mt-4" data-xiaojing-primary-nav>
           <button type="button" onClick={onOpenBrandArchive} aria-current={activeTab?.view === 'brand-archive' ? 'page' : undefined} className={`flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm transition-colors ${activeTab?.view === 'brand-archive' ? 'bg-[var(--accent-warm-subtle)] font-medium text-[var(--ink)]' : 'text-[var(--ink-secondary)] hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]'}`}>
             <Archive className="h-4 w-4" />
             <span>{t('xiaojingSidebar.brandArchive')}</span>
+          </button>
+          <button type="button" onClick={onOpenBrandEffect} aria-current={activeTab?.view === 'brand-effect' ? 'page' : undefined} className={`mt-1 flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm transition-colors ${activeTab?.view === 'brand-effect' ? 'bg-[var(--accent-warm-subtle)] font-medium text-[var(--ink)]' : 'text-[var(--ink-secondary)] hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]'}`}>
+            <Gauge className="h-4 w-4" />
+            <span>{t('xiaojingSidebar.brandEffect')}</span>
           </button>
         </nav>
       </div>

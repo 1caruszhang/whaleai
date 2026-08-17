@@ -10,6 +10,7 @@ export type TabContentKind =
     | 'welcome'
     | 'settings'
     | 'brand-archive' // brand-level read-only full page; follows the current workspace
+    | 'brand-effect' // brand-level effects full page (baseline/monitor/dashboard); follows the current workspace
     | 'chat'; // every chat tab is live and mounts TabProvider
 
 /**
@@ -24,5 +25,6 @@ export function tabContentKind(tab: Tab, isDeferredMount: boolean): TabContentKi
     if (tab.view === 'welcome') return 'welcome';
     if (tab.view === 'settings') return 'settings';
     if (tab.view === 'brand-archive') return 'brand-archive';
+    if (tab.view === 'brand-effect') return 'brand-effect';
     return 'chat';
 }

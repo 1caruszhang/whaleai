@@ -9,7 +9,7 @@ export interface Tab {
   id: string;
   workspacePath: string | null;
   sessionId: string | null;
-  view: 'welcome' | 'chat' | 'settings' | 'brand-archive';
+  view: 'welcome' | 'chat' | 'settings' | 'brand-archive' | 'brand-effect';
   title: string;
   isGenerating?: boolean;
   hasUnread?: boolean;

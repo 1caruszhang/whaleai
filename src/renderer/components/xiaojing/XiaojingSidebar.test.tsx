@@ -85,6 +85,7 @@ describe('XiaojingSidebar brand session lifecycle', () => {
         onDeleteBrand={brandDeleteProps.onDeleteBrand}
         onOpenSettings={vi.fn()}
         onOpenBrandArchive={vi.fn()}
+        onOpenBrandEffect={vi.fn()}
       />,
     );
 
@@ -126,6 +127,7 @@ describe('XiaojingSidebar brand session lifecycle', () => {
         onDeleteBrand={brandDeleteProps.onDeleteBrand}
         onOpenSettings={vi.fn()}
         onOpenBrandArchive={vi.fn()}
+        onOpenBrandEffect={vi.fn()}
       />,
     );
 
@@ -179,6 +181,7 @@ describe('XiaojingSidebar brand session lifecycle', () => {
         onDeleteBrand={brandDeleteProps.onDeleteBrand}
         onOpenSettings={vi.fn()}
         onOpenBrandArchive={vi.fn()}
+        onOpenBrandEffect={vi.fn()}
       />,
     );
 
@@ -212,6 +215,7 @@ describe('XiaojingSidebar brand session lifecycle', () => {
         onDeleteBrand={brandDeleteProps.onDeleteBrand}
         onOpenSettings={vi.fn()}
         onOpenBrandArchive={vi.fn()}
+        onOpenBrandEffect={vi.fn()}
       />,
     );
 
@@ -258,6 +262,7 @@ describe('XiaojingSidebar brand session lifecycle', () => {
         onDeleteBrand={onDeleteBrand}
         onOpenSettings={vi.fn()}
         onOpenBrandArchive={vi.fn()}
+        onOpenBrandEffect={vi.fn()}
       />,
     );
 
@@ -296,6 +301,7 @@ describe('XiaojingSidebar brand session lifecycle', () => {
         onDeleteBrand={brandDeleteProps.onDeleteBrand}
         onOpenSettings={vi.fn()}
         onOpenBrandArchive={onOpenBrandArchive}
+        onOpenBrandEffect={vi.fn()}
       />,
     );
 
@@ -317,12 +323,69 @@ describe('XiaojingSidebar brand session lifecycle', () => {
         onDeleteBrand={brandDeleteProps.onDeleteBrand}
         onOpenSettings={vi.fn()}
         onOpenBrandArchive={vi.fn()}
+        onOpenBrandEffect={vi.fn()}
       />,
     );
 
     expect(screen.getByRole('button', { name: '品牌档案' })).toHaveAttribute(
       'aria-current',
       'page',
+    );
+  });
+
+  // 票 31：品牌级「效果」一级入口——与「品牌档案」同一导航机制，只调品牌级
+  // 回调，不经过任何 onOpenWorkspace/onOpenSession 会话打开路径。
+  it('opens the brand effect primary nav entry without touching any session path', () => {
+    const onOpenBrandEffect = vi.fn();
+    const onOpenWorkspace = vi.fn(async () => true);
+    const onOpenSession = vi.fn(async () => true);
+
+    render(
+      <XiaojingSidebar
+        brandState={state()}
+        activeTab={undefined}
+        onOpenWorkspace={onOpenWorkspace}
+        onOpenSession={onOpenSession}
+        onRenameSession={vi.fn(async () => undefined)}
+        onDeleteSession={vi.fn(async () => ({ deleted: true }) as const)}
+        onDeleteBrand={brandDeleteProps.onDeleteBrand}
+        onOpenSettings={vi.fn()}
+        onOpenBrandArchive={vi.fn()}
+        onOpenBrandEffect={onOpenBrandEffect}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: '效果' }));
+    expect(onOpenBrandEffect).toHaveBeenCalledTimes(1);
+    expect(onOpenWorkspace).not.toHaveBeenCalled();
+    expect(onOpenSession).not.toHaveBeenCalled();
+    expect(screen.getByRole('button', { name: '品牌档案' })).not.toHaveAttribute(
+      'aria-current',
+    );
+  });
+
+  it('marks the brand effect entry as the current page while its tab is active', () => {
+    render(
+      <XiaojingSidebar
+        brandState={state()}
+        activeTab={{ ...createNewTab(), view: 'brand-effect', title: '效果' }}
+        onOpenWorkspace={vi.fn(async () => true)}
+        onOpenSession={vi.fn(async () => true)}
+        onRenameSession={vi.fn(async () => undefined)}
+        onDeleteSession={vi.fn(async () => ({ deleted: true }) as const)}
+        onDeleteBrand={brandDeleteProps.onDeleteBrand}
+        onOpenSettings={vi.fn()}
+        onOpenBrandArchive={vi.fn()}
+        onOpenBrandEffect={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByRole('button', { name: '效果' })).toHaveAttribute(
+      'aria-current',
+      'page',
+    );
+    expect(screen.getByRole('button', { name: '品牌档案' })).not.toHaveAttribute(
+      'aria-current',
     );
   });
 });
