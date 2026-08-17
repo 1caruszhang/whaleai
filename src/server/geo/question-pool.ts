@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 
 import {
+  QUESTION_POOL_POLICY_VERSION,
   buildKeywordMiningPrompt,
   buildQuestionGenerationPrompt,
   normalizeQuestionPoolParameters,
@@ -64,7 +65,10 @@ interface QuestionPoolStepClaim {
 }
 
 export interface QuestionPoolPersistencePort {
-  latest(productLine?: string): Promise<QuestionPoolProjection | null>;
+  latest(
+    productLine?: string,
+    pendingOnly?: boolean,
+  ): Promise<QuestionPoolProjection | null>;
   prepare(input: {
     workspaceId: string;
     sessionId: string;
@@ -104,6 +108,43 @@ export interface QuestionPoolPersistencePort {
     selectedQuestionIds: string[];
     actorId: "desktop-user";
   }): Promise<QuestionPoolDecision>;
+  revise(input: {
+    workspaceId: string;
+    sessionId: string;
+    poolId: string;
+    expectedRevision: number;
+    action: QuestionPoolRevisionAction;
+    targetKind: QuestionPoolRevisionTargetKind;
+    targetId?: string;
+    keywords: MinedKeyword[];
+    questions: QuestionPoolQuestion[];
+    actorId: "desktop-user";
+    reason: string;
+  }): Promise<QuestionPoolProjection>;
+}
+
+/** 聊天修订（ADR 0003，票 38）只作用于 awaiting-selection 的待决池。 */
+export type QuestionPoolRevisionAction = "modify" | "delete" | "add";
+export type QuestionPoolRevisionTargetKind = "question" | "keyword";
+
+export interface QuestionPoolRevisionInput {
+  workspaceId: string;
+  sessionId: string;
+  action: QuestionPoolRevisionAction;
+  targetKind: QuestionPoolRevisionTargetKind;
+  /** modify/delete：目标条目 id（question.id / keyword.id）。 */
+  targetId?: string;
+  /**
+   * modify/add 的新值：question = 新文本或 {text, recommended}；keyword =
+   * 新词或 {term, category, heat}。
+   */
+  value?: unknown;
+  reason: string;
+  actorId: "desktop-user";
+}
+
+export interface QuestionPoolRevisionOutcome {
+  pool: QuestionPoolProjection;
 }
 
 function persistenceError(result: Record<string, unknown>): Error {
@@ -143,10 +184,13 @@ export class RustQuestionPoolPort implements QuestionPoolPersistencePort {
     return this.post("/api/brand-question-pools/prepare", input, "preparation");
   }
 
-  latest(productLine?: string): Promise<QuestionPoolProjection | null> {
+  latest(
+    productLine?: string,
+    pendingOnly?: boolean,
+  ): Promise<QuestionPoolProjection | null> {
     return this.post(
       "/api/brand-question-pools/latest",
-      { productLine },
+      { productLine, pendingOnly },
       "pool",
     );
   }
@@ -182,16 +226,215 @@ export class RustQuestionPoolPort implements QuestionPoolPersistencePort {
   ): Promise<QuestionPoolDecision> {
     return this.post("/api/brand-question-pools/decide", input, "result");
   }
+
+  revise(
+    input: Parameters<QuestionPoolPersistencePort["revise"]>[0],
+  ): Promise<QuestionPoolProjection> {
+    return this.post("/api/brand-question-pools/revise", input, "pool");
+  }
 }
 
 export function createQuestionPoolPort(identity: {
   workspaceId: string;
   sessionId: string;
 }): RustQuestionPoolPort {
-  const sidecarId = process.env.MYAGENTS_SIDECAR_ID?.trim();
+  const sidecarId = process.env.XIAOJING_SIDECAR_ID?.trim();
   if (!sidecarId)
     throw new Error("Question pool requires an authenticated Sidecar identity");
   return new RustQuestionPoolPort({ ...identity, sidecarId });
+}
+
+const QUESTION_POOL_MAX_QUESTIONS = 50;
+const QUESTION_POOL_MAX_KEYWORDS = 200;
+
+function questionIdentity(text: string): string {
+  return text
+    .toLocaleLowerCase("zh-CN")
+    .replace(/[？?。！!\s]+$/g, "");
+}
+
+function keywordIdentity(term: string): string {
+  return term.trim().toLocaleLowerCase("zh-CN");
+}
+
+/** 用户补充的问题没有模型评分：中性占位分明确标注未评估，卡片按低优先级呈现。 */
+function userAddedQuestionScore(): QuestionPoolQuestion["score"] {
+  return {
+    mode: "pred-1",
+    relevance: 0,
+    recentPoolSimilarity: 0,
+    optimizationPotential: 0,
+    priorityTotal: 0,
+    priority: "low",
+    formula: "user-added; not scored",
+    policyVersion: QUESTION_POOL_POLICY_VERSION,
+  };
+}
+
+function uniqueEntryId(prefix: string, taken: Set<string>): string {
+  let sequence = taken.size + 1;
+  let id = `${prefix}-${sequence}`;
+  while (taken.has(id)) {
+    sequence += 1;
+    id = `${prefix}-${sequence}`;
+  }
+  return id;
+}
+
+function parseKeywordValue(
+  value: unknown,
+  defaults: { category: MinedKeyword["category"]; heat: MinedKeyword["heat"] },
+): { term: string; category: MinedKeyword["category"]; heat: MinedKeyword["heat"] } {
+  const holder =
+    typeof value === "string"
+      ? { term: value }
+      : value && typeof value === "object"
+        ? (value as Record<string, unknown>)
+        : {};
+  if (typeof holder.term !== "string" || !holder.term.trim()) {
+    throw new Error("question_pool_keyword_term_required");
+  }
+  const term = holder.term.trim();
+  if (term.length > 120) throw new Error("question_pool_keyword_term_invalid");
+  const category =
+    holder.category === "core" || holder.category === "scene" || holder.category === "longtail"
+      ? holder.category
+      : defaults.category;
+  const heat =
+    holder.heat === "high" || holder.heat === "medium" || holder.heat === "low"
+      ? holder.heat
+      : defaults.heat;
+  return { term, category, heat };
+}
+
+/**
+ * 聊天修订的纯策略（ADR 0003）：对 awaiting-selection 池的搜索词与候选问题
+ * 执行改/删/增。抛错沿用 question_pool_* 域错误码，越权类别经
+ * gateRevisionErrorCode 结构化。不触碰权威知识；新增问题/词标注 user-added
+ * 证据，落库后随卡片轮询重渲染。
+ */
+export function applyQuestionPoolRevision(
+  pool: QuestionPoolProjection,
+  input: QuestionPoolRevisionInput,
+): { keywords: MinedKeyword[]; questions: QuestionPoolQuestion[] } {
+  if (input.targetKind === "keyword") {
+    let keywords = pool.keywords.map((keyword) => ({ ...keyword }));
+    if (input.action === "add") {
+      const parsed = parseKeywordValue(input.value, {
+        category: "longtail",
+        heat: "medium",
+      });
+      if (
+        keywords.some(
+          (keyword) => keywordIdentity(keyword.term) === keywordIdentity(parsed.term),
+        )
+      ) {
+        throw new Error("question_pool_keyword_duplicate");
+      }
+      if (keywords.length >= QUESTION_POOL_MAX_KEYWORDS) {
+        throw new Error("question_pool_keywords_invalid");
+      }
+      keywords.push({
+        id: uniqueEntryId(
+          "kw-user",
+          new Set(keywords.map((keyword) => keyword.id)),
+        ),
+        term: parsed.term,
+        category: parsed.category,
+        heat: parsed.heat,
+        platform: "doubao",
+      });
+      return { keywords, questions: pool.questions };
+    }
+    const target = keywords.find((keyword) => keyword.id === input.targetId);
+    if (!target) throw new Error("question_pool_revision_target_not_found");
+    if (input.action === "delete") {
+      keywords = keywords.filter((keyword) => keyword.id !== input.targetId);
+    } else {
+      const parsed = parseKeywordValue(input.value, {
+        category: target.category,
+        heat: target.heat,
+      });
+      if (
+        keywords.some(
+          (keyword) =>
+            keyword.id !== input.targetId &&
+            keywordIdentity(keyword.term) === keywordIdentity(parsed.term),
+        )
+      ) {
+        throw new Error("question_pool_keyword_duplicate");
+      }
+      Object.assign(target, parsed);
+    }
+    return { keywords, questions: pool.questions };
+  }
+
+  let questions = pool.questions.map((question) => ({
+    ...question,
+    evidence: question.evidence.map((entry) => ({ ...entry })),
+  }));
+  if (input.action === "add") {
+    const holder =
+      input.value && typeof input.value === "object" && !Array.isArray(input.value)
+        ? (input.value as Record<string, unknown>)
+        : { text: input.value };
+    if (typeof holder.text !== "string" || !holder.text.trim()) {
+      throw new Error("question_pool_question_text_required");
+    }
+    const text = holder.text.trim();
+    if (text.length > 500) throw new Error("question_pool_question_text_invalid");
+    if (
+      questions.some(
+        (question) => questionIdentity(question.text) === questionIdentity(text),
+      )
+    ) {
+      throw new Error("question_pool_question_duplicate");
+    }
+    if (questions.length >= QUESTION_POOL_MAX_QUESTIONS) {
+      throw new Error("question_pool_questions_invalid");
+    }
+    questions.push({
+      id: uniqueEntryId(
+        "q-user",
+        new Set(questions.map((question) => question.id)),
+      ),
+      text,
+      selected: false,
+      recommended: holder.recommended === true,
+      score: userAddedQuestionScore(),
+      evidence: [
+        {
+          kind: "user-added",
+          reference: "chat-revision",
+          excerpt: text,
+        },
+      ],
+    });
+    return { keywords: pool.keywords, questions };
+  }
+  const target = questions.find((question) => question.id === input.targetId);
+  if (!target) throw new Error("question_pool_revision_target_not_found");
+  if (input.action === "delete") {
+    questions = questions.filter((question) => question.id !== input.targetId);
+    if (questions.length === 0) throw new Error("question_pool_questions_invalid");
+  } else {
+    if (typeof input.value !== "string" || !input.value.trim()) {
+      throw new Error("question_pool_question_text_required");
+    }
+    const text = input.value.trim();
+    if (text.length > 500) throw new Error("question_pool_question_text_invalid");
+    if (
+      questions.some(
+        (question) =>
+          question.id !== input.targetId &&
+          questionIdentity(question.text) === questionIdentity(text),
+      )
+    ) {
+      throw new Error("question_pool_question_duplicate");
+    }
+    target.text = text;
+  }
+  return { keywords: pool.keywords, questions };
 }
 
 export interface QuestionPoolGenerateInput {
@@ -200,6 +443,8 @@ export interface QuestionPoolGenerateInput {
   productLine: string;
   targetRegion: string;
   idempotencyKey: string;
+  /** 领域内的具体业务焦点（如"汽车隔音"）；缺省=整个产品线领域。 */
+  businessFocus?: string;
   generationParameters?: Partial<QuestionPoolGenerationParameters>;
   retry?: boolean;
 }
@@ -312,6 +557,7 @@ export class QuestionPoolService {
     workspaceId: string;
     sessionId: string;
     productLine?: string;
+    pendingOnly?: boolean;
   }): Promise<QuestionPoolProjection | null> {
     if (
       input.workspaceId !== this.identity.workspaceId ||
@@ -319,7 +565,7 @@ export class QuestionPoolService {
     ) {
       throw new Error("question_pool_identity_mismatch");
     }
-    return this.persistence.latest(input.productLine);
+    return this.persistence.latest(input.productLine, input.pendingOnly);
   }
 
   generate(
@@ -381,6 +627,7 @@ export class QuestionPoolService {
       productLine,
       brandNames: generationContext.brandNames,
       knowledgeSummary: generationContext.knowledgeSummary,
+      ...(input.businessFocus ? { businessFocus: input.businessFocus } : {}),
     });
 
     try {
@@ -635,5 +882,52 @@ export class QuestionPoolService {
       selectedQuestionIds,
       actorId: "desktop-user",
     });
+  }
+
+  /**
+   * 聊天修订（ADR 0003，票 38）：只作用于本 Session 当前 awaiting-selection
+   * 的待决池；逐条操作独立提交（与 decide-batch 的逐条独立语义一致），
+   * 每条经 Rust 写 geo_question_pool_revisions 审计（含用户指令原文）。
+   */
+  async revise(
+    input: QuestionPoolRevisionInput,
+  ): Promise<QuestionPoolRevisionOutcome> {
+    if (
+      input.workspaceId !== this.identity.workspaceId ||
+      input.sessionId !== this.identity.sessionId
+    ) {
+      throw new Error("question_pool_identity_mismatch");
+    }
+    const reason = input.reason.trim();
+    if (!reason || reason.length > 20_000) {
+      throw new Error(
+        "question pool revision requires the user's explicit instruction (1-20000 characters)",
+      );
+    }
+    // 只解析本 Session 的待决池：普通 latest 会把同版本 confirmed 池排在
+    // 前面，遮蔽掉真正待修订的新池。
+    const pool = await this.persistence.latest(undefined, true);
+    if (!pool) throw new Error("question_pool_not_found");
+    if (pool.status === "confirmed") {
+      throw new Error("question_pool_confirmed_immutable");
+    }
+    if (pool.status !== "awaiting-selection") {
+      throw new Error("question_pool_not_selectable");
+    }
+    const next = applyQuestionPoolRevision(pool, input);
+    const revised = await this.persistence.revise({
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      poolId: pool.id,
+      expectedRevision: pool.revision,
+      action: input.action,
+      targetKind: input.targetKind,
+      ...(input.targetId ? { targetId: input.targetId } : {}),
+      keywords: next.keywords,
+      questions: next.questions,
+      actorId: "desktop-user",
+      reason,
+    });
+    return { pool: revised };
   }
 }

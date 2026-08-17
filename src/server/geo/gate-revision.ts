@@ -1,7 +1,7 @@
 /**
  * 通用闸门修订分发骨架（ADR 0003）：聊天里的显式改/删/增指令经单一受限
  * 工具按闸门类型分发到对应域 owner。本模块持有分发契约、回执投影与工具
- * 纪律文案；知识闸门 handler 在此作为参考实现注册，后续闸门经
+ * 纪律文案；知识闸门 handler 在此作为参考实现注册，其余闸门经
  * {@link registerGateRevisionHandler} 接入，无需改动工具契约。
  */
 
@@ -9,6 +9,32 @@ import {
   createKnowledgeAuthority,
   type KnowledgeRevisionInput,
 } from './knowledge-authority';
+import {
+  ArticleGenerationService,
+  createArticlePort,
+} from './article-generation';
+import {
+  DistributionPlanningService,
+  createDistributionPlanPort,
+} from './distribution-plan';
+import { createPublishSchedulerPort, type PublishSchedulerPort } from './publish-scheduler';
+import {
+  QuestionPoolService,
+  createQuestionPoolPort,
+} from './question-pool';
+import { TopicPlanService, createTopicPlanPort } from './topic-plan';
+import { getXiaojingGeoProviderCapabilities } from './provider-runtime';
+import type {
+  TopicPlanItem,
+  TopicPlanKnowledgeFact,
+  TopicPlanProjection,
+} from '../../shared/geo/topicPlan';
+import type {
+  DistributionAssignment,
+  DistributionPlanEditInput,
+  DistributionPlanProjection,
+} from '../../shared/geo/distributionPlan';
+import type { PublishExecutionProjection } from '../../shared/geo/publishScheduler';
 
 export const GATE_REVISION_TOOL_NAME = 'revise_gate_content';
 
@@ -24,7 +50,7 @@ export const GATE_REVISION_TOOL_DESCRIPTION = [
   'The revised card re-renders on its own polling cycle; report the returned receipt honestly.',
 ].join(' ');
 
-/** 分发契约覆盖全部既有闸门；本票只注册知识 handler，其余闸门待接入。 */
+/** 分发契约覆盖全部既有闸门；六个闸门的 handler 均在本模块注册（票 38）。 */
 export const GATE_REVISION_GATE_TYPES = [
   'knowledge',
   'question-pool',
@@ -117,12 +143,32 @@ export function gateRevisionErrorCode(error: unknown): string {
     return 'target_not_in_session';
   }
   if (message.includes('not found for this Session')) return 'target_not_found';
+  // 各域持久层错误码（票 38）：非未决、跨 Session/品牌、目标缺失与 CAS 冲突。
+  if (
+    message.includes('immutable') ||
+    message.includes('not_selectable') ||
+    message.includes('already_immutable') ||
+    message.includes('discovery_incomplete') ||
+    message.includes('not pending')
+  ) {
+    return 'target_not_pending';
+  }
+  if (message.includes('identity_mismatch') || message.includes('session_mismatch')) {
+    return 'target_not_in_session';
+  }
+  if (message.includes('revision_conflict')) return 'revision_conflict';
+  if (message.includes('not_found')) return 'target_not_found';
   return 'revision_rejected';
 }
 
-/** 操作列表的结构校验；返回首个错误消息，合法则返回 null。 */
+/**
+ * 操作列表的结构校验；返回首个错误消息，合法则返回 null。add 的目标键
+ * 按闸门区分：知识闸门维持事实键（subject+predicate）契约，其余闸门把
+ * 新条目内容整体放在 value 里（工具 zod 契约不变）。
+ */
 export function validateGateRevisionOperations(
   operations: GateRevisionOperation[],
+  gate?: GateRevisionGateType,
 ): string | null {
   if (!Array.isArray(operations) || operations.length === 0) {
     return 'gate revision requires at least one operation';
@@ -147,8 +193,10 @@ export function validateGateRevisionOperations(
     } else if (operation.action === 'delete') {
       if (!operation.targetId?.trim()) return `${label} (delete) requires targetId`;
     } else if (operation.action === 'add') {
-      if (!operation.subject?.trim() || !operation.predicate?.trim()) {
-        return `${label} (add) requires a subject and predicate`;
+      if (gate === undefined || gate === 'knowledge') {
+        if (!operation.subject?.trim() || !operation.predicate?.trim()) {
+          return `${label} (add) requires a subject and predicate`;
+        }
       }
       if (operation.value === undefined) {
         return `${label} (add) requires a value`;
@@ -192,7 +240,7 @@ export async function dispatchGateRevision(
       results: [],
     };
   }
-  const validationError = validateGateRevisionOperations(operations);
+  const validationError = validateGateRevisionOperations(operations, gate);
   if (validationError) {
     return {
       kind: 'gate-revision',
@@ -299,3 +347,662 @@ export async function knowledgeGateRevisionHandler(
 }
 
 registerGateRevisionHandler('knowledge', knowledgeGateRevisionHandler);
+
+/** 单条操作的回执基座：带回目标 id，错误按域错误码结构化。 */
+function opFailure(
+  operation: GateRevisionOperation,
+  error: unknown,
+): GateRevisionOpResult {
+  return {
+    action: operation.action,
+    ...(operation.targetId ? { targetId: operation.targetId } : {}),
+    ok: false,
+    code: gateRevisionErrorCode(error),
+    error: error instanceof Error ? error.message : String(error),
+  };
+}
+
+function opUnsupported(
+  operation: GateRevisionOperation,
+  supported: string,
+): GateRevisionOpResult {
+  return {
+    action: operation.action,
+    ...(operation.targetId ? { targetId: operation.targetId } : {}),
+    ok: false,
+    code: 'action_not_supported',
+    error: `this gate supports ${supported} only; refuse the instruction and explain the existing channel instead`,
+  };
+}
+
+/**
+ * 问题池闸门（票 38）：确认卡上的搜索词（subject='keyword'）与候选问题
+ * （默认）改/删/增。逐条独立提交，只动本 Session awaiting-selection 池的
+ * 待决内容；每条写 geo_question_pool_revisions 审计（含指令原文）。
+ */
+export function createQuestionPoolGateRevisionHandler(
+  resolveService: (
+    context: GateRevisionContext,
+  ) => Pick<QuestionPoolService, 'revise'>,
+): GateRevisionHandler {
+  return async (operations, context) => {
+    // 惰性解析（与知识 handler 一致）：Sidecar 身份缺失等服务构造错误也按
+    // 单条回执结构化，不让整批分发变成裸工具错误。
+    let service: Pick<QuestionPoolService, 'revise'> | null = null;
+    const resolve = () => (service ??= resolveService(context));
+    const results: GateRevisionOpResult[] = [];
+    for (const operation of operations) {
+      try {
+        const outcome = await resolve().revise({
+          workspaceId: context.workspaceId,
+          sessionId: context.sessionId,
+          action: operation.action,
+          targetKind: operation.subject === 'keyword' ? 'keyword' : 'question',
+          ...(operation.targetId ? { targetId: operation.targetId } : {}),
+          ...(operation.value !== undefined ? { value: operation.value } : {}),
+          reason: operation.userInstruction,
+          actorId: GATE_REVISION_ACTOR_ID,
+        });
+        results.push({
+          action: operation.action,
+          ...(operation.targetId ? { targetId: operation.targetId } : {}),
+          ok: true,
+          status: outcome.pool.status,
+        });
+      } catch (error) {
+        results.push(opFailure(operation, error));
+      }
+    }
+    return results;
+  };
+}
+
+const TOPIC_PLAN_PATCHABLE_FIELDS = [
+  'title',
+  'contentType',
+  'typeSelectionReason',
+  'sourceQuestionIds',
+  'plannedFacts',
+] as const;
+
+function topicPlanUserItemRationale(instruction: string): TopicPlanItem['titleRationale'] {
+  return {
+    questionCoverage: '用户在聊天中补充的选题',
+    searchIntent: `用户指令：${instruction}`,
+    differentiation: '未评估（用户补充）',
+    brandFit: '未评估（用户补充）',
+    chinaMarketExpression: '未评估（用户补充）',
+  };
+}
+
+function topicPlanItemId(taken: Set<string>): string {
+  let sequence = taken.size + 1;
+  let id = `item-user-${sequence}`;
+  while (taken.has(id)) {
+    sequence += 1;
+    id = `item-user-${sequence}`;
+  }
+  return id;
+}
+
+/**
+ * 把一条修订操作映射到新的选题条目数组；目标缺失/结构非法抛域错误码，
+ * 由回执结构化。add 的 value 携带新条目字段（topicId、sourceQuestionIds、
+ * contentType、typeSelectionReason、title、plannedFacts）。
+ */
+export function applyTopicPlanRevisionOperation(
+  plan: TopicPlanProjection,
+  operation: GateRevisionOperation,
+): TopicPlanItem[] {
+  if (operation.action === 'add') {
+    const value =
+      operation.value && typeof operation.value === 'object' && !Array.isArray(operation.value)
+        ? (operation.value as Record<string, unknown>)
+        : {};
+    const base = plan.items.map((item) => ({ ...item }));
+    base.push({
+      id: typeof value.id === 'string' && value.id.trim()
+        ? value.id.trim()
+        : topicPlanItemId(new Set(base.map((item) => item.id))),
+      topicId: String(value.topicId ?? ''),
+      sourceQuestionIds: Array.isArray(value.sourceQuestionIds)
+        ? value.sourceQuestionIds.filter((id): id is string => typeof id === 'string')
+        : [],
+      contentType: value.contentType as TopicPlanItem['contentType'],
+      typeSelectionReason: String(value.typeSelectionReason ?? ''),
+      title: String(value.title ?? ''),
+      titleCandidates: [],
+      titleRationale: topicPlanUserItemRationale(operation.userInstruction),
+      plannedFacts: (Array.isArray(value.plannedFacts)
+        ? value.plannedFacts
+        : []) as TopicPlanKnowledgeFact[],
+      deduplication: {
+        method: 'not-evaluated-user-override',
+        comparedItemIds: [],
+        maxSimilarity: null,
+        threshold: 0,
+      },
+      userEdited: true,
+      approvalStatus: 'draft',
+      origin: 'user',
+    });
+    return base;
+  }
+  const target = plan.items.find((item) => item.id === operation.targetId);
+  if (!target) throw new Error('topic_plan_revision_target_not_found');
+  if (operation.action === 'delete') {
+    const remaining = plan.items.filter((item) => item.id !== operation.targetId);
+    if (remaining.length === 0) throw new Error('topic_plan_items_invalid');
+    return remaining;
+  }
+  const patch =
+    operation.value && typeof operation.value === 'object' && !Array.isArray(operation.value)
+      ? (operation.value as Record<string, unknown>)
+      : {};
+  const merged = { ...target } as Record<string, unknown>;
+  for (const field of TOPIC_PLAN_PATCHABLE_FIELDS) {
+    if (patch[field] !== undefined) merged[field] = patch[field];
+  }
+  return plan.items.map((item) =>
+    item.id === operation.targetId ? (merged as unknown as TopicPlanItem) : item,
+  );
+}
+
+/**
+ * 选题规划闸门（票 38）：待确认选题条目改/删/增，复用 saveItems 的
+ * user-edit 语义（origin=user、userEdited、审计含指令原文）。逐条独立
+ * 提交；confirmed 计划按非未决拒绝。
+ */
+export function createTopicPlanGateRevisionHandler(
+  resolveService: (
+    context: GateRevisionContext,
+  ) => Pick<TopicPlanService, 'latest' | 'saveItems'>,
+): GateRevisionHandler {
+  return async (operations, context) => {
+    let service: Pick<TopicPlanService, 'latest' | 'saveItems'> | null = null;
+    const resolve = () => (service ??= resolveService(context));
+    const results: GateRevisionOpResult[] = [];
+    let plan: TopicPlanProjection | null = null;
+    let planLoaded = false;
+    for (const operation of operations) {
+      try {
+        if (!planLoaded) {
+          plan = await resolve().latest({
+            workspaceId: context.workspaceId,
+            sessionId: context.sessionId,
+          });
+          planLoaded = true;
+        }
+        if (!plan) {
+          results.push(opFailure(operation, new Error('topic_plan_not_found')));
+          continue;
+        }
+        if (plan.status !== 'awaiting-confirmation') {
+          results.push(
+            opFailure(operation, new Error('topic_plan_confirmed_immutable')),
+          );
+          continue;
+        }
+        const items = applyTopicPlanRevisionOperation(plan, operation);
+        const outcome = await resolve().saveItems({
+          workspaceId: context.workspaceId,
+          sessionId: context.sessionId,
+          planId: plan.id,
+          expectedRevision: plan.revision,
+          items,
+          reason: operation.userInstruction,
+        });
+        plan = outcome.plan;
+        results.push({
+          action: operation.action,
+          ...(operation.targetId ? { targetId: operation.targetId } : {}),
+          ok: true,
+          status: outcome.plan.status,
+        });
+      } catch (error) {
+        results.push(opFailure(operation, error));
+      }
+    }
+    return results;
+  };
+}
+
+/**
+ * 文章生成闸门（票 38）：仅支持修改待审批（draft_ready）文章的标题与正文，
+ * 走既有 edit 语义（新版本行 origin=user-edited、状态回到 draft_ready、
+ * 必须重新过审批门）。删除/新增不是本闸门语义——拒绝并指向既有通道。
+ */
+export function createArticleGateRevisionHandler(
+  resolveService: (
+    context: GateRevisionContext,
+  ) => Pick<ArticleGenerationService, 'latest' | 'edit'>,
+): GateRevisionHandler {
+  return async (operations, context) => {
+    let service: Pick<ArticleGenerationService, 'latest' | 'edit'> | null = null;
+    const resolve = () => (service ??= resolveService(context));
+    const results: GateRevisionOpResult[] = [];
+    for (const operation of operations) {
+      if (operation.action !== 'modify') {
+        results.push(opUnsupported(operation, 'modify'));
+        continue;
+      }
+      try {
+        const articleOperation = await resolve().latest({
+          workspaceId: context.workspaceId,
+          sessionId: context.sessionId,
+        });
+        if (!articleOperation) {
+          throw new Error('article_generation_operation_not_found');
+        }
+        const article = articleOperation.articles.find(
+          (candidate) => candidate.id === operation.targetId,
+        );
+        if (!article) {
+          throw new Error('article_generation_article_not_found');
+        }
+        if (article.status !== 'draft_ready') {
+          throw new Error('article is no longer pending (awaiting approval)');
+        }
+        const holder =
+          operation.value && typeof operation.value === 'object' && !Array.isArray(operation.value)
+            ? (operation.value as Record<string, unknown>)
+            : {};
+        if (typeof holder.body !== 'string' || !holder.body.trim()) {
+          throw new Error('article revision requires the full new body');
+        }
+        const body = holder.body;
+        const title =
+          typeof holder.title === 'string' && holder.title.trim()
+            ? holder.title.trim()
+            : body.trim().split(/\r?\n/, 1)[0]?.replace(/^#\s*/, '').trim() ?? '';
+        const revised = await resolve().edit({
+          workspaceId: context.workspaceId,
+          sessionId: context.sessionId,
+          operationId: articleOperation.id,
+          articleId: article.id,
+          expectedRevision: article.revision,
+          title,
+          body,
+          reason: operation.userInstruction,
+        });
+        results.push({
+          action: operation.action,
+          targetId: operation.targetId,
+          ok: true,
+          status: revised.status,
+        });
+      } catch (error) {
+        results.push(opFailure(operation, error));
+      }
+    }
+    return results;
+  };
+}
+
+/**
+ * 渠道计划闸门（票 38）：待确认渠道选择与计划参数改/删/增，复用既有
+ * edit 语义（白名单字段整组替换、blockingIssues 重算、审计含指令原文）。
+ * subject：'channel'（增删=选择/取消选择渠道）、'assignment'（改派）、
+ * 缺省 'plan'（预算/发布开始时间）。
+ */
+export function createDistributionPlanGateRevisionHandler(
+  resolveService: (
+    context: GateRevisionContext,
+  ) => Pick<DistributionPlanningService, 'latest' | 'edit'>,
+): GateRevisionHandler {
+  return async (operations, context) => {
+    let service: Pick<DistributionPlanningService, 'latest' | 'edit'> | null =
+      null;
+    const resolve = () => (service ??= resolveService(context));
+    const results: GateRevisionOpResult[] = [];
+    let plan: DistributionPlanProjection | null = null;
+    for (const operation of operations) {
+      try {
+        if (!plan) {
+          plan = await resolve().latest({
+            workspaceId: context.workspaceId,
+            sessionId: context.sessionId,
+          });
+        }
+        if (!plan) {
+          results.push(
+            opFailure(operation, new Error('distribution_plan_not_found')),
+          );
+          continue;
+        }
+        if (plan.status === 'confirmed') {
+          // 非未决投影不缓存：批内下一条操作重新拉取（可能已有新 draft）。
+          plan = null;
+          results.push(
+            opFailure(operation, new Error('distribution_plan_confirmed_immutable')),
+          );
+          continue;
+        }
+        if (plan.status === 'discovering') {
+          plan = null;
+          results.push(
+            opFailure(operation, new Error('distribution_plan_discovery_incomplete')),
+          );
+          continue;
+        }
+        const edit = distributionPlanEditForOperation(plan, operation);
+        const revised = await resolve().edit({
+          workspaceId: context.workspaceId,
+          sessionId: context.sessionId,
+          planId: plan.id,
+          expectedRevision: plan.revision,
+          edit,
+          reason: operation.userInstruction,
+        });
+        plan = revised;
+        results.push({
+          action: operation.action,
+          ...(operation.targetId ? { targetId: operation.targetId } : {}),
+          ok: true,
+          status: revised.status,
+        });
+      } catch (error) {
+        results.push(opFailure(operation, error));
+      }
+    }
+    return results;
+  };
+}
+
+/** 把单条操作映射为一次整组 edit 载荷；目标缺失/非法抛域错误码。 */
+export function distributionPlanEditForOperation(
+  plan: DistributionPlanProjection,
+  operation: GateRevisionOperation,
+): DistributionPlanEditInput {
+  const base: DistributionPlanEditInput = {
+    selectedResourceIds: [...plan.selectedResourceIds],
+    assignments: plan.assignments.map((assignment) => ({ ...assignment })),
+    budgetCny: plan.budgetCny,
+    publishStartAt: plan.publishStartAt,
+  };
+  const subject = operation.subject ?? 'plan';
+  if (subject === 'channel') {
+    const resourceId = Number(operation.targetId);
+    if (!Number.isInteger(resourceId) || resourceId <= 0) {
+      throw new Error('distribution_plan_revision_target_not_found');
+    }
+    const known = plan.candidates.some(
+      (candidate) => candidate.resourceId === resourceId,
+    );
+    if (!known) throw new Error('distribution_plan_revision_target_not_found');
+    if (operation.action === 'modify') {
+      throw new Error('distribution_plan_channel_snapshot_immutable');
+    }
+    if (operation.action === 'add') {
+      if (!base.selectedResourceIds.includes(resourceId)) {
+        base.selectedResourceIds.push(resourceId);
+      }
+      return base;
+    }
+    if (!base.selectedResourceIds.includes(resourceId)) {
+      throw new Error('distribution_plan_revision_target_not_found');
+    }
+    base.selectedResourceIds = base.selectedResourceIds.filter(
+      (id) => id !== resourceId,
+    );
+    base.assignments = base.assignments.map((assignment) =>
+      assignment.resourceId === resourceId
+        ? { ...assignment, resourceId: null, reason: 'unassigned' }
+        : assignment,
+    );
+    return base;
+  }
+  if (subject === 'assignment') {
+    if (operation.action !== 'modify') {
+      throw new Error('assignment rows always exist; use modify');
+    }
+    const target = base.assignments.find(
+      (assignment) => assignment.articleId === operation.targetId,
+    );
+    if (!target) throw new Error('distribution_plan_revision_target_not_found');
+    const patch =
+      operation.value && typeof operation.value === 'object' && !Array.isArray(operation.value)
+        ? (operation.value as Record<string, unknown>)
+        : {};
+    const next: DistributionAssignment = { ...target };
+    if (patch.resourceId !== undefined) {
+      const resourceId =
+        patch.resourceId === null
+          ? null
+          : Number(patch.resourceId);
+      if (resourceId !== null && !base.selectedResourceIds.includes(resourceId)) {
+        throw new Error('distribution_plan_channel_not_selected');
+      }
+      next.resourceId = resourceId;
+    }
+    if (typeof patch.reason === 'string' && patch.reason.trim()) {
+      const reason = patch.reason.trim();
+      if (
+        reason !== 'source-evidence' &&
+        reason !== 'content-fit' &&
+        reason !== 'weighted-score' &&
+        reason !== 'unassigned'
+      ) {
+        throw new Error('distribution_plan_assignment_reason_invalid');
+      }
+      next.reason = reason;
+    }
+    if (typeof patch.scheduledAt === 'string' && patch.scheduledAt.trim()) {
+      next.scheduledAt = patch.scheduledAt.trim();
+    }
+    base.assignments = base.assignments.map((assignment) =>
+      assignment.articleId === target.articleId ? next : assignment,
+    );
+    return base;
+  }
+  if (operation.action !== 'modify') {
+    throw new Error('plan-level parameters support modify only');
+  }
+  const patch =
+    operation.value && typeof operation.value === 'object' && !Array.isArray(operation.value)
+      ? (operation.value as Record<string, unknown>)
+      : {};
+  if (patch.budgetCny !== undefined) {
+    const budget = Number(patch.budgetCny);
+    if (!Number.isFinite(budget) || budget < 0) {
+      throw new Error('distribution_plan_budget_invalid');
+    }
+    base.budgetCny = budget;
+  }
+  if (typeof patch.publishStartAt === 'string' && patch.publishStartAt.trim()) {
+    base.publishStartAt = patch.publishStartAt.trim();
+  }
+  return base;
+}
+
+/**
+ * 发布准备闸门（票 38）：仅支持修改 awaiting-confirmation 执行的预算、
+ * 发布开始时间与逐项排期（subject='item' + targetId=itemId）。修订后
+ * Rust 重算确认摘要——旧摘要即刻失效，用户必须对新摘要重新走 UI 授权；
+ * 确认/开始/重试仍 exclusively 走 Rust UI 权威入口。
+ */
+export function createPublishPreparationGateRevisionHandler(
+  resolvePort: (
+    context: GateRevisionContext,
+  ) => Pick<PublishSchedulerPort, 'latest' | 'revise'>,
+): GateRevisionHandler {
+  return async (operations, context) => {
+    let port: Pick<PublishSchedulerPort, 'latest' | 'revise'> | null = null;
+    const resolve = () => (port ??= resolvePort(context));
+    const results: GateRevisionOpResult[] = [];
+    let execution: PublishExecutionProjection | null = null;
+    for (const operation of operations) {
+      if (operation.action !== 'modify') {
+        results.push(opUnsupported(operation, 'modify'));
+        continue;
+      }
+      try {
+        if (!execution) {
+          execution = await resolve().latest();
+        }
+        if (!execution) {
+          results.push(
+            opFailure(operation, new Error('publish_execution_not_found')),
+          );
+          continue;
+        }
+        if (execution.status !== 'awaiting-confirmation') {
+          // 非未决执行不缓存：批内下一条操作重新拉取（可能有新 preview）。
+          execution = null;
+          results.push(
+            opFailure(operation, new Error('publish_execution_already_immutable')),
+          );
+          continue;
+        }
+        const current = execution;
+        const patch =
+          operation.value && typeof operation.value === 'object' && !Array.isArray(operation.value)
+            ? (operation.value as Record<string, unknown>)
+            : {};
+        if (operation.subject === 'item') {
+          if (typeof patch.scheduledAt !== 'string' || !patch.scheduledAt.trim()) {
+            throw new Error('publish revision requires a scheduledAt');
+          }
+          execution = await resolve().revise({
+            executionId: current.id,
+            expectedRevision: current.revision,
+            itemUpdates: [
+              {
+                itemId: operation.targetId ?? '',
+                scheduledAt: patch.scheduledAt,
+              },
+            ],
+            actorId: GATE_REVISION_ACTOR_ID,
+            reason: operation.userInstruction,
+          });
+        } else {
+          if (patch.budgetCny === undefined && patch.publishStartAt === undefined) {
+            throw new Error('publish revision requires budgetCny or publishStartAt');
+          }
+          execution = await resolve().revise({
+            executionId: current.id,
+            expectedRevision: current.revision,
+            ...(patch.budgetCny !== undefined
+              ? { budgetCny: Number(patch.budgetCny) }
+              : {}),
+            ...(typeof patch.publishStartAt === 'string'
+              ? { publishStartAt: patch.publishStartAt }
+              : {}),
+            actorId: GATE_REVISION_ACTOR_ID,
+            reason: operation.userInstruction,
+          });
+        }
+        results.push({
+          action: operation.action,
+          ...(operation.targetId ? { targetId: operation.targetId } : {}),
+          ok: true,
+          status: execution.status,
+        });
+      } catch (error) {
+        results.push(opFailure(operation, error));
+      }
+    }
+    return results;
+  };
+}
+
+/**
+ * 默认注册（票 38）：五个域 handler 全部挂接同一工具契约，服务实例按
+ * Session 惰性构造（修订路径不触发任何 provider 调用）。新增闸门仍只需
+ * registerGateRevisionHandler，不得另起修改入口。
+ */
+type GateRevisionDomainService =
+  | QuestionPoolService
+  | TopicPlanService
+  | ArticleGenerationService
+  | DistributionPlanningService;
+
+const gateRevisionServiceRuntimes = new Map<string, GateRevisionDomainService>();
+
+function lazyService<T extends GateRevisionDomainService>(
+  key: string,
+  build: () => T,
+  context: GateRevisionContext,
+): T {
+  const cacheKey = `${key}:${context.workspaceId}:${context.sessionId}`;
+  const cached = gateRevisionServiceRuntimes.get(cacheKey);
+  if (cached) return cached as T;
+  const service = build();
+  gateRevisionServiceRuntimes.set(cacheKey, service);
+  return service as T;
+}
+
+function stageIdentity(context: GateRevisionContext) {
+  return { workspaceId: context.workspaceId, sessionId: context.sessionId };
+}
+
+registerGateRevisionHandler(
+  'question-pool',
+  createQuestionPoolGateRevisionHandler((context) =>
+    lazyService('question-pool', () => {
+      const identity = stageIdentity(context);
+      const capabilities = getXiaojingGeoProviderCapabilities();
+      return new QuestionPoolService(
+        identity,
+        createQuestionPoolPort(identity),
+        capabilities.keywordSearch,
+        capabilities.generation,
+        capabilities.embedding,
+      );
+    }, context),
+  ),
+);
+
+registerGateRevisionHandler(
+  'topic-plan',
+  createTopicPlanGateRevisionHandler((context) =>
+    lazyService('topic-plan', () => {
+      const identity = stageIdentity(context);
+      const capabilities = getXiaojingGeoProviderCapabilities();
+      return new TopicPlanService(
+        identity,
+        createTopicPlanPort(identity),
+        capabilities.generation,
+        capabilities.embedding,
+      );
+    }, context),
+  ),
+);
+
+registerGateRevisionHandler(
+  'article',
+  createArticleGateRevisionHandler((context) =>
+    lazyService('article', () => {
+      const identity = stageIdentity(context);
+      const capabilities = getXiaojingGeoProviderCapabilities();
+      return new ArticleGenerationService(
+        identity,
+        createArticlePort(identity),
+        capabilities.generation,
+        capabilities.reflection,
+      );
+    }, context),
+  ),
+);
+
+registerGateRevisionHandler(
+  'distribution-plan',
+  createDistributionPlanGateRevisionHandler((context) =>
+    lazyService('distribution-plan', () => {
+      const identity = stageIdentity(context);
+      const capabilities = getXiaojingGeoProviderCapabilities();
+      return new DistributionPlanningService(
+        identity,
+        createDistributionPlanPort(identity),
+        capabilities.distribution,
+      );
+    }, context),
+  ),
+);
+
+registerGateRevisionHandler(
+  'publish-preparation',
+  createPublishPreparationGateRevisionHandler((context) =>
+    createPublishSchedulerPort(stageIdentity(context)),
+  ),
+);

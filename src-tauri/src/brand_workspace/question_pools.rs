@@ -151,6 +151,10 @@ pub struct QuestionPoolCancelRequest {
 #[serde(rename_all = "camelCase")]
 pub struct QuestionPoolLatestRequest {
     pub product_line: Option<String>,
+    /// 聊天修订（票 38）解析目标：只取本 Session 最新的 awaiting-selection
+    /// 池，跳过会排在普通 latest 前面的同版本 confirmed 池。
+    #[serde(default)]
+    pub pending_only: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -163,6 +167,24 @@ pub struct QuestionPoolDecisionRequest {
     pub questions: Value,
     pub selected_question_ids: Vec<String>,
     pub actor_id: String,
+}
+
+/// 聊天修订（ADR 0003，票 38）：Sidecar 转发的单条改/删/增指令。Node 侧已
+/// 完成数组策略（applyQuestionPoolRevision），这里按 decide 同级校验落库。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QuestionPoolRevisionRequest {
+    pub workspace_id: String,
+    pub session_id: String,
+    pub pool_id: String,
+    pub expected_revision: i64,
+    pub action: String,
+    pub target_kind: String,
+    pub target_id: Option<String>,
+    pub keywords: Value,
+    pub questions: Value,
+    pub actor_id: String,
+    pub reason: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -186,7 +208,7 @@ pub(super) fn ensure_schema(connection: &Connection) -> Result<(), String> {
             "CREATE TABLE IF NOT EXISTS geo_question_pools (
                 id TEXT PRIMARY KEY,
                 operation_id TEXT NOT NULL REFERENCES geo_operations(id),
-                created_by_session_id TEXT NOT NULL REFERENCES brand_sessions(id),
+                created_by_session_id TEXT NOT NULL,
                 knowledge_version INTEGER NOT NULL REFERENCES knowledge_versions(version),
                 product_line TEXT NOT NULL,
                 target_region TEXT NOT NULL,
@@ -205,7 +227,7 @@ pub(super) fn ensure_schema(connection: &Connection) -> Result<(), String> {
              CREATE TABLE IF NOT EXISTS geo_question_pool_attempts (
                 id TEXT PRIMARY KEY,
                 pool_id TEXT NOT NULL REFERENCES geo_question_pools(id),
-                session_id TEXT NOT NULL REFERENCES brand_sessions(id),
+                session_id TEXT NOT NULL,
                 idempotency_key TEXT NOT NULL UNIQUE,
                 state TEXT NOT NULL CHECK(state IN ('running','awaiting-selection','confirmed','failed','cancelled')),
                 current_stage TEXT,
@@ -229,7 +251,7 @@ pub(super) fn ensure_schema(connection: &Connection) -> Result<(), String> {
              CREATE TABLE IF NOT EXISTS geo_question_pool_decisions (
                 id TEXT PRIMARY KEY,
                 pool_id TEXT NOT NULL REFERENCES geo_question_pools(id),
-                session_id TEXT NOT NULL REFERENCES brand_sessions(id),
+                session_id TEXT NOT NULL,
                 decision TEXT NOT NULL CHECK(decision='confirm-selection'),
                 expected_revision INTEGER NOT NULL,
                 revision INTEGER NOT NULL,
@@ -238,9 +260,31 @@ pub(super) fn ensure_schema(connection: &Connection) -> Result<(), String> {
                 actor_id TEXT NOT NULL,
                 decided_at TEXT NOT NULL,
                 UNIQUE(pool_id, revision)
+             );
+             CREATE TABLE IF NOT EXISTS geo_question_pool_revisions (
+                id TEXT PRIMARY KEY,
+                pool_id TEXT NOT NULL REFERENCES geo_question_pools(id),
+                session_id TEXT NOT NULL,
+                action TEXT NOT NULL CHECK(action IN ('modify','delete','add')),
+                target_kind TEXT NOT NULL CHECK(target_kind IN ('question','keyword')),
+                target_id TEXT,
+                before_json TEXT,
+                after_json TEXT,
+                actor_id TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                revised_at TEXT NOT NULL
              );",
         )
-        .map_err(|error| format!("initialize question pool schema: {error}"))
+        .map_err(|error| format!("initialize question pool schema: {error}"))?;
+    super::drop_brand_sessions_foreign_keys(
+        connection,
+        &[
+            "geo_question_pools",
+            "geo_question_pool_attempts",
+            "geo_question_pool_decisions",
+            "geo_question_pool_revisions",
+        ],
+    )
 }
 
 impl BrandWorkspaceStore {
@@ -272,18 +316,35 @@ impl BrandWorkspaceStore {
         {
             return Err("question_pool_product_line_unknown".to_string());
         }
-        let pool_id: Option<String> = connection
-            .query_row(
-                "SELECT id FROM geo_question_pools
-                 WHERE knowledge_version=?1 AND status IN ('awaiting-selection','confirmed')
-                   AND (?2 IS NULL OR product_line=?2)
-                 ORDER BY CASE status WHEN 'confirmed' THEN 0 ELSE 1 END, updated_at DESC, id DESC
-                 LIMIT 1",
-                params![knowledge_version, product_line],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(|error| format!("read latest valid question pool: {error}"))?;
+        let pool_id: Option<String> = if request.pending_only {
+            connection
+                .query_row(
+                    "SELECT id FROM geo_question_pools
+                     WHERE knowledge_version=?1 AND status='awaiting-selection'
+                       AND created_by_session_id=?3
+                       AND (?2 IS NULL OR product_line=?2)
+                     ORDER BY updated_at DESC, id DESC
+                     LIMIT 1",
+                    params![knowledge_version, product_line, session_id],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(|error| format!("read latest valid question pool: {error}"))?
+        } else {
+            connection
+                .query_row(
+                    "SELECT id FROM geo_question_pools
+                     WHERE knowledge_version=?1 AND status IN ('awaiting-selection','confirmed')
+                       AND (?2 IS NULL OR product_line=?2)
+                       AND (status='confirmed' OR created_by_session_id=?3)
+                     ORDER BY CASE status WHEN 'confirmed' THEN 0 ELSE 1 END, updated_at DESC, id DESC
+                     LIMIT 1",
+                    params![knowledge_version, product_line, session_id],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(|error| format!("read latest valid question pool: {error}"))?
+        };
         pool_id
             .map(|pool_id| read_question_pool(&connection, workspace_id, &pool_id, true))
             .transpose()
@@ -306,6 +367,16 @@ impl BrandWorkspaceStore {
         let parameters_json = canonical_json(&request.generation_parameters)?;
 
         if let Some(attempt) = read_attempt_by_key(&connection, &request.idempotency_key)? {
+            let attempt_session: String = connection
+                .query_row(
+                    "SELECT session_id FROM geo_question_pool_attempts WHERE id=?1",
+                    [&attempt.id],
+                    |row| row.get(0),
+                )
+                .map_err(|error| format!("read question pool attempt owner: {error}"))?;
+            if attempt_session != request.session_id {
+                return Err("question_pool_identity_mismatch".to_string());
+            }
             let pool = read_question_pool(&connection, &workspace.id, &attempt.pool_id, false)?;
             if pool.knowledge_version != context.knowledge_version
                 || pool.product_line != request.product_line.trim()
@@ -343,13 +414,15 @@ impl BrandWorkspaceStore {
                      WHERE knowledge_version=?1 AND product_line=?2 AND target_region=?3
                        AND generation_parameters_json=?4
                        AND status IN ('awaiting-selection','confirmed')
+                       AND (status='confirmed' OR created_by_session_id=?5)
                      ORDER BY CASE status WHEN 'confirmed' THEN 0 ELSE 1 END, updated_at DESC, id DESC
                      LIMIT 1",
                     params![
                         context.knowledge_version,
                         request.product_line.trim(),
                         request.target_region.trim(),
-                        parameters_json
+                        parameters_json,
+                        request.session_id
                     ],
                     |row| row.get::<_, String>(0),
                 )
@@ -802,15 +875,33 @@ impl BrandWorkspaceStore {
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|error| format!("start question pool decision: {error}"))?;
-        let (revision, status, operation_id, knowledge_version): (i64, String, String, i64) = transaction
+        let (revision, status, operation_id, knowledge_version, created_by_session_id): (
+            i64,
+            String,
+            String,
+            i64,
+            String,
+        ) = transaction
             .query_row(
-                "SELECT revision, status, operation_id, knowledge_version FROM geo_question_pools WHERE id=?1",
+                "SELECT revision, status, operation_id, knowledge_version, created_by_session_id
+                 FROM geo_question_pools WHERE id=?1",
                 [&request.pool_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
             )
             .optional()
             .map_err(|error| format!("read question pool: {error}"))?
             .ok_or_else(|| "question_pool_not_found".to_string())?;
+        if created_by_session_id != request.session_id {
+            return Err("question_pool_identity_mismatch".to_string());
+        }
         if !matches!(status.as_str(), "awaiting-selection" | "confirmed") {
             return Err("question_pool_not_selectable".to_string());
         }
@@ -875,6 +966,147 @@ impl BrandWorkspaceStore {
             actor_id: request.actor_id,
             decided_at: now,
         })
+    }
+
+    /// 聊天修订（ADR 0003，票 38）：仅作用于本 Session 的 awaiting-selection
+    /// 待决池。modify/delete/add 均由 Node 侧算好新词库/问题数组后整组落库
+    /// （与 decide 信任边界同构），这里做形状校验、身份/状态/CAS 栅栏，并按
+    /// 条写 geo_question_pool_revisions 审计（含用户指令原文 reason）。
+    pub fn revise_question_pool(
+        &self,
+        request: QuestionPoolRevisionRequest,
+    ) -> Result<QuestionPoolProjection, String> {
+        validate_session_id(&request.session_id)?;
+        if request.actor_id != "desktop-user" {
+            return Err("question_pool_actor_invalid".to_string());
+        }
+        if request.reason.trim().is_empty() {
+            return Err(
+                "question pool revision requires the user's explicit instruction".to_string(),
+            );
+        }
+        if !matches!(request.action.as_str(), "modify" | "delete" | "add") {
+            return Err("question_pool_revision_action_invalid".to_string());
+        }
+        if !matches!(request.target_kind.as_str(), "question" | "keyword") {
+            return Err("question_pool_revision_target_invalid".to_string());
+        }
+        if matches!(request.action.as_str(), "modify" | "delete")
+            && request
+                .target_id
+                .as_deref()
+                .map(str::trim)
+                .is_none_or(|value| value.is_empty())
+        {
+            return Err("question_pool_revision_target_required".to_string());
+        }
+        validate_revision_payload(&request.keywords, &request.questions)?;
+        let workspace = self.workspace(&request.workspace_id)?;
+        let mut connection = open_database(&workspace)?;
+        require_question_pool_session(&connection, &request.session_id)?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| format!("start question pool revision: {error}"))?;
+        let (revision, status, keywords_json, questions_json, created_by_session_id): (
+            i64,
+            String,
+            String,
+            String,
+            String,
+        ) = transaction
+            .query_row(
+                "SELECT revision, status, keywords_json, questions_json, created_by_session_id
+                 FROM geo_question_pools WHERE id=?1",
+                [&request.pool_id],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|error| format!("read question pool for revision: {error}"))?
+            .ok_or_else(|| "question_pool_not_found".to_string())?;
+        if created_by_session_id != request.session_id {
+            return Err("question_pool_identity_mismatch".to_string());
+        }
+        let has_decision: i64 = transaction
+            .query_row(
+                "SELECT COUNT(*) FROM geo_question_pool_decisions WHERE pool_id=?1",
+                [&request.pool_id],
+                |row| row.get(0),
+            )
+            .map_err(|error| format!("inspect question pool decisions: {error}"))?;
+        if has_decision > 0 || status == "confirmed" {
+            return Err("question_pool_confirmed_immutable".to_string());
+        }
+        if status != "awaiting-selection" {
+            return Err("question_pool_not_selectable".to_string());
+        }
+        if revision != request.expected_revision {
+            return Err("question_pool_revision_conflict".to_string());
+        }
+        let next_revision = revision + 1;
+        let now = Utc::now().to_rfc3339();
+        let next_keywords_json = canonical_json(&request.keywords)?;
+        let next_questions_json = canonical_json(&request.questions)?;
+        transaction
+            .execute(
+                "INSERT INTO geo_question_pool_revisions
+                    (id, pool_id, session_id, action, target_kind, target_id,
+                     before_json, after_json, actor_id, reason, revised_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                params![
+                    Uuid::new_v4().to_string(),
+                    request.pool_id,
+                    request.session_id,
+                    request.action,
+                    request.target_kind,
+                    request.target_id,
+                    serde_json::json!({
+                        "keywords": serde_json::from_str::<Value>(&keywords_json)
+                            .unwrap_or(Value::Null),
+                        "questions": serde_json::from_str::<Value>(&questions_json)
+                            .unwrap_or(Value::Null),
+                    })
+                    .to_string(),
+                    serde_json::json!({
+                        "keywords": request.keywords,
+                        "questions": request.questions,
+                    })
+                    .to_string(),
+                    request.actor_id,
+                    request.reason,
+                    now
+                ],
+            )
+            .map_err(|error| format!("audit question pool revision: {error}"))?;
+        let changed = transaction
+            .execute(
+                "UPDATE geo_question_pools
+                 SET keywords_json=?2, questions_json=?3, revision=?4, updated_at=?5
+                 WHERE id=?1 AND revision=?6 AND status='awaiting-selection'",
+                params![
+                    request.pool_id,
+                    next_keywords_json,
+                    next_questions_json,
+                    next_revision,
+                    now,
+                    revision
+                ],
+            )
+            .map_err(|error| format!("apply question pool revision: {error}"))?;
+        if changed != 1 {
+            return Err("question_pool_revision_conflict".to_string());
+        }
+        transaction
+            .commit()
+            .map_err(|error| format!("commit question pool revision: {error}"))?;
+        read_question_pool(&connection, &workspace.id, &request.pool_id, false)
     }
 }
 
@@ -1162,10 +1394,7 @@ fn read_checkpoint(
         .ok_or_else(|| "question_pool_checkpoint_not_found".to_string())
 }
 
-fn validate_decision_payload(
-    questions: &Value,
-    selected_question_ids: &[String],
-) -> Result<(), String> {
+fn validate_question_entries(questions: &Value) -> Result<std::collections::HashSet<String>, String> {
     let list = questions
         .as_array()
         .ok_or_else(|| "question_pool_questions_invalid".to_string())?;
@@ -1189,11 +1418,46 @@ fn validate_decision_payload(
             return Err("question_pool_question_id_duplicate".to_string());
         }
     }
+    Ok(ids)
+}
+
+fn validate_decision_payload(
+    questions: &Value,
+    selected_question_ids: &[String],
+) -> Result<(), String> {
+    let ids = validate_question_entries(questions)?;
     if selected_question_ids.is_empty()
         || selected_question_ids.len() > ids.len()
         || selected_question_ids.iter().any(|id| !ids.contains(id))
     {
         return Err("question_pool_selection_invalid".to_string());
+    }
+    Ok(())
+}
+
+/// 修订载荷校验（与 decide 同级）：问题沿用 1-50 条与逐条 id/text 规则，
+/// 词库要求逐条 id/term 合法且不重复。
+fn validate_revision_payload(keywords: &Value, questions: &Value) -> Result<(), String> {
+    validate_question_entries(questions)?;
+    let list = keywords
+        .as_array()
+        .ok_or_else(|| "question_pool_keywords_invalid".to_string())?;
+    let mut ids = std::collections::HashSet::new();
+    for keyword in list {
+        let id = keyword
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| "question_pool_keyword_id_invalid".to_string())?;
+        let term = keyword
+            .get("term")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty() && value.chars().count() <= 120)
+            .ok_or_else(|| "question_pool_keyword_term_invalid".to_string())?;
+        let _ = term;
+        if !ids.insert(id.to_string()) {
+            return Err("question_pool_keyword_id_duplicate".to_string());
+        }
     }
     Ok(())
 }
@@ -1215,6 +1479,16 @@ mod tests {
                 SessionCommit {
                     id: "session-08".to_string(),
                     title: "问题池".to_string(),
+                    title_source: SessionTitleSource::User,
+                },
+            )
+            .unwrap();
+        store
+            .commit_session(
+                &workspace.id,
+                SessionCommit {
+                    id: "session-other".to_string(),
+                    title: "另一个会话".to_string(),
                     title_source: SessionTitleSource::User,
                 },
             )
@@ -1358,6 +1632,251 @@ mod tests {
     }
 
     #[test]
+    fn chat_revision_touches_only_pending_pools_and_audits_the_verbatim_instruction() {
+        let (store, workspace) = setup();
+        let prepared = prepare(&store, &workspace, "revise-08");
+        let attempt_id = prepared.attempt.unwrap().id;
+        for stage in ["keyword-search", "question-generation", "embedding"] {
+            complete_step(&store, &workspace, &attempt_id, stage);
+        }
+        let pending = store
+            .persist_question_pool(
+                &workspace.id,
+                "session-08",
+                QuestionPoolPersistRequest {
+                    attempt_id,
+                    keywords: serde_json::json!([
+                        {"id":"kw-1","term":"成都汽车改装","category":"core","heat":"high","platform":"doubao"},
+                        {"id":"kw-2","term":"成都汽车隔音","category":"scene","heat":"medium","platform":"doubao"}
+                    ]),
+                    questions: serde_json::json!([
+                        {"id":"q-1","text":"成都汽车改装哪家好？","selected":true}
+                    ]),
+                    source_evidence: serde_json::json!([]),
+                },
+            )
+            .unwrap();
+        assert_eq!(pending.status, "awaiting-selection");
+
+        // 跨 Session 修订被拒。
+        assert_eq!(
+            store
+                .revise_question_pool(QuestionPoolRevisionRequest {
+                    workspace_id: workspace.id.clone(),
+                    session_id: "session-other".to_string(),
+                    pool_id: pending.id.clone(),
+                    expected_revision: pending.revision,
+                    action: "delete".to_string(),
+                    target_kind: "keyword".to_string(),
+                    target_id: Some("kw-2".to_string()),
+                    keywords: pending.keywords.clone(),
+                    questions: pending.questions.clone(),
+                    actor_id: "desktop-user".to_string(),
+                    reason: "删掉第二个搜索词".to_string(),
+                })
+                .unwrap_err(),
+            "question_pool_identity_mismatch"
+        );
+
+        // 合法 modify：词库更新、revision 递增、状态保持待决。
+        let next_questions = serde_json::json!([
+            {"id":"q-1","text":"成都汽车改装哪家靠谱？","selected":true},
+            {"id":"q-user-1","text":"成都贴隐形车衣多少钱？","selected":false}
+        ]);
+        let revised = store
+            .revise_question_pool(QuestionPoolRevisionRequest {
+                workspace_id: workspace.id.clone(),
+                session_id: "session-08".to_string(),
+                pool_id: pending.id.clone(),
+                expected_revision: pending.revision,
+                action: "add".to_string(),
+                target_kind: "question".to_string(),
+                target_id: None,
+                keywords: pending.keywords.clone(),
+                questions: next_questions,
+                actor_id: "desktop-user".to_string(),
+                reason: "补一个价格问题".to_string(),
+            })
+            .unwrap();
+        assert_eq!(revised.status, "awaiting-selection");
+        assert_eq!(revised.revision, pending.revision + 1);
+        assert_eq!(revised.questions.as_array().unwrap().len(), 2);
+
+        // 逐条审计携带用户指令原文。
+        let connection = open_database(&workspace).unwrap();
+        let (audit_count, audit_reason, audit_action): (i64, String, String) = connection
+            .query_row(
+                "SELECT COUNT(*), MAX(reason), MAX(action) FROM geo_question_pool_revisions
+                 WHERE pool_id=?1",
+                [&pending.id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(audit_count, 1);
+        assert_eq!(audit_reason, "补一个价格问题");
+        assert_eq!(audit_action, "add");
+
+        // 旧 revision CAS 冲突。
+        assert_eq!(
+            store
+                .revise_question_pool(QuestionPoolRevisionRequest {
+                    workspace_id: workspace.id.clone(),
+                    session_id: "session-08".to_string(),
+                    pool_id: pending.id.clone(),
+                    expected_revision: pending.revision,
+                    action: "delete".to_string(),
+                    target_kind: "question".to_string(),
+                    target_id: Some("q-user-1".to_string()),
+                    keywords: pending.keywords.clone(),
+                    questions: revised.questions.clone(),
+                    actor_id: "desktop-user".to_string(),
+                    reason: "删掉刚才加的".to_string(),
+                })
+                .unwrap_err(),
+            "question_pool_revision_conflict"
+        );
+
+        // 裁决后的池不可再修订。
+        store
+            .decide_question_pool(QuestionPoolDecisionRequest {
+                workspace_id: workspace.id.clone(),
+                session_id: "session-08".to_string(),
+                pool_id: pending.id.clone(),
+                expected_revision: revised.revision,
+                questions: revised.questions.clone(),
+                selected_question_ids: vec!["q-1".to_string()],
+                actor_id: "desktop-user".to_string(),
+            })
+            .unwrap();
+        assert_eq!(
+            store
+                .revise_question_pool(QuestionPoolRevisionRequest {
+                    workspace_id: workspace.id.clone(),
+                    session_id: "session-08".to_string(),
+                    pool_id: pending.id.clone(),
+                    expected_revision: revised.revision,
+                    action: "modify".to_string(),
+                    target_kind: "question".to_string(),
+                    target_id: Some("q-1".to_string()),
+                    keywords: pending.keywords.clone(),
+                    questions: revised.questions.clone(),
+                    actor_id: "desktop-user".to_string(),
+                    reason: "改已确认的问题".to_string(),
+                })
+                .unwrap_err(),
+            "question_pool_confirmed_immutable"
+        );
+    }
+
+    #[test]
+    fn pending_only_latest_resolves_the_shadowed_awaiting_pool() {
+        let (store, workspace) = setup();
+        let prepared = prepare(&store, &workspace, "shadow-08");
+        let attempt_id = prepared.attempt.unwrap().id;
+        for stage in ["keyword-search", "question-generation", "embedding"] {
+            complete_step(&store, &workspace, &attempt_id, stage);
+        }
+        let first = store
+            .persist_question_pool(
+                &workspace.id,
+                "session-08",
+                QuestionPoolPersistRequest {
+                    attempt_id,
+                    keywords: serde_json::json!([{"id":"kw-1","term":"成都汽车改装"}]),
+                    questions: serde_json::json!([
+                        {"id":"q-1","text":"成都汽车改装哪家好？","selected":true}
+                    ]),
+                    source_evidence: serde_json::json!([]),
+                },
+            )
+            .unwrap();
+        store
+            .decide_question_pool(QuestionPoolDecisionRequest {
+                workspace_id: workspace.id.clone(),
+                session_id: "session-08".to_string(),
+                pool_id: first.id.clone(),
+                expected_revision: first.revision,
+                questions: first.questions.clone(),
+                selected_question_ids: vec!["q-1".to_string()],
+                actor_id: "desktop-user".to_string(),
+            })
+            .unwrap();
+
+        // 同 Session 再有一个 awaiting 池（如跨产品线并行挖掘）时，普通
+        // latest 会被排在前面的 confirmed 池遮蔽，pending_only 必须解析到
+        // 本 Session 的待决池。
+        let connection = open_database(&workspace).unwrap();
+        connection
+            .execute(
+                "INSERT INTO geo_operations (id, session_id, state, created_at)
+                 VALUES ('operation-shadow', 'session-08', 'question-pool-awaiting', '2026-08-16T00:00:00Z')",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO geo_question_pools
+                    (id, operation_id, created_by_session_id, knowledge_version, product_line,
+                     target_region, generation_parameters_json, source_evidence_json,
+                     keywords_json, questions_json, status, revision, created_at, updated_at)
+                 VALUES ('pool-shadow', 'operation-shadow', 'session-08', 1, '汽车音响', '成都',
+                         '{\"policyVersion\":\"js-ai-dev-pred-1-v1\"}', '[]',
+                         '[{\"id\":\"kw-1\",\"term\":\"成都汽车改装\"}]',
+                         '[{\"id\":\"q-1\",\"text\":\"成都汽车改装哪家好？\",\"selected\":true},
+                           {\"id\":\"q-2\",\"text\":\"成都汽车隔音多少钱？\",\"selected\":false}]',
+                         'awaiting-selection', 0, '2026-08-16T00:00:00Z', '2026-08-16T01:00:00Z')",
+                [],
+            )
+            .unwrap();
+        let second = store
+            .latest_valid_question_pool(
+                &workspace.id,
+                "session-08",
+                QuestionPoolLatestRequest {
+                    product_line: None,
+                    pending_only: true,
+                },
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(second.id, "pool-shadow");
+        // 普通 latest 仍优先返回 confirmed 池（卡片水合语义不变）。
+        let plain_latest = store
+            .latest_valid_question_pool(
+                &workspace.id,
+                "session-08",
+                QuestionPoolLatestRequest {
+                    product_line: None,
+                    pending_only: false,
+                },
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(plain_latest.id, first.id);
+
+        // 修订落在待决池上，confirmed 池不受影响。
+        let revised = store
+            .revise_question_pool(QuestionPoolRevisionRequest {
+                workspace_id: workspace.id.clone(),
+                session_id: "session-08".to_string(),
+                pool_id: second.id.clone(),
+                expected_revision: second.revision,
+                action: "delete".to_string(),
+                target_kind: "question".to_string(),
+                target_id: Some("q-2".to_string()),
+                keywords: second.keywords.clone(),
+                questions: serde_json::json!([
+                    {"id":"q-1","text":"成都汽车改装哪家好？","selected":true}
+                ]),
+                actor_id: "desktop-user".to_string(),
+                reason: "删掉隔音问题".to_string(),
+            })
+            .unwrap();
+        assert_eq!(revised.id, second.id);
+        assert_eq!(revised.revision, second.revision + 1);
+    }
+
+    #[test]
     fn pool_identity_binds_version_product_region_parameters_and_reuses_only_valid_pool() {
         let (store, workspace) = setup();
         let first = prepare(&store, &workspace, "attempt-08");
@@ -1368,7 +1887,7 @@ mod tests {
         for stage in ["keyword-search", "question-generation", "embedding"] {
             complete_step(&store, &workspace, &attempt_id, stage);
         }
-        store
+        let pending = store
             .persist_question_pool(
                 &workspace.id,
                 "session-08",
@@ -1380,6 +1899,69 @@ mod tests {
                 },
             )
             .unwrap();
+        assert!(store
+            .latest_valid_question_pool(
+                &workspace.id,
+                "session-other",
+                QuestionPoolLatestRequest {
+                    product_line: Some("汽车音响".to_string()),
+                    pending_only: false,
+                },
+            )
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            store
+                .prepare_question_pool(QuestionPoolPrepareRequest {
+                    workspace_id: workspace.id.clone(),
+                    session_id: "session-other".to_string(),
+                    product_line: "汽车音响".to_string(),
+                    target_region: "成都".to_string(),
+                    generation_parameters: serde_json::json!({"policyVersion":"js-ai-dev-pred-1-v1"}),
+                    idempotency_key: "attempt-08".to_string(),
+                    reuse_existing: true,
+                    retry: false,
+                })
+                .unwrap_err(),
+            "question_pool_identity_mismatch"
+        );
+        let questions = pending.questions.clone();
+        assert_eq!(
+            store
+                .decide_question_pool(QuestionPoolDecisionRequest {
+                    workspace_id: workspace.id.clone(),
+                    session_id: "session-other".to_string(),
+                    pool_id: pending.id.clone(),
+                    expected_revision: pending.revision,
+                    questions: questions.clone(),
+                    selected_question_ids: vec!["q1".to_string()],
+                    actor_id: "desktop-user".to_string(),
+                })
+                .unwrap_err(),
+            "question_pool_identity_mismatch"
+        );
+        store
+            .decide_question_pool(QuestionPoolDecisionRequest {
+                workspace_id: workspace.id.clone(),
+                session_id: "session-08".to_string(),
+                pool_id: pending.id,
+                expected_revision: pending.revision,
+                questions,
+                selected_question_ids: vec!["q1".to_string()],
+                actor_id: "desktop-user".to_string(),
+            })
+            .unwrap();
+        assert!(store
+            .latest_valid_question_pool(
+                &workspace.id,
+                "session-other",
+                QuestionPoolLatestRequest {
+                    product_line: Some("汽车音响".to_string()),
+                    pending_only: false,
+                },
+            )
+            .unwrap()
+            .is_some());
         let reused = prepare(&store, &workspace, "attempt-08-next");
         assert_eq!(reused.kind, "reused");
         assert!(reused.pool.reused);

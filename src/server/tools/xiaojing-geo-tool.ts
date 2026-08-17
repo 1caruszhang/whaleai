@@ -604,9 +604,9 @@ export async function createXiaojingGeoServer() {
               z.object({
                 action: z.enum(['modify', 'delete', 'add']),
                 targetId: z.string().min(1).max(200).optional()
-                  .describe('modify/delete: pending entry id from the confirmation card (knowledge gate = candidate id).'),
+                  .describe('modify/delete: pending entry id from the confirmation card (knowledge gate = candidate id; distribution channel ops use the resourceId, publish item ops use the item id).'),
                 subject: z.string().min(1).max(200).optional()
-                  .describe('add: fact subject of the new entry.'),
+                  .describe('Entry kind. knowledge add: fact subject of the new entry. question-pool: "keyword" targets a mined search term, omit for a candidate question. distribution-plan: "channel" | "assignment" (omit for plan-level budget/publishStartAt). publish-preparation: "item" (omit for execution-level budget/publishStartAt).'),
                 predicate: z.string().min(1).max(200).optional()
                   .describe('add: fact predicate of the new entry.'),
                 scope: z.record(z.string(), z.union([z.string(), z.number(), z.boolean(), z.null()])).optional(),

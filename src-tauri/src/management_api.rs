@@ -195,6 +195,10 @@ pub async fn start_management_api() -> Result<u16, String> {
             post(brand_question_pool_decide_handler),
         )
         .route(
+            "/api/brand-question-pools/revise",
+            post(brand_question_pool_revise_handler),
+        )
+        .route(
             "/api/brand-topic-plans/latest",
             post(brand_topic_plan_latest_handler),
         )
@@ -292,6 +296,10 @@ pub async fn start_management_api() -> Result<u16, String> {
         .route(
             "/api/brand-publish-scheduler/preview",
             post(brand_publish_preview_handler),
+        )
+        .route(
+            "/api/brand-publish-scheduler/revise",
+            post(brand_publish_scheduler_revise_handler),
         )
         .route(
             "/api/brand-geo-baselines/latest",
@@ -1283,6 +1291,33 @@ async fn brand_question_pool_decide_handler(
     }
 }
 
+/// 聊天修订（ADR 0003，票 38）：问题池闸门的待决词库/候选问题改删增；
+/// 信封身份校验与 decide 同构，只作用于本 Session 的 awaiting-selection 池。
+async fn brand_question_pool_revise_handler(
+    headers: HeaderMap,
+    Json(request): Json<
+        BrandKnowledgeEnvelope<crate::brand_workspace::QuestionPoolRevisionRequest>,
+    >,
+) -> Json<serde_json::Value> {
+    let store = match validate_brand_knowledge_request(&headers, &request) {
+        Ok(store) => store,
+        Err(error) => return Json(error),
+    };
+    if request.payload.workspace_id != request.workspace_id
+        || request.payload.session_id != request.session_id
+    {
+        return Json(serde_json::json!({
+            "ok": false,
+            "code": "identity_mismatch",
+            "error": "Question pool revision identity must match its authenticated envelope",
+        }));
+    }
+    match store.revise_question_pool(request.payload) {
+        Ok(pool) => Json(serde_json::json!({ "ok": true, "pool": pool })),
+        Err(error) => Json(serde_json::json!({ "ok": false, "error": error })),
+    }
+}
+
 async fn brand_topic_plan_latest_handler(
     headers: HeaderMap,
     Json(request): Json<BrandKnowledgeEnvelope<crate::brand_workspace::TopicPlanLatestRequest>>,
@@ -1777,6 +1812,29 @@ async fn brand_publish_preview_handler(
         Err(error) => return Json(error),
     };
     match store.prepare_publish_execution(
+        &request.workspace_id,
+        &request.session_id,
+        request.payload,
+    ) {
+        Ok(execution) => Json(serde_json::json!({ "ok": true, "execution": execution })),
+        Err(error) => Json(serde_json::json!({ "ok": false, "error": error })),
+    }
+}
+
+/// 聊天修订（ADR 0003，票 38）：发布准备闸门的待决内容（预算/开始时间/
+/// 逐项排期）。确认、开始与重试仍 exclusively 走 Rust UI 权威入口，本路由
+/// 只重算摘要并审计，不触碰不可逆动作。
+async fn brand_publish_scheduler_revise_handler(
+    headers: HeaderMap,
+    Json(request): Json<
+        BrandKnowledgeEnvelope<crate::brand_workspace::PublishRevisionRequest>,
+    >,
+) -> Json<serde_json::Value> {
+    let store = match validate_brand_knowledge_request(&headers, &request) {
+        Ok(store) => store,
+        Err(error) => return Json(error),
+    };
+    match store.revise_publish_execution(
         &request.workspace_id,
         &request.session_id,
         request.payload,

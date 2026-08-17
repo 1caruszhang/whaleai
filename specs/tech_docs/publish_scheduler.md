@@ -1,0 +1,27 @@
+# GEO deterministic publishing
+
+Ticket 13 turns one confirmed distribution-plan revision into a durable, user-authorized execution. `PublishScheduler` is an application-lifetime Rust owner backed by the BrandWorkspace SQLite database. It does not use a Session Sidecar timer, an HTTP request, or a Renderer tick to make future work run.
+
+## Authority and confirmation
+
+Node and the model may read `latest`, read an exact execution, and prepare a preview. Paid-action mutations are absent from the Sidecar and Rust Management API. Confirmation, start, and explicit safe-item retry are WebView-only Tauri commands. Ticket 12 confirmation is not execution authorization: the Ticket 13 card shows the exact approved article revision/hash/summary, frozen distribution plan revision, channels, known price and rate, budget, schedule, provider snapshot, and irreversible impact before accepting a separate user checkbox and confirmation gesture.
+
+An awaiting preview may be superseded by a new confirmed distribution plan. The old preview and its audit remain readable, but its never-executed internal idempotency keys are namespaced so the replacement can be prepared. Confirmed or started executions are immutable and cannot be superseded. The UI returns to a new editable Ticket 12 draft rather than modifying its confirmed artifact.
+
+Chat revision (ticket 38, ADR 0003) adds exactly one Sidecar mutation seam for pending content: `/api/brand-publish-scheduler/revise` behind the shared gate tool (`gate=publish-preparation`, modify-only). It may adjust budget, publish start time, and per-item `scheduledAt` while the execution is still `awaiting-confirmation` and owned by the requesting session; Rust recomputes the confirmation digest over the stored snapshots with the same shared formula (preview and revision build one `confirmation_digest_of`), bumps the revision, and appends a `revision` audit row carrying the verbatim user instruction. The old digest fails closed at confirmation, so the user must re-check and re-authorize the new digest through the UI command; confirmation, start, and retry remain WebView-only. The authorization card re-polls `/publish-scheduler/latest` every 3s while pending and resets the irreversible-impact checkbox whenever the digest changes. The payload hash never covers `scheduledAt`, so a schedule revision does not invalidate the frozen order payload.
+
+## Stable item and payload contract
+
+The execution unit is one approved article × one assigned channel. Each row freezes the approved revision/body hash/path, channel/resource snapshot, distribution plan and revision, schedule, estimated price, provider configuration fingerprints, stable item ID, full internal idempotency key, and an external request `sn` of `publish-order-{sha256(internal-key)[0..32]}`. The external `sn` is at most 64 characters and remains stable across plan-only budget or schedule changes.
+
+The payload hash covers the exact order structure: external `sn`, channel kind/endpoint, resource ID, title, deterministic object URL, and the media or we-media structural fields. Internal `scheduledAt` is part of confirmation and the durable request summary, not the media order form. A same-key/same-hash unstarted preview can only be replaced through the explicit supersede flow; a started duplicate is rejected. A same-key/different-hash attempt fails closed. It never rewrites a submitted row, its external IDs, or its completed execution truth.
+
+## Execution and recovery
+
+The Rust background loop scans every BrandWorkspace for due persisted items. A SQLite immediate transaction performs claim/CAS with a claim token and lease. Earlier active sequence items block later ones. The provider path reads the bounded immutable approved file from the Rust-owned workspace, renders HTML, uploads to the frozen deterministic object URL, then submits the channel order. Secrets are loaded only by the Rust credential owner and never enter SQLite, audit JSON, Renderer, Sidecar, or the Agent prompt. Approved body bytes only enter the upload request.
+
+Provider configuration fingerprints are non-secret hashes frozen at preview. The scheduler compares the complete snapshot before claim execution and the production provider reloads and compares the relevant fingerprint immediately before each upload or submit egress. Missing or changed configuration becomes `reconciliation-required`; it cannot continue under an old idempotency key.
+
+Expired upload claims may resume because PUT uses a stable object key. Expired submission claims are unknown outcomes and require reconciliation. Explicitly safe failures follow the authoritative 1 / 5 / 15 minute backoff with at most three retries. Provider rejection is terminal. Transport errors after a possible order submission, malformed success responses, server errors with unknown acceptance, and any same-key/different-payload conflict are never automatically retried. Submitted items and their external content/order IDs remain immutable when later items fail.
+
+Audit records contain bounded request summaries, timestamps, claim/result events, external IDs, and safe diagnostic codes. They exclude credentials, signatures, approved body bytes, and rendered HTML. Default tests use an injected mock Provider and deterministic clock; credentialed publishing smoke is forbidden in the normal test pool.

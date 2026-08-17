@@ -18,7 +18,7 @@
    `/api/xiaojing/knowledge/decide-batch`（批量确认卡）的结构化卡片决策；
    `/api/xiaojing/knowledge/candidates` 供卡片在会话重载后水合候选真实状态。
 
-4. `xiaojing-geo` MCP 的通用闸门修订工具 `revise_gate_content`：按用户在聊天中的显式自然语言指令（操作逐条携带 `userInstruction` 原文审计）对当前未决闸门内容执行改/删/增。工具是单一受限入口（参数：闸门类型 + 操作列表），内部分发到各域 handler（见 `src/server/geo/gate-revision.ts`，后续闸门经同一契约接入）；工具描述写死「仅基于用户显式指令；不得自行判断删除」。知识闸门作用于本 Session 的 `awaiting-confirmation`/`conflict` 候选：
+4. `xiaojing-geo` MCP 的通用闸门修订工具 `revise_gate_content`：按用户在聊天中的显式自然语言指令（操作逐条携带 `userInstruction` 原文审计）对当前未决闸门内容执行改/删/增。工具是单一受限入口（参数：闸门类型 + 操作列表），内部分发到各域 handler（见 `src/server/geo/gate-revision.ts`：六个既有闸门——知识、问题池、选题、文章、渠道计划、发布准备——已全部挂接同一契约，后续新闸门经 `registerGateRevisionHandler` 接入，不得另起修改入口）；工具描述写死「仅基于用户显式指令；不得自行判断删除」。非未决目标、跨 Session/品牌目标按域错误码结构化拒绝（`target_not_pending` / `target_not_in_session` / `target_not_found` / `revision_conflict`）。知识闸门作用于本 Session 的 `awaiting-confirmation`/`conflict` 候选：
    - **modify**：新值经既有归一化管道写回候选行，provenance 升为 `asked`（只升不降），状态回到 `awaiting-confirmation`——用户显式改值即表达了对新值的选择，整卡确认按 `adopt-new` 提交；
    - **delete**：候选终结为 `rejected`，材料未决候选清零时与裁决同步置 `processed`；
    - **add**：走既有 propose 语义（`user-stated` / `knowledge-update` / `asked` 待确认候选），携带材料 id 时把新候选挂回该材料最新处理 attempt 的候选快照，卡片经既有轮询/水合投影重渲染出新行。

@@ -31,8 +31,14 @@ low                   = priorityTotal < 100
 - `idempotency_key` 定位 attempt；`attempt_id + stage` 定位 checkpoint；`attempt_id:stage` 是稳定 billing key。每次 claim 记录 input hash、attempt number 与一次性 claim token，finish 使用 token CAS。
 - completed checkpoint 必须返回缓存输出，不重复调用 Provider；重试只重新 claim 当前 failed stage，已成功的付费阶段不重复计费。
 - 取消同时 abort 当前 Provider signal 并把 attempt/checkpoint 标记为 cancelled。
-- 用户勾选、编辑、删除、新增的结果以 `confirm-selection` decision 附加写入，并用 expected revision CAS。已有 decision 的 pool 不可再 persist 或覆写。Sidecar 只投送带固定 tag 的隐藏结构化 event，不生成可见 user message。
+- 用户勾选的结果以 `confirm-selection` decision 附加写入，并用 expected revision CAS。已有 decision 的 pool 不可再 persist 或覆写。Sidecar 只投送带固定 tag 的隐藏结构化 event，不生成可见 user message。
+
+## 聊天修订（票 38，ADR 0003）
+
+- 待决（awaiting-selection）池的搜索词与候选问题可经通用闸门修订工具 `revise_gate_content`（gate=`question-pool`，`subject='keyword'` 指词、缺省指问题）改/删/增：`QuestionPoolService.revise` 只读最新待决池，数组策略在 `applyQuestionPoolRevision` 纯函数中执行（文本 1–500、去重、问题 1–50 条、上限内新增），Rust `/api/brand-question-pools/revise` 做形状校验、身份/状态/CAS 栅栏并逐条写 `geo_question_pool_revisions` 审计（before/after 全量数组 + 用户指令原文）。
+- 用户补充的问题无模型评分：中性占位分（全 0、低优先级、formula=`user-added; not scored`）+ `user-added` 证据；补充的词默认 `longtail`/`medium`，id 续 `kw-user-*`/`q-user-*`。
+- 修订不改 pool 状态、不产生 decision、不投送 reminder；确认卡（`QuestionPoolGateCard`）待决期间每 3s 轮询 `/question-pools/latest`，按问题文本指纹做服务端胜合并（被改行采信服务端、未改行保留本地勾选），确认用最新 revision CAS。
 
 ## 测试边界
 
-Provider 单测必须使用 fake/stub，不访问网络、凭据或付费端点。Rust 测试覆盖 identity/reuse/version/CAS；Node 测试覆盖 typed-port 编排和阶段重试；DOM 测试覆盖真实工作台入口与结构化增删改选。
+Provider 单测必须使用 fake/stub，不访问网络、凭据或付费端点。Rust 测试覆盖 identity/reuse/version/CAS 与修订审计；Node 测试覆盖 typed-port 编排、阶段重试与 revise 策略；DOM 测试覆盖真实工作台入口、结构化增删改选与轮询服务端胜。

@@ -53,11 +53,20 @@ class FakePersistence implements QuestionPoolPersistencePort {
   readonly decisions: Array<
     Parameters<QuestionPoolPersistencePort["decide"]>[0]
   > = [];
+  readonly revisions: Array<
+    Parameters<QuestionPoolPersistencePort["revise"]>[0]
+  > = [];
+  readonly latestCalls: Array<{ productLine?: string; pendingOnly?: boolean }> =
+    [];
   persistCalls = 0;
   cancelCalls = 0;
   reuse: QuestionPoolProjection | null = null;
 
-  async latest(): Promise<QuestionPoolProjection | null> {
+  async latest(
+    productLine?: string,
+    pendingOnly?: boolean,
+  ): Promise<QuestionPoolProjection | null> {
+    this.latestCalls.push({ productLine, pendingOnly });
     return this.reuse;
   }
 
@@ -169,6 +178,21 @@ class FakePersistence implements QuestionPoolPersistencePort {
       decidedAt: "2026-08-15T00:10:00Z",
     };
   }
+
+  async revise(
+    input: Parameters<QuestionPoolPersistencePort["revise"]>[0],
+  ): Promise<QuestionPoolProjection> {
+    this.revisions.push(input);
+    const pool = basePool({
+      id: input.poolId,
+      status: "awaiting-selection",
+      revision: input.expectedRevision + 1,
+      keywords: input.keywords,
+      questions: input.questions,
+    });
+    this.reuse = pool;
+    return pool;
+  }
 }
 
 function providers(
@@ -179,6 +203,8 @@ function providers(
 ) {
   const keywordSearch = {
     slot: "keyword-search" as const,
+    baselineEngines: vi.fn(() => []),
+    probeQuestion: vi.fn<GeoKeywordSearchCapability["probeQuestion"]>(),
     search: vi.fn<GeoKeywordSearchCapability["search"]>(async () =>
       JSON.stringify({
         core: [
@@ -389,5 +415,158 @@ describe("QuestionPoolService", () => {
       selectedQuestionIds: generated.questions.map((question) => question.id),
     });
     expect(persistence.decisions[0]).toMatchObject({ actorId: "desktop-user" });
+  });
+
+  it("revises a pending question and forwards the verbatim instruction to persistence", async () => {
+    const persistence = new FakePersistence();
+    const { service: subject } = service(persistence);
+    const generated = await subject.generate(input);
+    persistence.reuse = { ...generated, status: "awaiting-selection" };
+    const target = generated.questions[0];
+
+    const outcome = await subject.revise({
+      workspaceId: "brand-08",
+      sessionId: "session-08",
+      action: "modify",
+      targetKind: "question",
+      targetId: target.id,
+      value: "成都汽车改装哪家靠谱？",
+      reason: "把第一个问题改得更口语",
+      actorId: "desktop-user",
+    });
+
+    // 修订只解析本 Session 的待决池（跳过普通 latest 优先返回的已确认池）。
+    expect(persistence.latestCalls.at(-1)).toEqual({
+      productLine: undefined,
+      pendingOnly: true,
+    });
+    expect(persistence.revisions[0]).toMatchObject({
+      poolId: generated.id,
+      expectedRevision: generated.revision,
+      action: "modify",
+      targetKind: "question",
+      targetId: target.id,
+      actorId: "desktop-user",
+      reason: "把第一个问题改得更口语",
+    });
+    expect(
+      persistence.revisions[0].questions.find((q) => q.id === target.id)?.text,
+    ).toBe("成都汽车改装哪家靠谱？");
+    expect(outcome.pool.status).toBe("awaiting-selection");
+  });
+
+  it("adds and deletes pending keywords and questions with user-added provenance", async () => {
+    const persistence = new FakePersistence();
+    const { service: subject } = service(persistence);
+    const generated = await subject.generate(input);
+    persistence.reuse = { ...generated, status: "awaiting-selection" };
+
+    await subject.revise({
+      workspaceId: "brand-08",
+      sessionId: "session-08",
+      action: "add",
+      targetKind: "keyword",
+      value: { term: "成都汽车隔音", category: "scene", heat: "high" },
+      reason: "加一个场景词",
+      actorId: "desktop-user",
+    });
+    const addedKeywords = persistence.revisions[0].keywords;
+    expect(addedKeywords.at(-1)).toMatchObject({
+      term: "成都汽车隔音",
+      category: "scene",
+      heat: "high",
+      platform: "doubao",
+    });
+    expect(addedKeywords.at(-1)?.id).toMatch(/^kw-user-/);
+
+    await subject.revise({
+      workspaceId: "brand-08",
+      sessionId: "session-08",
+      action: "add",
+      targetKind: "question",
+      value: { text: "成都贴隐形车衣要多少钱？" },
+      reason: "补一个价格问题",
+      actorId: "desktop-user",
+    });
+    const addedQuestion = persistence.revisions[1].questions.at(-1);
+    expect(addedQuestion).toMatchObject({
+      text: "成都贴隐形车衣要多少钱？",
+      recommended: false,
+    });
+    expect(addedQuestion?.id).toMatch(/^q-user-/);
+    expect(addedQuestion?.evidence).toEqual([
+      { kind: "user-added", reference: "chat-revision", excerpt: "成都贴隐形车衣要多少钱？" },
+    ]);
+    expect(addedQuestion?.score).toMatchObject({ priority: "low", relevance: 0 });
+
+    const before = persistence.revisions[1].questions.length;
+    await subject.revise({
+      workspaceId: "brand-08",
+      sessionId: "session-08",
+      action: "delete",
+      targetKind: "question",
+      targetId: addedQuestion!.id,
+      reason: "删掉刚才加的",
+      actorId: "desktop-user",
+    });
+    expect(persistence.revisions[2].questions).toHaveLength(before - 1);
+  });
+
+  it("rejects revisions on confirmed pools, unknown targets, duplicates and cross-session identity", async () => {
+    const persistence = new FakePersistence();
+    const { service: subject } = service(persistence);
+    const generated = await subject.generate(input);
+
+    persistence.reuse = { ...generated, status: "confirmed" };
+    await expect(
+      subject.revise({
+        workspaceId: "brand-08",
+        sessionId: "session-08",
+        action: "delete",
+        targetKind: "question",
+        targetId: generated.questions[0].id,
+        reason: "删",
+        actorId: "desktop-user",
+      }),
+    ).rejects.toThrow("question_pool_confirmed_immutable");
+
+    persistence.reuse = { ...generated, status: "awaiting-selection" };
+    await expect(
+      subject.revise({
+        workspaceId: "brand-08",
+        sessionId: "session-08",
+        action: "modify",
+        targetKind: "question",
+        targetId: "q-404",
+        value: "x",
+        reason: "改",
+        actorId: "desktop-user",
+      }),
+    ).rejects.toThrow("question_pool_revision_target_not_found");
+
+    await expect(
+      subject.revise({
+        workspaceId: "brand-08",
+        sessionId: "session-08",
+        action: "add",
+        targetKind: "question",
+        value: { text: generated.questions[0].text },
+        reason: "加重复问题",
+        actorId: "desktop-user",
+      }),
+    ).rejects.toThrow("question_pool_question_duplicate");
+
+    await expect(
+      subject.revise({
+        workspaceId: "brand-08",
+        sessionId: "session-other",
+        action: "delete",
+        targetKind: "question",
+        targetId: generated.questions[0].id,
+        reason: "跨会话修订",
+        actorId: "desktop-user",
+      }),
+    ).rejects.toThrow("question_pool_identity_mismatch");
+    expect(persistence.revisions).toHaveLength(0);
   });
 });
