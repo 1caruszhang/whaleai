@@ -41,9 +41,15 @@ vi.mock("./XiaojingGeoBaselinePanel", async () => {
   return { default: BaselineStub };
 });
 vi.mock("./XiaojingPostPublishMonitoringPanel", () => ({
-  default: (props: { workspaceId: string; readOnly?: boolean }) => {
+  default: (props: {
+    workspaceId: string;
+    readOnly?: boolean;
+    planId?: string;
+  }) => {
     mocks.monitorProps(props);
-    return <section aria-label="监测面板桩" />;
+    return (
+      <section aria-label="监测面板桩" data-monitor-plan={props.planId ?? ""} />
+    );
   },
 }));
 vi.mock("./XiaojingGeoEffectDashboard", () => ({
@@ -210,5 +216,34 @@ describe("XiaojingGeoEffectPage", () => {
     expect(mocks.baselineProps).toHaveBeenLastCalledWith(
       expect.objectContaining({ workspaceId: "brand-77" }),
     );
+  });
+
+  // 票 32：监测告警深链的落点经整页传入三面板挂载区——精确计划 id 到达
+  // 监测面板，页面对落点本身不做任何改写或猜测。
+  it("forwards the monitor deep-link target to the monitoring panel", () => {
+    const scrollIntoView = vi.fn();
+    const originalScrollIntoView = HTMLElement.prototype.scrollIntoView;
+    HTMLElement.prototype.scrollIntoView = scrollIntoView;
+    render(
+      <XiaojingGeoEffectPage
+        workspace={workspace}
+        sessionBinding={binding}
+        monitorNavigationTarget={{
+          workspaceId: "brand-19",
+          planId: "monitor-plan-exact",
+          nonce: 3,
+        }}
+        onOpenBrandSession={vi.fn()}
+      />,
+    );
+
+    expect(mocks.monitorProps).toHaveBeenLastCalledWith(
+      expect.objectContaining({ planId: "monitor-plan-exact" }),
+    );
+    expect(
+      document.querySelector("[data-monitor-plan]"),
+    ).toHaveAttribute("data-monitor-plan", "monitor-plan-exact");
+    expect(scrollIntoView).toHaveBeenCalledTimes(1);
+    HTMLElement.prototype.scrollIntoView = originalScrollIntoView;
   });
 });

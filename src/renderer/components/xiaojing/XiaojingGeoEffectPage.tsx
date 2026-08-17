@@ -9,6 +9,7 @@ import {
   type TabApiContextValue,
   type TabContextValue,
 } from "@/context/TabContext";
+import type { GeoEffectNavigationTarget } from "../../../shared/geo/notification";
 import XiaojingGeoEffectPanel from "./XiaojingGeoEffectPanel";
 
 /** The control-plane identity the effects panels borrow: the brand's first
@@ -23,6 +24,8 @@ export interface BrandEffectSessionBinding {
 interface Props {
   workspace: BrandWorkspace | null;
   sessionBinding: BrandEffectSessionBinding | null;
+  /** 监测告警通知深链的落点（票 32）：精确监测计划 id + nonce。 */
+  monitorNavigationTarget?: GeoEffectNavigationTarget | null;
   onOpenBrandSession: () => void;
 }
 
@@ -123,10 +126,13 @@ function EffectSessionScope({
  * 选中品牌、不携带 Session 身份；三面板的控制面请求借用该品牌已打开
  * 聊天 Tab 的 Session Sidecar owner 身份——没有已打开会话时如实引导先
  * 打开会话，不伪造数据也不新建第二个 Agent 入口。
+ * 票 32：监测告警通知深链落在本页的精确监测计划 run 视图
+ * （monitorNavigationTarget），不落到聊天或工作台。
  */
 export default memo(function XiaojingGeoEffectPage({
   workspace,
   sessionBinding,
+  monitorNavigationTarget = null,
   onOpenBrandSession,
 }: Props) {
   if (!workspace) {
@@ -171,6 +177,7 @@ export default memo(function XiaojingGeoEffectPage({
             <XiaojingGeoEffectPanel
               key={`${workspace.id}:geo-effect`}
               workspaceId={workspace.id}
+              monitorNavigationTarget={monitorNavigationTarget}
             />
           </EffectSessionScope>
         ) : (

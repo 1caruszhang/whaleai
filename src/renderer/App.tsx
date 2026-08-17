@@ -49,7 +49,10 @@ import {
 import { resolveNotificationClickRoute, type NotificationClickPayload } from '@/utils/notificationClickRoute';
 import { buildRestoredTabs, saveOpenTabs } from '@/utils/tabPersistence';
 import { tabContentKind } from '@/utils/tabContentKind';
-import type { GeoNavigationTarget } from '../shared/geo/notification';
+import type {
+  GeoEffectNavigationTarget,
+  GeoNavigationTarget,
+} from '../shared/geo/notification';
 import { workspacePathsEqual } from '../shared/workspacePath';
 
 const Chat = lazy(() => import('@/pages/Chat'));
@@ -68,6 +71,7 @@ interface TabContentProps {
   claimSessionOpeningTransition: (sessionId: string, ownerId: string) => (() => void) | null;
   onClearInitialMessage: (tabId: string) => void;
   geoNavigationTarget?: GeoNavigationTarget | null;
+  effectNavigationTarget?: GeoEffectNavigationTarget | null;
   effectSessionBinding?: BrandEffectSessionBinding | null;
   onOpenBrandSession?: () => void;
 }
@@ -85,6 +89,7 @@ export const MemoizedTabContent = memo(function MemoizedTabContent({
   claimSessionOpeningTransition,
   onClearInitialMessage,
   geoNavigationTarget,
+  effectNavigationTarget,
   effectSessionBinding,
   onOpenBrandSession,
 }: TabContentProps) {
@@ -108,10 +113,12 @@ export const MemoizedTabContent = memo(function MemoizedTabContent({
         <XiaojingBrandArchivePage workspace={brandWorkspace} />
       ) : kind === 'brand-effect' ? (
         /* 票 31：效果整页同为品牌级整页；三面板控制面借用该品牌已打开
-           聊天 Tab 的 Session Sidecar owner 身份（见 brandEffectSessionBinding）。 */
+           聊天 Tab 的 Session Sidecar owner 身份（见 brandEffectSessionBinding）。
+           票 32：监测告警深链的精确监测计划落点也经此传入。 */
         <XiaojingGeoEffectPage
           workspace={brandWorkspace}
           sessionBinding={effectSessionBinding ?? null}
+          monitorNavigationTarget={effectNavigationTarget ?? null}
           onOpenBrandSession={onOpenBrandSession ?? (() => undefined)}
         />
       ) : (
@@ -136,6 +143,7 @@ export const MemoizedTabContent = memo(function MemoizedTabContent({
                     onNewSession={() => onNewSession(tab.id)}
                     sessionTitle={tab.title}
                     onRenameSession={(title) => onRenameSession(tab.id, title)}
+                    navigationTarget={geoNavigationTarget ?? undefined}
                   />
                 </Suspense>
               </div>
@@ -172,6 +180,9 @@ export default function App() {
   const [restoreCandidate, setRestoreCandidate] = useState(() => buildRestoredTabs());
   const [geoNavigationTarget, setGeoNavigationTarget] = useState<GeoNavigationTarget | null>(null);
   const geoNavigationNonce = useRef(0);
+  // 票 32：监测告警深链在「效果」整页的落点（精确监测计划 id + nonce）。
+  const [effectNavigationTarget, setEffectNavigationTarget] = useState<GeoEffectNavigationTarget | null>(null);
+  const effectNavigationNonce = useRef(0);
   const handledNotificationIds = useRef(new Set<string>());
   const transitions = useRef(createSessionResourceTransitionState());
 
@@ -202,6 +213,8 @@ export default function App() {
   const selectTab = useCallback((tabId: string) => {
     const tab = tabsRef.current.find((candidate) => candidate.id === tabId);
     if (!tab) return;
+    // 用户主动选中「效果」页意味着放弃旧的监测深链落点，恢复 latest 视图。
+    if (tab.view === 'brand-effect') setEffectNavigationTarget(null);
     setActiveTabId(tabId);
     if (tab.sessionId) void reconcileSessionTabActivation(tab.sessionId, tab.id);
     if (tab.hasUnread) {
@@ -328,14 +341,20 @@ export default function App() {
     setActiveTabId(tab.id);
   }, [selectTab, setActiveTabId, setTabs, t]);
 
-  // 票 31：「效果」复用同一品牌级一级导航机制（单例整页 tab）。
-  const openBrandEffect = useCallback(() => {
+  // 票 31：「效果」复用同一品牌级一级导航机制（单例整页 tab）。返回是否
+  // 成功选中/创建效果 tab；用户主动进入时丢弃未消费的监测深链落点。
+  const openBrandEffect = useCallback((): boolean => {
+    setEffectNavigationTarget(null);
     const existing = tabsRef.current.find((tab) => tab.view === 'brand-effect');
-    if (existing) return selectTab(existing.id);
-    if (tabsRef.current.length >= MAX_TABS) return;
+    if (existing) {
+      selectTab(existing.id);
+      return true;
+    }
+    if (tabsRef.current.length >= MAX_TABS) return false;
     const tab = { ...createNewTab(), view: 'brand-effect' as const, title: t('tabs.brandEffect') };
     setTabs((current) => [...current, tab]);
     setActiveTabId(tab.id);
+    return true;
   }, [selectTab, setActiveTabId, setTabs, t]);
 
   // 票 31：效果整页不新建 Sidecar owner——借用该品牌第一个已打开聊天 Tab
@@ -484,6 +503,13 @@ export default function App() {
       const resolution = await resolveGeoNotificationLocator(route.locator);
       if (resolution.status !== 'exact' || !resolution.workspace || !resolution.locator) {
         toastRef.current.info(resolution.message ?? t('notifications.geoTargetUnavailable'));
+        // 失效目标不替换成相似对象；品牌仍存在时只回到该品牌的安全入口。
+        if (
+          resolution.workspace
+          && brandStateRef.current.currentWorkspace?.id !== resolution.workspace.id
+        ) {
+          await brandStateRef.current.switchWorkspace(resolution.workspace.id);
+        }
         return;
       }
       if (brandStateRef.current.currentWorkspace?.id !== resolution.workspace.id) {
@@ -494,7 +520,24 @@ export default function App() {
         workspacePath: resolution.workspace.rootPath,
         title: resolution.sessionTitle ?? t('notifications.geoSessionTitle'),
       });
-      if (opened) setGeoNavigationTarget({ ...resolution.locator, nonce: ++geoNavigationNonce.current });
+      if (!opened) return;
+      if (route.landing === 'effect-monitor') {
+        // 票 32：监测告警落到「效果」整页的具体监测计划 run 视图。会话
+        // 照常恢复——效果页控制面借用该品牌已打开聊天 Tab 的 Session 身份。
+        // openBrandEffect 会先清空旧落点，这里随后写入本次落点（批量更新，
+        // 最终状态即本次落点）；tab 已满时如实提示，不静默改降落点。
+        if (!openBrandEffect()) {
+          toastRef.current.warning(t('tabs.maxTabsReached', { count: MAX_TABS }));
+          return;
+        }
+        setEffectNavigationTarget({
+          workspaceId: resolution.workspace.id,
+          planId: resolution.locator.artifact.id,
+          nonce: ++effectNavigationNonce.current,
+        });
+        return;
+      }
+      setGeoNavigationTarget({ ...resolution.locator, nonce: ++geoNavigationNonce.current });
     };
     void (async () => {
       await listenWithCleanup<NotificationClickPayload>(
@@ -506,7 +549,7 @@ export default function App() {
       if (pending && !controller.signal.aborted) await handleClick(pending);
     })();
     return () => controller.abort();
-  }, [mountSession, selectTab, t]);
+  }, [mountSession, openBrandEffect, selectTab, t]);
 
   return (
     <SessionDeletionContext.Provider value={(sessionId) => deleteSession(sessionId)}>
@@ -578,6 +621,12 @@ export default function App() {
                     claimSessionOpeningTransition={claimSessionOpeningTransition}
                     onClearInitialMessage={(tabId) => updateTab(tabId, { initialMessage: undefined })}
                     geoNavigationTarget={tab.sessionId === geoNavigationTarget?.sessionId ? geoNavigationTarget : null}
+                    effectNavigationTarget={
+                      tab.view === 'brand-effect'
+                      && effectNavigationTarget?.workspaceId === brandState.currentWorkspace?.id
+                        ? effectNavigationTarget
+                        : null
+                    }
                     effectSessionBinding={tab.view === 'brand-effect' ? brandEffectSessionBinding : null}
                     onOpenBrandSession={tab.view === 'brand-effect' ? openBrandEffectSession : undefined}
                   />
