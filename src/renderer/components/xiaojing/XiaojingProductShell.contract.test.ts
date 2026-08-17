@@ -24,6 +24,43 @@ describe("Xiaojing product shell contract", () => {
     expect(app).not.toContain("activeTab?.view !== 'chat'");
   });
 
+  // 票 30：一级导航机制——品牌级入口跟随当前选中品牌、不依赖任何 Session。
+  // 「品牌档案」先落地；「效果」由票 31 复用同一机制加入后，四个一级入口
+  // （主聊天、品牌工作台、品牌档案、效果）完整。
+  it("hosts brand-level full pages through sidebar primary navigation", () => {
+    const app = source("src/renderer/App.tsx");
+    const sidebar = source(
+      "src/renderer/components/xiaojing/XiaojingSidebar.tsx",
+    );
+    const archive = source(
+      "src/renderer/components/xiaojing/XiaojingBrandArchivePage.tsx",
+    );
+    const workbench = source(
+      "src/renderer/components/xiaojing/XiaojingGeoWorkbench.tsx",
+    );
+    // 左侧栏一级导航承载品牌档案；入口只调品牌级回调，不经过任何
+    // onOpenWorkspace/onOpenSession 会话打开路径。
+    expect(sidebar).toContain("onOpenBrandArchive");
+    expect(sidebar).toContain("xiaojingSidebar.brandArchive");
+    expect(sidebar).toContain("activeTab?.view === 'brand-archive'");
+    expect(sidebar).toContain("onClick={onOpenBrandArchive}");
+    // 品牌档案是独立整页 tab 视图（单例复用），跟随当前选中品牌，
+    // 不绑定任何 Session 身份。
+    expect(app).toContain("view: 'brand-archive'");
+    expect(app).toContain("<XiaojingBrandArchivePage");
+    expect(app).toContain("tab.view === 'brand-archive'");
+    expect(app).toContain("brandState.currentWorkspace");
+    // 整页只读投影：版本史与产物血缘来自 BrandWorkspace 历史投影，无确认
+    // 或动作入口；工作台不再渲染历史面板。
+    expect(archive).toContain("loadBrandHistory");
+    expect(archive).toContain('aria-label="品牌知识版本"');
+    expect(archive).toContain('aria-label="已批准产物"');
+    expect(archive).not.toContain("decideGeoKnowledge");
+    expect(archive).not.toContain("controlGeoOperation");
+    expect(archive).not.toContain("apiPost");
+    expect(workbench).not.toContain("BrandHistoryPanel");
+  });
+
   it("registers only focused Session and GEO route families in the Sidecar", () => {
     const composition = source("src/server/sidecar-composition.ts");
     expect(composition).toContain("pathname.startsWith('/api/xiaojing/')");
@@ -59,7 +96,8 @@ describe("Xiaojing product shell contract", () => {
     expect(workbench).toContain("xiaojing:geo-workbench-collapsed");
     expect(workbench).toContain("<XiaojingGeoOperationPanel");
     expect(workbench).toContain("<XiaojingBrandKnowledgePanel");
-    expect(workbench).toContain("<XiaojingBrandHistoryPanel");
+    // 票 30：历史面板移出工作台，知识版本史与产物血缘整页迁往「品牌档案」。
+    expect(workbench).not.toContain("<XiaojingBrandHistoryPanel");
     expect(operationPanel).toContain("<XiaojingQuestionPoolPanel");
     expect(operationPanel).toContain("<XiaojingTopicPlanPanel");
     expect(operationPanel).toContain("<XiaojingArticleGenerationPanel");
@@ -153,7 +191,7 @@ describe("Xiaojing product shell contract", () => {
     const gatePanels = source(
       "src/renderer/components/xiaojing/GeoOperationGatePanels.tsx",
     );
-    expect(app).toContain("tab.view === 'chat' ? workspaceForPath");
+    expect(app).toContain("workspaceForPath(brandState.workspaces, tab.workspacePath)");
     expect(app).toContain("workspacePathsEqual(workspace.rootPath, path)");
     expect(chat).toContain("useCurrentWorkspace()");
     expect(chat).toContain("<XiaojingChatMaterialImport");

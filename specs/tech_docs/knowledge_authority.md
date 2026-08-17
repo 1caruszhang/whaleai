@@ -27,6 +27,12 @@
 切换器与六阶段骨架之间，工作台组成见 `geo_operations.md`），Agent 通过一条聚合
 `XIAOJING_KNOWLEDGE_DECISION` reminder 得到全部结果。
 
+知识版本史与产物血缘的呈现位置是左侧栏「品牌档案」一级入口：品牌级只读整页
+（`XiaojingBrandArchivePage`），跟随当前选中品牌、不依赖任何 Session，数据来自
+`cmd_brand_workspace_history` 返回的 `BrandHistoryProjection`（`knowledge_versions`
+用户批准快照与已批准产物的 `sourceRefs`/`usedBy` 血缘）。整页除读取（刷新/重试）
+外不提供任何确认或动作入口；右侧 GEO 工作台不再渲染历史面板。
+
 Node 再通过既有 Management API `/api/brand-knowledge/*` 交给 Rust。Rust 同时校验 Sidecar immutable management id、process generation、逻辑 Session id 和品牌 workspace path；JSON 中换一个 `workspaceId` 不能访问另一品牌。
 
 ## 事实 identity 与标准化
@@ -105,6 +111,7 @@ Agent 自然确认结果；没有 visible tail，因此不会生成虚假用户�
 - 结构化四按钮与无聊天消息提交：`KnowledgeConflictCard.test.tsx`；
 - 批量确认卡勾选/胶囊编辑/水合/部分失败：`KnowledgeBatchCard.test.tsx`；
 - 工作台权威知识投影：`XiaojingBrandKnowledgePanel.test.tsx`；
+- 品牌档案只读整页（版本史与血缘投影、无动作入口）：`XiaojingBrandArchivePage.test.tsx`；
 - 小鲸 persistent prompt 建议门：`src/server/system-prompt.unit.test.ts`。
 
 所有默认测试离线运行，不读取真实 Provider credential、用户目录或网络。

@@ -12,9 +12,6 @@ vi.mock("./XiaojingGeoOperationPanel", () => ({
 vi.mock("./XiaojingBrandKnowledgePanel", () => ({
   default: () => <section aria-label="品牌知识桩" />,
 }));
-vi.mock("./XiaojingBrandHistoryPanel", () => ({
-  default: () => <section aria-label="品牌历史桩" />,
-}));
 vi.mock("./XiaojingGeoEffectPanel", () => ({
   default: (props: { workspaceId: string }) => (
     <section aria-label="效果入口桩" data-workspace={props.workspaceId} />
@@ -74,10 +71,14 @@ describe("XiaojingGeoWorkbench", () => {
     expect(operationPanel).toContainElement(
       screen.getByRole("region", { name: "品牌知识桩" }),
     );
-    // 品牌历史面板留在工作台（票 30 迁往品牌档案整页）。
+    // 票 30：历史面板移出工作台，知识版本史与产物血缘由左侧栏
+    // 「品牌档案」一级入口整页呈现。
     expect(
-      screen.getByRole("region", { name: "品牌历史桩" }),
-    ).toBeInTheDocument();
+      screen.queryByRole("region", { name: "品牌历史桩" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /品牌知识与产物历史/ }),
+    ).not.toBeInTheDocument();
   });
 
   it("keeps capability launch cards out of the workbench in both views", () => {

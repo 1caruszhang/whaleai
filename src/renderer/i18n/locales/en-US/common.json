@@ -1,15 +1,4 @@
 {
-  "actions": {
-    "cancel": "Cancel",
-    "close": "Close",
-    "confirm": "Confirm",
-    "save": "Save"
-  },
-  "language": {
-    "system": "System",
-    "zhCN": "Simplified Chinese",
-    "enUS": "English"
-  },
   "xiaojingSidebar": {
     "ariaLabel": "Xiaojing brands and sessions",
     "currentBrand": "Current brand",
@@ -19,6 +8,8 @@
     "startFromBrand": "Start by creating a brand",
     "createNewBrand": "Create new brand",
     "brandOverview": "Brand overview",
+    "primaryNav": "Brand-level navigation",
+    "brandArchive": "Brand archive",
     "newSession": "New session",
     "sessions": "Sessions",
     "loadingBrand": "Loading brand",
@@ -33,12 +24,32 @@
     "footer": "Xiaojing · Local brand workspace",
     "closeCreateBrand": "Close create brand",
     "brandName": "Brand name",
-    "productLines": "Product lines (optional, comma-separated)",
     "cancel": "Cancel",
     "createAndEnter": "Create and open",
     "deleteTitle": "Permanently delete “{{title}}”",
     "deleteScope": "This deletes {{sessionRecords}} session index record(s) and {{chatTranscripts}} chat transcript(s). It retains {{knowledgeFacts}} brand fact(s), {{operations}} operation(s), {{artifacts}} artifact(s), {{publishOrders}} order(s), and {{observations}} observation(s).",
-    "deletePrompt": "Type “Delete permanently” to confirm",
-    "deletePhrase": "Delete permanently"
+    "deletePreviewFailed": "Cannot start deletion: {{message}}",
+    "deleteBrand": "Delete brand “{{name}}”",
+    "brandDeleteTitle": "Delete brand “{{name}}”",
+    "brandDeleteScope": "This permanently deletes everything about the brand: {{sessions}} session(s) with {{chatTranscripts}} chat transcript(s), {{knowledgeFacts}} brand fact(s), {{operations}} operation(s), {{articles}} article(s), {{materials}} material(s), and {{monitorPlans}} active monitoring plan(s).",
+    "brandDeleteIrreversible": "This action cannot be undone; no brand data can be recovered afterwards.",
+    "brandDeleteConfirm": "Delete brand",
+    "brandDeletePreviewFailed": "Cannot start brand deletion: {{message}}",
+    "deleteFailed": {
+      "in-use": "The session is still responding, or an active post-publish monitor is running. Try again later.",
+      "transition-in-progress": "The session is still opening. Try again shortly.",
+      "activity-unavailable": "Session activity cannot be verified right now. Try again shortly.",
+      "unexpected": "Delete failed. Please retry; if it keeps failing, restart the app.",
+      "generic": "Delete failed. Please try again."
+    },
+    "geoStatus": {
+      "awaiting-confirmation": "Confirm",
+      "failed": "Failed",
+      "queued": "Queued",
+      "running": "Running",
+      "completed": "Done",
+      "ready": "Ready"
+    },
+    "productLineHint": "Just the brand name — product lines (domains) are confirmed automatically when you import material and confirm brand knowledge."
   }
 }

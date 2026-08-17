@@ -3,7 +3,6 @@ import { memo, useCallback, useState } from "react";
 
 import type { BrandWorkspace } from "@/api/brandWorkspaceClient";
 import type { GeoNavigationTarget } from "../../../shared/geo/notification";
-import XiaojingBrandHistoryPanel from "./XiaojingBrandHistoryPanel";
 import XiaojingBrandKnowledgePanel from "./XiaojingBrandKnowledgePanel";
 import XiaojingGeoEffectPanel from "./XiaojingGeoEffectPanel";
 import XiaojingGeoOperationPanel from "./XiaojingGeoOperationPanel";
@@ -133,25 +132,19 @@ export default memo(function XiaojingGeoWorkbench({
             </p>
           )
         ) : currentWorkspace ? (
-          <>
-            {/* 票 28：工作台只保留多操作切换器、当前已确认品牌知识与六阶段
-                骨架三段结构；品牌信息卡由左侧栏表达，过程块在聊天进度卡。 */}
-            <XiaojingGeoOperationPanel
-              key={`${currentWorkspace.id}:geo-operation-workbench`}
-              workspace={currentWorkspace}
-              navigationTarget={navigationTarget}
-            >
-              <XiaojingBrandKnowledgePanel
-                key={`${currentWorkspace.id}:brand-knowledge`}
-                workspaceId={currentWorkspace.id}
-              />
-            </XiaojingGeoOperationPanel>
-
-            <XiaojingBrandHistoryPanel
-              key={`${currentWorkspace.id}:brand-history`}
+          /* 票 28：工作台只保留多操作切换器、当前已确认品牌知识与六阶段
+              骨架三段结构；品牌信息卡由左侧栏表达，过程块在聊天进度卡；
+              历史面板由左侧栏「品牌档案」一级入口整页呈现（票 30）。 */
+          <XiaojingGeoOperationPanel
+            key={`${currentWorkspace.id}:geo-operation-workbench`}
+            workspace={currentWorkspace}
+            navigationTarget={navigationTarget}
+          >
+            <XiaojingBrandKnowledgePanel
+              key={`${currentWorkspace.id}:brand-knowledge`}
               workspaceId={currentWorkspace.id}
             />
-          </>
+          </XiaojingGeoOperationPanel>
         ) : (
           <p className="mt-4 rounded-xl border border-dashed border-[var(--line)] p-4 text-xs leading-5 text-[var(--ink-muted)]">
             {"先在左侧选择品牌，再在聊天中发起 GEO 目标。在聊天中发起 GEO 目标后，小鲸会先确认事实与目标，再创建受控的 GEO 操作。"}

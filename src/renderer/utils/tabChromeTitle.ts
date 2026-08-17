@@ -9,14 +9,10 @@ export function getFixedTabChromeTitle(
   switch (view) {
     case 'settings':
       return t('tabs.settings');
-    case 'capabilities':
-      return t('tabs.capabilities');
-    case 'taskcenter':
-      return t('tabs.taskCenter');
-    case 'space':
-      return t('tabs.team');
-    case 'launcher':
-      return t('tabs.launcher');
+    case 'welcome':
+      return t('tabs.welcome');
+    case 'brand-archive':
+      return t('tabs.brandArchive');
     default:
       return undefined;
   }

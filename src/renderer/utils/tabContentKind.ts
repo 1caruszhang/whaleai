@@ -7,11 +7,9 @@ import type { Tab } from '@/types/tab';
 export type TabContentKind =
     | 'deferred' // one-frame placeholder for a freshly created heavy non-Chat tab
     | 'deferred-chat' // live TabProvider + lightweight boot surface; Chat mounts later
-    | 'launcher'
+    | 'welcome'
     | 'settings'
-    | 'capabilities'
-    | 'taskcenter'
-    | 'space'
+    | 'brand-archive' // brand-level read-only full page; follows the current workspace
     | 'chat'; // every chat tab is live and mounts TabProvider
 
 /**
@@ -23,10 +21,8 @@ export type TabContentKind =
  */
 export function tabContentKind(tab: Tab, isDeferredMount: boolean): TabContentKind {
     if (isDeferredMount) return tab.view === 'chat' ? 'deferred-chat' : 'deferred';
-    if (tab.view === 'launcher') return 'launcher';
+    if (tab.view === 'welcome') return 'welcome';
     if (tab.view === 'settings') return 'settings';
-    if (tab.view === 'capabilities') return 'capabilities';
-    if (tab.view === 'taskcenter') return 'taskcenter';
-    if (tab.view === 'space') return 'space';
+    if (tab.view === 'brand-archive') return 'brand-archive';
     return 'chat';
 }

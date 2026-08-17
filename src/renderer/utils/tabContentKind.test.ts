@@ -1,36 +1,21 @@
-import { describe, it, expect } from 'vitest';
+import { describe, expect, it } from 'vitest';
 
-import { tabContentKind } from './tabContentKind';
 import type { Tab } from '@/types/tab';
+import { tabContentKind } from './tabContentKind';
 
-function tab(over: Partial<Tab>): Tab {
-    return {
-        id: 't',
-        agentDir: '/ws',
-        sessionId: 'sid',
-        view: 'chat',
-        title: 'T',
-        sidecarConfigDisposition: 'push',
-        ...over,
-    };
-}
+const tab = (view: Tab['view']): Tab => ({
+  id: view,
+  workspacePath: view === 'chat' ? '/brands/acme' : null,
+  sessionId: view === 'chat' ? 'session-1' : null,
+  view,
+  title: view,
+});
 
-describe('tabContentKind', () => {
-    it('a restored pending chat tab mounts the normal chat path', () => {
-        expect(tabContentKind(tab({ sidecarConfigDisposition: 'pending' }), false)).toBe('chat');
-    });
-
-    it('deferred Chat keeps its lifecycle branch while non-Chat uses a placeholder', () => {
-        expect(tabContentKind(tab({ sidecarConfigDisposition: 'pending' }), true)).toBe('deferred-chat');
-        expect(tabContentKind(tab({ view: 'launcher' }), true)).toBe('deferred');
-    });
-
-    it('dispatches non-chat views by view field', () => {
-        expect(tabContentKind(tab({ view: 'launcher' }), false)).toBe('launcher');
-        expect(tabContentKind(tab({ view: 'settings' }), false)).toBe('settings');
-        expect(tabContentKind(tab({ view: 'capabilities' }), false)).toBe('capabilities');
-        expect(tabContentKind(tab({ view: 'taskcenter' }), false)).toBe('taskcenter');
-        expect(tabContentKind(tab({ view: 'space' }), false)).toBe('space');
-    });
-
+describe('focused tab content', () => {
+  it('dispatches the complete product route table', () => {
+    expect(tabContentKind(tab('welcome'), false)).toBe('welcome');
+    expect(tabContentKind(tab('settings'), false)).toBe('settings');
+    expect(tabContentKind(tab('brand-archive'), false)).toBe('brand-archive');
+    expect(tabContentKind(tab('chat'), false)).toBe('chat');
+  });
 });

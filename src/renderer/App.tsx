@@ -26,6 +26,7 @@ import CustomTitleBar from '@/components/CustomTitleBar';
 import LinkContextMenuProvider from '@/components/LinkContextMenuProvider';
 import TabBar from '@/components/TabBar';
 import { useToast } from '@/components/Toast';
+import XiaojingBrandArchivePage from '@/components/xiaojing/XiaojingBrandArchivePage';
 import XiaojingGeoWorkbench from '@/components/xiaojing/XiaojingGeoWorkbench';
 import XiaojingSidebar from '@/components/xiaojing/XiaojingSidebar';
 import XiaojingWelcome from '@/components/xiaojing/XiaojingWelcome';
@@ -96,6 +97,9 @@ export const MemoizedTabContent = memo(function MemoizedTabContent({
         <XiaojingWelcome />
       ) : kind === 'settings' ? (
         <Suspense fallback={PAGE_FALLBACK}><Settings /></Suspense>
+      ) : kind === 'brand-archive' ? (
+        /* 票 30：品牌级整页跟随当前选中品牌，不依赖任何 Session。 */
+        <XiaojingBrandArchivePage workspace={brandWorkspace} />
       ) : (
         <TabProvider
           tabId={tab.id}
@@ -299,6 +303,17 @@ export default function App() {
     setActiveTabId(tab.id);
   }, [selectTab, setActiveTabId, setTabs, t]);
 
+  // 票 30：品牌级一级导航入口。整页跟随当前选中品牌（渲染时取
+  // brandState.currentWorkspace），tab 本身不携带 workspace/session 身份。
+  const openBrandArchive = useCallback(() => {
+    const existing = tabsRef.current.find((tab) => tab.view === 'brand-archive');
+    if (existing) return selectTab(existing.id);
+    if (tabsRef.current.length >= MAX_TABS) return;
+    const tab = { ...createNewTab(), view: 'brand-archive' as const, title: t('tabs.brandArchive') };
+    setTabs((current) => [...current, tab]);
+    setActiveTabId(tab.id);
+  }, [selectTab, setActiveTabId, setTabs, t]);
+
   useWindowLifecycle({
     onCmdWCloseTab: () => closeTab(activeTabIdRef.current),
     onExitRequested: async () => true,
@@ -450,6 +465,7 @@ export default function App() {
             onDeleteSession={async (preview) => deleteSession(preview.sessionId, preview)}
             onDeleteBrand={deleteBrand}
             onOpenSettings={openSettings}
+            onOpenBrandArchive={openBrandArchive}
           />
           <div className="flex min-w-0 flex-1 flex-col" data-tab-workspace>
             <CustomTitleBar
@@ -481,7 +497,13 @@ export default function App() {
                   <MemoizedTabContent
                     key={tab.id}
                     tab={tab}
-                    brandWorkspace={tab.view === 'chat' ? workspaceForPath(brandState.workspaces, tab.workspacePath) : null}
+                    brandWorkspace={
+                      tab.view === 'chat'
+                        ? workspaceForPath(brandState.workspaces, tab.workspacePath)
+                        : tab.view === 'brand-archive'
+                          ? brandState.currentWorkspace
+                          : null
+                    }
                     isActive={tab.id === activeTabId}
                     onNewSession={async (tabId) => {
                       const source = tabsRef.current.find((candidate) => candidate.id === tabId);
