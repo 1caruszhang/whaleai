@@ -1,22 +1,13 @@
-import {
-  fireEvent,
-  render,
-  screen,
-  waitFor,
-  within,
-} from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { QuestionPoolProjection } from "../../../shared/geo/questionPool";
-import XiaojingGeoWorkbench from "./XiaojingGeoWorkbench";
+import XiaojingQuestionPoolPanel from "./XiaojingQuestionPoolPanel";
 
 const mocks = vi.hoisted(() => ({
   sessionId: "session-08",
   apiPost: vi.fn(),
   latest: vi.fn(),
-  generate: vi.fn(),
-  cancel: vi.fn(),
-  confirm: vi.fn(),
 }));
 
 vi.mock("@/context/TabContext", () => ({
@@ -26,9 +17,6 @@ vi.mock("@/context/TabContext", () => ({
 
 vi.mock("@/api/brandQuestionPoolClient", () => ({
   loadLatestQuestionPool: mocks.latest,
-  generateQuestionPool: mocks.generate,
-  cancelQuestionPool: mocks.cancel,
-  confirmQuestionPool: mocks.confirm,
 }));
 
 const workspace = {
@@ -142,145 +130,115 @@ function pool(
   };
 }
 
-function renderWorkbench() {
-  return render(
-    <XiaojingGeoWorkbench
-      currentWorkspace={workspace}
-      onOpenWorkspace={vi.fn(async () => true)}
-      materialImportEnabled
-    />,
-  );
-}
-
-describe("reachable structured question-pool workbench", () => {
+// 票 29：面板退化为纯只读投影——生成/勾选/编辑/确认只有聊天卡片一套
+// 实现，组件测试只断言只读渲染行为。
+describe("XiaojingQuestionPoolPanel read-only projection", () => {
   beforeEach(() => {
-    localStorage.removeItem("xiaojing:geo-workbench-collapsed");
     mocks.sessionId = "session-08";
-    for (const mock of Object.values(mocks).filter(
-      (value) => typeof value === "function",
-    )) {
-      (mock as ReturnType<typeof vi.fn>).mockReset();
-    }
-    mocks.latest.mockResolvedValue(pool());
-    mocks.confirm.mockResolvedValue({
-      poolId: "pool-08",
-      decisionId: "decision-08",
-      decision: "confirm-selection",
-      expectedRevision: 1,
-      revision: 2,
-      knowledgeVersion: 7,
-      questions: [],
-      selectedQuestionIds: [],
-      actorId: "desktop-user",
-      decidedAt: "2026-08-15T00:02:00Z",
-    });
+    mocks.apiPost.mockReset();
+    mocks.latest.mockReset().mockResolvedValue(pool());
   });
 
-  it("loads a valid pool without regenerating, then supports select/edit/delete/add and structured confirm", async () => {
-    renderWorkbench();
+  it("loads the session's latest pool and renders it read-only", async () => {
+    render(
+      <XiaojingQuestionPoolPanel
+        workspaceId={workspace.id}
+      />,
+    );
     const region = await screen.findByRole("region", { name: "问题池选择" });
 
-    expect(mocks.latest).toHaveBeenCalledWith(
-      mocks.apiPost,
-      { workspaceId: "brand-08", sessionId: "session-08" },
-      "旗舰产品",
-    );
-    expect(mocks.generate).not.toHaveBeenCalled();
-    expect(within(region).getByText("已复用")).toBeInTheDocument();
-    expect(within(region).getByText("知识 v7")).toBeInTheDocument();
-    expect(
-      within(region).getByText(/keyword-search:completed#1/),
-    ).toBeInTheDocument();
-
-    fireEvent.click(
-      within(region).getByRole("checkbox", {
-        name: "选择 锦江区汽车隔音推荐哪家？",
-      }),
-    );
-    fireEvent.click(
-      within(region).getByRole("button", { name: "编辑 成都汽车改装哪家好？" }),
-    );
-    fireEvent.change(
-      within(region).getByRole("textbox", { name: "编辑 q-1" }),
-      {
-        target: { value: "成都汽车音响升级哪家好？" },
-      },
-    );
-    fireEvent.click(
-      within(region).getByRole("button", {
-        name: "删除 锦江区汽车隔音推荐哪家？",
-      }),
-    );
-    fireEvent.change(within(region).getByPlaceholderText("补充一个问题"), {
-      target: { value: "成都汽车隔音怎么选？" },
-    });
-    fireEvent.click(within(region).getByRole("button", { name: "新增问题" }));
-    fireEvent.click(
-      within(region).getByRole("button", { name: /确认本轮问题/ }),
-    );
-
-    await waitFor(() => expect(mocks.confirm).toHaveBeenCalledTimes(1));
-    const [, identity, input] = mocks.confirm.mock.calls[0];
-    expect(identity).toEqual({
+    expect(mocks.latest).toHaveBeenCalledWith(mocks.apiPost, {
       workspaceId: "brand-08",
       sessionId: "session-08",
     });
-    expect(input).toMatchObject({ poolId: "pool-08", expectedRevision: 1 });
+    expect(within(region).getByText("已复用")).toBeInTheDocument();
+    expect(within(region).getByText("知识 v7")).toBeInTheDocument();
+    expect(within(region).getByText("成都汽车改装哪家好？")).toBeInTheDocument();
+    expect(within(region).getByText(/已选 1\/2/)).toBeInTheDocument();
     expect(
-      input.questions.map((question: { text: string }) => question.text),
-    ).toEqual(["成都汽车音响升级哪家好？", "成都汽车隔音怎么选？"]);
-    expect(screen.queryByText(/typed user message/i)).not.toBeInTheDocument();
+      within(region).getByText(/keyword-search:completed#1/),
+    ).toBeInTheDocument();
   });
 
-  it("generates only after required product/region input and can cancel the active attempt", async () => {
-    mocks.latest.mockResolvedValue(null);
-    let resolveGenerate!: (value: QuestionPoolProjection) => void;
-    mocks.generate.mockReturnValue(
-      new Promise<QuestionPoolProjection>((resolve) => {
-        resolveGenerate = resolve;
+  it("exposes no generation, selection, edit or confirm controls", async () => {
+    render(
+      <XiaojingQuestionPoolPanel
+        workspaceId={workspace.id}
+      />,
+    );
+    const panel = await screen.findByRole("region", {
+      name: "关键词与问题池",
+    });
+    await within(panel).findByText(/已选/);
+
+    expect(within(panel).queryByRole("button")).not.toBeInTheDocument();
+    expect(within(panel).queryByRole("checkbox")).not.toBeInTheDocument();
+    expect(within(panel).queryByRole("textbox")).not.toBeInTheDocument();
+    expect(
+      within(panel).queryByPlaceholderText("补充一个问题"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("reloads the projection when the session tool signal advances", async () => {
+    const { rerender } = render(
+      <XiaojingQuestionPoolPanel
+        workspaceId={workspace.id}
+        refreshKey={0}
+      />,
+    );
+    await screen.findByRole("region", { name: "问题池选择" });
+    expect(mocks.latest).toHaveBeenCalledTimes(1);
+
+    rerender(
+      <XiaojingQuestionPoolPanel
+        workspaceId={workspace.id}
+        refreshKey={1}
+      />,
+    );
+    await waitFor(() => expect(mocks.latest).toHaveBeenCalledTimes(2));
+  });
+
+  it("surfaces load failures without retry affordances that mutate the pool", async () => {
+    mocks.latest.mockRejectedValue(new Error("question_pool_load_failed"));
+    render(
+      <XiaojingQuestionPoolPanel
+        workspaceId={workspace.id}
+      />,
+    );
+    expect(await screen.findByText("question_pool_load_failed")).toBeInTheDocument();
+    expect(screen.queryByRole("button")).not.toBeInTheDocument();
+  });
+
+  // GD-7 决策 A 回归：关键词挖掘融合进池生成，无独立确认门，
+  // 但挖掘出的搜索词必须随投影展示，供聊天卡片确认时一并审阅。
+  it("shows the mined search terms with category and heat alongside questions", async () => {
+    mocks.latest.mockResolvedValue(
+      pool({
+        keywords: [
+          { id: "kw-1", term: "成都汽车音响改装", category: "core", heat: "high", platform: "doubao" },
+          { id: "kw-2", term: "锦江区 汽车隔音 多少钱", category: "longtail", heat: "medium", platform: "doubao" },
+        ],
       }),
     );
-    mocks.cancel.mockResolvedValue(
-      pool({ status: "cancelled", reused: false }),
+    render(
+      <XiaojingQuestionPoolPanel
+        workspaceId={workspace.id}
+      />,
     );
-    renderWorkbench();
-
-    await waitFor(() => expect(mocks.latest).toHaveBeenCalled());
-    const generateButton = screen.getByRole("button", {
-      name: "加载或生成问题池",
+    const region = await screen.findByRole("region", {
+      name: "关键词与问题池",
     });
-    expect(generateButton).toBeDisabled();
-    fireEvent.change(screen.getByPlaceholderText("如：成都"), {
-      target: { value: "成都" },
-    });
-    expect(generateButton).toBeEnabled();
-    fireEvent.click(generateButton);
-
-    await waitFor(() => expect(mocks.generate).toHaveBeenCalledTimes(1));
-    fireEvent.click(screen.getByRole("button", { name: "取消" }));
-    await waitFor(() => expect(mocks.cancel).toHaveBeenCalledTimes(1));
-    const generatedInput = mocks.generate.mock.calls[0][2];
-    expect(mocks.cancel.mock.calls[0][2]).toBe(generatedInput.idempotencyKey);
-    resolveGenerate(pool({ reused: false }));
-  });
-
-  it("retries with the same attempt key and the retry flag", async () => {
-    mocks.latest.mockResolvedValue(null);
-    mocks.generate
-      .mockRejectedValueOnce(new Error("question_pool_provider_failed"))
-      .mockResolvedValueOnce(pool({ reused: false }));
-    renderWorkbench();
-    await waitFor(() => expect(mocks.latest).toHaveBeenCalled());
-    fireEvent.change(screen.getByPlaceholderText("如：成都"), {
-      target: { value: "成都" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: "加载或生成问题池" }));
-    await screen.findByText("question_pool_provider_failed");
-    fireEvent.click(screen.getByRole("button", { name: "从失败步骤重试" }));
-    await waitFor(() => expect(mocks.generate).toHaveBeenCalledTimes(2));
-    expect(mocks.generate.mock.calls[1][2]).toMatchObject({
-      idempotencyKey: mocks.generate.mock.calls[0][2].idempotencyKey,
-      retry: true,
-    });
+    const keywordBlock = await within(region).findByLabelText(
+      "本次挖掘的搜索词",
+    );
+    expect(
+      within(keywordBlock).getByText(/成都汽车音响改装/),
+    ).toBeInTheDocument();
+    expect(
+      within(keywordBlock).getByText(/锦江区 汽车隔音 多少钱/),
+    ).toBeInTheDocument();
+    expect(within(keywordBlock).getByText(/核心词/)).toBeInTheDocument();
+    expect(within(keywordBlock).getByText(/长尾词/)).toBeInTheDocument();
+    expect(within(keywordBlock).getAllByText(/热度高|热度中/).length).toBe(2);
   });
 });

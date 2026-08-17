@@ -1,9 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import {
-  cancelQuestionPool,
   confirmQuestionPool,
-  generateQuestionPool,
   loadLatestQuestionPool,
   type QuestionPoolApiPost,
 } from "./brandQuestionPoolClient";
@@ -22,12 +20,6 @@ describe("Question pool structured client", () => {
     const identity = { workspaceId: "brand-08", sessionId: "session-08" };
 
     await loadLatestQuestionPool(apiPost, identity, "旗舰产品");
-    await generateQuestionPool(apiPost, identity, {
-      productLine: "旗舰产品",
-      targetRegion: "成都",
-      idempotencyKey: "attempt-ui-08",
-    });
-    await cancelQuestionPool(apiPost, identity, "attempt-ui-08");
     await confirmQuestionPool(apiPost, identity, {
       poolId: "pool-08",
       expectedRevision: 0,
@@ -38,19 +30,6 @@ describe("Question pool structured client", () => {
       [
         "/api/xiaojing/question-pools/latest",
         { ...identity, productLine: "旗舰产品" },
-      ],
-      [
-        "/api/xiaojing/question-pools/generate",
-        {
-          ...identity,
-          productLine: "旗舰产品",
-          targetRegion: "成都",
-          idempotencyKey: "attempt-ui-08",
-        },
-      ],
-      [
-        "/api/xiaojing/question-pools/cancel",
-        { ...identity, idempotencyKey: "attempt-ui-08" },
       ],
       [
         "/api/xiaojing/question-pools/confirm",

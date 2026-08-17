@@ -1,6 +1,5 @@
 import type {
   QuestionPoolDecision,
-  QuestionPoolGenerationParameters,
   QuestionPoolProjection,
   QuestionPoolQuestion,
 } from "../../shared/geo/questionPool";
@@ -18,13 +17,6 @@ interface QuestionPoolResponse<T> {
   error?: string;
 }
 
-function requirePool<T>(response: QuestionPoolResponse<T>): T {
-  if (!response.success || response.pool == null) {
-    throw new Error(response.error ?? "question_pool_not_found");
-  }
-  return response.pool;
-}
-
 export async function loadLatestQuestionPool(
   apiPost: QuestionPoolApiPost,
   identity: { workspaceId: string; sessionId: string },
@@ -37,36 +29,6 @@ export async function loadLatestQuestionPool(
   if (!response.success)
     throw new Error(response.error ?? "question_pool_load_failed");
   return response.pool ?? null;
-}
-
-export function generateQuestionPool(
-  apiPost: QuestionPoolApiPost,
-  identity: { workspaceId: string; sessionId: string },
-  input: {
-    productLine: string;
-    targetRegion: string;
-    idempotencyKey: string;
-    generationParameters?: Partial<QuestionPoolGenerationParameters>;
-    retry?: boolean;
-  },
-  signal?: AbortSignal,
-): Promise<QuestionPoolProjection> {
-  return apiPost<QuestionPoolResponse<QuestionPoolProjection>>(
-    "/api/xiaojing/question-pools/generate",
-    { ...identity, ...input },
-    { signal },
-  ).then(requirePool);
-}
-
-export function cancelQuestionPool(
-  apiPost: QuestionPoolApiPost,
-  identity: { workspaceId: string; sessionId: string },
-  idempotencyKey: string,
-): Promise<QuestionPoolProjection> {
-  return apiPost<QuestionPoolResponse<QuestionPoolProjection>>(
-    "/api/xiaojing/question-pools/cancel",
-    { ...identity, idempotencyKey },
-  ).then(requirePool);
 }
 
 export async function confirmQuestionPool(

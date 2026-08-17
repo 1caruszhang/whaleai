@@ -158,12 +158,6 @@ export default memo(function XiaojingGeoOperationPanel({
   const [focusedId, setFocusedId] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [questionPoolRevision, setQuestionPoolRevision] = useState(0);
-  const [topicPlanRevision, setTopicPlanRevision] = useState(0);
-  const [articleApprovalRevision, setArticleApprovalRevision] = useState(0);
-  const [distributionPlanRevision, setDistributionPlanRevision] = useState(0);
-  const [distributionPlanEditRequest, setDistributionPlanEditRequest] =
-    useState(0);
   // 深链聚焦 pin：每次 nonce 只消费一次，之后的手动切换不被轮询刷新抢回。
   const focusPinRef = useRef<string | null>(null);
 
@@ -358,7 +352,7 @@ export default memo(function XiaojingGeoOperationPanel({
     label: `${STATUS_LABEL[operation.status]} · ${operation.goal}`,
   }));
 
-  /** 阶段产物面板：产物按阶段能力归属渲染，全部只读。 */
+  /** 阶段产物面板：产物按阶段能力归属渲染，全部只读（票 29）。 */
   const renderPhaseBody = useCallback(
     (phaseId: string): ReactNode => {
       const target =
@@ -366,14 +360,14 @@ export default memo(function XiaojingGeoOperationPanel({
         navigationTarget?.operationId === focused?.id
           ? navigationTarget
           : null;
+      // 只读面板的刷新信号：会话内任一工具完成即可能产生新产物。
+      const refreshKey = toolCompleteCount;
       if (target?.card === "article-generation") {
         return (
           <XiaojingArticleGenerationPanel
             workspaceId={workspace.id}
             operationId={target.artifact.id}
-            refreshKey={topicPlanRevision}
-            onApproved={() => setArticleApprovalRevision((value) => value + 1)}
-            readOnly
+            refreshKey={refreshKey}
           />
         );
       }
@@ -382,11 +376,7 @@ export default memo(function XiaojingGeoOperationPanel({
           <XiaojingPublishSchedulerPanel
             workspaceId={workspace.id}
             executionId={target.artifact.id}
-            refreshKey={distributionPlanRevision}
-            onRequestPlanEdit={() =>
-              setDistributionPlanEditRequest((value) => value + 1)
-            }
-            readOnly
+            refreshKey={refreshKey}
           />
         );
       }
@@ -412,9 +402,7 @@ export default memo(function XiaojingGeoOperationPanel({
           return (
             <XiaojingQuestionPoolPanel
               workspaceId={workspace.id}
-              productLines={workspace.productLines}
-              onConfirmed={() => setQuestionPoolRevision((value) => value + 1)}
-              readOnly
+              refreshKey={refreshKey}
             />
           );
         case "content":
@@ -422,17 +410,11 @@ export default memo(function XiaojingGeoOperationPanel({
             <>
               <XiaojingTopicPlanPanel
                 workspaceId={workspace.id}
-                refreshKey={questionPoolRevision}
-                onConfirmed={() => setTopicPlanRevision((value) => value + 1)}
-                readOnly
+                refreshKey={refreshKey}
               />
               <XiaojingArticleGenerationPanel
                 workspaceId={workspace.id}
-                refreshKey={topicPlanRevision}
-                onApproved={() =>
-                  setArticleApprovalRevision((value) => value + 1)
-                }
-                readOnly
+                refreshKey={refreshKey}
               />
             </>
           );
@@ -440,23 +422,14 @@ export default memo(function XiaojingGeoOperationPanel({
           return (
             <XiaojingDistributionPlanPanel
               workspaceId={workspace.id}
-              refreshKey={articleApprovalRevision}
-              editRequestKey={distributionPlanEditRequest}
-              onConfirmed={() =>
-                setDistributionPlanRevision((value) => value + 1)
-              }
-              readOnly
+              refreshKey={refreshKey}
             />
           );
         case "publishing":
           return (
             <XiaojingPublishSchedulerPanel
               workspaceId={workspace.id}
-              refreshKey={distributionPlanRevision}
-              onRequestPlanEdit={() =>
-                setDistributionPlanEditRequest((value) => value + 1)
-              }
-              readOnly
+              refreshKey={refreshKey}
             />
           );
         case "monitoring":
@@ -474,23 +447,18 @@ export default memo(function XiaojingGeoOperationPanel({
           return (
             <XiaojingGeoBaselinePanel
               workspaceId={workspace.id}
-              refreshKey={questionPoolRevision}
+              refreshKey={refreshKey}
               readOnly
             />
           );
       }
     },
     [
-      articleApprovalRevision,
-      distributionPlanEditRequest,
-      distributionPlanRevision,
       focused?.id,
       navigationPhaseId,
       navigationTarget,
-      questionPoolRevision,
-      topicPlanRevision,
+      toolCompleteCount,
       workspace.id,
-      workspace.productLines,
     ],
   );
 
