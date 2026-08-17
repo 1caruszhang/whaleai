@@ -22,13 +22,16 @@ export { parseKnowledgeCandidatesCard };
 
 /**
  * 行内裁决的本地暂存，按候选 id 键控：卡片 3s 轮询用新 data 投影重建后原样保留
- * （ADR 0003）。逐行「确认」是纯视觉糖；冲突二选一在整卡确认前可改。
+ * （ADR 0003）。逐行「确认」是纯视觉糖；冲突二选一在整卡确认前可改；「更改」
+ * 暂存编辑值（adopt-edited 载荷），整卡确认前不落库。
  */
 type KnowledgeConflictChoice = 'adopt-new' | 'keep-current';
 
 interface CandidateState {
   confirmed: boolean;
   conflictChoice: KnowledgeConflictChoice | undefined;
+  /** 行内「更改」的暂存编辑值（数组/标量按候选原值形状解析）；随整卡确认提交 adopt-edited。 */
+  editedValue?: unknown;
   outcome: 'pending' | 'settled' | 'failed';
   settledStatus?: string;
   error?: string;
@@ -53,19 +56,16 @@ function candidateTier(candidate: KnowledgeCardCandidate): 'ready' | 'inferred' 
 }
 
 /** 字符串/字符串数组按顿号连成可扫读的行内摘要，其余 JSON 保持紧凑原文。 */
-function formatValueForDisplay(raw: string, unit?: string | null): string {
-  let text = raw;
-  try {
-    const parsed = JSON.parse(raw) as unknown;
-    if (typeof parsed === 'string') text = parsed;
-    else if (Array.isArray(parsed) && parsed.every((item) => typeof item === 'string')) {
-      text = parsed.join('、');
-    } else {
-      text = JSON.stringify(parsed);
-    }
-  } catch {
-    // 解析失败保持原文展示。
+function plainTextOfValue(value: unknown): string {
+  if (typeof value === 'string') return value;
+  if (Array.isArray(value) && value.every((item) => typeof item === 'string')) {
+    return value.join('、');
   }
+  return JSON.stringify(value);
+}
+
+function formatValueForDisplay(raw: string, unit?: string | null): string {
+  const text = plainTextOfValue(parseCandidateValue(raw));
   return unit ? `${text} ${unit}` : text;
 }
 
@@ -75,6 +75,50 @@ function provenanceLabelKey(candidate: KnowledgeCardCandidate): string {
     return `knowledgeCard.provenance.${provenance}`;
   }
   return 'knowledgeCard.provenance.inferred';
+}
+
+function parseCandidateValue(raw: string): unknown {
+  try {
+    return JSON.parse(raw) as unknown;
+  } catch {
+    return raw;
+  }
+}
+
+function candidateBaseValue(candidate: KnowledgeCardCandidate): unknown {
+  return parseCandidateValue(candidate.normalizedValueJson);
+}
+
+/** 候选当前值（或已暂存编辑）→ 编辑框文本：字符串数组顿号连接，标量保持原文。 */
+function editableTextOf(candidate: KnowledgeCardCandidate, state: CandidateState): string {
+  return plainTextOfValue(
+    state.editedValue !== undefined ? state.editedValue : candidateBaseValue(candidate),
+  );
+}
+
+/** 候选原值是字符串数组 → 编辑框按顿号切分回多值；标量整体为字符串。 */
+function isArrayShapedCandidate(candidate: KnowledgeCardCandidate): boolean {
+  return Array.isArray(candidateBaseValue(candidate));
+}
+
+function parseEditedInput(text: string, candidate: KnowledgeCardCandidate): unknown {
+  if (isArrayShapedCandidate(candidate)) {
+    return text.split('、').map((item) => item.trim()).filter((item) => item.length > 0);
+  }
+  if (typeof candidateBaseValue(candidate) === 'string') {
+    return text.trim();
+  }
+  try {
+    return JSON.parse(text) as unknown;
+  } catch {
+    return text.trim();
+  }
+}
+
+/** 行内「更改」的一条暂存编辑（按候选 id 键控进本地 state）。 */
+interface CandidateEdit {
+  candidate: KnowledgeCardCandidate;
+  value: unknown;
 }
 
 interface KnowledgeBatchCardProps {
@@ -163,8 +207,12 @@ export default function KnowledgeBatchCard({ data, onDecided }: KnowledgeBatchCa
     () => candidates.filter((candidate) => stateOf(candidate).outcome !== 'settled'),
     [candidates, stateOf],
   );
+  // 已「更改」的冲突候选由编辑值裁决（adopt-edited），不再要求二选一。
+  // 已「更改」的冲突候选由编辑值裁决（adopt-edited），不再要求二选一。
   const unresolvedConflictCount = activeCandidates.filter(
-    (candidate) => candidate.status === 'conflict' && !stateOf(candidate).conflictChoice,
+    (candidate) => candidate.status === 'conflict'
+      && stateOf(candidate).editedValue === undefined
+      && !stateOf(candidate).conflictChoice,
   ).length;
   const failedCount = activeCandidates.filter(
     (candidate) => stateOf(candidate).outcome === 'failed',
@@ -196,20 +244,44 @@ export default function KnowledgeBatchCard({ data, onDecided }: KnowledgeBatchCa
     patchState(candidate, { conflictChoice: choice });
   }, [patchState]);
 
+  /** 行内「更改」保存：只暂存进本地 state（按候选 id 键控），不产生任何服务端请求。 */
+  const stageEdits = useCallback((edits: CandidateEdit[]) => {
+    setStates((current) => {
+      const next = { ...current };
+      for (const { candidate, value } of edits) {
+        next[candidate.id] = {
+          ...(current[candidate.id] ?? defaultStateOf(candidate)),
+          editedValue: value,
+          conflictChoice: undefined,
+        };
+      }
+      return next;
+    });
+  }, []);
+
   const submitDecisions = useCallback(async (targets: KnowledgeCardCandidate[]) => {
     if (busy || targets.length === 0) return;
     setBusy(true);
     setSubmitError(null);
     try {
-      const decisions: KnowledgeBatchDecisionItem[] = targets.map((candidate) => ({
-        candidateId: candidate.id,
+      const decisions: KnowledgeBatchDecisionItem[] = targets.map((candidate) => {
+        const state = stateOf(candidate);
+        const base = {
+          candidateId: candidate.id,
+          expectedCurrentVersion: candidate.current?.version ?? candidate.baseVersion,
+        };
         // 整卡全量采纳（ADR 0003）：非冲突行一律 adopt-new（含从未逐条查看的补全行）；
-        // 冲突行按用户内联选择。canSubmit 已保证无未选择冲突，兜底保守保留当前值。
-        decision: candidate.status === 'conflict'
-          ? (stateOf(candidate).conflictChoice ?? 'keep-current')
-          : 'adopt-new',
-        expectedCurrentVersion: candidate.current?.version ?? candidate.baseVersion,
-      }));
+        // 冲突行按用户内联选择；被「更改」的行携带暂存编辑值提交 adopt-edited。
+        if (state.editedValue !== undefined) {
+          return { ...base, decision: 'adopt-edited' as const, editedValue: state.editedValue };
+        }
+        return {
+          ...base,
+          decision: candidate.status === 'conflict'
+            ? (state.conflictChoice ?? 'keep-current')
+            : 'adopt-new' as const,
+        };
+      });
       const response = await apiPost<{
         success: boolean;
         error?: string;
@@ -310,6 +382,7 @@ export default function KnowledgeBatchCard({ data, onDecided }: KnowledgeBatchCa
             busy={busy}
             onConfirmRow={confirmRow}
             onChoose={chooseConflict}
+            onStageEdits={stageEdits}
             onRetry={(targets) => { void submitDecisions(targets); }}
           />
         ))}
@@ -363,13 +436,16 @@ interface FieldRowProps {
   busy: boolean;
   onConfirmRow: (row: KnowledgeFieldRow) => void;
   onChoose: (candidate: KnowledgeCardCandidate, choice: KnowledgeConflictChoice) => void;
+  onStageEdits: (edits: CandidateEdit[]) => void;
   onRetry: (targets: KnowledgeCardCandidate[]) => void;
 }
 
 /** 字段行：同字段多值合并展示；徽章与控件按分层默认派生，摘录与置信度收进展开详情。 */
-function FieldRow({ row, stateOf, busy, onConfirmRow, onChoose, onRetry }: FieldRowProps) {
+function FieldRow({ row, stateOf, busy, onConfirmRow, onChoose, onStageEdits, onRetry }: FieldRowProps) {
   const { t } = useTranslation('chat');
   const [expanded, setExpanded] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const [drafts, setDrafts] = useState<Record<string, string>>({});
   const fieldText = isEnterpriseProfileField(row.field)
     ? t(`knowledgeCard.fields.${row.field}`)
     : row.field;
@@ -379,9 +455,16 @@ function FieldRow({ row, stateOf, busy, onConfirmRow, onChoose, onRetry }: Field
   const settled = row.candidates.filter(
     (candidate) => stateOf(candidate).outcome === 'settled',
   );
-  const conflicts = active.filter((candidate) => candidate.status === 'conflict');
+  const isEdited = (candidate: KnowledgeCardCandidate) =>
+    stateOf(candidate).editedValue !== undefined;
+  const edited = active.filter(isEdited);
+  const conflicts = active.filter(
+    (candidate) => candidate.status === 'conflict' && !isEdited(candidate),
+  );
   const awaitingConfirm = active.filter(
-    (candidate) => candidateTier(candidate) === 'inferred' && !stateOf(candidate).confirmed,
+    (candidate) => candidateTier(candidate) === 'inferred'
+      && !stateOf(candidate).confirmed
+      && !isEdited(candidate),
   );
   const failed = active.filter((candidate) => stateOf(candidate).outcome === 'failed');
   // 失败行优先于分层徽章：需要重试的行不能显示绿色的「已就绪」。
@@ -389,14 +472,41 @@ function FieldRow({ row, stateOf, busy, onConfirmRow, onChoose, onRetry }: Field
     ? 'settled'
     : failed.length > 0
       ? 'failed'
-      : conflicts.length > 0
-        ? 'conflict'
-        : awaitingConfirm.length > 0
-          ? 'pending'
-          : 'ready';
+      : edited.length === active.length
+        ? 'user-edited'
+        : conflicts.length > 0
+          ? 'conflict'
+          : awaitingConfirm.length > 0
+            ? 'pending'
+            : 'ready';
   const summary = row.candidates
-    .map((candidate) => formatValueForDisplay(candidate.normalizedValueJson, candidate.unit))
+    .map((candidate) => {
+      const state = stateOf(candidate);
+      const raw = state.editedValue !== undefined
+        ? JSON.stringify(state.editedValue)
+        : candidate.normalizedValueJson;
+      return formatValueForDisplay(raw, candidate.unit);
+    })
     .join('；');
+
+  const startEditing = () => {
+    setDrafts(Object.fromEntries(
+      active.map((candidate) => [candidate.id, editableTextOf(candidate, stateOf(candidate))]),
+    ));
+    setEditing(true);
+  };
+
+  const saveEdits = () => {
+    // 只暂存实际改动的候选：未改动的输入保持原裁决路径（adopt-new/二选一），
+    // 不把从未编辑过的值误标为用户补充来源。
+    onStageEdits(active.flatMap((candidate) => {
+      const value = parseEditedInput(drafts[candidate.id] ?? '', candidate);
+      return JSON.stringify(value) === JSON.stringify(candidateBaseValue(candidate))
+        ? []
+        : [{ candidate, value }];
+    }));
+    setEditing(false);
+  };
 
   return (
     <article
@@ -442,6 +552,21 @@ function FieldRow({ row, stateOf, busy, onConfirmRow, onChoose, onRetry }: Field
             {t('knowledgeCard.badgeReady')}
           </span>
         )}
+        {tier === 'user-edited' && (
+          <span className="rounded-full bg-[var(--success-bg)] px-2 py-0.5 text-xs text-[var(--success)]">
+            {t('knowledgeCard.badgeUserEdited')}
+          </span>
+        )}
+        {/* 部分编辑的合并行：已编辑候选逐条给出「用户补充」徽章，未编辑候选保持其分层控件。 */}
+        {edited.length > 0 && edited.length < active.length && edited.map((candidate) => (
+          <span
+            key={candidate.id}
+            data-candidate-user-edited={candidate.id}
+            className="rounded-full bg-[var(--success-bg)] px-2 py-0.5 text-xs text-[var(--success)]"
+          >
+            {t('knowledgeCard.badgeUserEdited')}
+          </span>
+        ))}
         {tier === 'pending' && (
           <>
             <span className="rounded-full bg-[var(--paper-inset)] px-2 py-0.5 text-xs text-[var(--ink-muted)]">
@@ -484,6 +609,17 @@ function FieldRow({ row, stateOf, busy, onConfirmRow, onChoose, onRetry }: Field
             </span>
           );
         })}
+        {active.length > 0 && (
+          <button
+            type="button"
+            disabled={busy}
+            aria-label={t('knowledgeCard.rowEditAria', { field: fieldText })}
+            onClick={() => (editing ? setEditing(false) : startEditing())}
+            className="rounded-md border border-[var(--line)] px-2 py-0.5 text-xs text-[var(--ink-secondary)] hover:bg-[var(--hover-bg)] disabled:opacity-50"
+          >
+            {t('knowledgeCard.rowEdit')}
+          </button>
+        )}
         {settled.map((candidate) => {
           const status = stateOf(candidate).settledStatus ?? '';
           const resultKey = `knowledgeCard.results.${status}`;
@@ -500,6 +636,54 @@ function FieldRow({ row, stateOf, busy, onConfirmRow, onChoose, onRetry }: Field
           );
         })}
       </div>
+
+      {editing && (
+        <div className="mt-2 space-y-2 border-t border-[var(--line-subtle)] pt-2">
+          {active.map((candidate) => (
+            <div key={candidate.id} data-candidate-edit={candidate.id} className="space-y-1">
+              {active.length > 1 && (
+                <span className="text-[var(--ink-secondary)]">{candidate.key.subject}</span>
+              )}
+              <input
+                type="text"
+                value={drafts[candidate.id] ?? ''}
+                aria-label={active.length > 1
+                  ? `${candidate.key.subject} · ${fieldText}`
+                  : fieldText}
+                onChange={(event) => setDrafts((current) => ({
+                  ...current,
+                  [candidate.id]: event.target.value,
+                }))}
+                className="w-full rounded-md border border-[var(--line)] bg-[var(--paper)] px-2 py-1 text-xs text-[var(--ink)] outline-none focus:border-[var(--accent)]"
+              />
+              {isArrayShapedCandidate(candidate) && (
+                <p className="text-xs text-[var(--ink-subtle)]">
+                  {t('knowledgeCard.editArrayHint')}
+                </p>
+              )}
+            </div>
+          ))}
+          <div className="flex items-center gap-1.5">
+            <button
+              type="button"
+              disabled={busy}
+              aria-label={t('knowledgeCard.editSaveAria', { field: fieldText })}
+              onClick={saveEdits}
+              className="rounded-md bg-[var(--button-dark-bg)] px-2.5 py-1 text-xs font-medium text-[var(--button-dark-text)] disabled:opacity-50"
+            >
+              {t('knowledgeCard.editSave')}
+            </button>
+            <button
+              type="button"
+              aria-label={t('knowledgeCard.editCancelAria', { field: fieldText })}
+              onClick={() => setEditing(false)}
+              className="rounded-md border border-[var(--line)] px-2.5 py-1 text-xs text-[var(--ink-secondary)] hover:bg-[var(--hover-bg)]"
+            >
+              {t('knowledgeCard.editCancel')}
+            </button>
+          </div>
+        </div>
+      )}
 
       {row.overflowCount > 0 && (
         <p className="mt-1.5 text-xs text-[var(--ink-subtle)]">

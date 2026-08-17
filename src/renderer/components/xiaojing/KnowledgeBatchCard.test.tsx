@@ -441,3 +441,265 @@ describe('KnowledgeBatchCard（字段行复核卡）', () => {
     expect(screen.getByText('技术领先')).toBeInTheDocument();
   });
 });
+
+describe('KnowledgeBatchCard（行内「更改」暂存与轮询存活）', () => {
+  beforeEach(() => {
+    mocks.apiPost.mockReset();
+    mocks.apiPost.mockImplementation(async (path: string, body?: {
+      candidateIds?: string[];
+      decisions?: Array<{ candidateId: string; decision: string }>;
+    }) => {
+      if (path === '/api/xiaojing/knowledge/candidates') {
+        return { success: true, candidates: (body?.candidateIds ?? []).map(() => null) };
+      }
+      return {
+        success: true,
+        results: (body?.decisions ?? []).map((decision) => ({
+          candidateId: decision.candidateId,
+          ok: true,
+          status: decision.decision === 'keep-current' ? 'kept-current' : 'adopted',
+        })),
+      };
+    });
+  });
+
+  it('材料原文、AI 补全、冲突行都有「更改」入口；已裁决行没有', () => {
+    render(<KnowledgeBatchCard data={cardData([
+      candidateSource({ id: 'c-fullname', predicate: 'enterprise-profile.fullName', valueJson: '"鲸跃科技"', normalizedValueJson: '"鲸跃科技"' }),
+      candidateSource({
+        id: 'c-advantage',
+        source: { materialId: 'material-1', excerpt: '推断优势', confidence: 0.4, profileProvenance: 'inferred' },
+      }),
+      candidateSource({
+        id: 'c-industry-conflict',
+        predicate: 'enterprise-profile.industry',
+        valueJson: '"汽车后市场装具"',
+        normalizedValueJson: '"汽车后市场装具"',
+        status: 'conflict',
+        baseVersion: 2,
+        current: {
+          normalizedValueJson: '"汽车零售"',
+          unit: null,
+          version: 2,
+          confirmedBy: 'user-1',
+          confirmedAt: '2026-08-15T00:00:00Z',
+        },
+      }),
+    ])} />);
+
+    expect(screen.getByRole('button', { name: '更改：品牌全称' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '更改：核心优势' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '更改：行业' })).toBeInTheDocument();
+  });
+
+  it('已裁决行不提供「更改」入口', () => {
+    render(<KnowledgeBatchCard data={cardData([
+      candidateSource({ id: 'c-advantage', status: 'adopted' }),
+    ])} />);
+
+    expect(screen.queryByRole('button', { name: '更改：核心优势' })).not.toBeInTheDocument();
+  });
+
+  it('更改数组行：顿号分隔多值输入，保存后行变「用户补充 · 已就绪」且确认控件消失，暂存不落库', () => {
+    render(<KnowledgeBatchCard data={cardData([
+      candidateSource({
+        id: 'c-advantage',
+        valueJson: '["技术领先","响应快"]',
+        normalizedValueJson: '["技术领先","响应快"]',
+        source: { materialId: 'material-1', excerpt: '推断优势', confidence: 0.4, profileProvenance: 'inferred' },
+      }),
+    ])} />);
+
+    fireEvent.click(screen.getByRole('button', { name: '更改：核心优势' }));
+    const input = screen.getByRole('textbox', { name: '核心优势' });
+    // 数组值预填为顿号连接文本，并提示多值输入格式。
+    expect(input).toHaveValue('技术领先、响应快');
+    expect(screen.getByText('多个值用顿号（、）分隔')).toBeInTheDocument();
+
+    fireEvent.change(input, { target: { value: '技术领先、响应快、本地服务' } });
+    fireEvent.click(screen.getByRole('button', { name: '保存：核心优势' }));
+
+    const row = screen.getByText('核心优势').closest('article');
+    expect(row).toHaveAttribute('data-row-tier', 'user-edited');
+    expect(screen.getByText('用户补充 · 已就绪')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '确认核心优势' })).not.toBeInTheDocument();
+    // 行摘要立即显示编辑后的值。
+    expect(screen.getByText('技术领先、响应快、本地服务')).toBeInTheDocument();
+    // 更改只暂存：保存后没有任何 decide-batch 请求。
+    expect(mocks.apiPost.mock.calls.every(([path]) => path !== '/api/xiaojing/knowledge/decide-batch')).toBe(true);
+  });
+
+  it('整卡确认时编辑行按 adopt-edited 提交编辑值，未编辑行照常 adopt-new', async () => {
+    render(<KnowledgeBatchCard data={cardData([
+      candidateSource({ id: 'c-fullname', predicate: 'enterprise-profile.fullName', valueJson: '"鲸跃科技"', normalizedValueJson: '"鲸跃科技"' }),
+      candidateSource({
+        id: 'c-industry',
+        predicate: 'enterprise-profile.industry',
+        valueJson: '"汽车后市场"',
+        normalizedValueJson: '"汽车后市场"',
+        source: { materialId: 'material-1', excerpt: '推断行业', confidence: 0.4, profileProvenance: 'inferred' },
+      }),
+    ])} />);
+
+    fireEvent.click(screen.getByRole('button', { name: '更改：行业' }));
+    fireEvent.change(screen.getByRole('textbox', { name: '行业' }), { target: { value: '汽车后市场装具' } });
+    fireEvent.click(screen.getByRole('button', { name: '保存：行业' }));
+    fireEvent.click(screen.getByRole('button', { name: '确认（采纳全部 2 条）' }));
+
+    await waitFor(() => expect(mocks.apiPost).toHaveBeenCalledWith(
+      '/api/xiaojing/knowledge/decide-batch',
+      expect.objectContaining({
+        decisions: [
+          expect.objectContaining({ candidateId: 'c-fullname', decision: 'adopt-new' }),
+          // 标量字段保持字符串提交，不切成数组。
+          expect.objectContaining({ candidateId: 'c-industry', decision: 'adopt-edited', editedValue: '汽车后市场装具' }),
+        ],
+      }),
+    ));
+  });
+
+  it('冲突行更改保存后无需二选一即可确认，提交 adopt-edited', async () => {
+    render(<KnowledgeBatchCard data={cardData([
+      candidateSource({
+        id: 'c-conflict',
+        status: 'conflict',
+        baseVersion: 2,
+        current: {
+          normalizedValueJson: '["口碑服务"]',
+          unit: null,
+          version: 2,
+          confirmedBy: 'user-1',
+          confirmedAt: '2026-08-15T00:00:00Z',
+        },
+      }),
+    ])} />);
+
+    const confirmAll = screen.getByRole('button', { name: '确认（采纳全部 1 条）' });
+    expect(confirmAll).toBeDisabled();
+
+    fireEvent.click(screen.getByRole('button', { name: '更改：核心优势' }));
+    fireEvent.change(screen.getByRole('textbox', { name: '核心优势' }), { target: { value: '技术领先、口碑服务' } });
+    fireEvent.click(screen.getByRole('button', { name: '保存：核心优势' }));
+
+    // 编辑替代二选一：选择控件与未解决提示消失，整卡确认解锁。
+    expect(screen.queryByRole('button', { name: '采用新值：核心优势' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '保留当前值：核心优势' })).not.toBeInTheDocument();
+    expect(screen.queryByText('还有 1 条冲突待选择')).not.toBeInTheDocument();
+    expect(screen.getByText('用户补充 · 已就绪')).toBeInTheDocument();
+    await waitFor(() => expect(confirmAll).toBeEnabled());
+
+    fireEvent.click(confirmAll);
+    await waitFor(() => expect(mocks.apiPost).toHaveBeenCalledWith(
+      '/api/xiaojing/knowledge/decide-batch',
+      expect.objectContaining({
+        decisions: [expect.objectContaining({
+          candidateId: 'c-conflict',
+          decision: 'adopt-edited',
+          editedValue: ['技术领先', '口碑服务'],
+          expectedCurrentVersion: 2,
+        })],
+      }),
+    ));
+  });
+
+  it('暂存编辑按候选 id 键控，3 秒轮询重建后徽章、编辑值与冲突选择原样保留', () => {
+    const sources = [
+      candidateSource({
+        id: 'c-industry',
+        predicate: 'enterprise-profile.industry',
+        valueJson: '"汽车后市场"',
+        normalizedValueJson: '"汽车后市场"',
+        source: { materialId: 'material-1', excerpt: '推断行业', confidence: 0.4, profileProvenance: 'inferred' },
+      }),
+      candidateSource({
+        id: 'c-conflict',
+        status: 'conflict',
+        baseVersion: 3,
+        current: {
+          normalizedValueJson: '["口碑服务"]',
+          unit: null,
+          version: 3,
+          confirmedBy: 'user-1',
+          confirmedAt: '2026-08-15T00:00:00Z',
+        },
+      }),
+    ];
+    const view = render(<KnowledgeBatchCard data={cardData(sources)} />);
+
+    fireEvent.click(screen.getByRole('button', { name: '更改：行业' }));
+    fireEvent.change(screen.getByRole('textbox', { name: '行业' }), { target: { value: '汽车后市场装具' } });
+    fireEvent.click(screen.getByRole('button', { name: '保存：行业' }));
+    fireEvent.click(screen.getByRole('button', { name: '采用新值：核心优势' }));
+
+    // 模拟 3s 轮询：服务端返回全新构建的 data 投影对象（同包装、同挂载点，不重挂载卡片）。
+    view.rerender(
+      <XiaojingThemeRuntime>
+        <KnowledgeBatchCard data={cardData(sources)} />
+      </XiaojingThemeRuntime>,
+    );
+
+    expect(screen.getByText('行业').closest('article')).toHaveAttribute('data-row-tier', 'user-edited');
+    expect(screen.getByText('用户补充 · 已就绪')).toBeInTheDocument();
+    expect(screen.getByText('汽车后市场装具')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '采用新值：核心优势' })).toHaveAttribute('aria-pressed', 'true');
+
+    // 重新打开编辑器：预填暂存值而非原始候选值。
+    fireEvent.click(screen.getByRole('button', { name: '更改：行业' }));
+    expect(screen.getByRole('textbox', { name: '行业' })).toHaveValue('汽车后市场装具');
+  });
+
+  it('同字段多候选行的更改逐候选编辑：未改动的输入不暂存、不误标用户补充', async () => {
+    const { container } = render(<KnowledgeBatchCard data={cardData([
+      candidateSource({
+        id: 'c-products',
+        predicate: 'enterprise-profile.products',
+        valueJson: '["电动车"]',
+        normalizedValueJson: '["电动车"]',
+      }),
+      candidateSource({
+        id: 'c-products-line',
+        predicate: 'enterprise-profile.products',
+        key: {
+          subject: '鲸跃科技/电动车',
+          predicate: 'enterprise-profile.products',
+          scopeJson: '{"entityScope":"product-line","productLine":"电动车"}',
+          effectiveFrom: null,
+          effectiveTo: null,
+        },
+        valueJson: '["充电桩"]',
+        normalizedValueJson: '["充电桩"]',
+      }),
+    ])} />);
+
+    fireEvent.click(screen.getByRole('button', { name: '更改：核心产品' }));
+    const brandInput = container.querySelector('[data-candidate-edit="c-products"] input') as HTMLInputElement | null;
+    const lineInput = container.querySelector('[data-candidate-edit="c-products-line"] input') as HTMLInputElement | null;
+    expect(brandInput).toHaveValue('电动车');
+    expect(lineInput).toHaveValue('充电桩');
+    // 多候选时用 subject 区分 scope。
+    expect(screen.getByText('鲸跃科技/电动车')).toBeInTheDocument();
+
+    // 只改品牌 scope 的值；product-line 输入保持原值。
+    fireEvent.change(brandInput!, { target: { value: '电动车、换电站' } });
+    fireEvent.click(screen.getByRole('button', { name: '保存：核心产品' }));
+
+    // 部分编辑的合并行：已编辑候选逐条呈现「用户补充」徽章，未编辑候选维持原状。
+    expect(screen.getAllByText('用户补充 · 已就绪')).toHaveLength(1);
+    fireEvent.click(screen.getByRole('button', { name: '确认（采纳全部 2 条）' }));
+
+    await waitFor(() => expect(mocks.apiPost).toHaveBeenCalledWith(
+      '/api/xiaojing/knowledge/decide-batch',
+      expect.objectContaining({
+        decisions: [
+          expect.objectContaining({ candidateId: 'c-products', decision: 'adopt-edited', editedValue: ['电动车', '换电站'] }),
+          // 未改动的输入不被暂存，仍走整卡默认的 adopt-new，不误标用户补充来源。
+          expect.objectContaining({ candidateId: 'c-products-line', decision: 'adopt-new' }),
+        ],
+      }),
+    ));
+    const lineDecision = mocks.apiPost.mock.calls.at(-1)?.[1]?.decisions?.find(
+      (decision: { candidateId: string }) => decision.candidateId === 'c-products-line',
+    );
+    expect(lineDecision.editedValue).toBeUndefined();
+  });
+});
