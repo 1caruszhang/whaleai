@@ -5,6 +5,7 @@ import { z } from 'zod';
 import type { BackendDeps } from '../deps';
 import { accountProjection, createAccountWithGrant, findAccountById } from '../domain/accounts';
 import { applyAccountLedgerDelta, balanceSnapshot, listLedgerEntries } from '../domain/ledger';
+import { listChatUsageRecords } from '../domain/chat-usage';
 import { AppError } from '../errors';
 import { signAdminToken, verifyAdminToken } from '../auth/tokens';
 import { parseJsonBody, readBearerToken } from './request';
@@ -104,8 +105,7 @@ export function createAdminRoutes(deps: BackendDeps) {
     return c.json({ account: accountProjection(account), balance: balanceSnapshot(deps.db, account) });
   });
 
-  routes.get('/admin/accounts/:accountId/ledger', requireAdmin, c => {
-    const accountId = accountIdSchema.parse(c.req.param('accountId'));
+  routes.get('/admin/accounts/:accountId/ledger', requireAdmin, c => {    const accountId = accountIdSchema.parse(c.req.param('accountId'));
     const account = findAccountById(deps.db, accountId);
     if (!account) throw new AppError('account_not_found', '账号不存在。', 404);
     const limitRaw = c.req.query('limit');
@@ -129,6 +129,28 @@ export function createAdminRoutes(deps: BackendDeps) {
       account: accountProjection(account),
       balance: balanceSnapshot(deps.db, account),
       entries,
+    });
+  });
+
+  routes.get('/admin/accounts/:accountId/chat-usage', requireAdmin, c => {
+    // 运营对账面（票 04）：按请求列网关旁路 token 计量与折点。这是运营侧
+    // 信息——对话隐藏额度对客户端接口不可见，此处仅供与 DeepSeek 账单对账。
+    const accountId = accountIdSchema.parse(c.req.param('accountId'));
+    const account = findAccountById(deps.db, accountId);
+    if (!account) throw new AppError('account_not_found', '账号不存在。', 404);
+    const limitRaw = c.req.query('limit');
+    let limit = 50;
+    if (limitRaw !== undefined) {
+      const parsed = z.coerce.number().int().min(1).max(200).safeParse(limitRaw);
+      if (!parsed.success) {
+        throw new AppError('validation_error', 'limit 必须是 1–200 的整数。', 400);
+      }
+      limit = parsed.data;
+    }
+    return c.json({
+      account: accountProjection(account),
+      quotaUsedMilli: account.chat_quota_used_milli,
+      records: listChatUsageRecords(deps.db, accountId, limit),
     });
   });
 
