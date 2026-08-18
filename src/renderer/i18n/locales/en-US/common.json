@@ -59,7 +59,16 @@
     "invalidPhone": "Enter a valid 11-digit phone number",
     "missingPassword": "Enter your password",
     "agreementRequired": "Please accept the User Agreement and Privacy Policy first",
-    "agreement": "I have read and agree to the User Agreement and Privacy Policy",
+    "agreement": "I have read and agree to the User Agreement, Privacy Policy and Pricing Standard",
+    "agreementPrefix": "I have read and agree to the ",
+    "agreementSeparator": ", ",
+    "agreementJoiner": " and ",
+    "complianceDocsSection": "Compliance documents",
+    "complianceDoc": {
+      "user-agreement": "User Agreement",
+      "privacy-policy": "Privacy Policy",
+      "pricing-standard": "Pricing Standard"
+    },
     "loginButton": "Sign in",
     "loggingIn": "Signing in…",
     "graceExpiredNotice": "The app has not reached the server for over 7 days. Reconnect and sign in again to continue.",
