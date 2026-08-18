@@ -196,7 +196,7 @@ pub(super) fn diagnose_immediate_exit(
             )
         };
         ulog_error!("[sidecar] {}", msg);
-        return msg;
+        msg
     }
 
     #[cfg(not(target_os = "windows"))]

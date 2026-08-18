@@ -221,10 +221,10 @@ pub async fn cmd_deepseek_credential_save(
     {
         platform::write(&api_key)?;
         crate::sidecar::restart_xiaojing_session_sidecars(&app_handle, sidecars.inner()).await?;
-        return Ok(DeepseekCredentialStatus {
+        Ok(DeepseekCredentialStatus {
             configured: true,
             source: "windows-credential-manager",
-        });
+        })
     }
     #[cfg(not(windows))]
     {
