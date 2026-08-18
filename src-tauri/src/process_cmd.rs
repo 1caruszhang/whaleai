@@ -32,6 +32,8 @@ use std::time::Duration;
 #[cfg(target_os = "windows")]
 pub(crate) const CREATE_NO_WINDOW: u32 = 0x08000000;
 
+// 进程组收割循环（unix）专用；Windows 编译路径没有使用者。
+#[cfg_attr(not(unix), allow(dead_code))]
 const GRACEFUL_TREE_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Create a new [`Command`] with platform-specific GUI flags applied.

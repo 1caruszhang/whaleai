@@ -98,12 +98,16 @@ mod tests {
         // 对端接受连接但按住不响应，直到测试结束。
         let hold = std::sync::Arc::new(tokio::sync::Notify::new());
         let hold_server = hold.clone();
+        // 测试桩绑定当前 #[tokio::test] runtime（current_thread 语义），不适用
+        // tauri::async_runtime 红线——该红线针对生产代码的无 caller context 场景。
+        #[allow(clippy::disallowed_methods)]
         let server = tokio::spawn(async move {
             loop {
                 let Ok((stream, _)) = listener.accept().await else {
                     break;
                 };
                 let notify = hold_server.clone();
+                #[allow(clippy::disallowed_methods)]
                 tokio::spawn(async move {
                     let _stream = stream;
                     notify.notified().await;

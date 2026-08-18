@@ -197,10 +197,10 @@ pub(crate) async fn restart_xiaojing_session_sidecars<R: Runtime>(
         let mut ids = guard
             .sidecars
             .iter()
-            .filter_map(|(session_id, sidecar)| {
+            .filter(|(_, sidecar)| {
                 crate::brand_workspace::is_brand_workspace_path(&sidecar.workspace_path)
-                    .then(|| session_id.clone())
             })
+            .map(|(session_id, _)| session_id.clone())
             .collect::<Vec<_>>();
         ids.sort();
         ids.dedup();

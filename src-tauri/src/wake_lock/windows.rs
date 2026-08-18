@@ -20,7 +20,7 @@
 //! ## Flag combination
 //! - `PowerRequestSystemRequired`     — prevent idle sleep
 //! - `PowerRequestAwayModeRequired`   — Windows 7+ "Away Mode" (background
-//!                                       tasks continue while machine "sleeps")
+//!   tasks continue while machine "sleeps")
 //!
 //! Lid-close and explicit user sleep are not blocked — those obey the user's
 //! Power Plan, which we don't touch.

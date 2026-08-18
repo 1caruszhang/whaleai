@@ -144,20 +144,11 @@ pub struct ChannelPreferenceEntryPayload {
 }
 
 /// 偏好 overlay：增补名单 + 排除名单；内置名单由共享层合成，不落库。
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", default)]
 pub struct ChannelPreferencesPayload {
     pub additional_preference_channels: Vec<ChannelPreferenceEntryPayload>,
     pub excluded_preference_channels: Vec<String>,
-}
-
-impl Default for ChannelPreferencesPayload {
-    fn default() -> Self {
-        Self {
-            additional_preference_channels: Vec::new(),
-            excluded_preference_channels: Vec::new(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
