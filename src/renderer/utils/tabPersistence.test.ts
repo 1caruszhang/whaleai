@@ -11,7 +11,7 @@ describe('multi-Session tab persistence', () => {
   it('round-trips multiple real Sessions and drops non-chat surfaces', () => {
     const state = serializeTabs([
       chat('a', 'session-a'),
-      { id: 'settings', workspacePath: null, sessionId: null, view: 'settings', title: '设置' },
+      { id: 'welcome', workspacePath: null, sessionId: null, view: 'welcome', title: '品牌工作台' },
       chat('b', 'session-b'),
     ], 'b');
     const parsed = deserializeTabs(JSON.stringify(state));

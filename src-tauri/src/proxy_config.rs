@@ -215,28 +215,8 @@ pub fn proxy_enabled_for_general_requests(settings: &ProxySettings) -> bool {
     }
 }
 
-pub fn proxy_enabled_for_provider(settings: &ProxySettings, provider_id: &str) -> bool {
-    if !settings.enabled {
-        return false;
-    }
-    let provider_id = provider_id.trim();
-    if provider_id.is_empty() {
-        return false;
-    }
-    match normalized_proxy_scope(settings) {
-        ProxyScopeSettings::All => true,
-        ProxyScopeSettings::Custom { provider_ids, .. } => {
-            provider_ids.iter().any(|id| id == provider_id)
-        }
-    }
-}
-
 pub fn read_proxy_settings_for_general_requests() -> Option<ProxySettings> {
     read_proxy_settings().filter(proxy_enabled_for_general_requests)
-}
-
-pub fn read_proxy_settings_for_provider(provider_id: &str) -> Option<ProxySettings> {
-    read_proxy_settings().filter(|settings| proxy_enabled_for_provider(settings, provider_id))
 }
 
 /// Snapshot proxy env vars before Xiaojing overwrites them for a child process.
@@ -388,34 +368,6 @@ pub fn build_client_with_proxy(builder: reqwest::ClientBuilder) -> Result<reqwes
         .map_err(|e| format!("[proxy_config] Failed to build HTTP client: {}", e))
 }
 
-pub fn build_client_with_proxy_for_provider(
-    builder: reqwest::ClientBuilder,
-    provider_id: &str,
-) -> Result<reqwest::Client, String> {
-    let final_builder = if let Some(proxy_settings) = read_proxy_settings_for_provider(provider_id)
-    {
-        let proxy_url = get_proxy_url(&proxy_settings)?;
-        ulog_info!(
-            "[proxy_config] owner=provider providerId={} path=xiaojing-proxy",
-            provider_id
-        );
-        let proxy = reqwest::Proxy::all(&proxy_url)
-            .map_err(|e| format!("[proxy_config] Failed to create proxy: {}", e))?
-            .no_proxy(reqwest::NoProxy::from_string(LOCALHOST_NO_PROXY));
-        builder.proxy(proxy)
-    } else {
-        ulog_info!(
-            "[proxy_config] owner=provider providerId={} path=inherited",
-            provider_id
-        );
-        builder
-    };
-
-    final_builder
-        .build()
-        .map_err(|e| format!("[proxy_config] Failed to build HTTP client: {}", e))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -505,11 +457,11 @@ mod tests {
             scope: None,
         };
 
-        assert!(proxy_enabled_for_provider(&settings, "deepseek"));
+        assert_eq!(normalized_proxy_scope(&settings), ProxyScopeSettings::All);
     }
 
     #[test]
-    fn test_provider_scope_custom_filters_by_provider() {
+    fn test_provider_scope_custom_keeps_provider_ids() {
         let settings = ProxySettings {
             enabled: true,
             protocol: None,
@@ -521,8 +473,13 @@ mod tests {
             }),
         };
 
-        assert!(proxy_enabled_for_provider(&settings, "ark-paygo"));
-        assert!(!proxy_enabled_for_provider(&settings, "anthropic-sub"));
+        assert_eq!(
+            normalized_proxy_scope(&settings),
+            ProxyScopeSettings::Custom {
+                general_requests: false,
+                provider_ids: vec!["ark-paygo".to_string(), "deepseek".to_string()],
+            }
+        );
     }
 
     #[test]
@@ -533,8 +490,6 @@ mod tests {
         }))
         .unwrap();
 
-        assert!(proxy_enabled_for_provider(&settings, "ark-paygo"));
-        assert!(!proxy_enabled_for_provider(&settings, "deepseek"));
         assert_eq!(
             serde_json::to_value(settings.scope.unwrap()).unwrap(),
             serde_json::json!({ "mode": "custom", "generalRequests": false, "providerIds": ["ark-paygo"] })
@@ -542,7 +497,7 @@ mod tests {
     }
 
     #[test]
-    fn test_empty_custom_provider_scope_selects_no_provider() {
+    fn test_empty_custom_provider_scope_stays_empty() {
         let settings = ProxySettings {
             enabled: true,
             protocol: None,
@@ -554,7 +509,13 @@ mod tests {
             }),
         };
 
-        assert!(!proxy_enabled_for_provider(&settings, "deepseek"));
+        assert_eq!(
+            normalized_proxy_scope(&settings),
+            ProxyScopeSettings::Custom {
+                general_requests: false,
+                provider_ids: vec![],
+            }
+        );
     }
 
     #[test]
@@ -581,8 +542,13 @@ mod tests {
         .unwrap();
 
         assert!(!proxy_enabled_for_general_requests(&settings));
-        assert!(proxy_enabled_for_provider(&settings, "ark-paygo"));
-        assert!(!proxy_enabled_for_provider(&settings, "deepseek"));
+        assert_eq!(
+            normalized_proxy_scope(&settings),
+            ProxyScopeSettings::Custom {
+                general_requests: false,
+                provider_ids: vec!["ark-paygo".to_string()],
+            }
+        );
     }
 
     #[test]
@@ -609,7 +575,6 @@ mod tests {
                 proxy_enabled_for_general_requests(&settings),
                 general_requests
             );
-            assert!(!proxy_enabled_for_provider(&settings, "deepseek"));
         }
     }
 

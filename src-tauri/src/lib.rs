@@ -1,12 +1,12 @@
 //! Xiaojing desktop shell.
 
+pub mod account_auth;
 pub mod app_dirs;
 pub mod attachment_protocol;
 pub mod brand_workspace;
 mod commands;
 pub mod config_io;
 mod crash_artifact_retention;
-pub mod deepseek_credentials;
 #[cfg(debug_assertions)]
 pub(crate) mod dev_env;
 pub mod geo_autonomy;
@@ -133,14 +133,11 @@ pub fn run() {
             sse_proxy::stop_sse_proxy,
             sse_proxy::stop_all_sse_proxies,
             sse_proxy::session_sidecar_http_request,
-            deepseek_credentials::cmd_deepseek_credential_status,
-            deepseek_credentials::cmd_deepseek_credential_save,
-            deepseek_credentials::cmd_deepseek_credential_delete,
-            deepseek_credentials::cmd_deepseek_credential_verify,
-            geo_provider_credentials::cmd_geo_provider_capability_status,
-            geo_provider_credentials::cmd_geo_provider_credentials_save,
-            geo_provider_credentials::cmd_geo_provider_credentials_delete,
-            geo_provider_credentials::cmd_geo_provider_capability_verify,
+            account_auth::cmd_account_state,
+            account_auth::cmd_account_login,
+            account_auth::cmd_account_change_password,
+            account_auth::cmd_account_refresh,
+            account_auth::cmd_account_logout,
             brand_workspace::cmd_brand_workspace_bootstrap,
             brand_workspace::cmd_brand_workspace_create,
             brand_workspace::cmd_brand_workspace_switch,

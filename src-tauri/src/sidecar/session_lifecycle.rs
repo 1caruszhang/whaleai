@@ -682,28 +682,16 @@ fn create_new_session_sidecar<'a, R: Runtime>(
         cmd.env("XIAOJING_DATA_ROOT", data_root);
     }
     if crate::brand_workspace::is_brand_workspace_path(workspace_path) {
-        crate::deepseek_credentials::inject_into_sidecar(&mut cmd)?;
-        crate::geo_provider_credentials::inject_into_sidecar(&mut cmd)?;
+        // 票 06：admission 注入运营网关地址 + 账号 access token，替代旧
+        // Provider 凭据注入路径；旧传输名在注入内逐一清除。
+        crate::account_auth::inject_into_sidecar(&mut cmd)?;
         cmd.env("XIAOJING_MAIN_AGENT", "1");
         cmd.env(
             "XIAOJING_GEO_AUTONOMY_PROFILE",
             crate::geo_autonomy::read_geo_autonomy_profile(),
         );
     } else {
-        cmd.env_remove(crate::deepseek_credentials::SIDECAR_SECRET_ENV);
-        cmd.env_remove("DEEPSEEK_API_KEY");
-        for name in crate::deepseek_credentials::SIDECAR_URL_ENV_NAMES {
-            cmd.env_remove(name);
-        }
-        for name in crate::deepseek_credentials::DEVELOPMENT_URL_ENV_NAMES {
-            cmd.env_remove(name);
-        }
-        for name in crate::geo_provider_credentials::SIDECAR_ENV_NAMES {
-            cmd.env_remove(name);
-        }
-        for name in crate::geo_provider_credentials::DEVELOPMENT_SOURCE_ENV_NAMES {
-            cmd.env_remove(name);
-        }
+        crate::account_auth::scrub_account_admission(&mut cmd);
         cmd.env_remove("XIAOJING_MAIN_AGENT");
         cmd.env_remove("XIAOJING_GEO_AUTONOMY_PROFILE");
     }

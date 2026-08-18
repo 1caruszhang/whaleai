@@ -55,11 +55,11 @@ describe("Xiaojing fixed GEO provider capability catalog", () => {
     expect(assignments.length).toBeGreaterThan(0);
     expect(assignments.every((line) => line.endsWith("="))).toBe(true);
     expect(source).not.toMatch(/ANTHROPIC|OPENAI|TAURI_SIGNING|APPLE_/);
+    // 票 06：DeepSeek 凭据/端点变量移除（主 Agent 流量在票 07 切网关），
+    // 新增账号网关地址 GATEWAY_BASE_URL。
     expect(assignments.map((line) => line.slice(0, line.indexOf("=")))).toEqual(
       [
-        "DEEPSEEK_API_KEY",
-        "DEEPSEEK_MAIN_AGENT_BASE_URL",
-        "DEEPSEEK_API_BASE_URL",
+        "GATEWAY_BASE_URL",
         "ARK_API_KEY",
         "ARK_PAYGO_BASE_URL",
         "DOUBAO_SEARCH_BASE_URL",

@@ -17,9 +17,9 @@ describe("Xiaojing product shell contract", () => {
     expect(app).toContain("<XiaojingWelcome");
   });
 
-  it("mounts the workbench only inside chat tabs so welcome and settings span full width", () => {
+  it("mounts the workbench only inside chat tabs so welcome and brand pages span full width", () => {
     const app = source("src/renderer/App.tsx");
-    // 票 28：工作台仅挂载于聊天 Tab；欢迎页/设置页主区全宽。
+    // 票 28：工作台仅挂载于聊天 Tab；欢迎页与品牌整页主区全宽。
     expect(app.match(/<XiaojingGeoWorkbench/g)?.length).toBe(1);
     expect(app).not.toContain("activeTab?.view !== 'chat'");
   });
@@ -85,14 +85,29 @@ describe("Xiaojing product shell contract", () => {
     expect(composition).toContain("pathname.startsWith('/chat/')");
   });
 
-  it("injects the native DeepSeek secret only into brand Session sidecars", () => {
+  // 票 06：账号 admission 取代旧 Provider 凭据注入——品牌 Session Sidecar
+  // 只拿网关地址 + 账号 access token；旧传输名逐一清洗，非品牌 Session 全部
+  // scrub。旧凭据配置命令不得再回到 invoke_handler。
+  it("admits only the gateway address and account token into brand Session sidecars", () => {
     const lifecycle = source("src-tauri/src/sidecar/session_lifecycle.rs");
+    const accountAuth = source("src-tauri/src/account_auth.rs");
+    const lib = source("src-tauri/src/lib.rs");
     expect(lifecycle).toMatch(
-      /if crate::brand_workspace::is_brand_workspace_path\(workspace_path\) \{\s*crate::deepseek_credentials::inject_into_sidecar/,
+      /if crate::brand_workspace::is_brand_workspace_path\(workspace_path\) \{\s*\/\/ 票 06[\s\S]*?crate::account_auth::inject_into_sidecar\(&mut cmd\)\?;/,
     );
-    expect(lifecycle).toMatch(
-      /else \{\s*cmd\.env_remove\(crate::deepseek_credentials::SIDECAR_SECRET_ENV\)/,
-    );
+    expect(lifecycle).toMatch(/else \{\s*crate::account_auth::scrub_account_admission\(&mut cmd\);/);
+    expect(lifecycle).not.toContain("deepseek_credentials");
+    expect(lifecycle).not.toContain("geo_provider_credentials::inject_into_sidecar");
+    // 账号投影不得携带 token（AccountState 无 token 字段由 Rust 单测
+    // state_projection_never_carries_token_material 钉死）；token 只经 OS
+    // 凭据库 + admission 传输名流转。
+    expect(accountAuth).toContain('pub const GATEWAY_BASE_URL_ENV: &str = "XIAOJING_GATEWAY_BASE_URL";');
+    expect(accountAuth).toContain('pub const ACCOUNT_ACCESS_TOKEN_ENV: &str = "XIAOJING_ACCOUNT_ACCESS_TOKEN";');
+    expect(lib).toContain("account_auth::cmd_account_state");
+    expect(lib).toContain("account_auth::cmd_account_login");
+    expect(lib).not.toContain("cmd_deepseek_credential_save");
+    expect(lib).not.toContain("cmd_geo_provider_credentials_save");
+    expect(lib).not.toContain("cmd_geo_provider_capability_verify");
   });
 
   it("keeps the workbench honest without inventing GeoOperation state", () => {

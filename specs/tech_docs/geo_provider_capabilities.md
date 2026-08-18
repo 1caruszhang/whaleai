@@ -8,7 +8,7 @@
 
 ## Owner 与边界
 
-- Rust `geo_provider_credentials.rs` 是 ARK、Embedding、OSS、超级媒介应用级凭据的唯一持久化 owner；DeepSeek 继续由 `deepseek_credentials.rs` 拥有。Windows 安装版使用 Credential Manager，一个应用配置供所有品牌复用。
+- 票 06（commercial-beta）起客户端不再管理 Provider 凭据：原设置页、八个凭据命令、CredMan 写入与 Sidecar 凭据注入均已移除，`deepseek_credentials.rs` 删除。`geo_provider_credentials.rs` 只剩 Rust 确定性 PublishScheduler/发布后监测的直连读取（Windows 既有 CredMan 凭据 + dev `.env` 兜底）与签名 helper，票 08 发布切网关 port 后整体移除。账号登录态（登录 token 存 OS 凭据库、7 天断网宽限、renderer 只拿无 token 投影）由 `src-tauri/src/account_auth.rs` 拥有；Sidecar admission 现在注入 `XIAOJING_GATEWAY_BASE_URL` + `XIAOJING_ACCOUNT_ACCESS_TOKEN`（网关流量消费在票 07 接线），旧 `XIAOJING_*` 凭据传输名在所有生成路径无条件清除。
 - 凭据不是 `BrandWorkspace` 数据。品牌知识、产物、订单与观测仍显式绑定各自 workspace；能力复用不允许引入进程级 Active Project。
 - Rust 只在已确认的品牌 Session Sidecar 出生时通过一次性 `XIAOJING_*` 环境传输注入服务配置。Node `provider-runtime.ts` 在组合 `xiaojing-geo` MCP 时立即捕获并删除传输变量；Renderer、config、品牌数据库、Session transcript 与工具结果都拿不到明文。
 - Provider 端点覆盖走同一 admission 传输（`XIAOJING_ARK_PAYGO_BASE_URL`、`XIAOJING_DOUBAO_SEARCH_BASE_URL`、`XIAOJING_DEEPSEEK_OPENAI_BASE_URL`，主 Agent SDK 根为 `XIAOJING_DEEPSEEK_ANTHROPIC_BASE_URL`）：未注入时逐字节回落 `providerCapabilities.ts` 固定默认值，注入时只替换 host 根、路径与 wire shape 不变，业务层零感知。这些变量非密钥但同样在 Sidecar 出生时捕获删除；Rust 在所有生成路径无条件清除（含非品牌 Sidecar），release 构建不从环境注入端点——伪造父环境不能把带凭据的流量重定向到任意地址。
@@ -46,11 +46,11 @@ Ticket 12 的渠道发现只使用 `distribution` port 分页读取媒体与自�
 
 ## 配置与状态
 
-设置页只展示上述八个能力。状态是 `unconfigured / verifying / available / rate_limited / failed`，错误文本只包含服务、HTTP 状态和可操作提示，不包含响应正文、Authorization、签名或任何密钥片段。保存/删除服务配置会沿 Ticket 04 的 generation replacement 路径重启现有品牌 Session Sidecar，同时保留 owner。
+票 06 起设置页与凭据配置面已移除；能力可用性不再有客户端配置状态展示，计费/准入状态由账号网关（票 03/04/05）持有。历史版本的状态词表（`unconfigured / verifying / available / rate_limited / failed`）与「错误文本只包含服务、HTTP 状态和可操作提示」的脱敏规则继续约束任何新的服务状态展示。
 
 开发环境的 `.env` 兼容变量：
 
-- `DEEPSEEK_API_KEY`，以及可选端点覆盖 `DEEPSEEK_MAIN_AGENT_BASE_URL`（主 Agent Anthropic 协议根）与 `DEEPSEEK_API_BASE_URL`（extraction / reflection 的 OpenAI 兼容根）
+- 票 06 起 `DEEPSEEK_API_KEY` 及其端点覆盖不再读取（主 Agent 流量票 07 切网关）；新增 `GATEWAY_BASE_URL`（账号网关根地址，本地联调指向 backend/，见 `.env.example`）
 - `ARK_API_KEY`，以及可选端点覆盖 `ARK_PAYGO_BASE_URL`（Paygo Chat/Responses/Embedding 统一根）与 `DOUBAO_SEARCH_BASE_URL`（searchSources 结构化召回根）
 - `ARK_EMBEDDING_API_KEY`（可选，缺失时复用 ARK）与 `ARK_EMBEDDING_MODEL`
 - `ALI_OSS_ACCESS_KEY_ID`、`ALI_OSS_ACCESS_KEY_SECRET`、`ALI_OSS_BUCKET`、`ALI_OSS_REGION`、`ALI_OSS_PUBLIC_BASE_URL`

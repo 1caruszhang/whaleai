@@ -26,11 +26,18 @@ import CustomTitleBar from '@/components/CustomTitleBar';
 import LinkContextMenuProvider from '@/components/LinkContextMenuProvider';
 import TabBar from '@/components/TabBar';
 import { useToast } from '@/components/Toast';
+import { ChangePasswordScreen, LoginScreen } from '@/components/account/LoginGate';
 import XiaojingBrandArchivePage from '@/components/xiaojing/XiaojingBrandArchivePage';
 import XiaojingGeoEffectPage, { type BrandEffectSessionBinding } from '@/components/xiaojing/XiaojingGeoEffectPage';
 import XiaojingGeoWorkbench from '@/components/xiaojing/XiaojingGeoWorkbench';
 import XiaojingSidebar from '@/components/xiaojing/XiaojingSidebar';
 import XiaojingWelcome from '@/components/xiaojing/XiaojingWelcome';
+import {
+  accountGateFor,
+  useAccountReady,
+  useAccountState,
+} from '@/context/AccountContext';
+import AccountProvider from '@/context/AccountProvider';
 import { SessionDeletionContext } from '@/context/SessionDeletionContext';
 import { CurrentWorkspaceContext } from '@/context/CurrentWorkspaceContext';
 import TabProvider from '@/context/TabProvider';
@@ -56,8 +63,6 @@ import type {
 import { workspacePathsEqual } from '../shared/workspacePath';
 
 const Chat = lazy(() => import('@/pages/Chat'));
-const Settings = lazy(() => import('@/pages/Settings'));
-const PAGE_FALLBACK = <div className="h-full w-full bg-[var(--paper)]" />;
 
 interface TabContentProps {
   tab: Tab;
@@ -76,7 +81,7 @@ interface TabContentProps {
   onOpenBrandSession?: () => void;
 }
 
-/** The complete Renderer route table: product welcome, fixed-Agent chat and settings. */
+/** The complete Renderer route table: product welcome, fixed-Agent chat and brand pages. */
 export const MemoizedTabContent = memo(function MemoizedTabContent({
   tab,
   brandWorkspace,
@@ -106,8 +111,6 @@ export const MemoizedTabContent = memo(function MemoizedTabContent({
     >
       {kind === 'welcome' ? (
         <XiaojingWelcome />
-      ) : kind === 'settings' ? (
-        <Suspense fallback={PAGE_FALLBACK}><Settings /></Suspense>
       ) : kind === 'brand-archive' ? (
         /* 票 30：品牌级整页跟随当前选中品牌，不依赖任何 Session。 */
         <XiaojingBrandArchivePage workspace={brandWorkspace} />
@@ -148,7 +151,7 @@ export const MemoizedTabContent = memo(function MemoizedTabContent({
                 </Suspense>
               </div>
             </CurrentWorkspaceContext.Provider>
-            {/* 票 28：工作台仅挂载于聊天 Tab；欢迎页/设置页主区全宽。 */}
+            {/* 票 28：工作台仅挂载于聊天 Tab；欢迎页与品牌整页主区全宽。 */}
             <XiaojingGeoWorkbench
               currentWorkspace={brandWorkspace}
               navigationTarget={geoNavigationTarget}
@@ -165,7 +168,41 @@ function workspaceForPath(workspaces: readonly BrandWorkspace[], path: string | 
   return workspaces.find((workspace) => workspacePathsEqual(workspace.rootPath, path)) ?? null;
 }
 
+/**
+ * 账号登录门（票 06）：未登录/宽限超期 → 全屏登录页；首登未改密 →
+ * 强制改密屏；其余才挂载工作台。工作台整树只在通过登录门后渲染，
+ * 保证未登录时不会创建任何 Session Sidecar owner。
+ */
+function AccountGatedShell() {
+  const ready = useAccountReady();
+  const state = useAccountState();
+  if (!ready || !state) {
+    return (
+      <div className="flex h-screen w-screen items-center justify-center bg-[var(--paper)]" aria-busy="true" data-account-boot-veil>
+        <ChatBootOverlay />
+      </div>
+    );
+  }
+  const gate = accountGateFor(state);
+  if (gate === 'login') {
+    // 仍有本地 token 但超过 7 天未接触服务器：要求重新联网登录。
+    return <LoginScreen graceExpired={state.loggedIn} agreementAccepted={state.agreementAccepted} />;
+  }
+  if (gate === 'change-password') {
+    return <ChangePasswordScreen />;
+  }
+  return <Workbench />;
+}
+
 export default function App() {
+  return (
+    <AccountProvider>
+      <AccountGatedShell />
+    </AccountProvider>
+  );
+}
+
+function Workbench() {
   const { t } = useTranslation('app');
   const toast = useToast();
   const toastRef = useRef(toast);
@@ -320,15 +357,6 @@ export default function App() {
       })();
     }
   }, [setActiveTabId, setTabs]);
-
-  const openSettings = useCallback(() => {
-    const existing = tabsRef.current.find((tab) => tab.view === 'settings');
-    if (existing) return selectTab(existing.id);
-    if (tabsRef.current.length >= MAX_TABS) return;
-    const tab = { ...createNewTab(), view: 'settings' as const, title: t('tabs.settings') };
-    setTabs((current) => [...current, tab]);
-    setActiveTabId(tab.id);
-  }, [selectTab, setActiveTabId, setTabs, t]);
 
   // 票 30：品牌级一级导航入口。整页跟随当前选中品牌（渲染时取
   // brandState.currentWorkspace），tab 本身不携带 workspace/session 身份。
@@ -567,7 +595,6 @@ export default function App() {
             }}
             onDeleteSession={async (preview) => deleteSession(preview.sessionId, preview)}
             onDeleteBrand={deleteBrand}
-            onOpenSettings={openSettings}
             onOpenBrandArchive={openBrandArchive}
             onOpenBrandEffect={openBrandEffect}
           />

@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import type { ComponentProps } from 'react';
 import { describe, expect, it, vi } from 'vitest';
 
@@ -8,15 +8,40 @@ import type {
   BrandWorkspace,
   BrandWorkspaceDeletionPreview,
 } from '@/api/brandWorkspaceClient';
+import type { AccountState } from '@/api/accountClient';
+import { AccountApiContext, AccountStateContext, type AccountApiContextValue } from '@/context/AccountContext';
 import type { BrandWorkspaceState } from '@/hooks/useBrandWorkspaces';
 import { XiaojingThemeRuntime } from '@/theme';
 import { createNewTab } from '@/types/tab';
 import ProductSidebar from './XiaojingSidebar';
 
+const loggedInAccount: AccountState = {
+  loggedIn: true,
+  phone: '13800001234',
+  points: 500,
+  status: 'active',
+  mustChangePassword: false,
+  agreementAccepted: true,
+  offlineGrace: { within: true, lastServerContactAt: 1, deadlineAt: 1 },
+};
+
+const accountApiStub: AccountApiContextValue = {
+  login: vi.fn(async () => null),
+  changePassword: vi.fn(async () => null),
+  logout: vi.fn(async () => undefined),
+  refresh: vi.fn(async () => null),
+  requireBalance: vi.fn(() => true),
+  dismissInsufficientBalance: vi.fn(),
+};
+
 function XiaojingSidebar(props: ComponentProps<typeof ProductSidebar>) {
   return (
     <XiaojingThemeRuntime>
-      <ProductSidebar {...props} />
+      <AccountApiContext.Provider value={accountApiStub}>
+        <AccountStateContext.Provider value={loggedInAccount}>
+          <ProductSidebar {...props} />
+        </AccountStateContext.Provider>
+      </AccountApiContext.Provider>
     </XiaojingThemeRuntime>
   );
 }
@@ -83,7 +108,6 @@ describe('XiaojingSidebar brand session lifecycle', () => {
         onRenameSession={vi.fn(async () => undefined)}
         onDeleteSession={vi.fn(async () => ({ deleted: true }) as const)}
         onDeleteBrand={brandDeleteProps.onDeleteBrand}
-        onOpenSettings={vi.fn()}
         onOpenBrandArchive={vi.fn()}
         onOpenBrandEffect={vi.fn()}
       />,
@@ -125,7 +149,6 @@ describe('XiaojingSidebar brand session lifecycle', () => {
         onRenameSession={vi.fn(async () => undefined)}
         onDeleteSession={onDeleteSession}
         onDeleteBrand={brandDeleteProps.onDeleteBrand}
-        onOpenSettings={vi.fn()}
         onOpenBrandArchive={vi.fn()}
         onOpenBrandEffect={vi.fn()}
       />,
@@ -179,7 +202,6 @@ describe('XiaojingSidebar brand session lifecycle', () => {
         onRenameSession={vi.fn(async () => undefined)}
         onDeleteSession={onDeleteSession}
         onDeleteBrand={brandDeleteProps.onDeleteBrand}
-        onOpenSettings={vi.fn()}
         onOpenBrandArchive={vi.fn()}
         onOpenBrandEffect={vi.fn()}
       />,
@@ -213,7 +235,6 @@ describe('XiaojingSidebar brand session lifecycle', () => {
         onRenameSession={vi.fn(async () => undefined)}
         onDeleteSession={vi.fn(async () => ({ deleted: true }) as const)}
         onDeleteBrand={brandDeleteProps.onDeleteBrand}
-        onOpenSettings={vi.fn()}
         onOpenBrandArchive={vi.fn()}
         onOpenBrandEffect={vi.fn()}
       />,
@@ -260,7 +281,6 @@ describe('XiaojingSidebar brand session lifecycle', () => {
         onRenameSession={vi.fn(async () => undefined)}
         onDeleteSession={vi.fn(async () => ({ deleted: true }) as const)}
         onDeleteBrand={onDeleteBrand}
-        onOpenSettings={vi.fn()}
         onOpenBrandArchive={vi.fn()}
         onOpenBrandEffect={vi.fn()}
       />,
@@ -299,7 +319,6 @@ describe('XiaojingSidebar brand session lifecycle', () => {
         onRenameSession={vi.fn(async () => undefined)}
         onDeleteSession={vi.fn(async () => ({ deleted: true }) as const)}
         onDeleteBrand={brandDeleteProps.onDeleteBrand}
-        onOpenSettings={vi.fn()}
         onOpenBrandArchive={onOpenBrandArchive}
         onOpenBrandEffect={vi.fn()}
       />,
@@ -321,7 +340,6 @@ describe('XiaojingSidebar brand session lifecycle', () => {
         onRenameSession={vi.fn(async () => undefined)}
         onDeleteSession={vi.fn(async () => ({ deleted: true }) as const)}
         onDeleteBrand={brandDeleteProps.onDeleteBrand}
-        onOpenSettings={vi.fn()}
         onOpenBrandArchive={vi.fn()}
         onOpenBrandEffect={vi.fn()}
       />,
@@ -349,7 +367,6 @@ describe('XiaojingSidebar brand session lifecycle', () => {
         onRenameSession={vi.fn(async () => undefined)}
         onDeleteSession={vi.fn(async () => ({ deleted: true }) as const)}
         onDeleteBrand={brandDeleteProps.onDeleteBrand}
-        onOpenSettings={vi.fn()}
         onOpenBrandArchive={vi.fn()}
         onOpenBrandEffect={onOpenBrandEffect}
       />,
@@ -374,7 +391,6 @@ describe('XiaojingSidebar brand session lifecycle', () => {
         onRenameSession={vi.fn(async () => undefined)}
         onDeleteSession={vi.fn(async () => ({ deleted: true }) as const)}
         onDeleteBrand={brandDeleteProps.onDeleteBrand}
-        onOpenSettings={vi.fn()}
         onOpenBrandArchive={vi.fn()}
         onOpenBrandEffect={vi.fn()}
       />,
@@ -387,5 +403,33 @@ describe('XiaojingSidebar brand session lifecycle', () => {
     expect(screen.getByRole('button', { name: '品牌档案' })).not.toHaveAttribute(
       'aria-current',
     );
+  });
+
+  it('opens the personal-info panel from the footer account button', async () => {
+    render(
+      <XiaojingSidebar
+        brandState={state()}
+        activeTab={undefined}
+        onOpenWorkspace={vi.fn(async () => true)}
+        onOpenSession={vi.fn(async () => true)}
+        onRenameSession={vi.fn(async () => undefined)}
+        onDeleteSession={vi.fn(async () => ({ deleted: true }) as const)}
+        onDeleteBrand={brandDeleteProps.onDeleteBrand}
+        onOpenBrandArchive={vi.fn()}
+        onOpenBrandEffect={vi.fn()}
+      />,
+    );
+
+    // 左下角账号按钮：手机号掩码 + 点数投影，替代已移除的凭据设置入口。
+    const footerButton = screen.getByRole('button', { name: '个人信息' });
+    expect(footerButton).toHaveTextContent('138****1234');
+    expect(footerButton).toHaveTextContent('500');
+
+    fireEvent.click(footerButton);
+    const panel = await screen.findByRole('dialog', { name: '个人信息' });
+    // 面板按验收展示完整手机号；侧栏页脚保持掩码。
+    expect(within(panel).getByText('13800001234')).toBeTruthy();
+    expect(within(panel).getByText('充值引导')).toBeTruthy();
+    expect(within(panel).getByRole('button', { name: '退出登录' })).toBeTruthy();
   });
 });
