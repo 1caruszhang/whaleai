@@ -72,6 +72,8 @@ export function createProviderProxyRoutes(deps: BackendDeps) {
   /**
    * Bearer 直代理（JSON POST 全透传）：客户端凭证头一律剥掉重写为上游密钥，
    * 响应字节透传；2xx 时旁路计量（JSON 带 usage 记 token，SSE 记次数）。
+   * bodyTransform 仅用于票 07 网关模式的服务端参数兜底（如 embedding
+   * endpoint id），未命中时必须原样返回。
    */
   const bearerProxy = (options: {
     provider: ProviderUsageProvider;
@@ -79,10 +81,12 @@ export function createProviderProxyRoutes(deps: BackendDeps) {
     upstreamUrl: string;
     apiKey: string;
     extraHeaders?: Record<string, string>;
+    bodyTransform?: (body: string) => string;
   }) => {
     return async (c: GatewayContext) => {
       const account = c.get('account');
-      const body = await c.req.raw.text();
+      const rawBody = await c.req.raw.text();
+      const body = options.bodyTransform ? options.bodyTransform(rawBody) : rawBody;
       const response = await fetchOrUnavailable(options.upstreamUrl, {
         method: 'POST',
         headers: {
@@ -165,6 +169,20 @@ export function createProviderProxyRoutes(deps: BackendDeps) {
       route: 'ark.embeddings',
       upstreamUrl: `${config.arkBaseUrl}/embeddings/multimodal`,
       apiKey: config.arkEmbeddingApiKey ?? config.arkApiKey,
+      // 票 07：网关模式 sidecar 不携带账号级 endpoint id（账号 admission 清洗），
+      // body 缺 model 时按服务器配置补齐；显式携带或未配置则原样透传。
+      bodyTransform: config.arkEmbeddingEndpointId
+        ? body => {
+            let parsed: { model?: unknown };
+            try {
+              parsed = JSON.parse(body) as { model?: unknown };
+            } catch {
+              return body;
+            }
+            if (parsed.model !== undefined && parsed.model !== '') return body;
+            return JSON.stringify({ ...parsed, model: config.arkEmbeddingEndpointId });
+          }
+        : undefined,
     }),
   );
 

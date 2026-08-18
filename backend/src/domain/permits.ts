@@ -10,8 +10,9 @@ export interface PermitApplyInput {
   permitId: string;
   operation: string;
   units: number;
-  unitPrice: number;
-  basePrice: number;
+  /** 客户端对账口径（票 07 起可省略）：省略时按服务端价目表定价。 */
+  unitPrice?: number;
+  basePrice?: number;
 }
 
 export interface PermitProjection {
@@ -124,8 +125,18 @@ export function permitProjection(
 export function applyForPermit(
   deps: BackendDeps,
   accountId: string,
-  input: PermitApplyInput,
+  rawInput: PermitApplyInput,
 ): PermitApplyResult {
+  // 定价权威在后端：省略的价目按服务端价目表补齐后再进幂等/对账比较，
+  // 「省略申请」与「携带服务端价目重放」参数等价。
+  const knownPrice = isBillingOperation(rawInput.operation)
+    ? OPERATION_PRICES[rawInput.operation]
+    : undefined;
+  const input = {
+    ...rawInput,
+    unitPrice: rawInput.unitPrice ?? knownPrice?.perUnit,
+    basePrice: rawInput.basePrice ?? knownPrice?.base,
+  };
   return deps.db.transaction(() => {
     const existing = loadPermit(deps.db, input.permitId);
     if (existing) {

@@ -7,6 +7,7 @@ import {
   type GeoBaselineProjection,
   type GeoBaselineProviderSnapshot,
 } from "../../shared/geo/baseline";
+import { GatewayBillingError } from "./billing-permit";
 import {
   GeoBaselineService,
   type GeoBaselinePersistencePort,
@@ -353,5 +354,185 @@ describe("GeoBaselineService", () => {
 
     expect(capability.probeQuestion).toHaveBeenCalledTimes(1);
     expect(result.units[0]).toMatchObject({ status: "succeeded" });
+  });
+});
+
+describe("GeoBaselineService billing permits (ticket 07)", () => {
+  function permitPort(options: { failApplyWith?: Error } = {}) {
+    const calls: Array<
+      | { kind: "apply"; permitId: string; operation: string; units: number }
+      | { kind: "report"; permitId: string; unit: number; outcome: string }
+      | { kind: "close"; permitId: string }
+    > = [];
+    return {
+      calls,
+      port: {
+        async apply(input: { permitId: string; operation: string; units: number }) {
+          calls.push({ kind: "apply", ...input });
+          if (options.failApplyWith) throw options.failApplyWith;
+          return {
+            permitId: input.permitId,
+            operation: input.operation,
+            units: input.units,
+            totalPoints: 5,
+            status: "open" as const,
+            frozenPoints: 5,
+            consumedPoints: 0,
+            refundedPoints: 0,
+          };
+        },
+        async reportUnit(permitId: string, unit: number, outcome: string) {
+          calls.push({ kind: "report", permitId, unit, outcome });
+        },
+        async close(permitId: string) {
+          calls.push({ kind: "close", permitId });
+        },
+      },
+    };
+  }
+
+  function billed(persistence: FakePersistence, permits: ReturnType<typeof permitPort>["port"]) {
+    return new GeoBaselineService(identity, persistence, provider(async () => ({
+      output_text: "鲸跃汽车。",
+      output: [],
+    })), undefined as unknown as () => number, permits);
+  }
+
+  it("bills each executed unit as its own baseline_probe permit keyed by attempt", async () => {
+    const persistence = new FakePersistence();
+    persistence.projection = baseline([
+      unit("unit-1", "问题一"),
+      unit("unit-2", "问题二"),
+    ]);
+    const permits = permitPort();
+    const service = billed(persistence, permits.port);
+
+    const result = await service.start({
+      ...identity,
+      questionPoolId: "pool-08",
+      engineIds: ["doubao"],
+      idempotencyKey: "run-1",
+    });
+
+    expect(result.metrics.succeeded).toBe(2);
+    expect(permits.calls).toEqual([
+      { kind: "apply", permitId: "gbl:baseline-09:unit-1:1", operation: "baseline_probe", units: 1 },
+      { kind: "apply", permitId: "gbl:baseline-09:unit-2:1", operation: "baseline_probe", units: 1 },
+      { kind: "report", permitId: "gbl:baseline-09:unit-1:1", unit: 0, outcome: "success" },
+      { kind: "report", permitId: "gbl:baseline-09:unit-2:1", unit: 0, outcome: "success" },
+    ]);
+  });
+
+  it("reports a failed unit as failure (per-question refund) and keeps other units isolated", async () => {
+    const persistence = new FakePersistence();
+    persistence.projection = baseline([
+      unit("unit-1", "问题一"),
+      unit("unit-2", "问题二"),
+    ]);
+    const permits = permitPort();
+    const capability = provider(async (question) => {
+      if (question === "问题一") throw new Error("keyword-search 上游请求失败（HTTP 500）");
+      return { output_text: "鲸跃汽车。", output: [] };
+    });
+    const service = new GeoBaselineService(
+      identity,
+      persistence,
+      capability,
+      undefined as unknown as () => number,
+      permits.port,
+    );
+
+    const result = await service.start({
+      ...identity,
+      questionPoolId: "pool-08",
+      engineIds: ["doubao"],
+      idempotencyKey: "run-2",
+    });
+
+    expect(result.metrics).toMatchObject({ succeeded: 1, failed: 1 });
+    expect(permits.calls).toContainEqual({
+      kind: "report",
+      permitId: "gbl:baseline-09:unit-1:1",
+      unit: 0,
+      outcome: "failure",
+    });
+    expect(permits.calls).toContainEqual({
+      kind: "report",
+      permitId: "gbl:baseline-09:unit-2:1",
+      unit: 0,
+      outcome: "success",
+    });
+  });
+
+  it("marks the unit failed without any report when the permit is rejected (insufficient balance)", async () => {
+    const persistence = new FakePersistence();
+    const permits = permitPort({
+      failApplyWith: new GatewayBillingError(
+        "insufficient_balance",
+        "点数不足：本次需 5 点，当前可用 4 点，请充值后再试。",
+        402,
+        { required: 5, available: 4 },
+      ),
+    });
+    const service = billed(persistence, permits.port);
+
+    const result = await service.start({
+      ...identity,
+      questionPoolId: "pool-08",
+      engineIds: ["doubao"],
+      idempotencyKey: "run-3",
+    });
+
+    expect(result.metrics).toMatchObject({ failed: 1, succeeded: 0 });
+    expect(result.units[0].attempts[0]).toMatchObject({
+      errorCode: "geo_baseline_insufficient_balance",
+    });
+    // 未取得 permit：只有申请记录，零回报。
+    expect(permits.calls).toEqual([
+      { kind: "apply", permitId: "gbl:baseline-09:unit-1:1", operation: "baseline_probe", units: 1 },
+    ]);
+  });
+
+  it("re-uses a fresh permit per retry attempt while cached claims stay free", async () => {
+    const persistence = new FakePersistence();
+    // 第一轮：unit-1 失败落库。
+    const failing = provider(() =>
+      Promise.reject(new Error("keyword-search 上游请求失败（HTTP 500）")),
+    );
+    const firstRound = new GeoBaselineService(
+      identity,
+      persistence,
+      failing,
+      undefined as unknown as () => number,
+    );
+    await firstRound.start({
+      ...identity,
+      questionPoolId: "pool-08",
+      engineIds: ["doubao"],
+      idempotencyKey: "run-4",
+    });
+
+    // 第二轮（用户重试失败问）：新 claim attempt → 新 permit；缓存命中
+    // （已完成问）不发 permit。
+    const permits = permitPort();
+    const service = new GeoBaselineService(
+      identity,
+      persistence,
+      provider(async () => ({ output_text: "鲸跃汽车。", output: [] })),
+      undefined as unknown as () => number,
+      permits.port,
+    );
+    await service.start({
+      ...identity,
+      questionPoolId: "pool-08",
+      engineIds: ["doubao"],
+      idempotencyKey: "run-4",
+    });
+
+    // 失败问仍属 pending/failed → 只对失败问重新计费探测，attempt 2。
+    expect(permits.calls).toEqual([
+      { kind: "apply", permitId: "gbl:baseline-09:unit-1:2", operation: "baseline_probe", units: 1 },
+      { kind: "report", permitId: "gbl:baseline-09:unit-1:2", unit: 0, outcome: "success" },
+    ]);
   });
 });

@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import {
   DISTRIBUTION_PLAN_POLICY_VERSION,
   DISTRIBUTION_RESOURCE_MAX_PAGES,
@@ -30,6 +32,7 @@ import {
 import { parseGeoProbeProviderResponse } from "../../shared/geo/baseline";
 import { XIAOJING_GEO_PROVIDER_DEFAULTS } from "../../shared/geo/providerCapabilities";
 import { managementApi } from "../utils/management-api-client";
+import type { GeoBillingPermitPort } from "./billing-permit";
 import type {
   GeoDistributionCapability,
   GeoDistributionResource,
@@ -261,6 +264,8 @@ export class DistributionPlanningService {
     private readonly distribution: GeoDistributionCapability,
     private readonly keywordSearch: DistributionKeywordSearchPort,
     private readonly now: () => Date = () => new Date(),
+    /** 网关计费（票 07）：基础 30 + 被动路 5/问；缺省时跳过 permit。 */
+    private readonly permits?: GeoBillingPermitPort,
   ) {}
 
   private assertIdentity(input: {
@@ -308,40 +313,46 @@ export class DistributionPlanningService {
    * 被动路（js_ai probePassiveRecallMulti 语义）：对已确认问题池逐问现场
    * 探测豆包引用（Responses + ai_search），2-wide 窗口限流、逐问隔离失败。
    * 整体失败返回空数组——被动证据缺失只降级，不阻断（用户裁决 2026-08-18）。
+   * 逐问成败（outcomes，按问题顺序）供计费逐单位回报（票 07）。
    */
   private async probeQuestionSources(
     context: DistributionPlanningContext,
-  ): Promise<DistributionQuestionSource[]> {
+  ): Promise<{
+    sources: DistributionQuestionSource[];
+    outcomes: boolean[];
+  }> {
     const questions = context.questions.slice(0, 20);
-    const outcomes: Array<
-      { question: DistributionPlanningContext["questions"][number]; ok: true; citations: Array<{ url: string; title?: string }> } | { question: DistributionPlanningContext["questions"][number]; ok: false }
-    > = [];
+    const outcomes: boolean[] = new Array(questions.length).fill(false);
+    const collected: Array<{
+      question: DistributionPlanningContext["questions"][number];
+      citations: Array<{ url: string; title?: string }>;
+    }> = [];
     let cursor = 0;
     const worker = async () => {
       for (;;) {
-        const question = questions[cursor++];
+        const index = cursor++;
+        const question = questions[index];
         if (!question) return;
         try {
           const response = await this.keywordSearch.probeQuestion(
             "doubao",
             question.question,
           );
-          outcomes.push({
+          outcomes[index] = true;
+          collected.push({
             question,
-            ok: true,
             citations: parseGeoProbeProviderResponse(response.rawEvidence)
               .citations,
           });
         } catch {
-          outcomes.push({ question, ok: false });
+          outcomes[index] = false;
         }
       }
     };
     await Promise.all(Array.from({ length: Math.min(2, questions.length) }, worker));
     const sources: DistributionQuestionSource[] = [];
     const seen = new Set<string>();
-    for (const outcome of outcomes) {
-      if (!outcome.ok) continue;
+    for (const outcome of collected) {
       for (const [index, citation] of outcome.citations.entries()) {
         const url = citation.url.trim();
         if (!/^https?:\/\//i.test(url)) continue;
@@ -354,10 +365,10 @@ export class DistributionPlanningService {
           url,
           articleIds: outcome.question.articleIds,
         });
-        if (sources.length >= 100) return sources;
+        if (sources.length >= 100) return { sources, outcomes };
       }
     }
-    return sources;
+    return { sources, outcomes };
   }
 
   /**
@@ -436,125 +447,174 @@ export class DistributionPlanningService {
   }): Promise<DistributionPlanProjection> {
     this.assertIdentity(input);
     const source = validateDistributionPlanStartInput(input.source);
-    // 四路召回的现场证据（js_ai 语义）：被动=问题池逐问探测、主动=全局单次
-    // 召回、偏好=品牌 overlay 合成；保底是纯规则路（无外部输入）。探测与召回
-    // 均按 independent-best-effort 降级——失败只损失对应路的证据，不阻断计划。
+    // 计费（票 07）：分发计划（含渠道发现）基础 30 + 被动路 5/问。permitId
+    // 绑定来源请求（文章操作 + 参数指纹）：同一请求的网络重试/恢复重跑重放
+    // 同一 permit；被动路探测在预扣后发起，逐问回报成败（失败问回补 5 点，
+    // 基础费绑定首个成功问）。无被动问时单单位 = 计划发现整体成败。
+    // 渠道资源读取本身免费（浏览/缓存命中不扣点）。
     const context = await this.persistence.context(source.articleOperationId);
-    const [questionSources, activeSources, preferenceSettings] =
-      await Promise.all([
-        this.probeQuestionSources(context),
-        this.recallActiveSources(context),
-        this.persistence.channelPreferences().catch(() => undefined),
-      ]);
-    const preferenceChannels: PreferenceChannelEntry[] =
-      resolvePreferenceChannels(preferenceSettings);
-    const preparation = await this.persistence.prepare({
-      ...source,
-      questionSources,
-    });
-    const base = preparation.plan;
-    let media: { total: number; items: GeoDistributionResource[] };
-    let weMedia: { total: number; items: GeoDistributionResource[] };
+    const probeCount = Math.min(context.questions.length, 20);
+    const unitCount = Math.max(1, probeCount);
+    const sourceFingerprint = createHash("sha256")
+      .update(JSON.stringify(source))
+      .digest("hex")
+      .slice(0, 16);
+    const permitId = `dist:${source.articleOperationId ?? "latest"}:${sourceFingerprint}`;
+    if (this.permits) {
+      await this.permits.apply({
+        permitId,
+        operation: "distribution_planning",
+        units: unitCount,
+      });
+    }
+    const reportUnit = async (unit: number, outcome: "success" | "failure") => {
+      if (!this.permits) return;
+      await this.permits.reportUnit(permitId, unit, outcome).catch(
+        () => undefined,
+      );
+    };
+    const settleDiscovery = async (
+      outcomes: boolean[],
+      discoverySucceeded: boolean,
+    ) => {
+      if (!this.permits) return;
+      if (probeCount > 0) {
+        await Promise.all(
+          outcomes.map((ok, unit) => reportUnit(unit, ok ? "success" : "failure")),
+        );
+      } else {
+        await reportUnit(0, discoverySucceeded ? "success" : "failure");
+      }
+    };
     try {
-      [media, weMedia] = await Promise.all([
-        this.loadResources("media"),
-        this.loadResources("we-media"),
-      ]);
-    } catch {
+      // 四路召回的现场证据（js_ai 语义）：被动=问题池逐问探测、主动=全局单次
+      // 召回、偏好=品牌 overlay 合成；保底是纯规则路（无外部输入）。探测与召回
+      // 均按 independent-best-effort 降级——失败只损失对应路的证据，不阻断计划。
+      const [probeOutcome, activeSources, preferenceSettings] =
+        await Promise.all([
+          this.probeQuestionSources(context),
+          this.recallActiveSources(context),
+          this.persistence.channelPreferences().catch(() => undefined),
+        ]);
+      const questionSources = probeOutcome.sources;
+      const preferenceChannels: PreferenceChannelEntry[] =
+        resolvePreferenceChannels(preferenceSettings);
+      const preparation = await this.persistence.prepare({
+        ...source,
+        questionSources,
+      });
+      const base = preparation.plan;
+      let media: { total: number; items: GeoDistributionResource[] };
+      let weMedia: { total: number; items: GeoDistributionResource[] };
+      try {
+        [media, weMedia] = await Promise.all([
+          this.loadResources("media"),
+          this.loadResources("we-media"),
+        ]);
+      } catch {
+        await this.persistence.finishDiscovery({
+          planId: base.id,
+          expectedRevision: base.revision,
+          claimToken: preparation.claimToken,
+          providerState: "unavailable",
+          providerSnapshot: unavailableSnapshot(),
+          resourceSnapshot: [],
+          candidates: [],
+          selectedResourceIds: [],
+          assignments: base.articles.map((article) => ({
+            articleId: article.id,
+            resourceId: null,
+            reason: "unassigned",
+            scheduledAt: base.publishStartAt,
+          })),
+          discoverySummary: {
+            inputResources: 0,
+            approvedResources: 0,
+            filteredUnavailable: 0,
+            filteredHighPrice: 0,
+            alignedResources: 0,
+            recommendedResources: 0,
+          },
+          blockingIssues: [
+            "distribution-provider-unavailable",
+            "channel-candidate-unavailable",
+            "article-channel-unassigned",
+          ],
+        });
+        await settleDiscovery(probeOutcome.outcomes, false);
+        return this.persistence.get(base.id);
+      }
+      const normalized = [
+        ...media.items.map((resource) =>
+          normalizeDistributionResource(
+            "media",
+            resource as DistributionResourceInput,
+          ),
+        ),
+        ...weMedia.items.map((resource) =>
+          normalizeDistributionResource(
+            "we-media",
+            resource as DistributionResourceInput,
+          ),
+        ),
+      ].filter(
+        (resource): resource is DistributionResourceSnapshot => resource !== null,
+      );
+      const discovery = buildDistributionCandidates({
+        industry: base.industry,
+        targetAudience: base.targetAudience,
+        questionSources: base.questionSources,
+        activeSources,
+        preferenceChannels,
+        articles: base.articles,
+        resources: normalized,
+      });
+      const assignments = assignDistributionChannels({
+        articles: base.articles,
+        candidates: discovery.candidates,
+        mappingMode: base.mappingMode,
+        ratio: base.ratio,
+        publishStartAt: base.publishStartAt,
+      });
+      const selectedResourceIds = assignments.flatMap((assignment) =>
+        assignment.resourceId === null ? [] : [assignment.resourceId],
+      );
+      const providerSnapshot: DistributionProviderSnapshot = {
+        ...unavailableSnapshot(),
+        fetchedAt: this.now().toISOString(),
+        mediaTotal: media.total,
+        weMediaTotal: weMedia.total,
+      };
+      const blockingIssues = distributionPlanBlockingIssues({
+        ...base,
+        providerState: "available",
+        candidates: discovery.candidates,
+        selectedResourceIds,
+        assignments,
+      });
       await this.persistence.finishDiscovery({
         planId: base.id,
         expectedRevision: base.revision,
         claimToken: preparation.claimToken,
-        providerState: "unavailable",
-        providerSnapshot: unavailableSnapshot(),
-        resourceSnapshot: [],
-        candidates: [],
-        selectedResourceIds: [],
-        assignments: base.articles.map((article) => ({
-          articleId: article.id,
-          resourceId: null,
-          reason: "unassigned",
-          scheduledAt: base.publishStartAt,
-        })),
-        discoverySummary: {
-          inputResources: 0,
-          approvedResources: 0,
-          filteredUnavailable: 0,
-          filteredHighPrice: 0,
-          alignedResources: 0,
-          recommendedResources: 0,
-        },
-        blockingIssues: [
-          "distribution-provider-unavailable",
-          "channel-candidate-unavailable",
-          "article-channel-unassigned",
-        ],
+        providerState: "available",
+        providerSnapshot,
+        resourceSnapshot: discovery.resourceSnapshot,
+        candidates: discovery.candidates,
+        selectedResourceIds,
+        assignments,
+        discoverySummary: discovery.summary,
+        blockingIssues,
       });
+      await settleDiscovery(probeOutcome.outcomes, true);
+      // Exact identity read: a concurrent Session may have created a newer plan.
       return this.persistence.get(base.id);
+    } catch (error) {
+      // 未回报单位（含无被动问时的单单位失败）随结清回补。
+      if (this.permits) {
+        await this.permits.close(permitId).catch(() => undefined);
+      }
+      throw error;
     }
-    const normalized = [
-      ...media.items.map((resource) =>
-        normalizeDistributionResource(
-          "media",
-          resource as DistributionResourceInput,
-        ),
-      ),
-      ...weMedia.items.map((resource) =>
-        normalizeDistributionResource(
-          "we-media",
-          resource as DistributionResourceInput,
-        ),
-      ),
-    ].filter(
-      (resource): resource is DistributionResourceSnapshot => resource !== null,
-    );
-    const discovery = buildDistributionCandidates({
-      industry: base.industry,
-      targetAudience: base.targetAudience,
-      questionSources: base.questionSources,
-      activeSources,
-      preferenceChannels,
-      articles: base.articles,
-      resources: normalized,
-    });
-    const assignments = assignDistributionChannels({
-      articles: base.articles,
-      candidates: discovery.candidates,
-      mappingMode: base.mappingMode,
-      ratio: base.ratio,
-      publishStartAt: base.publishStartAt,
-    });
-    const selectedResourceIds = assignments.flatMap((assignment) =>
-      assignment.resourceId === null ? [] : [assignment.resourceId],
-    );
-    const providerSnapshot: DistributionProviderSnapshot = {
-      ...unavailableSnapshot(),
-      fetchedAt: this.now().toISOString(),
-      mediaTotal: media.total,
-      weMediaTotal: weMedia.total,
-    };
-    const blockingIssues = distributionPlanBlockingIssues({
-      ...base,
-      providerState: "available",
-      candidates: discovery.candidates,
-      selectedResourceIds,
-      assignments,
-    });
-    await this.persistence.finishDiscovery({
-      planId: base.id,
-      expectedRevision: base.revision,
-      claimToken: preparation.claimToken,
-      providerState: "available",
-      providerSnapshot,
-      resourceSnapshot: discovery.resourceSnapshot,
-      candidates: discovery.candidates,
-      selectedResourceIds,
-      assignments,
-      discoverySummary: discovery.summary,
-      blockingIssues,
-    });
-    // Exact identity read: a concurrent Session may have created a newer plan.
-    return this.persistence.get(base.id);
   }
 
   async edit(input: {

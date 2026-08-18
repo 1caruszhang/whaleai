@@ -33,6 +33,7 @@ import { XIAOJING_GEO_PROVIDER_DEFAULTS } from "../../shared/geo/providerCapabil
 /** 反思 LLM 审核开关：用户裁定（2026-08-18）先只审格式，暂停语义反思。 */
 const REFLECTION_REVIEW_ENABLED = false;
 import { managementApi } from "../utils/management-api-client";
+import type { GeoBillingPermitPort } from "./billing-permit";
 import type { GeoTextCapability } from "./provider-capabilities";
 
 export interface ArticlePersistencePort {
@@ -297,6 +298,8 @@ export class ArticleGenerationService {
     private readonly persistence: ArticlePersistencePort,
     private readonly generation: GeoTextCapability,
     private readonly reflection: GeoTextCapability,
+    /** 网关计费（票 07）：生成 20/篇、改写 10/篇；缺省时跳过 permit。 */
+    private readonly permits?: GeoBillingPermitPort,
   ) {}
 
   private assertIdentity(input: {
@@ -341,10 +344,33 @@ export class ArticleGenerationService {
     const operation = await this.persistence.start(source);
     // 叙事视角种子按操作洗牌发牌（同批不重复直到发尽，ADR-0006 §3）。
     const seeds = dealNarrativeSeeds(operation.articles.length);
-    await mapWithArticleConcurrency(operation.articles, async (article, index) => {
-      await this.generateOne(article, "initial", seeds[index]);
+    // 计费（票 07）：文章生成 20 点/篇，一操作一张批量 permit（并发 5 路
+    // 逐篇回报，避免逐篇 permit 撞每账号 2 并发准入）。permitId 绑定
+    // operation：恢复重跑（同 operation 重放）不二次预扣；批内未回报单位
+    // 在收尾 close 时按失败回补。
+    if (!this.permits) {
+      await mapWithArticleConcurrency(operation.articles, async (article, index) => {
+        await this.generateOne(article, "initial", seeds[index]);
+      });
+      return this.persistence.getOperation(operation.id);
+    }
+    const permitId = `article:${operation.id}:initial`;
+    await this.permits.apply({
+      permitId,
+      operation: "article_generation",
+      units: operation.articles.length,
     });
-    return this.persistence.getOperation(operation.id);
+    try {
+      await mapWithArticleConcurrency(operation.articles, async (article, index) => {
+        await this.generateOne(article, "initial", seeds[index], {
+          permitId,
+          unitIndex: index,
+        });
+      });
+      return await this.persistence.getOperation(operation.id);
+    } finally {
+      await this.permits.close(permitId).catch(() => undefined);
+    }
   }
 
   /**
@@ -404,6 +430,7 @@ export class ArticleGenerationService {
     article: ArticleProjection,
     mode: "initial" | "regenerate",
     narrativeSeed?: ArticleNarrativeSeed,
+    batchPermit?: { permitId: string; unitIndex: number },
   ): Promise<ArticleProjection> {
     const context = await this.persistence.claimGeneration({
       operationId: article.operationId,
@@ -411,6 +438,42 @@ export class ArticleGenerationService {
       expectedRevision: article.revision,
       mode,
     });
+    // 计费（票 07）：改写/重生成 10 点/篇，单篇独立 permit，permitId 绑定
+    // (operation, article, claim attempt)——同一 claim 的网络重试重放同一
+    // permit；显式重试是新的 claim attempt（上轮失败已回补）。initial 批次
+    // 走调用方预申请的批量 permit 按篇回报。
+    let regenPermitId: string | null = null;
+    if (this.permits && mode === "regenerate") {
+      regenPermitId = `art-rw:${article.operationId}:${article.id}:${context.article.generationAttempt}`;
+      try {
+        await this.permits.apply({
+          permitId: regenPermitId,
+          operation: "article_rewrite",
+          units: 1,
+        });
+      } catch (error) {
+        return this.persistence.failGeneration({
+          operationId: context.article.operationId,
+          articleId: context.article.id,
+          expectedRevision: context.article.revision,
+          claimToken: context.claimToken,
+          failureReason: safeFailureReason(error),
+        });
+      }
+    }
+    const reportOutcome = async (outcome: "success" | "failure") => {
+      if (!this.permits) return;
+      if (regenPermitId) {
+        await this.permits
+          .reportUnit(regenPermitId, 0, outcome)
+          .catch(() => undefined);
+      }
+      if (batchPermit) {
+        await this.permits
+          .reportUnit(batchPermit.permitId, batchPermit.unitIndex, outcome)
+          .catch(() => undefined);
+      }
+    };
     try {
       const requestedTitle =
         context.article.sourcePlanItemId === null
@@ -443,7 +506,7 @@ export class ArticleGenerationService {
         raw,
         requestedTitle,
       );
-      return await this.persistence.finishGeneration({
+      const finished = await this.persistence.finishGeneration({
         operationId: context.article.operationId,
         articleId: context.article.id,
         expectedRevision: context.article.revision,
@@ -461,14 +524,18 @@ export class ArticleGenerationService {
           topP: 0.9,
         },
       });
+      await reportOutcome("success");
+      return finished;
     } catch (error) {
-      return this.persistence.failGeneration({
+      const failed = await this.persistence.failGeneration({
         operationId: context.article.operationId,
         articleId: context.article.id,
         expectedRevision: context.article.revision,
         claimToken: context.claimToken,
         failureReason: safeFailureReason(error),
       });
+      await reportOutcome("failure");
+      return failed;
     }
   }
 

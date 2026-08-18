@@ -27,6 +27,7 @@ import {
 } from "../../shared/geo/profileInjection";
 import { anySignal } from "../utils/cancellation";
 import { managementApi } from "../utils/management-api-client";
+import type { GeoBillingPermitPort } from "./billing-permit";
 import type {
   GeoEmbeddingCapability,
   GeoKeywordSearchCapability,
@@ -543,6 +544,8 @@ export class QuestionPoolService {
     private readonly keywordSearch: GeoKeywordSearchCapability,
     private readonly generation: GeoTextCapability,
     private readonly embedding: GeoEmbeddingCapability,
+    /** 网关计费（票 07）：缺省（开发直连模式）时跳过全部 permit 路径。 */
+    private readonly permits?: GeoBillingPermitPort,
   ) {}
 
   latest(input: {
@@ -603,6 +606,26 @@ export class QuestionPoolService {
     if (preparation.kind === "reused") return preparation.pool;
     const attempt = preparation.attempt;
     if (!attempt) throw new Error("question_pool_attempt_not_found");
+    // 计费（票 07）：关键词+问题池生成 15 点/次，整体成败单单位。permitId
+    // 绑定 attempt（Rust 持久化），网络重试/恢复重跑同一 attempt 重放同一
+    // permit 不二次预扣；reused 复用路径在上面已提前返回（缓存命中不扣点）。
+    // 申请失败（insufficient_balance 等）在发起任何 Provider 调用前抛出。
+    const permitId = `qpool:${attempt.id}`;
+    if (this.permits) {
+      await this.permits.apply({
+        permitId,
+        operation: "question_pool",
+        units: 1,
+      });
+    }
+    const settlePermit = async (outcome: "success" | "failure" | "cancel") => {
+      if (!this.permits) return;
+      if (outcome === "cancel") {
+        await this.permits.close(permitId).catch(() => undefined);
+        return;
+      }
+      await this.permits.reportUnit(permitId, 0, outcome).catch(() => undefined);
+    };
     const controller = new AbortController();
     this.activeByKey.set(input.idempotencyKey, {
       attemptId: attempt.id,
@@ -791,7 +814,11 @@ export class QuestionPoolService {
       });
       if (claim.action === "busy")
         throw new Error("question_pool_step_busy:persist");
-      if (claim.action === "cached") return preparation.pool;
+      if (claim.action === "cached") {
+        // 全阶段缓存命中的恢复重跑：permit 重放为已结清投影，回报幂等。
+        await settlePermit("success");
+        return preparation.pool;
+      }
       if (!claim.claimToken)
         throw new Error("question_pool_claim_token_missing");
       try {
@@ -807,6 +834,7 @@ export class QuestionPoolService {
           output: { poolId: pool.id, revision: pool.revision },
         });
         checkpointFromPool(pool, "persist", "completed", claim, persistHash);
+        await settlePermit("success");
         return pool;
       } catch (error) {
         await this.persistence
@@ -822,9 +850,11 @@ export class QuestionPoolService {
       }
     } catch (error) {
       if (signal.aborted) {
+        await settlePermit("cancel");
         await this.persistence.cancel(attempt.id).catch(() => {});
         throw new Error("question_pool_cancelled");
       }
+      await settlePermit("failure");
       throw error;
     }
   }

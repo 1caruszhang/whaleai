@@ -8,6 +8,8 @@ import {
   parseExplicitTopThreeRank,
   type PostPublishBaselineEvidence,
 } from "../../shared/geo/postPublishMonitoring";
+import { randomUUID } from "node:crypto";
+import type { GeoBillingPermitChannel } from "./billing-permit";
 import type { GeoKeywordSearchCapability } from "./provider-capabilities";
 import { fetch as undiciFetch, type Dispatcher } from "undici";
 import {
@@ -15,6 +17,13 @@ import {
   isUrlSchemeSafe,
 } from "../utils/ssrf";
 import { withAbortSignal } from "../utils/cancellation";
+
+/**
+ * 监测巡检单问价（点）：余额预检阈值。与服务端价目表
+ * `backend/src/domain/pricing.ts` 的 monitoring_patrol.perUnit 对齐，由
+ * 集成测试做对照断言（网关侧 permit 申请不带价目，服务端定价权威不变）。
+ */
+export const MONITORING_PATROL_UNIT_POINTS = 5;
 
 export interface PublishedPageAccessDependencies {
   fetch?: (
@@ -119,8 +128,36 @@ function normalizedUrl(value: string): string | null {
   }
 }
 
+/**
+ * 监测巡检的单问探测错误：余额低于单次巡检所需时的类型化终止（票 07）。
+ * Rust wake executor 侧按非重试失败处理本轮，不发起 Provider 调用、不扣点；
+ * 充值后下一轮巡检自然恢复。
+ */
+export class PostPublishInsufficientBalanceError extends Error {
+  constructor(
+    readonly required: number,
+    readonly available: number,
+  ) {
+    super(
+      `insufficient_balance:点数不足：监测巡检需 ${required} 点，当前可用 ${available} 点，请充值后自动恢复。`,
+    );
+    this.name = "PostPublishInsufficientBalanceError";
+  }
+}
+
 export class PostPublishBaselineProbeService {
-  constructor(private readonly provider: GeoKeywordSearchCapability) {}
+  constructor(
+    private readonly provider: GeoKeywordSearchCapability,
+    /**
+     * 网关计费（票 07）：监测巡检 5 点/问/次。缺省（开发直连模式）时跳过
+     * 余额预检与 permit，保持纯探测语义。
+     */
+    private readonly billing?: Pick<
+      GeoBillingPermitChannel,
+      "apply" | "reportUnit" | "balance"
+    >,
+    private readonly nextPermitId: () => string = randomUUID,
+  ) {}
 
   async probe(
     input: PostPublishBaselineProbeInput,
@@ -131,10 +168,53 @@ export class PostPublishBaselineProbeService {
     if (!engine?.available) {
       throw new Error("post_publish_monitor_provider_unavailable");
     }
-    const response = await this.provider.probeQuestion(
-      input.engineId,
-      input.question,
-    );
+    // 余额预检（票 07 监测欠费暂停）：可用余额低于单问巡检价时以类型化错误
+    // 终止本轮该问——不申请 permit、不发起探测，Rust 侧按非重试失败收尾，
+    // 下一轮 wake 重新预检，充值后自动恢复。
+    const permit = await this.beginPermit();
+    try {
+      const response = await this.provider.probeQuestion(
+        input.engineId,
+        input.question,
+      );
+      const result = this.buildResult(input, response);
+      await this.settlePermit(permit, "success");
+      return result;
+    } catch (error) {
+      await this.settlePermit(permit, "failure");
+      throw error;
+    }
+  }
+
+  /** 申请单问巡检 permit；余额不足抛 PostPublishInsufficientBalanceError。 */
+  private async beginPermit(): Promise<string | null> {
+    if (!this.billing) return null;
+    const balance = await this.billing.balance();
+    const required = MONITORING_PATROL_UNIT_POINTS;
+    if (balance.available < required) {
+      throw new PostPublishInsufficientBalanceError(required, balance.available);
+    }
+    const permitId = `monitor:${this.nextPermitId()}`;
+    await this.billing.apply({
+      permitId,
+      operation: "monitoring_patrol",
+      units: 1,
+    });
+    return permitId;
+  }
+
+  private async settlePermit(
+    permitId: string | null,
+    outcome: "success" | "failure",
+  ): Promise<void> {
+    if (!this.billing || !permitId) return;
+    await this.billing.reportUnit(permitId, 0, outcome).catch(() => undefined);
+  }
+
+  private buildResult(
+    input: PostPublishBaselineProbeInput,
+    response: Awaited<ReturnType<GeoKeywordSearchCapability["probeQuestion"]>>,
+  ): PostPublishBaselineProbeResult {
     const parsed = parseGeoProbeProviderResponse(response.rawEvidence);
     const analysis = analyzeGeoProbeAnswer(
       parsed.answer,

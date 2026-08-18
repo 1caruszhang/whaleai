@@ -35,6 +35,14 @@ export interface GeoProviderRuntimeSecrets {
   deepseekOpenAiBaseUrl?: string;
   arkPaygoBaseUrl?: string;
   doubaoSearchBaseUrl?: string;
+  /**
+   * 账号 admission（票 06/07）：Rust 注入的运营网关基地址与账号 access
+   * token。两者齐备即网关模式——全部 Provider 流量经 /gw/* 代理（票 05
+   * 路由），鉴权一律换账号 token，业务层与 wire shape 零改动；Provider
+   * 密钥不再进入 Sidecar。
+   */
+  gatewayBaseUrl?: string;
+  accountAccessToken?: string;
 }
 
 export interface GeoTextMessage {
@@ -159,6 +167,9 @@ const secretTransportEnvNames = [
   "XIAOJING_OSS_ACCESS_KEY_SECRET",
   "XIAOJING_DISTRIBUTION_APP_ID",
   "XIAOJING_DISTRIBUTION_SECRET",
+  // 账号 admission 传输名（票 06）：捕获后同样擦除，账号 token 不得
+  // 被后续子进程、环境诊断或 Agent 工具继承。
+  "XIAOJING_ACCOUNT_ACCESS_TOKEN",
 ] as const;
 
 /**
@@ -185,6 +196,8 @@ export function captureGeoProviderRuntimeSecrets(
     distributionBaseUrl: read("XIAOJING_DISTRIBUTION_BASE_URL"),
     arkPaygoBaseUrl: read("XIAOJING_ARK_PAYGO_BASE_URL"),
     doubaoSearchBaseUrl: read("XIAOJING_DOUBAO_SEARCH_BASE_URL"),
+    gatewayBaseUrl: read("XIAOJING_GATEWAY_BASE_URL"),
+    accountAccessToken: read("XIAOJING_ACCOUNT_ACCESS_TOKEN"),
   };
   for (const name of [
     ...secretTransportEnvNames,
@@ -196,6 +209,7 @@ export function captureGeoProviderRuntimeSecrets(
     "XIAOJING_DISTRIBUTION_BASE_URL",
     "XIAOJING_ARK_PAYGO_BASE_URL",
     "XIAOJING_DOUBAO_SEARCH_BASE_URL",
+    "XIAOJING_GATEWAY_BASE_URL",
   ]) {
     delete env[name];
   }
@@ -309,22 +323,38 @@ export function createGeoProviderCapabilities(
     deps.sleep ??
     ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
   const now = deps.now ?? (() => new Date());
+  // 网关模式（票 07）：账号 admission 注入网关基地址 + 账号 token 后，
+  // 全部 Provider 端点改投 /gw/* 代理（票 05 路由：网关路径 = 上游路径，
+  // 根路径替换），鉴权一律换账号 token；业务层与 wire shape 零改动。
+  const gatewayRoot = secrets.gatewayBaseUrl?.trim().replace(/\/+$/, "");
+  const accountToken = secrets.accountAccessToken?.trim() || undefined;
+  const gatewayMode = Boolean(gatewayRoot && accountToken);
+  const bearerToken = (slot: GeoProviderCapabilitySlot): string => {
+    if (!gatewayMode) throw new Error(`${slot} 能力尚未配置`);
+    return accountToken!;
+  };
   // 端点覆盖（Rust admission 一次性注入）：缺省逐字节回落固定默认值，
   // 注入时只替换 host 根，路径与 wire shape 不变，业务层零感知。
   const endpointRoot = (override: string | undefined, fallback: string) =>
     (override || fallback).replace(/\/+$/, "");
-  const deepseekOpenAiBaseUrl = endpointRoot(
-    secrets.deepseekOpenAiBaseUrl,
-    XIAOJING_GEO_PROVIDER_DEFAULTS.deepseekOpenAiBaseUrl,
-  );
-  const arkPaygoBaseUrl = endpointRoot(
-    secrets.arkPaygoBaseUrl,
-    XIAOJING_GEO_PROVIDER_DEFAULTS.arkPaygoBaseUrl,
-  );
-  const doubaoSearchBaseUrl = endpointRoot(
-    secrets.doubaoSearchBaseUrl,
-    XIAOJING_GEO_PROVIDER_DEFAULTS.doubaoSearchBaseUrl,
-  );
+  const deepseekOpenAiBaseUrl = gatewayMode
+    ? `${gatewayRoot}/gw/deepseek`
+    : endpointRoot(
+        secrets.deepseekOpenAiBaseUrl,
+        XIAOJING_GEO_PROVIDER_DEFAULTS.deepseekOpenAiBaseUrl,
+      );
+  const arkPaygoBaseUrl = gatewayMode
+    ? `${gatewayRoot}/gw/ark`
+    : endpointRoot(
+        secrets.arkPaygoBaseUrl,
+        XIAOJING_GEO_PROVIDER_DEFAULTS.arkPaygoBaseUrl,
+      );
+  const doubaoSearchBaseUrl = gatewayMode
+    ? `${gatewayRoot}/gw/doubao-search`
+    : endpointRoot(
+        secrets.doubaoSearchBaseUrl,
+        XIAOJING_GEO_PROVIDER_DEFAULTS.doubaoSearchBaseUrl,
+      );
   const deepseekEndpoint = `${deepseekOpenAiBaseUrl}/chat/completions`;
   const arkEndpoint = `${arkPaygoBaseUrl}/chat/completions`;
   const arkResponsesEndpoint = `${arkPaygoBaseUrl}/responses`;
@@ -367,17 +397,27 @@ export function createGeoProviderCapabilities(
     },
   });
 
+  // 槽位凭证解析：网关模式一律账号 token（Provider 密钥不在 Sidecar），
+  // 直连模式保持逐槽 Provider key。
+  const slotCredential =
+    (
+      slot: "extraction" | "generation" | "reflection",
+      key: string | undefined,
+    ) =>
+    () =>
+      gatewayMode ? bearerToken(slot) : required(key, slot);
+
   return {
     extraction: textCapability(
       "extraction",
       deepseekEndpoint,
-      () => required(secrets.deepseekApiKey, "extraction"),
+      slotCredential("extraction", secrets.deepseekApiKey),
       XIAOJING_GEO_PROVIDER_DEFAULTS.extractionModel,
     ),
     keywordSearch: {
       slot: "keyword-search",
       baselineEngines() {
-        const available = Boolean(secrets.arkApiKey);
+        const available = gatewayMode || Boolean(secrets.arkApiKey);
         return [
           {
             id: "doubao",
@@ -395,7 +435,11 @@ export function createGeoProviderCapabilities(
           const response = await fetchImpl(arkEndpoint, {
             method: "POST",
             headers: {
-              Authorization: `Bearer ${required(secrets.arkApiKey, "keyword-search")}`,
+              Authorization: `Bearer ${
+                gatewayMode
+                  ? bearerToken("keyword-search")
+                  : required(secrets.arkApiKey, "keyword-search")
+              }`,
               "Content-Type": "application/json",
             },
             body: JSON.stringify({
@@ -432,17 +476,22 @@ export function createGeoProviderCapabilities(
         // 结构化 Title/Summary/Url 召回，不经 LLM 改写。Bearer 解析链：专用
         // 豆包搜索 key（联网搜索控制台签发，月度免费额度）→ 复用 ARK key
         // （volcengine 主 key / Agent Plan key 兼容豆包搜索计费面）；key 不被
-        // 接受时由调用方回落 search() 的 enable_search 生成语料。
+        // 接受时由调用方回落 search() 的 enable_search 生成语料。网关模式下
+        // 直接经 /gw/doubao-search 代理（服务端解析 key）。
         try {
           const response = await fetchImpl(
             `${doubaoSearchBaseUrl}/search_api/web_search`,
             {
               method: "POST",
               headers: {
-                Authorization: `Bearer ${required(
-                  secrets.doubaoSearchApiKey ?? secrets.arkApiKey,
-                  "keyword-search",
-                )}`,
+                Authorization: `Bearer ${
+                  gatewayMode
+                    ? bearerToken("keyword-search")
+                    : required(
+                        secrets.doubaoSearchApiKey ?? secrets.arkApiKey,
+                        "keyword-search",
+                      )
+                }`,
                 "Content-Type": "application/json",
               },
               body: JSON.stringify({
@@ -499,7 +548,11 @@ export function createGeoProviderCapabilities(
           const response = await fetchImpl(arkResponsesEndpoint, {
             method: "POST",
             headers: {
-              Authorization: `Bearer ${required(secrets.arkApiKey, "keyword-search")}`,
+              Authorization: `Bearer ${
+                gatewayMode
+                  ? bearerToken("keyword-search")
+                  : required(secrets.arkApiKey, "keyword-search")
+              }`,
               "Content-Type": "application/json",
               "ark-beta-doubao-app": "true",
             },
@@ -530,13 +583,13 @@ export function createGeoProviderCapabilities(
     generation: textCapability(
       "generation",
       arkEndpoint,
-      () => required(secrets.arkApiKey, "generation"),
+      slotCredential("generation", secrets.arkApiKey),
       XIAOJING_GEO_PROVIDER_DEFAULTS.generationModel,
     ),
     reflection: textCapability(
       "reflection",
       deepseekEndpoint,
-      () => required(secrets.deepseekApiKey, "reflection"),
+      slotCredential("reflection", secrets.deepseekApiKey),
       XIAOJING_GEO_PROVIDER_DEFAULTS.reflectionModel,
     ),
     embedding: {
@@ -546,11 +599,15 @@ export function createGeoProviderCapabilities(
       async embed(texts, options) {
         const results: number[][] = new Array(texts.length);
         let nextIndex = 0;
-        const apiKey = required(
-          secrets.embeddingApiKey ?? secrets.arkApiKey,
-          "embedding",
-        );
-        const model = required(secrets.embeddingEndpointId, "embedding");
+        // 网关模式：凭证 = 账号 token；embedding endpoint id 不再随 admission
+        // 下发（账号 admission 清洗了它），model 字段缺省交由网关按服务器
+        // 配置补齐（票 07 网关侧兜底），直连模式维持逐端点必填。
+        const apiKey = gatewayMode
+          ? bearerToken("embedding")
+          : required(secrets.embeddingApiKey ?? secrets.arkApiKey, "embedding");
+        const model = gatewayMode
+          ? null
+          : required(secrets.embeddingEndpointId, "embedding");
         const worker = async () => {
           for (;;) {
             const index = nextIndex++;
@@ -569,7 +626,7 @@ export function createGeoProviderCapabilities(
                     "Content-Type": "application/json",
                   },
                   body: JSON.stringify({
-                    model,
+                    ...(model ? { model } : {}),
                     input: [{ type: "text", text: texts[index] }],
                   }),
                   signal: options?.signal,
@@ -621,6 +678,31 @@ export function createGeoProviderCapabilities(
       slot: "object-storage",
       async putHtml(objectKey, html) {
         try {
+          const encodedKey = encodeObjectKey(objectKey);
+          const contentType = "text/html; charset=utf-8";
+          // 网关模式（票 07 接线）：PUT 网关路径携带 URL 编码的 objectKey，
+          // 网关用服务器 AK/SK 做 V1 HMAC-SHA1 重签后投 OSS（票 05 契约），
+          // 本地不做任何签名，OSS 凭据不进入 Sidecar。
+          if (gatewayMode) {
+            const response = await fetchImpl(
+              `${gatewayRoot}/gw/oss/${encodedKey}`,
+              {
+                method: "PUT",
+                headers: {
+                  Authorization: `Bearer ${bearerToken("object-storage")}`,
+                  "Content-Type": contentType,
+                },
+                body: html,
+              },
+            );
+            if (!response.ok)
+              throw safeUpstreamFailure("object-storage", response.status);
+            const payload = (await response.json()) as { url?: string };
+            if (typeof payload.url !== "string" || payload.url.length === 0) {
+              throw new Error("object-storage 返回了无效响应");
+            }
+            return { url: payload.url };
+          }
           const accessKeyId = required(
             secrets.ossAccessKeyId,
             "object-storage",
@@ -633,9 +715,7 @@ export function createGeoProviderCapabilities(
           const region =
             secrets.ossRegion ||
             XIAOJING_GEO_PROVIDER_DEFAULTS.ossDefaultRegion;
-          const encodedKey = encodeObjectKey(objectKey);
           const date = now().toUTCString();
-          const contentType = "text/html; charset=utf-8";
           const stringToSign = [
             "PUT",
             "",
@@ -671,6 +751,46 @@ export function createGeoProviderCapabilities(
       slot: "distribution",
       async listResources(kind, page = 1, size = 20) {
         try {
+          // 网关模式（票 07 接线）：公共参数（appid/timestamp/signature）
+          // 全部由网关生成（票 05 契约：传入签名参数一律忽略），客户端只传
+          // 业务参数 page/size + 账号 token。
+          if (gatewayMode) {
+            const path =
+              kind === "media" ? "/media/resource" : "/we-media/resource";
+            const query = new URLSearchParams({
+              page: String(page),
+              size: String(size),
+            });
+            const response = await fetchImpl(
+              `${gatewayRoot}/gw/distribution${path}?${query}`,
+              {
+                headers: {
+                  Accept: "application/json",
+                  Authorization: `Bearer ${bearerToken("distribution")}`,
+                },
+              },
+            );
+            if (!response.ok)
+              throw safeUpstreamFailure("distribution", response.status);
+            const envelope = (await response.json()) as {
+              code?: number;
+              message?: string;
+              data?: { total?: number; items?: GeoDistributionResource[] };
+            };
+            if (
+              envelope.code !== 200 ||
+              !envelope.data ||
+              !Array.isArray(envelope.data.items)
+            ) {
+              throw new Error(
+                `distribution 返回业务错误（code ${envelope.code ?? "unknown"}）`,
+              );
+            }
+            return {
+              total: envelope.data.total ?? envelope.data.items.length,
+              items: envelope.data.items,
+            };
+          }
           const appid = required(secrets.distributionAppId, "distribution");
           const secret = required(secrets.distributionSecret, "distribution");
           const baseUrl = (

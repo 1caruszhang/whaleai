@@ -11,6 +11,7 @@ import {
   type GeoProbeCitation,
 } from "../../shared/geo/baseline";
 import { managementApi } from "../utils/management-api-client";
+import { GatewayBillingError, type GeoBillingPermitPort } from "./billing-permit";
 import type { GeoKeywordSearchCapability } from "./provider-capabilities";
 
 interface GeoBaselinePreparation {
@@ -130,6 +131,16 @@ function safeFailure(error: unknown): { code: string; message: string } {
   const message = (error instanceof Error ? error.message : String(error))
     .replace(/Bearer\s+[^\s"']+/gi, "Bearer [REDACTED]")
     .slice(0, 500);
+  // 计费拒绝（票 07）：余额不足等语义码保留服务端文案（含「需 X 点、
+  // 当前 Y 点」），错误码单列，不再落入泛化 provider_failed。
+  if (
+    error instanceof GatewayBillingError ||
+    message.includes("点数不足")
+  ) {
+    const code =
+      error instanceof GatewayBillingError ? error.code : "billing_failed";
+    return { code: `geo_baseline_${code}`, message };
+  }
   if (message.includes("geo_baseline_empty_response")) {
     return { code: "geo_baseline_empty_response", message: "Provider 未返回可用回答" };
   }
@@ -181,6 +192,8 @@ export class GeoBaselineService {
     private readonly persistence: GeoBaselinePersistencePort,
     private readonly provider: GeoKeywordSearchCapability,
     private readonly now: () => number = Date.now,
+    /** 网关计费（票 07）：基线探测 5 点/问；缺省时跳过全部 permit 路径。 */
+    private readonly permits?: GeoBillingPermitPort,
   ) {}
 
   engines(): readonly GeoBaselineEngineAvailability[] {
@@ -298,8 +311,28 @@ export class GeoBaselineService {
   ): Promise<void> {
     const claim = await this.persistence.claim({ baselineId, unitId: unit.id });
     if (claim.action !== "execute" || !claim.claimToken) return;
+    // 计费（票 07）：基线探测 5 点/问，最小成败单位 = 单问探测。permitId
+    // 绑定 (baseline, unit, attemptNumber)：网络重试/恢复重跑同一 attempt 重放
+    // 同一 permit；用户显式重试失败问是新的 claim attempt → 新 permit（上轮
+    // 失败已回补）。claim 命中缓存（已完成问）在上面直接返回，不扣点。
+    // permit 申请失败（余额不足/并发准入）按单问失败落库并继续其余问，
+    // 未取得的 permit 不回报。
+    const permitId = `gbl:${baselineId}:${unit.id}:${claim.attemptNumber}`;
+    let permitAcquired = false;
+    const settlePermit = async (outcome: "success" | "failure") => {
+      if (!this.permits || !permitAcquired) return;
+      await this.permits.reportUnit(permitId, 0, outcome).catch(() => undefined);
+    };
     const startedAt = this.now();
     try {
+      if (this.permits) {
+        await this.permits.apply({
+          permitId,
+          operation: "baseline_probe",
+          units: 1,
+        });
+        permitAcquired = true;
+      }
       const currentEngine = this.provider
         .baselineEngines()
         .find((engine) => engine.id === unit.engineId);
@@ -333,6 +366,7 @@ export class GeoBaselineService {
         analysis,
         durationMs: Math.max(0, this.now() - startedAt),
       });
+      await settlePermit("success");
     } catch (error) {
       const failure = safeFailure(error);
       await this.persistence.finish({
@@ -344,6 +378,7 @@ export class GeoBaselineService {
         errorCode: failure.code,
         errorMessage: failure.message,
       });
+      await settlePermit("failure");
     }
   }
 

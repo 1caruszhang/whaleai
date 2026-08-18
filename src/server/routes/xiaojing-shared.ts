@@ -7,7 +7,10 @@ import { ArticleGenerationService, createArticlePort } from '../geo/article-gene
 import { GeoBaselineService, createGeoBaselinePort } from '../geo/baseline';
 import { createDistributionPlanPort, DistributionPlanningService } from '../geo/distribution-plan';
 import { recordGeoOperationMilestone } from '../geo/operation-progress';
-import { getXiaojingGeoProviderCapabilities } from '../geo/provider-runtime';
+import {
+  getXiaojingGeoBillingPermitChannel,
+  getXiaojingGeoProviderCapabilities,
+} from '../geo/provider-runtime';
 import { createQuestionPoolPort, QuestionPoolService } from '../geo/question-pool';
 import { createTopicPlanPort, TopicPlanService } from '../geo/topic-plan';
 import { sendXiaojingMessage } from '../xiaojing-reminder-send';
@@ -32,6 +35,7 @@ function getXiaojingQuestionPoolService(identity: Identity): QuestionPoolService
     capabilities.keywordSearch,
     capabilities.generation,
     capabilities.embedding,
+    getXiaojingGeoBillingPermitChannel(),
   );
   questionPoolRuntime = { key, service };
   return service;
@@ -45,6 +49,8 @@ function getXiaojingGeoBaselineService(identity: Identity): GeoBaselineService {
     identity,
     createGeoBaselinePort(identity),
     getXiaojingGeoProviderCapabilities().keywordSearch,
+    Date.now,
+    getXiaojingGeoBillingPermitChannel(),
   );
   baselineRuntime = { key, service };
   return service;
@@ -60,6 +66,8 @@ function getXiaojingTopicPlanService(identity: Identity): TopicPlanService {
     createTopicPlanPort(identity),
     capabilities.generation,
     capabilities.embedding,
+    undefined,
+    getXiaojingGeoBillingPermitChannel(),
   );
   topicRuntime = { key, service };
   return service;
@@ -75,6 +83,7 @@ function getXiaojingArticleService(identity: Identity): ArticleGenerationService
     createArticlePort(identity),
     capabilities.generation,
     capabilities.reflection,
+    getXiaojingGeoBillingPermitChannel(),
   );
   articleRuntime = { key, service };
   return service;
@@ -90,6 +99,8 @@ function getXiaojingDistributionPlanService(identity: Identity): DistributionPla
     createDistributionPlanPort(identity),
     capabilities.distribution,
     capabilities.keywordSearch,
+    undefined,
+    getXiaojingGeoBillingPermitChannel(),
   );
   distributionRuntime = { key, service };
   return service;

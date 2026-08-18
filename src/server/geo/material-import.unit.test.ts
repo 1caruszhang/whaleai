@@ -918,3 +918,105 @@ describe('profile and document compatibility', () => {
     expect(JSON.stringify(invalidIdentity)).not.toContain('private');
   });
 });
+
+describe('MaterialImportService billing permits (ticket 07)', () => {
+  function permitPort(options: { failApplyWith?: Error } = {}) {
+    const calls: Array<
+      | { kind: 'apply'; permitId: string; operation: string; units: number }
+      | { kind: 'report'; permitId: string; unit: number; outcome: string }
+      | { kind: 'close'; permitId: string }
+    > = [];
+    return {
+      calls,
+      port: {
+        async apply(input: { permitId: string; operation: string; units: number }) {
+          calls.push({ kind: 'apply', ...input });
+          if (options.failApplyWith) throw options.failApplyWith;
+          return {
+            permitId: input.permitId,
+            operation: input.operation,
+            units: input.units,
+            totalPoints: 20,
+            status: 'open' as const,
+            frozenPoints: 20,
+            consumedPoints: 0,
+            refundedPoints: 0,
+          };
+        },
+        async reportUnit(permitId: string, unit: number, outcome: string) {
+          calls.push({ kind: 'report', permitId, unit, outcome });
+        },
+        async close(permitId: string) {
+          calls.push({ kind: 'close', permitId });
+        },
+      },
+    };
+  }
+
+  function billedService(
+    port: FakeMaterialPort,
+    permits: ReturnType<typeof permitPort>['port'],
+    overrides: Parameters<typeof service>[1] = {},
+  ) {
+    const built = service(port, overrides);
+    return {
+      ...built,
+      value: new MaterialImportService(
+        { workspaceId: 'brand-07', sessionId: 'session-07' },
+        port,
+        { slot: 'extraction', complete: built.complete },
+        { propose: built.propose, inspect: built.inspect },
+        {},
+        undefined,
+        10 * 60_000,
+        permits,
+      ),
+    };
+  }
+
+  it('bills each imported document as its own material_import permit and reports success', async () => {
+    const port = new FakeMaterialPort();
+    const permits = permitPort();
+    const subject = billedService(port, permits.port);
+
+    const result = await subject.value.importPastedText('公司全称：鲸跃科技有限公司');
+
+    expect(result.ok).toBe(true);
+    expect(permits.calls).toEqual([
+      { kind: 'apply', permitId: 'mat:attempt-text-1-1', operation: 'material_import', units: 1 },
+      { kind: 'report', permitId: 'mat:attempt-text-1-1', unit: 0, outcome: 'success' },
+    ]);
+  });
+
+  it('reports the unit as failure (per-document refund) when extraction fails', async () => {
+    const port = new FakeMaterialPort();
+    const permits = permitPort();
+    const subject = billedService(port, permits.port, {
+      complete: async () => JSON.stringify({ facts: [] }),
+    });
+
+    const result = await subject.value.importPastedText('空内容');
+
+    expect(result.ok).toBe(false);
+    expect(permits.calls).toEqual([
+      { kind: 'apply', permitId: 'mat:attempt-text-1-1', operation: 'material_import', units: 1 },
+      { kind: 'report', permitId: 'mat:attempt-text-1-1', unit: 0, outcome: 'failure' },
+    ]);
+  });
+
+  it('fails the document without any report when the permit is rejected', async () => {
+    const port = new FakeMaterialPort();
+    const permits = permitPort({
+      failApplyWith: new Error('insufficient_balance:点数不足：本次需 20 点，当前可用 4 点。'),
+    });
+    const subject = billedService(port, permits.port);
+
+    const result = await subject.value.importPastedText('公司全称：鲸跃科技有限公司');
+
+    expect(result.ok).toBe(false);
+    expect(port.finishes[0]).toMatchObject({ status: 'failed' });
+    expect(permits.calls).toEqual([
+      { kind: 'apply', permitId: 'mat:attempt-text-1-1', operation: 'material_import', units: 1 },
+    ]);
+  });
+});

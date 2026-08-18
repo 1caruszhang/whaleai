@@ -31,6 +31,12 @@ export interface BackendConfig {
   arkBaseUrl: string;
   /** ARK embedding 专用 key；缺省回落 ARK_API_KEY（与 sidecar 口径一致）。 */
   arkEmbeddingApiKey?: string;
+  /**
+   * ARK embedding endpoint id（票 07）：网关模式下 sidecar 不再随 admission
+   * 携带账号级 endpoint id，body 缺 model 时由网关按本配置补齐；未配置则
+   * 原样透传（上游自行报错）。
+   */
+  arkEmbeddingEndpointId?: string;
   /** 豆包搜索专用 key；缺省回落 ARK_API_KEY（与 sidecar 口径一致）。 */
   doubaoSearchApiKey?: string;
   /** 豆包搜索 HTTP API 基地址。 */
@@ -129,6 +135,7 @@ export function loadBackendConfig(env: Record<string, string | undefined>): Back
     arkApiKey: env.ARK_API_KEY!,
     arkBaseUrl: trimRoot(env.ARK_BASE_URL, 'https://ark.cn-beijing.volces.com/api/v3'),
     ...(env.ARK_EMBEDDING_API_KEY ? { arkEmbeddingApiKey: env.ARK_EMBEDDING_API_KEY } : {}),
+    ...(env.ARK_EMBEDDING_ENDPOINT_ID ? { arkEmbeddingEndpointId: env.ARK_EMBEDDING_ENDPOINT_ID } : {}),
     ...(env.DOUBAO_SEARCH_API_KEY ? { doubaoSearchApiKey: env.DOUBAO_SEARCH_API_KEY } : {}),
     doubaoSearchBaseUrl: trimRoot(env.DOUBAO_SEARCH_BASE_URL, 'https://open.feedcoopapi.com'),
     ossAccessKeyId: env.OSS_ACCESS_KEY_ID!,

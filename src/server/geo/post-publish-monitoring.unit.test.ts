@@ -155,3 +155,117 @@ describe("published page SSRF guard", () => {
     expect(fetch).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("PostPublishBaselineProbeService billing (ticket 07)", () => {
+  function billing(options: { available?: number; failProbe?: boolean } = {}) {
+    const calls: Array<
+      | { kind: "balance" }
+      | { kind: "apply"; permitId: string; operation: string; units: number }
+      | { kind: "report"; permitId: string; unit: number; outcome: string }
+    > = [];
+    return {
+      calls,
+      channel: {
+        async balance() {
+          calls.push({ kind: "balance" });
+          return {
+            total: (options.available ?? 100) + 10,
+            frozen: 10,
+            available: options.available ?? 100,
+          };
+        },
+        async apply(input: { permitId: string; operation: string; units: number }) {
+          calls.push({ kind: "apply", ...input });
+          return {
+            permitId: input.permitId,
+            operation: input.operation,
+            units: input.units,
+            totalPoints: 5,
+            status: "open" as const,
+            frozenPoints: 5,
+            consumedPoints: 0,
+            refundedPoints: 0,
+          };
+        },
+        async reportUnit(permitId: string, unit: number, outcome: string) {
+          calls.push({ kind: "report", permitId, unit, outcome });
+        },
+      },
+    };
+  }
+
+  const input = {
+    engineId: "doubao" as const,
+    questionId: "q-1",
+    question: "小鲸同学值得选吗？",
+    sourceProviderSnapshot: sourceSnapshot,
+    brandNames: ["小鲸"],
+    publishedArticles: [{ articleId: "article-1", url: "https://brand.test/article-1" }],
+  };
+
+  it("pre-checks balance, applies a monitoring_patrol permit and reports success", async () => {
+    const providerCapability = provider({ output_text: "TOP 1：小鲸。" });
+    const billingChannel = billing({ available: 7 });
+    const service = new PostPublishBaselineProbeService(
+      providerCapability,
+      billingChannel.channel,
+      () => "round-1",
+    );
+
+    const result = await service.probe(input);
+
+    expect(result.evidence.questionId).toBe("q-1");
+    expect(billingChannel.calls).toEqual([
+      { kind: "balance" },
+      { kind: "apply", permitId: "monitor:round-1", operation: "monitoring_patrol", units: 1 },
+      { kind: "report", permitId: "monitor:round-1", unit: 0, outcome: "success" },
+    ]);
+  });
+
+  it("auto-pauses with a typed error and no permit when balance is below one patrol unit", async () => {
+    const providerCapability = provider({ output_text: "TOP 1：小鲸。" });
+    const billingChannel = billing({ available: 4 });
+    const service = new PostPublishBaselineProbeService(
+      providerCapability,
+      billingChannel.channel,
+      () => "round-2",
+    );
+
+    await expect(service.probe(input)).rejects.toMatchObject({
+      name: "PostPublishInsufficientBalanceError",
+      required: 5,
+      available: 4,
+    });
+    expect(providerCapability.probeQuestion).not.toHaveBeenCalled();
+    expect(billingChannel.calls).toEqual([{ kind: "balance" }]);
+  });
+
+  it("reports the patrol unit as failure when the probe fails, and stays free without billing", async () => {
+    const providerCapability = provider({ output_text: "x" });
+    (providerCapability.probeQuestion as ReturnType<typeof vi.fn>).mockRejectedValue(
+      new Error("keyword-search 上游请求失败（HTTP 500）"),
+    );
+    const billingChannel = billing();
+    const billed = new PostPublishBaselineProbeService(
+      providerCapability,
+      billingChannel.channel,
+      () => "round-3",
+    );
+    await expect(billed.probe(input)).rejects.toThrow("keyword-search");
+    expect(billingChannel.calls).toEqual([
+      { kind: "balance" },
+      { kind: "apply", permitId: "monitor:round-3", operation: "monitoring_patrol", units: 1 },
+      { kind: "report", permitId: "monitor:round-3", unit: 0, outcome: "failure" },
+    ]);
+
+    // 无计费通道（开发直连模式）：零计费调用，纯探测语义不变。
+    const unbilledCalls = billing();
+    const unbilled = new PostPublishBaselineProbeService(
+      provider({ output_text: "TOP 1：小鲸。" }),
+      undefined,
+      () => "round-4",
+    );
+    await unbilled.probe(input);
+    expect(unbilledCalls.calls).toEqual([]);
+  });
+});

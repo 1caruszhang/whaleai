@@ -462,3 +462,200 @@ describe("article generation policy version contract with BrandWorkspace", () =>
     expect(declared?.[1]).toBe(ARTICLE_GENERATION_POLICY_VERSION);
   });
 });
+
+describe("ArticleGenerationService billing permits (ticket 07)", () => {
+  function permitPort() {
+    const calls: Array<
+      | { kind: "apply"; permitId: string; operation: string; units: number }
+      | { kind: "report"; permitId: string; unit: number; outcome: string }
+      | { kind: "close"; permitId: string }
+    > = [];
+    return {
+      calls,
+      port: {
+        async apply(input: { permitId: string; operation: string; units: number }) {
+          calls.push({ kind: "apply", ...input });
+          return {
+            permitId: input.permitId,
+            operation: input.operation,
+            units: input.units,
+            totalPoints: 20 * input.units,
+            status: "open" as const,
+            frozenPoints: 20 * input.units,
+            consumedPoints: 0,
+            refundedPoints: 0,
+          };
+        },
+        async reportUnit(permitId: string, unit: number, outcome: string) {
+          calls.push({ kind: "report", permitId, unit, outcome });
+        },
+        async close(permitId: string) {
+          calls.push({ kind: "close", permitId });
+        },
+      },
+    };
+  }
+
+  function billedPort(rows: ArticleProjection[], failArticles: string[] = []) {
+    const finished: string[] = [];
+    const failed: string[] = [];
+    const claimAttempt = new Map<string, number>();
+    const port = {
+      start: vi.fn(async () => operation(rows)),
+      getOperation: vi.fn(async () => operation(rows)),
+      claimGeneration: vi.fn(async ({ articleId }: { articleId: string }) => {
+        const row = rows.find((candidate) => candidate.id === articleId)!;
+        const attempt = (claimAttempt.get(articleId) ?? row.generationAttempt) + 1;
+        claimAttempt.set(articleId, attempt);
+        return {
+          article: { ...row, generationAttempt: attempt },
+          brandName: "测试品牌",
+          productLine: "知识服务",
+          targetRegion: "中国",
+          claimToken: `claim-${articleId}-${attempt}`,
+        } satisfies ArticleGenerationContext;
+      }),
+      finishGeneration: vi.fn(async ({ articleId }: { articleId: string }) => {
+        finished.push(articleId);
+        return { ...rows.find((row) => row.id === articleId)!, status: "draft_ready", revision: 1 };
+      }),
+      failGeneration: vi.fn(async ({ articleId }: { articleId: string }) => {
+        failed.push(articleId);
+        return { ...rows.find((row) => row.id === articleId)!, status: "generation_failed" };
+      }),
+      get: vi.fn(async (operationId: string, articleId: string) =>
+        rows.find((row) => row.id === articleId)!),
+    } as unknown as ArticlePersistencePort;
+    const generation = {
+      slot: "generation",
+      complete: vi.fn(async (messages: readonly GeoTextMessage[], options?: CompleteOptions) => {
+        const prompt = messages.map((message) => message.content).join("\n");
+        const target = failArticles.find((id) => prompt.includes(`主题 ${id}`));
+        // 标题腿（title-planning purpose）保持成功，让损坏文章走到正文生成
+        // 才失败——单篇成败按整篇回报。
+        if (target && options?.purpose !== "title-planning") throw new Error("provider unavailable");
+        return directGenerationComplete(messages, options);
+      }),
+    } satisfies GeoTextCapability;
+    return { port, generation, finished, failed };
+  }
+
+  it("applies one batch permit for the operation and reports each article by index", async () => {
+    const rows = [article("a1"), article("a2")];
+    const { port, generation } = billedPort(rows);
+    const permits = permitPort();
+    const service = new ArticleGenerationService(
+      { workspaceId: "workspace-1", sessionId: "session-1" },
+      port,
+      generation,
+      { slot: "reflection", complete: vi.fn() } satisfies GeoTextCapability,
+      permits.port,
+    );
+
+    await service.start({
+      workspaceId: "workspace-1",
+      sessionId: "session-1",
+      source: {
+        kind: "direct",
+        count: 2,
+        themes: ["主题 a1", "主题 a2"],
+        contentType: "guide",
+        constraints: "",
+      },
+    });
+
+    expect(permits.calls[0]).toEqual({
+      kind: "apply",
+      permitId: "article:operation-1:initial",
+      operation: "article_generation",
+      units: 2,
+    });
+    const reports = permits.calls.filter((call) => call.kind === "report");
+    expect(reports).toHaveLength(2);
+    expect(reports).toContainEqual({
+      kind: "report",
+      permitId: "article:operation-1:initial",
+      unit: 0,
+      outcome: "success",
+    });
+    expect(reports).toContainEqual({
+      kind: "report",
+      permitId: "article:operation-1:initial",
+      unit: 1,
+      outcome: "success",
+    });
+    // 收尾结清（全单位已回报时为幂等 no-op）。
+    expect(permits.calls.at(-1)).toEqual({
+      kind: "close",
+      permitId: "article:operation-1:initial",
+    });
+  });
+
+  it("settles only successful articles when part of the batch fails (10 articles, 3 broken)", async () => {
+    const rows = Array.from({ length: 10 }, (_, index) => article(`a${index + 1}`));
+    const broken = ["a3", "a5", "a8"];
+    const { port, generation, finished, failed } = billedPort(rows, broken);
+    const permits = permitPort();
+    const service = new ArticleGenerationService(
+      { workspaceId: "workspace-1", sessionId: "session-1" },
+      port,
+      generation,
+      { slot: "reflection", complete: vi.fn() } satisfies GeoTextCapability,
+      permits.port,
+    );
+
+    const operation = await service.start({
+      workspaceId: "workspace-1",
+      sessionId: "session-1",
+      source: {
+        kind: "direct",
+        count: 10,
+        themes: rows.map((row) => `主题 ${row.id}`),
+        contentType: "guide",
+        constraints: "",
+      },
+    });
+
+    expect(operation.articles).toHaveLength(10);
+    expect(finished).toHaveLength(7);
+    expect(failed).toEqual(broken);
+    const reports = permits.calls.filter((call) => call.kind === "report") as Array<{
+      unit: number;
+      outcome: string;
+    }>;
+    expect(reports).toHaveLength(10);
+    const successUnits = reports.filter((report) => report.outcome === "success");
+    const failureUnits = reports.filter((report) => report.outcome === "failure");
+    expect(successUnits).toHaveLength(7);
+    expect(failureUnits).toHaveLength(3);
+    // 失败单位对应损坏文章在批次中的下标（标题生成在 direct 路径总是成功，
+    // 正文损坏 → 整篇按失败回报）。
+    expect(new Set(failureUnits.map((report) => report.unit))).toEqual(new Set([2, 4, 7]));
+  });
+
+  it("bills retry/regenerate as article_rewrite keyed by the claim attempt", async () => {
+    const rows = [article("a1")];
+    const { port, generation } = billedPort(rows);
+    const permits = permitPort();
+    const service = new ArticleGenerationService(
+      { workspaceId: "workspace-1", sessionId: "session-1" },
+      port,
+      generation,
+      { slot: "reflection", complete: vi.fn() } satisfies GeoTextCapability,
+      permits.port,
+    );
+
+    await service.retry({
+      workspaceId: "workspace-1",
+      sessionId: "session-1",
+      operationId: "operation-1",
+      articleId: "a1",
+      expectedRevision: 0,
+    });
+
+    expect(permits.calls).toEqual([
+      { kind: "apply", permitId: "art-rw:operation-1:a1:1", operation: "article_rewrite", units: 1 },
+      { kind: "report", permitId: "art-rw:operation-1:a1:1", unit: 0, outcome: "success" },
+    ]);
+  });
+});

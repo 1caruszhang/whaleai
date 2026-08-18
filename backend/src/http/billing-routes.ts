@@ -24,8 +24,10 @@ const applyPermitSchema = z.object({
   permitId: permitIdSchema,
   operation: z.string().min(1).max(64),
   units: z.number().int().min(1).max(1000),
-  unitPrice: z.number().int().min(0).max(1_000_000),
-  basePrice: z.number().int().min(0).max(1_000_000).default(0),
+  // 票 07 客户端形态：可省略价目，服务端按价目表定价（定价权威在后端）。
+  // 携带时仍逐字段对账，漂移拒绝（price_mismatch / permit_id_conflict）。
+  unitPrice: z.number().int().min(0).max(1_000_000).optional(),
+  basePrice: z.number().int().min(0).max(1_000_000).optional(),
 });
 
 const reportUnitSchema = z.object({
