@@ -256,7 +256,7 @@ describe('listenWithCleanup', () => {
             expect(mockUnlistenSpies[0]).toHaveBeenCalledTimes(1);
         });
 
-        it('drops events queued after manual unlisten even when signal is never aborted (Codex review WARN-1)', async () => {
+        it('drops events queued after manual unlisten even when signal is never aborted', async () => {
             // The handler's signal.aborted check would NOT block a queued
             // event in the manual-unlisten path because the signal stays
             // un-aborted. The internal `disposed` flag covers it.

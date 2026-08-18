@@ -31,8 +31,8 @@
 // What this REPLACES:
 //   - `pendingNavigation` Map + 2-second time window in
 //     `notificationService.ts` (fragile; could miss clicks past the window).
-//   - `wasHidden` closure flag in `useTrayEvents.ts` (broke when user wasn't
-//     minimized to tray — alt-tab away then click toast).
+//   - renderer-local visibility flags (broke when the window lost focus
+//     without being hidden).
 //   - `notification:show` Tauri event hop (Rust → JS → plugin-notification);
 //     now Rust calls plugin-notification directly via builder API.
 //
@@ -43,8 +43,8 @@
 // which drained the same entry and emitted a *second* identical event. The
 // strict cfg-split below makes the bug structurally unrepresentable.
 
-#[cfg(not(target_os = "windows"))]
-use std::sync::Mutex;
+use std::collections::{HashSet, VecDeque};
+use std::sync::{LazyLock, Mutex, OnceLock};
 #[cfg(not(target_os = "windows"))]
 use std::time::{Duration, Instant};
 
@@ -55,6 +55,10 @@ use tauri::{AppHandle, Emitter, Manager, Runtime};
 #[cfg(not(target_os = "windows"))]
 use tauri_plugin_notification::NotificationExt;
 
+use crate::brand_workspace::{
+    GeoNotificationArtifactLocator, GeoNotificationCard, GeoNotificationCategory,
+    GeoNotificationEvent, GeoNotificationLocator, GeoNotificationResolution,
+};
 use crate::notification_badge::NotificationBadgeIncrement;
 #[cfg(target_os = "windows")]
 use crate::ulog_error;
@@ -88,7 +92,7 @@ struct PendingClick {
 #[cfg(not(target_os = "windows"))]
 enum PendingState {
     Empty,
-    Single(PendingClick),
+    Single(Box<PendingClick>),
     /// Two-or-more notifications stacked unconsumed. Tracked timestamp is
     /// the *earliest* queue entry's `queued_at` so TTL still expires the
     /// state.
@@ -100,15 +104,51 @@ enum PendingState {
 #[cfg(not(target_os = "windows"))]
 static PENDING_CLICK: Mutex<PendingState> = Mutex::new(PendingState::Empty);
 
+/// AppHandle used by Rust-owned background GEO executors which do not have a
+/// Renderer or Tauri command frame. This does not own business state; it only
+/// reaches the existing notification surface and Tauri event bus.
+static NOTIFICATION_APP_HANDLE: OnceLock<AppHandle> = OnceLock::new();
+
+const GEO_DELIVERY_DEDUPE_LIMIT: usize = 2_048;
+
+#[derive(Default)]
+struct GeoDeliveryDedupe {
+    ids: HashSet<String>,
+    order: VecDeque<String>,
+}
+
+static GEO_DELIVERY_DEDUPE: LazyLock<Mutex<GeoDeliveryDedupe>> =
+    LazyLock::new(|| Mutex::new(GeoDeliveryDedupe::default()));
+
+/// The WebView listener is not installed during native cold start. Keep at
+/// most one exact click until Renderer acknowledges readiness. Repeated clicks
+/// with the same stable notification id remain one click; two different clicks
+/// are ambiguous and deliberately do not deep-link.
+#[derive(Default)]
+struct RendererClickIngress {
+    ready: bool,
+    pending: Option<NotificationClickPayload>,
+    ambiguous: bool,
+    handled_notification_ids: HashSet<String>,
+    handled_notification_order: VecDeque<String>,
+}
+
+static RENDERER_CLICK_INGRESS: LazyLock<Mutex<RendererClickIngress>> =
+    LazyLock::new(|| Mutex::new(RendererClickIngress::default()));
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct NotificationNavigation {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notification_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tab_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub geo_locator: Option<GeoNotificationLocator>,
 }
 
 impl NotificationNavigation {
@@ -118,9 +158,11 @@ impl NotificationNavigation {
         workspace_path: Option<String>,
     ) -> Option<Self> {
         let navigation = Self {
+            notification_id: None,
             tab_id: clean_optional_string(tab_id),
             session_id: clean_optional_string(session_id),
             workspace_path: clean_optional_string(workspace_path),
+            geo_locator: None,
         };
         if navigation.tab_id.is_none()
             && (navigation.session_id.is_none() || navigation.workspace_path.is_none())
@@ -143,11 +185,28 @@ impl NotificationNavigation {
         Self::new(tab_id, Some(session_id), Some(workspace_path))
     }
 
+    pub fn for_geo(event: &GeoNotificationEvent) -> Self {
+        Self {
+            notification_id: Some(event.delivery_id()),
+            tab_id: None,
+            session_id: Some(event.locator.session_id.clone()),
+            workspace_path: None,
+            geo_locator: Some(event.locator.clone()),
+        }
+    }
+
     fn describe(&self) -> String {
-        format!(
-            "tab_id={:?} session_id={:?} workspace_path={:?}",
-            self.tab_id, self.session_id, self.workspace_path
-        )
+        if let Some(locator) = self.geo_locator.as_ref() {
+            return format!(
+                "geo workspace_id={} session_id={} operation_id={} card={:?} artifact_kind={}",
+                locator.workspace_id,
+                locator.session_id,
+                locator.operation_id,
+                locator.card,
+                locator.artifact.kind,
+            );
+        }
+        format!("tab_id={:?} session_id={:?}", self.tab_id, self.session_id)
     }
 }
 
@@ -162,29 +221,31 @@ fn clean_optional_string(value: Option<String>) -> Option<String> {
     })
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct NotificationClickPayload {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notification_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tab_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub geo_locator: Option<GeoNotificationLocator>,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct SessionCompletionTurnOwner {
-    pub kind: String,
-    pub id: String,
-}
-
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct SessionCompletionOrigin {
-    pub kind: String,
-    pub surface: String,
+impl From<NotificationNavigation> for NotificationClickPayload {
+    fn from(navigation: NotificationNavigation) -> Self {
+        Self {
+            notification_id: navigation.notification_id,
+            tab_id: navigation.tab_id,
+            session_id: navigation.session_id,
+            workspace_path: navigation.workspace_path,
+            geo_locator: navigation.geo_locator,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
@@ -201,34 +262,7 @@ pub struct SessionCompletionTerminal {
     pub session_id: String,
     pub workspace_path: String,
     pub turn_id: String,
-    #[serde(default)]
-    pub turn_owner: Option<SessionCompletionTurnOwner>,
-    pub origin: SessionCompletionOrigin,
     pub status: SessionCompletionStatus,
-}
-
-fn is_generic_session_completion_eligible(terminal: &SessionCompletionTerminal) -> bool {
-    if matches!(
-        terminal
-            .turn_owner
-            .as_ref()
-            .map(|owner| owner.kind.as_str()),
-        Some("task" | "goal")
-    ) {
-        return false;
-    }
-    !matches!(
-        (
-            terminal.origin.kind.as_str(),
-            terminal.origin.surface.as_str()
-        ),
-        ("agent-channel", _)
-            | ("automation", _)
-            | (
-                _,
-                "channel_message" | "channel_heartbeat" | "memory_update" | "cron" | "task_run"
-            )
-    )
 }
 
 fn should_show_session_completion<R: Runtime>(app: &AppHandle<R>) -> bool {
@@ -250,16 +284,6 @@ pub(crate) fn submit_session_completion<R: Runtime>(
     terminal: SessionCompletionTerminal,
     _claim: crate::sidecar::SessionCompletionClaim,
 ) {
-    if !is_generic_session_completion_eligible(&terminal) {
-        ulog_debug!(
-            "[Notification] Generic session completion suppressed by owner/origin: session={} turn={} owner={:?} origin={:?}",
-            terminal.session_id,
-            terminal.turn_id,
-            terminal.turn_owner,
-            terminal.origin,
-        );
-        return;
-    }
     if !should_show_session_completion(app) {
         ulog_debug!(
             "[Notification] Session completion toast suppressed while main window is focused: session={} turn={}",
@@ -309,22 +333,274 @@ pub(crate) fn submit_session_completion<R: Runtime>(
     );
 }
 
+pub fn init_app_handle(app: AppHandle) {
+    let _ = NOTIFICATION_APP_HANDLE.set(app);
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GeoStatusChangedPayload {
+    workspace_id: String,
+    session_id: String,
+}
+
+/// Project every structured Operation mutation into the sidebar and, for the
+/// two generic GEO notification categories, submit a privacy-safe toast. This
+/// runs only after the BrandWorkspace transaction commits; it never changes
+/// Operation execution, persistence, retry, or recovery.
+pub fn submit_geo_operation_projection(operation: &crate::brand_workspace::GeoOperationProjection) {
+    let category = match operation.status.as_str() {
+        "awaiting-confirmation" => GeoNotificationCategory::AwaitingConfirmation,
+        "failed" => GeoNotificationCategory::OperationFailed,
+        _ => {
+            emit_geo_status_changed(&operation.workspace_id, &operation.session_id);
+            return;
+        }
+    };
+    let step_id = operation.steps.iter().find_map(|step| {
+        let relevant = match category {
+            GeoNotificationCategory::AwaitingConfirmation => step.status == "awaiting-confirmation",
+            GeoNotificationCategory::OperationFailed => step.status == "failed",
+            _ => false,
+        };
+        relevant.then(|| step.id.clone())
+    });
+    submit_geo_notification(GeoNotificationEvent {
+        category,
+        revision: operation.revision,
+        locator: GeoNotificationLocator {
+            workspace_id: operation.workspace_id.clone(),
+            session_id: operation.session_id.clone(),
+            operation_id: operation.id.clone(),
+            card: GeoNotificationCard::GeoOperation,
+            step_id,
+            artifact: GeoNotificationArtifactLocator {
+                kind: "operation".to_string(),
+                id: operation.id.clone(),
+                revision: Some(operation.revision),
+            },
+        },
+    });
+}
+
+pub fn submit_article_batch_completion(
+    workspace_id: &str,
+    session_id: &str,
+    operation_id: &str,
+    revision: i64,
+) {
+    submit_geo_notification(GeoNotificationEvent {
+        category: GeoNotificationCategory::BatchCompleted,
+        revision,
+        locator: GeoNotificationLocator {
+            workspace_id: workspace_id.to_string(),
+            session_id: session_id.to_string(),
+            operation_id: operation_id.to_string(),
+            card: GeoNotificationCard::ArticleGeneration,
+            step_id: None,
+            artifact: GeoNotificationArtifactLocator {
+                kind: "article-operation".to_string(),
+                id: operation_id.to_string(),
+                revision: Some(revision),
+            },
+        },
+    });
+}
+
+pub fn submit_publish_failure(
+    workspace_id: &str,
+    session_id: &str,
+    operation_id: &str,
+    execution_id: &str,
+    revision: i64,
+) {
+    submit_geo_notification(GeoNotificationEvent {
+        category: GeoNotificationCategory::PublishFailed,
+        revision,
+        locator: GeoNotificationLocator {
+            workspace_id: workspace_id.to_string(),
+            session_id: session_id.to_string(),
+            operation_id: operation_id.to_string(),
+            card: GeoNotificationCard::PublishExecution,
+            step_id: None,
+            artifact: GeoNotificationArtifactLocator {
+                kind: "publish-execution".to_string(),
+                id: execution_id.to_string(),
+                revision: Some(revision),
+            },
+        },
+    });
+}
+
+pub fn submit_publish_confirmation_required(
+    workspace_id: &str,
+    session_id: &str,
+    operation_id: &str,
+    execution_id: &str,
+    revision: i64,
+) {
+    submit_geo_notification(GeoNotificationEvent {
+        category: GeoNotificationCategory::AwaitingConfirmation,
+        revision,
+        locator: GeoNotificationLocator {
+            workspace_id: workspace_id.to_string(),
+            session_id: session_id.to_string(),
+            operation_id: operation_id.to_string(),
+            card: GeoNotificationCard::PublishExecution,
+            step_id: None,
+            artifact: GeoNotificationArtifactLocator {
+                kind: "publish-execution".to_string(),
+                id: execution_id.to_string(),
+                revision: Some(revision),
+            },
+        },
+    });
+}
+
+pub fn submit_monitoring_completion(
+    workspace_id: &str,
+    session_id: &str,
+    operation_id: &str,
+    plan_id: &str,
+    revision: i64,
+) {
+    submit_geo_notification(GeoNotificationEvent {
+        category: GeoNotificationCategory::MonitoringCompleted,
+        revision,
+        locator: GeoNotificationLocator {
+            workspace_id: workspace_id.to_string(),
+            session_id: session_id.to_string(),
+            operation_id: operation_id.to_string(),
+            card: GeoNotificationCard::PostPublishMonitoring,
+            step_id: None,
+            artifact: GeoNotificationArtifactLocator {
+                kind: "monitor-plan".to_string(),
+                id: plan_id.to_string(),
+                revision: Some(revision),
+            },
+        },
+    });
+}
+
+fn emit_geo_status_changed(workspace_id: &str, session_id: &str) {
+    let Some(app) = NOTIFICATION_APP_HANDLE.get() else {
+        return;
+    };
+    if let Err(error) = app.emit(
+        "geo:status-changed",
+        GeoStatusChangedPayload {
+            workspace_id: workspace_id.to_string(),
+            session_id: session_id.to_string(),
+        },
+    ) {
+        ulog_warn!(
+            "[Notification] Failed to emit GEO status projection: {}",
+            error
+        );
+    }
+}
+
+pub fn submit_geo_status_projection(workspace_id: &str, session_id: &str) {
+    emit_geo_status_changed(workspace_id, session_id);
+}
+
+fn submit_geo_notification(event: GeoNotificationEvent) {
+    emit_geo_status_changed(&event.locator.workspace_id, &event.locator.session_id);
+    let Some(app) = NOTIFICATION_APP_HANDLE.get() else {
+        ulog_warn!("[Notification] GEO notification skipped before AppHandle initialization");
+        return;
+    };
+    let prefs = read_notification_prefs();
+    if !prefs.os_notifications || !prefs.geo_category_enabled(event.category) {
+        ulog_debug!(
+            "[Notification] GEO category suppressed by preference category={}",
+            event.category.preference_key()
+        );
+        return;
+    }
+    if !should_show_session_completion(app) {
+        ulog_debug!(
+            "[Notification] GEO toast suppressed while main window is focused category={}",
+            event.category.preference_key()
+        );
+        return;
+    }
+    let delivery_id = event.delivery_id();
+    if !admit_geo_delivery(&delivery_id) {
+        ulog_debug!(
+            "[Notification] Duplicate GEO toast suppressed category={}",
+            event.category.preference_key()
+        );
+        return;
+    }
+    let locale = crate::i18n::current_locale();
+    let (title_key, body_key) = geo_notification_text_keys(event.category);
+    show_with_navigation_target_inner(
+        app,
+        crate::i18n::t(title_key, locale),
+        crate::i18n::t(body_key, locale),
+        Some(NotificationNavigation::for_geo(&event)),
+        None,
+    );
+}
+
+fn geo_notification_text_keys(category: GeoNotificationCategory) -> (&'static str, &'static str) {
+    match category {
+        GeoNotificationCategory::AwaitingConfirmation => (
+            "notification.geoAwaitingConfirmationTitle",
+            "notification.geoAwaitingConfirmationBody",
+        ),
+        GeoNotificationCategory::OperationFailed => (
+            "notification.geoOperationFailedTitle",
+            "notification.geoOperationFailedBody",
+        ),
+        GeoNotificationCategory::BatchCompleted => (
+            "notification.geoBatchCompletedTitle",
+            "notification.geoBatchCompletedBody",
+        ),
+        GeoNotificationCategory::PublishFailed => (
+            "notification.geoPublishFailedTitle",
+            "notification.geoPublishFailedBody",
+        ),
+        GeoNotificationCategory::MonitoringCompleted => (
+            "notification.geoMonitoringCompletedTitle",
+            "notification.geoMonitoringCompletedBody",
+        ),
+    }
+}
+
+fn admit_geo_delivery(delivery_id: &str) -> bool {
+    let mut guard = GEO_DELIVERY_DEDUPE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if !guard.ids.insert(delivery_id.to_string()) {
+        return false;
+    }
+    guard.order.push_back(delivery_id.to_string());
+    while guard.order.len() > GEO_DELIVERY_DEDUPE_LIMIT {
+        if let Some(expired) = guard.order.pop_front() {
+            guard.ids.remove(&expired);
+        }
+    }
+    true
+}
+
 /// Send an OS notification.
 ///
-/// `tab_id` (when supplied) is the legacy fast-path deep-link target consumed
-/// when the user clicks the notification. Use `show_with_navigation_target`
-/// when the target may need to open a session that has no live Tab yet.
+/// `tab_id` (when supplied) is an exact live-Tab deep-link target. Use
+/// `show_with_navigation_target` when the target may need to open a Session
+/// that has no live Tab yet.
 ///
 /// Sound is gated by the `notificationSound` user preference, read disk-first
-/// from `~/.myagents/config.json` (defaults to enabled if missing). The
+/// from Xiaojing's local-data `config.json` (defaults to enabled if missing). The
 /// preference flows through to the platform-specific sound API:
 ///   - Windows: `Toast::sound(None)` for silent, `Sound::Default` for default.
 ///   - macOS: `NSUserNotificationDefaultSoundName` (default mac chime).
 ///   - Linux: `message-new-instant` (XDG sound theme; widely supported).
 ///
 /// Best-effort: any OS-level failure is logged but never propagated to the
-/// caller — a silent notification is strictly better than failing the cron
-/// task / chat turn that triggered it.
+/// caller — a silent notification is strictly better than failing the GEO
+/// operation or chat turn that triggered it.
 pub fn show_with_navigation<R: Runtime>(
     app: &AppHandle<R>,
     title: &str,
@@ -341,10 +617,10 @@ pub fn show_with_navigation<R: Runtime>(
 
 /// Send an OS notification with an optional navigation target.
 ///
-/// Prefer this for background surfaces (cron / task execution) where the target
+/// Prefer this for background GEO surfaces where the target
 /// may not have a live Tab yet. A tab-only target can only switch an existing
 /// tab; a session target lets the renderer open the corresponding chat session
-/// through its cron-aware session-open planner.
+/// through its exact Session locator.
 pub fn show_with_navigation_target<R: Runtime>(
     app: &AppHandle<R>,
     title: &str,
@@ -465,12 +741,13 @@ fn default_sound_name() -> Option<&'static str> {
     Some("message-new-instant")
 }
 
-/// User notification preferences read from `~/.myagents/config.json`.
+/// User notification preferences read from Xiaojing's local-data `config.json`.
 ///
 /// Both fields default to `true` (fail-open) when the config file is missing
 /// or unparseable — silently disabling notifications because we couldn't read
 /// a JSON file would look like a regression. Read overhead is negligible:
 /// notifications are low-frequency events, and the file is small.
+#[derive(Debug)]
 struct NotificationPrefs {
     /// Master switch: when false, no OS notification is rendered at all
     /// (covers all 6 trigger sites — cron / task / message complete /
@@ -482,29 +759,83 @@ struct NotificationPrefs {
     /// Badge flag: when true, native app icon badges mirror unseen notification
     /// work. Defaults off while the feature is still being validated.
     notification_badge: bool,
+    geo_notifications: GeoNotificationPrefs,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct GeoNotificationPrefs {
+    awaiting_confirmation: bool,
+    operation_failed: bool,
+    batch_completed: bool,
+    publish_failed: bool,
+    monitoring_completed: bool,
+}
+
+impl Default for GeoNotificationPrefs {
+    fn default() -> Self {
+        Self {
+            awaiting_confirmation: true,
+            operation_failed: true,
+            batch_completed: true,
+            publish_failed: true,
+            monitoring_completed: true,
+        }
+    }
+}
+
+impl NotificationPrefs {
+    fn geo_category_enabled(&self, category: GeoNotificationCategory) -> bool {
+        match category {
+            GeoNotificationCategory::AwaitingConfirmation => {
+                self.geo_notifications.awaiting_confirmation
+            }
+            GeoNotificationCategory::OperationFailed => self.geo_notifications.operation_failed,
+            GeoNotificationCategory::BatchCompleted => self.geo_notifications.batch_completed,
+            GeoNotificationCategory::PublishFailed => self.geo_notifications.publish_failed,
+            GeoNotificationCategory::MonitoringCompleted => {
+                self.geo_notifications.monitoring_completed
+            }
+        }
+    }
 }
 
 fn read_notification_prefs() -> NotificationPrefs {
-    #[derive(Debug, serde::Deserialize, Default)]
-    #[serde(rename_all = "camelCase")]
-    struct PartialAppConfig {
-        os_notifications: Option<bool>,
-        /// Pre-0.2.14 master toggle. Read as a fallback so users who
-        /// deliberately set `cronNotifications: false` keep notifications
-        /// suppressed BEFORE the renderer's migrateOsNotificationsField
-        /// runs and rewrites the field on disk. Otherwise: launch app,
-        /// notification fires before they open Settings, surprise.
-        cron_notifications: Option<bool>,
-        notification_sound: Option<bool>,
-        notification_badge: Option<bool>,
-    }
-
     // Use the project-canonical data-dir helper rather than `dirs::home_dir()`
     // so future dev/prod isolation in `app_dirs.rs` reaches us automatically.
-    let parsed: Option<PartialAppConfig> = crate::app_dirs::myagents_data_dir()
+    let content = crate::app_dirs::xiaojing_data_dir()
         .and_then(|dir| std::fs::read_to_string(dir.join("config.json")).ok())
-        .and_then(|content| serde_json::from_str(strip_bom(&content)).ok());
+        .unwrap_or_default();
+    parse_notification_prefs((!content.is_empty()).then_some(content.as_str()))
+}
 
+#[derive(Debug, serde::Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct PartialAppConfig {
+    os_notifications: Option<bool>,
+    /// Pre-0.2.14 master toggle retained as a disk-first fallback.
+    cron_notifications: Option<bool>,
+    notification_sound: Option<bool>,
+    notification_badge: Option<bool>,
+    geo_notification_preferences: Option<PartialGeoNotificationPrefs>,
+}
+
+#[derive(Debug, serde::Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct PartialGeoNotificationPrefs {
+    awaiting_confirmation: Option<bool>,
+    operation_failed: Option<bool>,
+    batch_completed: Option<bool>,
+    publish_failed: Option<bool>,
+    monitoring_completed: Option<bool>,
+}
+
+fn parse_notification_prefs(content: Option<&str>) -> NotificationPrefs {
+    let parsed: Option<PartialAppConfig> =
+        content.and_then(|value| serde_json::from_str(strip_bom(value)).ok());
+
+    let geo = parsed
+        .as_ref()
+        .and_then(|config| config.geo_notification_preferences.as_ref());
     NotificationPrefs {
         os_notifications: parsed
             .as_ref()
@@ -514,7 +845,21 @@ fn read_notification_prefs() -> NotificationPrefs {
             .as_ref()
             .and_then(|c| c.notification_sound)
             .unwrap_or(true),
-        notification_badge: parsed.and_then(|c| c.notification_badge).unwrap_or(false),
+        notification_badge: parsed
+            .as_ref()
+            .and_then(|c| c.notification_badge)
+            .unwrap_or(false),
+        geo_notifications: GeoNotificationPrefs {
+            awaiting_confirmation: geo
+                .and_then(|prefs| prefs.awaiting_confirmation)
+                .unwrap_or(true),
+            operation_failed: geo.and_then(|prefs| prefs.operation_failed).unwrap_or(true),
+            batch_completed: geo.and_then(|prefs| prefs.batch_completed).unwrap_or(true),
+            publish_failed: geo.and_then(|prefs| prefs.publish_failed).unwrap_or(true),
+            monitoring_completed: geo
+                .and_then(|prefs| prefs.monitoring_completed)
+                .unwrap_or(true),
+        },
     }
 }
 
@@ -525,7 +870,7 @@ fn read_notification_prefs() -> NotificationPrefs {
 /// shortcut AUMID); on failure (portable EXE, custom install, missing
 /// shortcut) retry with PowerShell's well-known AUMID. The retry preserves
 /// `on_activated`, so click activation still works — the only visible
-/// difference is the toast attribution ("PowerShell" instead of "MyAgents").
+/// difference is the toast sender label ("PowerShell" instead of "Xiaojing").
 /// This beats falling back to plugin-notification, which would render a toast
 /// with *no* click handler at all.
 #[cfg(target_os = "windows")]
@@ -605,7 +950,7 @@ fn build_and_show_toast<R: Runtime>(
 ///
 /// In production: `app.config().identifier` matches the AUMID NSIS sets on
 /// the Start Menu shortcut via `SetLnkAppUserModelId` — required for WinRT
-/// to render a toast attributed to MyAgents.
+/// to render a toast attributed to Xiaojing.
 ///
 /// In dev (`cargo run`, `tauri dev`): `tauri::is_dev()` is true and we use
 /// PowerShell's AUMID — toast still shows but attributed to PowerShell.
@@ -637,7 +982,7 @@ fn handle_toast_click<R: Runtime>(app: &AppHandle<R>, navigation: Option<Notific
         "[Notification] Toast clicked; navigation={:?}",
         navigation.as_ref().map(NotificationNavigation::describe)
     );
-    crate::tray::show_main_window(app);
+    crate::show_main_window(app);
     emit_click(app, navigation);
 }
 
@@ -646,7 +991,7 @@ fn handle_toast_click<R: Runtime>(app: &AppHandle<R>, navigation: Option<Notific
 /// click), drain the pending latch.
 ///
 /// **Tradeoff (acknowledged)**: any external activation drains the latch,
-/// not strictly toast clicks — alt-tab back to MyAgents within 30s of a
+/// not strictly toast clicks — alt-tab back to Xiaojing within 30s of a
 /// notification will navigate to the queued tab even though the user didn't
 /// click the toast. Mitigations:
 ///   - The latch is `Ambiguous` (no-route) when ≥2 notifications stacked
@@ -683,16 +1028,61 @@ fn emit_click<R: Runtime>(app: &AppHandle<R>, navigation: Option<NotificationNav
     let Some(navigation) = navigation else {
         return;
     };
-    if let Err(e) = app.emit(
-        "notification:click",
-        NotificationClickPayload {
-            tab_id: navigation.tab_id,
-            session_id: navigation.session_id,
-            workspace_path: navigation.workspace_path,
-        },
-    ) {
-        ulog_warn!("[Notification] Failed to emit notification:click: {}", e);
+    let payload = NotificationClickPayload::from(navigation);
+    let should_emit = admit_renderer_click(payload.clone());
+    if should_emit {
+        if let Err(error) = app.emit("notification:click", payload) {
+            ulog_warn!(
+                "[Notification] Failed to emit notification:click: {}",
+                error
+            );
+        }
     }
+}
+
+fn admit_renderer_click(payload: NotificationClickPayload) -> bool {
+    let mut ingress = RENDERER_CLICK_INGRESS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(notification_id) = payload.notification_id.as_ref() {
+        if !ingress
+            .handled_notification_ids
+            .insert(notification_id.clone())
+        {
+            return false;
+        }
+        ingress
+            .handled_notification_order
+            .push_back(notification_id.clone());
+        while ingress.handled_notification_order.len() > GEO_DELIVERY_DEDUPE_LIMIT {
+            if let Some(expired) = ingress.handled_notification_order.pop_front() {
+                ingress.handled_notification_ids.remove(&expired);
+            }
+        }
+    }
+    if ingress.ready {
+        return true;
+    }
+    if ingress.pending.is_some() {
+        ingress.pending = None;
+        ingress.ambiguous = true;
+    } else if !ingress.ambiguous {
+        ingress.pending = Some(payload);
+    }
+    false
+}
+
+fn renderer_click_listener_ready() -> Option<NotificationClickPayload> {
+    let mut ingress = RENDERER_CLICK_INGRESS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    ingress.ready = true;
+    if ingress.ambiguous {
+        ingress.ambiguous = false;
+        ingress.pending = None;
+        return None;
+    }
+    ingress.pending.take()
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -708,15 +1098,15 @@ fn queue_pending_click(navigation: NotificationNavigation) {
     let now = Instant::now();
     *guard = match std::mem::replace(&mut *guard, PendingState::Empty) {
         // First entry — straightforward.
-        PendingState::Empty => PendingState::Single(PendingClick {
+        PendingState::Empty => PendingState::Single(Box::new(PendingClick {
             navigation,
             queued_at: now,
-        }),
+        })),
         // Promote to Ambiguous: we now have ≥2 unconsumed notifications
         // and can't tell which one the user will click. Keep the older
         // queued_at so TTL bounds the ambiguous window correctly.
         //
-        // Boundary fix (review-by-codex): if the old `Single` is itself
+        // Boundary fix from security review: if the old `Single` is itself
         // already past TTL (notification fired ≥30s ago, never clicked),
         // the user has clearly abandoned it — treat it as Empty for the
         // promotion. Otherwise we'd build an Ambiguous state seeded with
@@ -726,10 +1116,10 @@ fn queue_pending_click(navigation: NotificationNavigation) {
         // queue A, leave window unfocused 31s, queue B, click B → gets
         // no deep-link forever.
         PendingState::Single(prev) if prev.queued_at.elapsed() > PENDING_CLICK_TTL => {
-            PendingState::Single(PendingClick {
+            PendingState::Single(Box::new(PendingClick {
                 navigation,
                 queued_at: now,
-            })
+            }))
         }
         PendingState::Single(prev) => PendingState::Ambiguous {
             queued_at: prev.queued_at,
@@ -739,10 +1129,10 @@ fn queue_pending_click(navigation: NotificationNavigation) {
         // the fresh entry. The user's previous batch is no longer the one
         // being clicked.
         PendingState::Ambiguous { queued_at } if queued_at.elapsed() > PENDING_CLICK_TTL => {
-            PendingState::Single(PendingClick {
+            PendingState::Single(Box::new(PendingClick {
                 navigation,
                 queued_at: now,
-            })
+            }))
         }
         PendingState::Ambiguous { queued_at } => PendingState::Ambiguous { queued_at },
     };
@@ -832,6 +1222,26 @@ pub fn cmd_consume_notification_click<R: Runtime>(app: AppHandle<R>) -> bool {
     consumed
 }
 
+/// Renderer calls this only after installing its `notification:click`
+/// listener. The returned cold-start click is consumed exactly once and is
+/// intentionally memory-only; an empty/invalid navigation is never persisted
+/// into a future ordinary startup.
+#[tauri::command]
+pub fn cmd_notification_click_listener_ready() -> Option<NotificationClickPayload> {
+    renderer_click_listener_ready()
+}
+
+#[tauri::command]
+pub async fn cmd_resolve_geo_notification_locator(
+    locator: GeoNotificationLocator,
+) -> Result<GeoNotificationResolution, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::brand_workspace::production_store()?.resolve_geo_notification_locator(locator)
+    })
+    .await
+    .map_err(|error| format!("resolve GEO notification locator task failed: {error}"))?
+}
+
 // ============ Tests ============
 
 #[cfg(all(test, not(target_os = "windows")))]
@@ -899,23 +1309,23 @@ mod tests {
         // 6. TTL expiry on Single — synthesize an old entry directly.
         {
             let mut guard = PENDING_CLICK.lock().unwrap();
-            *guard = PendingState::Single(PendingClick {
+            *guard = PendingState::Single(Box::new(PendingClick {
                 navigation: NotificationNavigation::from_tab_id(Some("tab-stale".into())).unwrap(),
                 queued_at: Instant::now() - Duration::from_secs(31),
-            });
+            }));
         }
         assert_eq!(take_pending_click(), None, "TTL must drop stale Single");
 
         // 7. queue → wait past TTL → queue → take must route to the LATER
         //    notification (not stick on Ambiguous-with-stale-anchor). This
-        //    is the boundary fix from the v0.2.14 codex review.
+        //    is the boundary fix from the v0.2.14 security review.
         reset();
         {
             let mut guard = PENDING_CLICK.lock().unwrap();
-            *guard = PendingState::Single(PendingClick {
+            *guard = PendingState::Single(Box::new(PendingClick {
                 navigation: NotificationNavigation::from_tab_id(Some("tab-old".into())).unwrap(),
                 queued_at: Instant::now() - Duration::from_secs(31),
-            });
+            }));
         }
         queue_pending_click(
             NotificationNavigation::from_tab_id(Some("tab-fresh-after-stale".into())).unwrap(),
@@ -950,82 +1360,6 @@ mod tests {
 mod session_completion_tests {
     use super::*;
 
-    fn terminal(
-        session_id: &str,
-        turn_id: &str,
-        owner: Option<&str>,
-        origin_kind: &str,
-        origin_surface: &str,
-    ) -> SessionCompletionTerminal {
-        SessionCompletionTerminal {
-            session_id: session_id.to_string(),
-            workspace_path: "/tmp/workspace".to_string(),
-            turn_id: turn_id.to_string(),
-            turn_owner: owner.map(|kind| SessionCompletionTurnOwner {
-                kind: kind.to_string(),
-                id: "owner-1".to_string(),
-            }),
-            origin: SessionCompletionOrigin {
-                kind: origin_kind.to_string(),
-                surface: origin_surface.to_string(),
-            },
-            status: SessionCompletionStatus::Complete,
-        }
-    }
-
-    #[test]
-    fn generic_completion_policy_uses_owner_and_origin() {
-        assert!(is_generic_session_completion_eligible(&terminal(
-            "desktop",
-            "turn-1",
-            None,
-            "desktop",
-            "launcher_input",
-        )));
-        assert!(is_generic_session_completion_eligible(&terminal(
-            "space",
-            "turn-1",
-            None,
-            "registered-agent",
-            "space_issue_delivery",
-        )));
-        assert!(is_generic_session_completion_eligible(&terminal(
-            "inbox",
-            "turn-1",
-            None,
-            "session-inbox",
-            "session_send",
-        )));
-        assert!(!is_generic_session_completion_eligible(&terminal(
-            "task",
-            "turn-1",
-            Some("task"),
-            "automation",
-            "task_run",
-        )));
-        assert!(!is_generic_session_completion_eligible(&terminal(
-            "goal",
-            "turn-1",
-            Some("goal"),
-            "desktop",
-            "assistant",
-        )));
-        assert!(!is_generic_session_completion_eligible(&terminal(
-            "channel",
-            "turn-1",
-            None,
-            "agent-channel",
-            "channel_message",
-        )));
-        assert!(!is_generic_session_completion_eligible(&terminal(
-            "memory",
-            "turn-1",
-            None,
-            "automation",
-            "memory_update",
-        )));
-    }
-
     #[test]
     fn extracts_terminal_from_plain_and_live_payloads() {
         let raw = serde_json::json!({
@@ -1033,7 +1367,6 @@ mod session_completion_tests {
                 "sessionId": "session-1",
                 "workspacePath": "/tmp/workspace",
                 "turnId": "turn-1",
-                "origin": { "kind": "desktop", "surface": "launcher_input" },
                 "status": "complete"
             }
         });
@@ -1050,6 +1383,144 @@ mod session_completion_tests {
         assert_eq!(
             completion_terminal_from_sse_data(&live.to_string()).map(|value| value.turn_id),
             Some("turn-1".to_string()),
+        );
+    }
+}
+
+#[cfg(test)]
+mod geo_notification_tests {
+    use super::*;
+    use crate::i18n::SupportedLocale;
+
+    fn event(category: GeoNotificationCategory, suffix: &str) -> GeoNotificationEvent {
+        GeoNotificationEvent {
+            category,
+            revision: 7,
+            locator: GeoNotificationLocator {
+                workspace_id: "brand-19".to_string(),
+                session_id: "session-19".to_string(),
+                operation_id: "operation-19".to_string(),
+                card: GeoNotificationCard::GeoOperation,
+                step_id: Some("confirm-19".to_string()),
+                artifact: GeoNotificationArtifactLocator {
+                    kind: "operation".to_string(),
+                    id: format!("operation-19-{suffix}"),
+                    revision: Some(7),
+                },
+            },
+        }
+    }
+
+    fn reset_ingress(ready: bool) {
+        let mut ingress = RENDERER_CLICK_INGRESS.lock().unwrap();
+        *ingress = RendererClickIngress {
+            ready,
+            ..RendererClickIngress::default()
+        };
+    }
+
+    #[test]
+    fn categories_use_short_static_private_copy_and_respect_independent_preferences() {
+        let categories = [
+            GeoNotificationCategory::AwaitingConfirmation,
+            GeoNotificationCategory::OperationFailed,
+            GeoNotificationCategory::BatchCompleted,
+            GeoNotificationCategory::PublishFailed,
+            GeoNotificationCategory::MonitoringCompleted,
+        ];
+        for category in categories {
+            let (title_key, body_key) = geo_notification_text_keys(category);
+            for locale in [SupportedLocale::ZhCn, SupportedLocale::EnUs] {
+                let title = crate::i18n::t(title_key, locale);
+                let body = crate::i18n::t(body_key, locale);
+                assert_ne!(title, title_key);
+                assert_ne!(body, body_key);
+                assert!(body.chars().count() <= 100);
+                let lower = body.to_ascii_lowercase();
+                for forbidden in ["api key", "prompt", "credential", "secret", "token"] {
+                    assert!(!lower.contains(forbidden));
+                }
+                assert!(!body.contains("brand-19"));
+                assert!(!body.contains("operation-19"));
+            }
+        }
+
+        let prefs = parse_notification_prefs(Some(
+            r#"{
+              "osNotifications": true,
+              "geoNotificationPreferences": {
+                "awaitingConfirmation": false,
+                "operationFailed": true,
+                "batchCompleted": true,
+                "publishFailed": true,
+                "monitoringCompleted": true
+              }
+            }"#,
+        ));
+        assert!(prefs.os_notifications);
+        assert!(!prefs.geo_category_enabled(GeoNotificationCategory::AwaitingConfirmation));
+        assert!(prefs.geo_category_enabled(GeoNotificationCategory::OperationFailed));
+        // Preference evaluation is a projection-only decision: the durable
+        // event identity remains complete and deterministic either way.
+        assert!(
+            event(GeoNotificationCategory::AwaitingConfirmation, "prefs")
+                .delivery_id()
+                .contains("operation-19")
+        );
+    }
+
+    #[test]
+    fn delivery_and_click_ingress_dedupe_cold_hot_and_ambiguous_clicks() {
+        {
+            let mut dedupe = GEO_DELIVERY_DEDUPE.lock().unwrap();
+            *dedupe = GeoDeliveryDedupe::default();
+        }
+        let delivery = event(GeoNotificationCategory::BatchCompleted, "dedupe").delivery_id();
+        assert!(admit_geo_delivery(&delivery));
+        assert!(!admit_geo_delivery(&delivery));
+
+        let cold = NotificationClickPayload::from(NotificationNavigation::for_geo(&event(
+            GeoNotificationCategory::OperationFailed,
+            "cold",
+        )));
+        reset_ingress(false);
+        assert!(!admit_renderer_click(cold.clone()));
+        assert!(
+            !admit_renderer_click(cold.clone()),
+            "repeat click must be idempotent"
+        );
+        assert_eq!(
+            renderer_click_listener_ready().unwrap().notification_id,
+            cold.notification_id
+        );
+        assert_eq!(
+            renderer_click_listener_ready(),
+            None,
+            "cold click is consumed once"
+        );
+
+        reset_ingress(false);
+        let other = NotificationClickPayload::from(NotificationNavigation::for_geo(&event(
+            GeoNotificationCategory::PublishFailed,
+            "other",
+        )));
+        assert!(!admit_renderer_click(cold.clone()));
+        assert!(!admit_renderer_click(other));
+        assert_eq!(
+            renderer_click_listener_ready(),
+            None,
+            "different cold clicks are ambiguous"
+        );
+
+        reset_ingress(true);
+        assert!(admit_renderer_click(cold.clone()));
+        assert!(
+            !admit_renderer_click(cold),
+            "hot repeat click must be idempotent"
+        );
+        assert_eq!(
+            NotificationNavigation::new(None, Some(" ".into()), Some(" ".into())),
+            None
         );
     }
 }

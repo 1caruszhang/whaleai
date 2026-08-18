@@ -107,22 +107,6 @@ describe('SseConnection — listener cleanup invariants', () => {
         expect(conn.isActive()).toBe(false);
     });
 
-    it('passes the Floating Ball companion owner without inventing a new owner type', async () => {
-        const conn = new SseConnection('fb', { current: 'floating-session' }, {
-            type: 'companion',
-            id: 'floating-ball',
-        });
-        await conn.connect();
-
-        expect(mocks.invokeImpl).toHaveBeenCalledWith('start_sse_proxy', {
-            connectionKey: 'fb',
-            sessionIdHint: 'floating-session',
-            sidecarOwnerType: 'companion',
-            sidecarOwnerId: 'floating-ball',
-        });
-        await conn.disconnect();
-    });
-
     it('mid-connect disconnect does not leak listeners', async () => {
         const conn = new SseConnection('test-tab', { current: 'session-a' });
 
@@ -245,66 +229,6 @@ describe('SseConnection — listener cleanup invariants', () => {
         await conn.disconnect();
     });
 
-    it('unwraps revisioned envelopes using Rust transport generation metadata', async () => {
-        const conn = new SseConnection('test-tab', { current: 'session-a' });
-        const handler = vi.fn();
-        conn.setEventHandler(handler);
-        await conn.connect();
-
-        (conn as unknown as {
-            handleTauriEnvelope(eventName: string, envelope: { transportGeneration: number; data: string }): void;
-        }).handleTauriEnvelope('chat:message-chunk', {
-            transportGeneration: 42,
-            data: JSON.stringify({
-                sessionId: 'session-a',
-                liveRevision: 9,
-                payload: 'hello',
-            }),
-        });
-
-        expect(handler).toHaveBeenCalledWith('chat:message-chunk', 'hello', {
-            connectionGeneration: 42,
-            sessionId: 'session-a',
-            liveRevision: 9,
-        });
-        await conn.disconnect();
-    });
-
-    it('unwraps a revisioned terminal error as structured data', async () => {
-        const conn = new SseConnection('test-tab', { current: 'session-a' });
-        const handler = vi.fn();
-        conn.setEventHandler(handler);
-        await conn.connect();
-
-        const payload = {
-            message: 'terminal failure',
-            completionTerminal: {
-                sessionId: 'session-a',
-                workspacePath: '/tmp/workspace',
-                turnId: 'turn-a',
-                origin: { kind: 'desktop', surface: 'launcher_input' },
-                status: 'error',
-            },
-        };
-        (conn as unknown as {
-            handleTauriEnvelope(eventName: string, envelope: { transportGeneration: number; data: string }): void;
-        }).handleTauriEnvelope('chat:message-error', {
-            transportGeneration: 43,
-            data: JSON.stringify({
-                sessionId: 'session-a',
-                liveRevision: 10,
-                payload,
-            }),
-        });
-
-        expect(handler).toHaveBeenCalledWith('chat:message-error', payload, {
-            connectionGeneration: 43,
-            sessionId: 'session-a',
-            liveRevision: 10,
-        });
-        await conn.disconnect();
-    });
-
     it('announces a new generation before its first event and drops older envelopes', async () => {
         const conn = new SseConnection('test-tab', { current: 'session-a' });
         const order: string[] = [];
@@ -315,9 +239,9 @@ describe('SseConnection — listener cleanup invariants', () => {
         const receive = (transportGeneration: number, payload: string) => {
             (conn as unknown as {
                 handleTauriEnvelope(eventName: string, envelope: { transportGeneration: number; data: string }): void;
-            }).handleTauriEnvelope('chat:message-chunk', {
+            }).handleTauriEnvelope('chat:message-update', {
                 transportGeneration,
-                data: payload,
+                data: JSON.stringify(payload),
             });
         };
 
@@ -370,9 +294,9 @@ describe('SseConnection — listener cleanup invariants', () => {
 
         const first = FakeEventSource.instances[0];
         first.onopen?.();
-        first.listeners.get('chat:message-chunk')?.({
-            type: 'chat:message-chunk',
-            data: 'first',
+        first.listeners.get('chat:message-update')?.({
+            type: 'chat:message-update',
+            data: JSON.stringify('first'),
         } as MessageEvent<string>);
         first.onerror?.();
         await vi.advanceTimersByTimeAsync(1_000);
@@ -381,16 +305,16 @@ describe('SseConnection — listener cleanup invariants', () => {
         expect(FakeEventSource.instances).toHaveLength(2);
         const second = FakeEventSource.instances[1];
         second.onopen?.();
-        second.listeners.get('chat:message-chunk')?.({
-            type: 'chat:message-chunk',
-            data: 'second',
+        second.listeners.get('chat:message-update')?.({
+            type: 'chat:message-update',
+            data: JSON.stringify('second'),
         } as MessageEvent<string>);
 
         expect(statuses).toEqual(['connected', 'reconnecting', 'connected']);
-        expect(handler).toHaveBeenNthCalledWith(1, 'chat:message-chunk', 'first', {
+        expect(handler).toHaveBeenNthCalledWith(1, 'chat:message-update', 'first', {
             connectionGeneration: 1,
         });
-        expect(handler).toHaveBeenNthCalledWith(2, 'chat:message-chunk', 'second', {
+        expect(handler).toHaveBeenNthCalledWith(2, 'chat:message-update', 'second', {
             connectionGeneration: 2,
         });
         expect(mocks.invokeImpl).not.toHaveBeenCalled();

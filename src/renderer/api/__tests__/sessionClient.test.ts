@@ -1,155 +1,72 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({
-    apiFetch: vi.fn(),
-    apiGetJson: vi.fn(),
-    apiPostJson: vi.fn(),
-    deleteSessionIfUnowned: vi.fn(),
-    invoke: vi.fn(),
-    isTauri: vi.fn(),
+  invoke: vi.fn(),
+  deleteSessionIfUnowned: vi.fn(),
 }));
 
-vi.mock('../apiFetch', () => ({
-    apiFetch: mocks.apiFetch,
-    apiGetJson: mocks.apiGetJson,
-    apiPostJson: mocks.apiPostJson,
-}));
-
+vi.mock('@tauri-apps/api/core', () => ({ invoke: mocks.invoke }));
 vi.mock('../tauriClient', () => ({
-    deleteSessionIfUnowned: mocks.deleteSessionIfUnowned,
-    isTauri: mocks.isTauri,
+  deleteSessionIfUnowned: mocks.deleteSessionIfUnowned,
 }));
 
-vi.mock('@tauri-apps/api/core', () => ({
-    invoke: mocks.invoke,
-}));
+import { createSession, deleteSession, updateSession } from '../sessionClient';
 
-import { deleteSession, getSessions } from '../sessionClient';
+describe('Session persistence client', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mocks.invoke.mockResolvedValue(true);
+    mocks.deleteSessionIfUnowned.mockResolvedValue({ deleted: true });
+  });
 
-const okResponse = () => new Response(JSON.stringify({ success: true }), { status: 200 });
+  it('creates and renames metadata through the Rust owner', async () => {
+    const metadata = {
+      id: 'session-1',
+      workspacePath: '/brand/a',
+      title: 'Brand A',
+      createdAt: '2026-08-16T00:00:00Z',
+      lastActiveAt: '2026-08-16T00:00:00Z',
+    };
+    mocks.invoke.mockResolvedValueOnce(metadata).mockResolvedValueOnce(true);
 
-describe('deleteSession', () => {
-    beforeEach(() => {
-        vi.clearAllMocks();
-        mocks.isTauri.mockReturnValue(true);
-        mocks.deleteSessionIfUnowned.mockResolvedValue({ deleted: true });
-        mocks.apiFetch.mockResolvedValue(okResponse());
+    await expect(createSession('/brand/a', 'Brand A')).resolves.toEqual(metadata);
+    await expect(updateSession('session-1', { title: 'Renamed' })).resolves.toEqual(
+      expect.objectContaining({ id: 'session-1', title: 'Renamed' }),
+    );
+    expect(mocks.invoke).toHaveBeenNthCalledWith(1, 'cmd_create_session_metadata', {
+      workspacePath: '/brand/a',
+      title: 'Brand A',
     });
-
-    it('delegates desktop deletion to the atomic Rust owner boundary', async () => {
-        await expect(deleteSession('session-1', ['tab-a'])).resolves.toEqual({ deleted: true });
-
-        expect(mocks.deleteSessionIfUnowned).toHaveBeenCalledWith('session-1', ['tab-a']);
-        expect(mocks.apiFetch).not.toHaveBeenCalled();
+    expect(mocks.invoke).toHaveBeenNthCalledWith(2, 'cmd_update_session_title', {
+      sessionId: 'session-1',
+      title: 'Renamed',
     });
+  });
 
-    it('carries brand confirmation into the same Rust lifecycle fence', async () => {
-        const admission = { workspaceId: 'brand-a', confirmationToken: 'confirmed-token' };
+  it('delegates deletion to the fenced Rust owner boundary', async () => {
+    await expect(deleteSession('session-1', ['tab-a'])).resolves.toEqual({ deleted: true });
+    expect(mocks.deleteSessionIfUnowned).toHaveBeenCalledWith('session-1', ['tab-a']);
+  });
 
-        await expect(deleteSession('session-1', ['tab-a'], admission)).resolves.toEqual({ deleted: true });
+  it('carries brand confirmation into the same lifecycle fence', async () => {
+    const admission = { workspaceId: 'brand-a', confirmationToken: 'confirmed-token' };
+    await expect(deleteSession('session-1', ['tab-a'], admission)).resolves.toEqual({ deleted: true });
+    expect(mocks.deleteSessionIfUnowned).toHaveBeenCalledWith('session-1', ['tab-a'], admission);
+  });
 
-        expect(mocks.deleteSessionIfUnowned).toHaveBeenCalledWith('session-1', ['tab-a'], admission);
+  it.each(['in-use', 'authority-unavailable', 'not-found'] as const)(
+    'preserves the %s refusal reason',
+    async (reason) => {
+      mocks.deleteSessionIfUnowned.mockResolvedValue({ deleted: false, reason });
+      await expect(deleteSession('session-1')).resolves.toEqual({ deleted: false, reason });
+    },
+  );
+
+  it('maps invocation failure to an unexpected refusal', async () => {
+    mocks.deleteSessionIfUnowned.mockRejectedValue(new Error('unavailable'));
+    await expect(deleteSession('session-1')).resolves.toEqual({
+      deleted: false,
+      reason: 'unexpected',
     });
-
-    it('refuses to delete storage while any sidecar owner is still alive', async () => {
-        mocks.deleteSessionIfUnowned.mockResolvedValue({ deleted: false, reason: 'in-use' });
-
-        await expect(deleteSession('session-live')).resolves.toEqual({ deleted: false, reason: 'in-use' });
-
-        expect(mocks.apiFetch).not.toHaveBeenCalled();
-    });
-
-    it('does not release any owner as a side effect of storage deletion', async () => {
-        mocks.deleteSessionIfUnowned.mockResolvedValue({ deleted: false, reason: 'in-use' });
-
-        await expect(deleteSession('session-owned')).resolves.toEqual({ deleted: false, reason: 'in-use' });
-
-        expect(mocks.apiFetch).not.toHaveBeenCalled();
-    });
-
-    it('fails closed in browser development mode where Rust cannot fence owners', async () => {
-        mocks.isTauri.mockReturnValue(false);
-        mocks.deleteSessionIfUnowned.mockResolvedValue({ deleted: false, reason: 'authority-unavailable' });
-
-        await expect(deleteSession('session-browser')).resolves.toEqual({ deleted: false, reason: 'authority-unavailable' });
-
-        expect(mocks.deleteSessionIfUnowned).toHaveBeenCalledWith('session-browser', []);
-        expect(mocks.apiFetch).not.toHaveBeenCalled();
-    });
-
-    it('fails closed when sidecar presence cannot be verified', async () => {
-        mocks.deleteSessionIfUnowned.mockResolvedValue({ deleted: false, reason: 'unexpected' });
-
-        await expect(deleteSession('session-unknown')).resolves.toEqual({ deleted: false, reason: 'unexpected' });
-
-        expect(mocks.apiFetch).not.toHaveBeenCalled();
-        expect(mocks.deleteSessionIfUnowned).toHaveBeenCalledWith('session-unknown', []);
-    });
-
-    it('preserves the atomic boundary refusal reason', async () => {
-        mocks.deleteSessionIfUnowned.mockResolvedValue({ deleted: false, reason: 'not-found' });
-
-        await expect(deleteSession('missing-session')).resolves.toEqual({ deleted: false, reason: 'not-found' });
-
-        expect(mocks.deleteSessionIfUnowned).toHaveBeenCalledWith('missing-session', []);
-    });
-});
-
-describe('getSessions', () => {
-    beforeEach(() => {
-        vi.clearAllMocks();
-        mocks.isTauri.mockReturnValue(true);
-        mocks.invoke.mockResolvedValue([
-            { id: 'session-older', lastActiveAt: '2026-07-03T00:00:00.000Z' },
-            { id: 'session-tauri', lastActiveAt: '2026-07-04T00:00:00.000Z' },
-        ]);
-        mocks.apiGetJson.mockResolvedValue({
-            success: true,
-            sessions: [
-                { id: 'session-http-old', lastActiveAt: '2026-07-02T00:00:00.000Z' },
-                { id: 'session-http', lastActiveAt: '2026-07-04T00:00:00.000Z' },
-            ],
-        });
-    });
-
-    it('uses the Tauri metadata fast path in desktop mode', async () => {
-        await expect(getSessions()).resolves.toEqual([
-            { id: 'session-tauri', lastActiveAt: '2026-07-04T00:00:00.000Z' },
-            { id: 'session-older', lastActiveAt: '2026-07-03T00:00:00.000Z' },
-        ]);
-
-        expect(mocks.invoke).toHaveBeenCalledWith('cmd_list_session_metadata', { agentDir: null });
-        expect(mocks.apiGetJson).not.toHaveBeenCalled();
-    });
-
-    it('passes the optional workspace filter to the fast path', async () => {
-        await getSessions('C:\\Users\\me\\workspace');
-
-        expect(mocks.invoke).toHaveBeenCalledWith('cmd_list_session_metadata', {
-            agentDir: 'C:\\Users\\me\\workspace',
-        });
-    });
-
-    it('falls back to the HTTP sessions endpoint when the fast path fails', async () => {
-        mocks.invoke.mockRejectedValue(new Error('ipc unavailable'));
-
-        await expect(getSessions('/workspace/a')).resolves.toEqual([
-            { id: 'session-http', lastActiveAt: '2026-07-04T00:00:00.000Z' },
-            { id: 'session-http-old', lastActiveAt: '2026-07-02T00:00:00.000Z' },
-        ]);
-
-        expect(mocks.apiGetJson).toHaveBeenCalledWith('/sessions?agentDir=%2Fworkspace%2Fa');
-    });
-
-    it('keeps browser development mode on the HTTP sessions endpoint', async () => {
-        mocks.isTauri.mockReturnValue(false);
-
-        await expect(getSessions()).resolves.toEqual([
-            { id: 'session-http', lastActiveAt: '2026-07-04T00:00:00.000Z' },
-            { id: 'session-http-old', lastActiveAt: '2026-07-02T00:00:00.000Z' },
-        ]);
-
-        expect(mocks.invoke).not.toHaveBeenCalled();
-        expect(mocks.apiGetJson).toHaveBeenCalledWith('/sessions');
-    });
+  });
 });

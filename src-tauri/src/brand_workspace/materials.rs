@@ -78,6 +78,16 @@ pub struct MaterialProcessingFinish {
     pub error_code: Option<String>,
 }
 
+/// Session 材料列表项：材料投影 + 本 Session 最近一次 attempt 提交的候选
+/// ID。候选归属提出它的 Session（裁决也只属于该 Session），因此跨
+/// Session 的 attempt 不进入本列表。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct BrandMaterialListItem {
+    pub material: BrandMaterial,
+    pub candidate_ids: Vec<String>,
+}
+
 pub(super) fn ensure_schema(connection: &Connection) -> Result<(), String> {
     connection
         .execute_batch(
@@ -448,6 +458,100 @@ impl BrandWorkspaceStore {
             .commit()
             .map_err(|_| "material_processing_unavailable".to_string())?;
         read_material(&connection, &workspace.id, &finish.material_id)
+    }
+
+    /// 本 Session 导入的材料及其候选 ID：供 Sidecar 状态轮询与前端会话
+    /// 恢复重建确认卡。`material_ids` 提供时按请求顺序返回存在的材料
+    /// （仍限定本 Session 导入）；否则按 `updated_at` 倒序取最近 `limit`
+    /// 条。`limit` 与 `material_ids` 数量都有界，防止无界响应。
+    pub fn list_session_materials(
+        &self,
+        workspace_id: &str,
+        session_id: &str,
+        material_ids: Option<&[String]>,
+        limit: usize,
+    ) -> Result<Vec<BrandMaterialListItem>, String> {
+        let workspace = self.workspace(workspace_id)?;
+        let connection = open_database(&workspace)?;
+        require_committed_session(&connection, session_id)?;
+        let limit = limit.clamp(1, 20);
+        let mut materials: Vec<BrandMaterial> = Vec::new();
+        match material_ids {
+            Some(ids) => {
+                if ids.is_empty() || ids.len() > 50 {
+                    return Err("material_ids_invalid".to_string());
+                }
+                for id in ids {
+                    if let Ok(material) = read_material(&connection, &workspace.id, id) {
+                        if material.imported_by_session_id == session_id {
+                            materials.push(material);
+                        }
+                    }
+                }
+            }
+            None => {
+                let mut statement = connection
+                    .prepare(
+                        "SELECT id FROM brand_materials
+                         WHERE imported_by_session_id=?1
+                         ORDER BY updated_at DESC, id
+                         LIMIT ?2",
+                    )
+                    .map_err(|_| "material_processing_unavailable".to_string())?;
+                let ids: Vec<String> = statement
+                    .query_map(params![session_id, limit as i64], |row| row.get(0))
+                    .map_err(|_| "material_processing_unavailable".to_string())?
+                    .filter_map(|row| row.ok())
+                    .collect();
+                for id in ids {
+                    if let Ok(material) = read_material(&connection, &workspace.id, &id) {
+                        materials.push(material);
+                    }
+                }
+            }
+        }
+        // 本 Session 每个 material 最近一次 attempt 的候选 ID；一次分组
+        // 查询后在内存里按 material 匹配，材料数已有界。
+        let mut candidate_ids: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
+        let mut statement = connection
+            .prepare(
+                "SELECT p.material_id, p.candidate_ids_json
+                 FROM brand_material_processing p
+                 JOIN (
+                     SELECT material_id, MAX(attempt_number) AS max_attempt
+                     FROM brand_material_processing
+                     WHERE session_id = ?1
+                     GROUP BY material_id
+                 ) latest ON p.material_id = latest.material_id
+                          AND p.attempt_number = latest.max_attempt
+                 WHERE p.session_id = ?1",
+            )
+            .map_err(|_| "material_processing_unavailable".to_string())?;
+        let rows = statement
+            .query_map([session_id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|_| "material_processing_unavailable".to_string())?;
+        for row in rows {
+            let (material_id, ids_json) =
+                row.map_err(|_| "material_processing_unavailable".to_string())?;
+            if let Ok(parsed) = serde_json::from_str::<Vec<String>>(&ids_json) {
+                candidate_ids.insert(material_id, parsed);
+            }
+        }
+        Ok(materials
+            .into_iter()
+            .map(|material| {
+                let ids = candidate_ids
+                    .remove(&material.id)
+                    .unwrap_or_default();
+                BrandMaterialListItem {
+                    material,
+                    candidate_ids: ids,
+                }
+            })
+            .collect())
     }
 }
 
@@ -822,7 +926,7 @@ mod tests {
         let (_root, store, workspace, session_id) = fixture();
         let material = store
             .import_brand_text(ImportBrandTextRequest {
-                workspace_id: workspace.id,
+                workspace_id: workspace.id.clone(),
                 session_id,
                 input_kind: "website-url".to_string(),
                 display_name: "官网资料.html".to_string(),
@@ -842,5 +946,120 @@ mod tests {
         );
         assert!(!material.source.to_string().contains("private"));
         assert!(!material.source.to_string().contains("contact"));
+    }
+
+    #[test]
+    fn lists_session_materials_with_latest_attempt_candidate_ids() {
+        let (_root, store, workspace, session_id) = fixture();
+        let other_session = "session-07b".to_string();
+        store
+            .commit_session(
+                &workspace.id,
+                SessionCommit {
+                    id: other_session.clone(),
+                    title: "另一会话".to_string(),
+                    title_source: SessionTitleSource::Default,
+                },
+            )
+            .expect("other session");
+        let first = store
+            .import_brand_text(ImportBrandTextRequest {
+                workspace_id: workspace.id.clone(),
+                session_id: session_id.clone(),
+                input_kind: "pasted-text".to_string(),
+                display_name: "粘贴资料.txt".to_string(),
+                text: "鲸跃科技资料".to_string(),
+                source_url: None,
+            })
+            .expect("first import");
+        let second = store
+            .import_brand_text(ImportBrandTextRequest {
+                workspace_id: workspace.id.clone(),
+                session_id: session_id.clone(),
+                input_kind: "pasted-text".to_string(),
+                display_name: "补充资料.txt".to_string(),
+                text: "补充事实".to_string(),
+                source_url: None,
+            })
+            .expect("second import");
+        // 另一 Session 的材料不得进入本 Session 的恢复列表。
+        store
+            .import_brand_text(ImportBrandTextRequest {
+                workspace_id: workspace.id.clone(),
+                session_id: other_session,
+                input_kind: "pasted-text".to_string(),
+                display_name: "别的会话.txt".to_string(),
+                text: "隔离".to_string(),
+                source_url: None,
+            })
+            .expect("other import");
+
+        // 首次 attempt 提交候选后失败重试：列表必须取最近一次 attempt 的候选。
+        let failed_attempt = store
+            .begin_material_processing(&workspace.id, &session_id, &first.id)
+            .expect("begin");
+        store
+            .finish_material_processing(
+                &workspace.id,
+                &session_id,
+                MaterialProcessingFinish {
+                    attempt_id: failed_attempt.id,
+                    material_id: first.id.clone(),
+                    status: "failed".to_string(),
+                    candidate_ids: vec![],
+                    error_code: Some("model_failed".to_string()),
+                },
+            )
+            .expect("failed finish");
+        let retried = store
+            .begin_material_processing(&workspace.id, &session_id, &first.id)
+            .expect("retry begin");
+        store
+            .finish_material_processing(
+                &workspace.id,
+                &session_id,
+                MaterialProcessingFinish {
+                    attempt_id: retried.id,
+                    material_id: first.id.clone(),
+                    status: "awaiting-confirmation".to_string(),
+                    candidate_ids: vec!["candidate-1".to_string()],
+                    error_code: None,
+                },
+            )
+            .expect("retry finish");
+
+        let listed = store
+            .list_session_materials(&workspace.id, &session_id, None, 10)
+            .expect("list");
+        assert_eq!(listed.len(), 2);
+        let by_id: std::collections::HashMap<String, BrandMaterialListItem> = listed
+            .into_iter()
+            .map(|item| (item.material.id.clone(), item))
+            .collect();
+        assert_eq!(
+            by_id.get(&first.id).expect("first").candidate_ids,
+            vec!["candidate-1".to_string()]
+        );
+        assert_eq!(
+            by_id.get(&first.id).expect("first").material.status,
+            "awaiting-confirmation"
+        );
+        assert_eq!(
+            by_id.get(&second.id).expect("second").candidate_ids,
+            Vec::<String>::new()
+        );
+
+        // 指定 material_ids 轮询时：只返回存在的本 Session 材料，未知 id 忽略。
+        let polled = store
+            .list_session_materials(
+                &workspace.id,
+                &session_id,
+                Some(&[first.id.clone(), "missing".to_string()]),
+                10,
+            )
+            .expect("poll list");
+        assert_eq!(polled.len(), 1);
+        assert_eq!(polled[0].material.id, first.id);
+        assert_eq!(polled[0].candidate_ids, vec!["candidate-1".to_string()]);
     }
 }

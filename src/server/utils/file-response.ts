@@ -1,9 +1,7 @@
 /**
  * Web Response helper for serving files from disk under Node.js.
  *
- * Replaces Bun's `new Response(Bun.file(path))` idiom. Bun.file returns
- * a lazy-streaming handle that Bun.serve knows how to flush directly;
- * under Node we build an equivalent Web Response from fs.createReadStream
+ * Builds a Web Response from fs.createReadStream under Node
  * via Readable.toWeb, so large files stream without being slurped into
  * memory.
  *
@@ -16,9 +14,8 @@ import { extname } from 'node:path';
 import { Readable } from 'node:stream';
 
 /**
- * Minimal extension → MIME-type map for file types we actually serve
- * (attachments, image previews, audio playback, html/js/css in skills).
- * Covers every ext Bun.file().type could return for our use cases.
+ * Minimal extension → MIME-type map for the app shell, attachments and previews.
+ * Covers the file types used by the app shell, attachments and previews.
  * Falls back to `application/octet-stream` for unknown extensions.
  */
 const MIME_BY_EXT: Record<string, string> = {
@@ -61,7 +58,7 @@ const MIME_BY_EXT: Record<string, string> = {
   pdf: 'application/pdf',
 };
 
-/** Guess a MIME type from path extension, matching Bun.file(p).type behaviour. */
+/** Guess a MIME type from a path extension. */
 export function sniffMime(path: string): string {
   const ext = extname(path).slice(1).toLowerCase();
   return MIME_BY_EXT[ext] ?? 'application/octet-stream';

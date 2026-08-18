@@ -1,13 +1,28 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "bundle": {
+    "targets": [
+      "nsis"
+    ],
+    "useLocalToolsDir": true,
     "resources": {
-      "../src-tauri/resources/vcruntime140.dll": "vcruntime140.dll",
-      "../src-tauri/resources/vcruntime140_1.dll": "vcruntime140_1.dll"
+      "../src-tauri/resources/portable-git": "portable-git"
     },
     "windows": {
+      "allowDowngrades": false,
+      "webviewInstallMode": {
+        "type": "skip"
+      },
       "nsis": {
-        "installerHooks": "nsis/hooks.nsh"
+        "installMode": "currentUser",
+        "languages": [
+          "SimpChinese",
+          "English"
+        ],
+        "displayLanguageSelector": true,
+        "installerIcon": "icons/icon.ico",
+        "uninstallerIcon": "icons/icon.ico",
+        "installerHooks": "nsis/windows-x64-hooks.nsh"
       }
     }
   }

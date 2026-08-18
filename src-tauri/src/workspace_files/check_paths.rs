@@ -1,12 +1,12 @@
 //! Batch existence check for workspace-relative paths.
 //!
-//! Mirrors the sidecar `/agent/check-paths` endpoint: takes an array of
-//! workspace-relative paths and returns a `{ exists, type }` map. Used by
+//! Takes an array of workspace-relative paths and returns an `{ exists, type }`
+//! map. Used by
 //! `FileActionContext` to decorate inline-code path mentions in AI output
 //! (turn `<code>src/foo.ts</code>` into a clickable preview affordance only
 //! when the file actually exists).
 //!
-//! # Why we mirror the sidecar shape
+//! # Stable renderer shape
 //!
 //! `FileActionContext` already coalesces calls into a 50ms batch + a 200-path
 //! cap. We keep the same `Record<string, {exists, type}>` shape so the
@@ -16,10 +16,10 @@
 //!
 //! Bad inputs (empty string, traversal escape, non-existent) collapse to
 //! `{ exists: false, type: 'file' }` rather than erroring the whole batch —
-//! matches the sidecar fallback so a single bad path doesn't poison the
+//! matches the renderer fallback so a single bad path doesn't poison the
 //! cache for the others.
 //!
-//! Cross-review round 2 (Codex MED-3): we use
+//! Cross-review round 2 (security review MED-3): we use
 //! `resolve_existing_inside_workspace` (canonicalize + prefix-check), the
 //! same gate as `read_preview` and `download_file`. Without this, an
 //! `evil_link → /etc/passwd` inside the workspace would report
@@ -37,7 +37,7 @@ use serde::Serialize;
 use super::path_safety::{resolve_existing_inside_workspace, validate_workspace_root};
 use super::system_open::validate_external_open_path;
 
-/// Hard cap on inputs — matches sidecar `/agent/check-paths` (200) so a typo
+/// Hard cap on inputs keeps a renderer typo
 /// in renderer code can't fan out an unbounded `stat()` storm.
 const MAX_BATCH_SIZE: usize = 200;
 
@@ -46,7 +46,7 @@ const MAX_BATCH_SIZE: usize = 200;
 pub struct PathInfo {
     pub exists: bool,
     /// "file" | "dir" — defaults to "file" for not-found / invalid entries
-    /// to mirror the sidecar's fallback shape.
+    /// to preserve the renderer's fallback shape.
     #[serde(rename = "type")]
     pub kind: String,
 }
@@ -194,11 +194,11 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(res.results.get("a.txt").unwrap().exists, true);
+        assert!(res.results.get("a.txt").unwrap().exists);
         assert_eq!(res.results.get("a.txt").unwrap().kind, "file");
-        assert_eq!(res.results.get("b").unwrap().exists, true);
+        assert!(res.results.get("b").unwrap().exists);
         assert_eq!(res.results.get("b").unwrap().kind, "dir");
-        assert_eq!(res.results.get("missing").unwrap().exists, false);
+        assert!(!res.results.get("missing").unwrap().exists);
         let _ = fs::remove_dir_all(&ws);
     }
 
@@ -212,8 +212,8 @@ mod tests {
         .await
         .unwrap();
         // Both invalid → exists:false, no error surfaced (mirrors sidecar).
-        assert_eq!(res.results.get("../etc/hosts").unwrap().exists, false);
-        assert_eq!(res.results.get("/etc/passwd").unwrap().exists, false);
+        assert!(!res.results.get("../etc/hosts").unwrap().exists);
+        assert!(!res.results.get("/etc/passwd").unwrap().exists);
         let _ = fs::remove_dir_all(&ws);
     }
 
@@ -248,12 +248,12 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(res.results.get("").unwrap().exists, false);
-        assert_eq!(res.results.get("  ").unwrap().exists, false);
+        assert!(!res.results.get("").unwrap().exists);
+        assert!(!res.results.get("  ").unwrap().exists);
         let _ = fs::remove_dir_all(&ws);
     }
 
-    // Cross-review round 2 (Codex MED-3): a workspace-internal symlink
+    // Cross-review round 2 (security review MED-3): a workspace-internal symlink
     // pointing to /etc/... must report exists:false here, otherwise the
     // renderer's inline-code chip is clickable but the click → read_preview
     // rejects with "Path escapes workspace via symlink". Aligns with read
@@ -277,7 +277,7 @@ mod tests {
         .unwrap();
         // Surfaces as not-found rather than exists:true — chip won't appear,
         // user can't click to fail later.
-        assert_eq!(res.results.get("evil_link.txt").unwrap().exists, false);
+        assert!(!res.results.get("evil_link.txt").unwrap().exists);
         let _ = fs::remove_dir_all(&ws);
         let _ = fs::remove_dir_all(&outside);
     }
@@ -307,7 +307,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(res.results.get(&raw).unwrap().exists, true);
+        assert!(res.results.get(&raw).unwrap().exists);
         assert_eq!(res.results.get(&raw).unwrap().kind, "file");
         let _ = fs::remove_dir_all(&ws);
     }
@@ -324,13 +324,12 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(res.results.get("relative.txt").unwrap().exists, false);
-        assert_eq!(
-            res.results
+        assert!(!res.results.get("relative.txt").unwrap().exists);
+        assert!(
+            !res.results
                 .get("/definitely/missing/file.txt")
                 .unwrap()
                 .exists,
-            false,
         );
     }
 }

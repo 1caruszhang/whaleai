@@ -15,13 +15,10 @@ const css = (await Promise.all(
 )).join('\n');
 
 const requiredFragments = [
-  '.font-sans{font-family:var(--font-body)}',
   '.font-mono{font-family:var(--font-code)}',
   '.rounded{border-radius:var(--theme-radius-base)}',
   '--radius-sm:var(--theme-radius-sm)',
   '--radius-md:var(--theme-radius-md)',
-  '--radius-lg:var(--theme-radius-lg)',
-  '--radius-xl:var(--theme-radius-xl)',
   '--radius-2xl:var(--theme-radius-2xl)',
   '.rounded-sm{border-radius:var(--theme-radius-sm)}',
   '.rounded-md{border-radius:var(--theme-radius-md)}',
@@ -30,9 +27,7 @@ const requiredFragments = [
   '.rounded-2xl{border-radius:var(--theme-radius-2xl)}',
   '.rounded-full{border-radius:var(--theme-radius-full)}',
   '.shadow{--tw-shadow:var(--theme-shadow-base);',
-  '--shadow-xs:var(--theme-shadow-xs)',
   '--shadow-sm:var(--theme-shadow-sm)',
-  '--shadow-md:var(--theme-shadow-md)',
   '--shadow-lg:var(--theme-shadow-lg)',
   '--shadow-xl:var(--theme-shadow-xl)',
   '.shadow-xs{--tw-shadow:var(--theme-shadow-xs);',

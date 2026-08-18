@@ -25,8 +25,8 @@ html[data-theme-id='xiaojing'][data-color-scheme='light'] {
   --ink-subtle: #a2a2ab;
   --ink-faint: #c3c3ca;
   --paper: #fcfcfd;
-  --global-sidebar-bg: #f8f8fa;
-  --global-sidebar-bg-a0: rgb(248 248 250 / 0);
+  --xiaojing-sidebar-bg: #f8f8fa;
+  --xiaojing-sidebar-bg-a0: rgb(248 248 250 / 0);
   --paper-elevated: #ffffff;
   --message-user-bg: #ffffff;
   --paper-inset: #ececf1;
@@ -148,8 +148,8 @@ html[data-theme-id='xiaojing'][data-color-scheme='dark'] {
   --ink-subtle: #585963;
   --ink-faint: #3b3c44;
   --paper: #131518;
-  --global-sidebar-bg: #101216;
-  --global-sidebar-bg-a0: rgb(16 18 22 / 0);
+  --xiaojing-sidebar-bg: #101216;
+  --xiaojing-sidebar-bg-a0: rgb(16 18 22 / 0);
   --paper-elevated: #1d2023;
   --message-user-bg: #22262a;
   --paper-inset: #0d0f12;
@@ -272,28 +272,4 @@ html[data-theme-id='xiaojing'] .theme-product-wordmark {
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
   background-clip: text;
-}
-
-html[data-theme-id='xiaojing'] .theme-launcher-hero-title {
-  margin-bottom: 0.5rem;
-  font-size: 2.5rem;
-  font-weight: 300;
-}
-
-html[data-theme-id='xiaojing'] .theme-launcher-hero-slogan {
-  font-family: var(--font-body);
-  font-size: 15px;
-  font-weight: 350;
-  letter-spacing: 0.055em;
-  color: var(--ink-muted);
-  text-align: center;
-}
-
-@media (min-width: 768px) {
-  html[data-theme-id='xiaojing'] .theme-launcher-hero-title {
-    font-size: 3.5rem;
-  }
-  html[data-theme-id='xiaojing'] .theme-launcher-hero-slogan {
-    font-size: 17px;
-  }
 }

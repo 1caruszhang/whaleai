@@ -9,7 +9,7 @@ use std::time::Duration;
 use tauri::AppHandle;
 
 pub const SIDECAR_SECRET_ENV: &str = "XIAOJING_DEEPSEEK_API_KEY";
-const DEVELOPMENT_SECRET_ENV: &str = "DEEPSEEK_API_KEY";
+pub(crate) const DEVELOPMENT_SECRET_ENV: &str = "DEEPSEEK_API_KEY";
 #[cfg(windows)]
 const CREDENTIAL_TARGET: &str = "Xiaojing/DeepSeek/main-agent";
 

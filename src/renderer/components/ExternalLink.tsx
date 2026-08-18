@@ -1,8 +1,7 @@
-// Web link component that prefers Chat's embedded browser and falls back to
-// the system handler outside Chat or on explicit Cmd/Ctrl click.
+// Web link component that delegates to the system handler.
 
 import { type ReactNode, type MouseEvent } from 'react';
-import { useOpenWebLink } from '@/context/BrowserPanelContext';
+import { openExternal } from '@/utils/openExternal';
 
 interface ExternalLinkProps {
     href: string;
@@ -21,7 +20,6 @@ interface ExternalLinkProps {
  * - Click after selecting text: does not open (allows copy)
  */
 export function ExternalLink({ href, children, className, title, onClick }: ExternalLinkProps) {
-    const openWebLink = useOpenWebLink();
     const handleClick = (e: MouseEvent<HTMLAnchorElement>) => {
         e.preventDefault();
         onClick?.(e);
@@ -31,7 +29,7 @@ export function ExternalLink({ href, children, className, title, onClick }: Exte
         const hasSelection = selection && selection.toString().length > 0;
 
         if (!hasSelection && href) {
-            openWebLink(href, { forceExternal: e.metaKey || e.ctrlKey });
+            void openExternal(href);
         }
     };
 

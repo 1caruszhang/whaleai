@@ -82,7 +82,6 @@ const baseProps = {
   size: 11,
   path: 'notes.md',
   workspacePath: '/workspace',
-  embedded: true,
   onClose: vi.fn(),
 };
 
@@ -98,19 +97,16 @@ describe('FilePreviewModal live reload', () => {
       content: 'new content',
       size: 11,
     });
-    const onExternalContentUpdated = vi.fn();
-
-    const { container, rerender } = render(
+    const { rerender } = render(
       <FilePreviewModal
         {...baseProps}
         externalRefreshSignal={0}
-        onExternalContentUpdated={onExternalContentUpdated}
       />,
     );
 
     expect(screen.getByTestId('markdown-preview')).toHaveTextContent('old content');
 
-    const scroller = container.querySelector('.overflow-auto') as HTMLDivElement;
+    const scroller = screen.getByTestId('markdown-preview').closest('.overflow-auto') as HTMLDivElement;
     Object.defineProperty(scroller, 'scrollHeight', { value: 2000, configurable: true });
     Object.defineProperty(scroller, 'clientHeight', { value: 500, configurable: true });
     scroller.scrollTop = 360;
@@ -119,18 +115,11 @@ describe('FilePreviewModal live reload', () => {
       <FilePreviewModal
         {...baseProps}
         externalRefreshSignal={1}
-        onExternalContentUpdated={onExternalContentUpdated}
       />,
     );
 
     await waitFor(() => {
       expect(screen.getByTestId('markdown-preview')).toHaveTextContent('new content');
-    });
-    expect(onExternalContentUpdated).toHaveBeenCalledWith({
-      path: 'notes.md',
-      name: 'notes.md',
-      content: 'new content',
-      size: 11,
     });
     expect(screen.getByText(/^已更新 \d{2}:\d{2}$/)).toBeTruthy();
     expect(scroller.scrollTop).toBe(360);
@@ -164,14 +153,15 @@ describe('FilePreviewModal live reload', () => {
     });
 
     const { rerender } = render(
-      <FilePreviewModal {...baseProps} initialEditMode externalRefreshSignal={0} />,
+      <FilePreviewModal {...baseProps} externalRefreshSignal={0} />,
     );
 
+    fireEvent.click(screen.getByRole('button', { name: '编辑' }));
     const editor = await screen.findByTestId('monaco-editor') as HTMLTextAreaElement;
     fireEvent.change(editor, { target: { value: 'local dirty content' } });
 
     rerender(
-      <FilePreviewModal {...baseProps} initialEditMode externalRefreshSignal={1} />,
+      <FilePreviewModal {...baseProps} externalRefreshSignal={1} />,
     );
 
     await waitFor(() => {
@@ -196,11 +186,11 @@ describe('FilePreviewModal live reload', () => {
       <FilePreviewModal
         {...baseProps}
         onClose={onClose}
-        initialEditMode
         externalRefreshSignal={0}
       />,
     );
 
+    fireEvent.click(screen.getByRole('button', { name: '编辑' }));
     const editor = await screen.findByTestId('monaco-editor') as HTMLTextAreaElement;
     fireEvent.change(editor, { target: { value: 'local dirty content' } });
 
@@ -208,7 +198,6 @@ describe('FilePreviewModal live reload', () => {
       <FilePreviewModal
         {...baseProps}
         onClose={onClose}
-        initialEditMode
         externalRefreshSignal={1}
       />,
     );
@@ -217,8 +206,7 @@ describe('FilePreviewModal live reload', () => {
       expect(screen.getByText(/^外部更新 \d{2}:\d{2}$/)).toBeTruthy();
     });
 
-    const buttons = screen.getAllByRole('button');
-    fireEvent.click(buttons[buttons.length - 1]);
+    fireEvent.click(screen.getByRole('button', { name: '关闭' }));
 
     expect(mocks.toastWarning).toHaveBeenCalledWith('文件已在外部更新，未自动覆盖');
     expect(onClose).not.toHaveBeenCalled();
@@ -226,51 +214,30 @@ describe('FilePreviewModal live reload', () => {
     expect(editor.value).toBe('local dirty content');
   });
 
-  it('exposes file actions from the embedded toolbar more menu', async () => {
-    const onQuoteFile = vi.fn();
-    const onRevealInTree = vi.fn();
-    const onClose = vi.fn();
+  it('exposes the focused workspace file actions from the more menu', async () => {
     mocks.copyPlainText.mockResolvedValueOnce(undefined);
 
     render(
-      <FilePreviewModal
-        {...baseProps}
-        onClose={onClose}
-        onQuoteFile={onQuoteFile}
-        onRevealInTree={onRevealInTree}
-      />,
+      <FilePreviewModal {...baseProps} />,
     );
 
     fireEvent.click(screen.getByLabelText('更多'));
-    expect(screen.getByRole('button', { name: '引用' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: '在文件目录中展示' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '复制文件路径' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: '打开所在文件夹' })).toBeInTheDocument();
+    expect(screen.getAllByRole('button', { name: '打开所在文件夹' })).toHaveLength(2);
     expect(screen.getByRole('button', { name: '重命名' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '复制全文' })).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole('button', { name: '在文件目录中展示' }));
-    expect(onRevealInTree).toHaveBeenCalledWith('notes.md');
-    expect(onClose).not.toHaveBeenCalled();
-
-    fireEvent.click(screen.getByLabelText('更多'));
     fireEvent.click(screen.getByRole('button', { name: '复制文件路径' }));
     expect(mocks.copyPlainText).toHaveBeenCalledWith('/workspace/notes.md');
     await waitFor(() => expect(mocks.toastSuccess).toHaveBeenCalledWith('已复制文件路径'));
 
     fireEvent.click(screen.getByLabelText('更多'));
-    fireEvent.click(screen.getByRole('button', { name: '打开所在文件夹' }));
+    fireEvent.click(screen.getAllByRole('button', { name: '打开所在文件夹' })[1]);
     expect(mocks.openInFinder).toHaveBeenCalledWith({ path: 'notes.md' });
 
     fireEvent.click(screen.getByLabelText('更多'));
     fireEvent.click(screen.getByRole('button', { name: '重命名' }));
     expect(screen.getByDisplayValue('notes.md')).toBeInTheDocument();
-
-    fireEvent.keyDown(screen.getByDisplayValue('notes.md'), { key: 'Escape' });
-    fireEvent.click(screen.getByLabelText('更多'));
-    fireEvent.click(screen.getByRole('button', { name: '引用' }));
-    await waitFor(() => expect(onQuoteFile).toHaveBeenCalledWith('notes.md'));
-    expect(onClose).toHaveBeenCalled();
   });
 
   it('copies markdown preview as rich text from the full-text menu action', async () => {
@@ -294,9 +261,10 @@ describe('FilePreviewModal live reload', () => {
     mocks.copyPlainText.mockResolvedValueOnce(undefined);
 
     render(
-      <FilePreviewModal {...baseProps} content="# Saved" initialEditMode />,
+      <FilePreviewModal {...baseProps} content="# Saved" />,
     );
 
+    fireEvent.click(screen.getByRole('button', { name: '编辑' }));
     const editor = await screen.findByTestId('monaco-editor') as HTMLTextAreaElement;
     fireEvent.change(editor, { target: { value: '# Unsaved draft' } });
     mocks.saveFile.mockClear();
@@ -374,9 +342,10 @@ describe('FilePreviewModal live reload', () => {
     });
 
     render(
-      <FilePreviewModal {...baseProps} initialEditMode externalRefreshSignal={0} />,
+      <FilePreviewModal {...baseProps} externalRefreshSignal={0} />,
     );
 
+    fireEvent.click(screen.getByRole('button', { name: '编辑' }));
     const editor = await screen.findByTestId('monaco-editor') as HTMLTextAreaElement;
     fireEvent.change(editor, { target: { value: 'local dirty content' } });
 
@@ -394,44 +363,6 @@ describe('FilePreviewModal live reload', () => {
     expect(editor.value).toBe('local dirty content');
   });
 
-  it('does not enter fullscreen while a dirty external-update conflict is pending', async () => {
-    mocks.readPreview.mockResolvedValueOnce({
-      name: 'notes.md',
-      content: 'external content',
-      size: 16,
-    });
-    const onFullscreen = vi.fn();
-
-    const { rerender } = render(
-      <FilePreviewModal
-        {...baseProps}
-        initialEditMode
-        externalRefreshSignal={0}
-        onFullscreen={onFullscreen}
-      />,
-    );
-
-    const editor = await screen.findByTestId('monaco-editor') as HTMLTextAreaElement;
-    fireEvent.change(editor, { target: { value: 'local dirty content' } });
-
-    rerender(
-      <FilePreviewModal
-        {...baseProps}
-        initialEditMode
-        externalRefreshSignal={1}
-        onFullscreen={onFullscreen}
-      />,
-    );
-
-    await waitFor(() => {
-      expect(screen.getByText(/^外部更新 \d{2}:\d{2}$/)).toBeTruthy();
-    });
-
-    fireEvent.click(screen.getByLabelText('全屏预览'));
-
-    expect(onFullscreen).not.toHaveBeenCalled();
-    expect(mocks.toastWarning).toHaveBeenCalledWith('文件已在外部更新，未自动覆盖');
-  });
 });
 
 describe('FilePreviewModal live reload helpers', () => {

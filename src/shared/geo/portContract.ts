@@ -55,7 +55,7 @@ export const GEO_PORT_CONTRACT = {
       persistenceOwner: "rust-task-store",
       ownsGeoState: false,
       meaning:
-        "Hidden scheduling infrastructure that only wakes a referenced monitoring operation; Task Center does not own GEO stages or artifacts.",
+        "Hidden scheduling infrastructure that only wakes a referenced monitoring operation; it owns no GEO stage or artifact.",
     },
     PublishScheduler: {
       businessBoundary: "deterministic-publishing",
@@ -124,6 +124,12 @@ export const GEO_PORT_CONTRACT = {
       executorAfterConfirmation: "geo-domain",
       semantics:
         "Mined search terms are reviewed before any candidate questions are built.",
+      // GD-7 决策（用户已拍板，2026-08-17）：本产品有意融合此门——关键词在
+      // question pool attempt 内部挖掘并立即消费，不设独立用户停止点；挖掘词
+      // 全量展示在「关键词与问题池」卡片的搜索词区块，供确认问题时一并审阅。
+      // 此注释即 js_ai 基线与本产品的差异说明，勿据此恢复独立闸门。
+      xiaojingDivergence:
+        "fused into question-pool generation; mined terms are displayed in the pool card instead of gating it",
     },
     {
       id: "questions",
@@ -356,8 +362,8 @@ export const GEO_PORT_CONTRACT = {
       "active-model",
     ],
     pinned: {
-      question_pool: ["volcengine", "doubao-seed-2-0-mini-260428"],
-      title: ["volcengine", "doubao-seed-2-0-mini-260428"],
+      question_pool: ["volcengine", "doubao-seed-2-0-lite-260428"],
+      title: ["volcengine", "doubao-seed-2-0-lite-260428"],
       draft: ["volcengine", "doubao-seed-2-0-pro-260215"],
     },
     extractionDefault: "deepseek-chat",
@@ -518,7 +524,7 @@ export const GEO_PORT_CONTRACT = {
     "effect-report-auto-plans-next-round",
     "mock-metrics-as-decision-input",
     "model-owned-paid-order-submission",
-    "task-center-owned-geo-state",
+    "scheduler-owned-geo-state",
   ],
 } as const;
 

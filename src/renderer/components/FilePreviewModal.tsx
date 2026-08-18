@@ -8,12 +8,10 @@
  *   writable Monaco editor. Both share the same auto-saved `editContent`, so the toggle
  *   is purely a view switch.
  *
- * Edit capability comes from two sources (either is sufficient):
- * 1. `workspacePath` prop — Rust workspace_files via `useWorkspaceFileService`
- * 2. Explicit `onSave`/`onRevealFile` props — when caller provides save logic directly
- *    (e.g. Settings panels editing `~/.myagents/agents/...`)
+ * Workspace edits go through the Rust workspace file service. Local files outside the
+ * active workspace remain read-only.
  */
-import { AtSign, Check, Copy, Edit2, Expand, Eye, FileText, FolderOpen, Loader2, LocateFixed, MoreHorizontal, X } from 'lucide-react';
+import { Check, Copy, Edit2, Eye, FileText, FolderOpen, Loader2, MoreHorizontal, X } from 'lucide-react';
 import Tip from './Tip';
 import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useState, useRef } from 'react';
 import { createPortal } from 'react-dom';
@@ -79,10 +77,6 @@ interface FilePreviewModalProps {
     error?: string | null;
     /** Callback when modal is closed */
     onClose: () => void;
-    /** Callback after file is saved successfully */
-    onSaved?: () => void;
-    /** External save handler — enables editing even without Tab context */
-    onSave?: (content: string) => Promise<void>;
     /** External reveal-in-finder handler — enables "Open in Finder" without Tab context */
     onRevealFile?: () => Promise<void>;
     /** Absolute workspace root path — Phase D.5: required for rendered
@@ -92,19 +86,8 @@ interface FilePreviewModalProps {
     workspacePath?: string | null;
     /** Notify parent that the file was renamed. Parent MUST update the
      *  `name`/`path` it passes back so subsequent saves target the new
-     *  location (e.g., split-view's `splitFile` state). */
+     *  location. */
     onRenamed?: (newPath: string, newName: string) => void;
-    /** When `true`, markdown opens directly in the editable Monaco view
-     *  instead of the rendered preview. Used by 「新建笔记」 flow so a fresh
-     *  empty `note-…md` is immediately editable without an extra click. */
-    initialEditMode?: boolean;
-    /** When true, render inline (no portal/backdrop) for use in split-view panel */
-    embedded?: boolean;
-    /** Callback to open the fullscreen modal from embedded mode.
-     *  Receives the current editor content so fullscreen opens with up-to-date text. */
-    onFullscreen?: (currentContent?: string) => void;
-    /** Switch to browser preview (only for HTML files with an active browser panel) */
-    onSwitchToBrowser?: () => void;
     /** Initial line to scroll to */
     initialLineNumber?: number;
     /** User navigation target from workspace search/file links. Re-applies when requestId changes. */
@@ -113,21 +96,6 @@ interface FilePreviewModalProps {
      *  The modal revalidates only the currently open `path` and applies content
      *  in place, preserving the preview/editor surface. */
     externalRefreshSignal?: number;
-    /** Fired when live reload applies fresh disk content. Parent snapshots
-     *  (split panel / fullscreen / DirectoryPanel modal state) should mirror
-     *  this so remounting the modal does not fall back to stale content. */
-    onExternalContentUpdated?: (file: { path: string; name: string; content: string; size: number }) => void;
-    /** When provided, renders a「引用文件」icon button in the toolbar that injects
-     *  `@<path>` into the chat input and closes the modal. Omit on non-chat surfaces
-     *  (settings panels, agent admin pages) — the button hides automatically. */
-    onQuoteFile?: (path: string) => void;
-    /** Reveal this workspace-relative file inside the app's workspace tree. */
-    onRevealInTree?: (path: string) => void;
-    /** When provided, the Monaco editor (used for code files & markdown edit mode)
-     *  shows a floating「引用」menu on selection that injects `@<path>#L<start>[-L<end>]`
-     *  into the chat input. Markdown preview mode (rendered HTML) intentionally does
-     *  NOT surface this — line-mapping back to source is unreliable. */
-    onQuoteSelection?: (path: string, startLine: number, endLine: number, text: string) => void;
 }
 
 /** Auto-save status indicator — same treatment as the existing code-file editor.
@@ -307,24 +275,20 @@ function FilenameSlot({
     );
 }
 
-/** "预览 / 编辑" segmented control — header thumb-style toggle, mirrors task-center/ModeSegment.tsx
+/** "预览 / 编辑" segmented control — header thumb-style toggle
  *  visual treatment so markdown view-mode switching reads as one affordance. */
 function MdViewSegment({
     value,
     onChange,
-    compact = false,
 }: {
     value: 'preview' | 'edit';
     onChange: (mode: 'preview' | 'edit') => void;
-    compact?: boolean;
 }) {
     const { t } = useTranslation('chat');
-    const baseBtn = compact
-        ? 'inline-flex items-center gap-1 rounded-[var(--radius-sm)] px-2 py-0.5 text-xs font-medium transition-all duration-150'
-        : 'inline-flex items-center gap-1.5 rounded-[var(--radius-sm)] px-3 py-1 text-sm font-medium transition-all duration-150';
+    const baseBtn = 'inline-flex items-center gap-1.5 rounded-[var(--radius-sm)] px-3 py-1 text-sm font-medium transition-all duration-150';
     const activeBtn = 'bg-[var(--paper-elevated)] text-[var(--ink)] shadow-xs';
     const inactiveBtn = 'text-[var(--ink-muted)] hover:text-[var(--ink-secondary)]';
-    const iconCls = compact ? 'h-3 w-3' : 'h-3 w-3';
+    const iconCls = 'h-3 w-3';
     return (
         <div className="inline-flex gap-0.5 rounded-[var(--radius-md)] bg-[var(--paper-inset)] p-[3px]">
             <button
@@ -361,31 +325,19 @@ export default function FilePreviewModal({
     isLoading = false,
     error = null,
     onClose,
-    onSaved,
-    onSave,
     onRevealFile,
     workspacePath = null,
     onRenamed,
-    initialEditMode = false,
-    embedded = false,
-    onFullscreen,
-    onSwitchToBrowser,
     initialLineNumber,
     focusTarget,
     externalRefreshSignal,
-    onExternalContentUpdated,
-    onQuoteFile,
-    onRevealInTree,
-    onQuoteSelection,
 }: FilePreviewModalProps) {
     const { t } = useTranslation('chat');
-    // Cmd+W dismissal: only register for fullscreen mode (z-[210]).
-    // Embedded mode (split-panel) has no z-index overlay and is handled separately.
-    // Routes through `handleCloseRef` (latest-ref pattern) so Cmd+W respects the same
+    // Routes Cmd+W through `handleCloseRef` (latest-ref pattern) so it respects the same
     // `flushAndClose` autosave drain that the X button uses — without this, edits made
     // after the last debounce fire would be silently lost on Cmd+W.
     const handleCloseRef = useRef<() => void>(onClose);
-    useCloseLayer(() => { if (embedded) return false; handleCloseRef.current(); return true; }, 210);
+    useCloseLayer(() => { handleCloseRef.current(); return true; }, 210);
 
     // Mounted guard for async autosave callbacks. Project convention requires this on any
     // setState that runs after `await`; without it, an in-flight save resolving after
@@ -406,19 +358,15 @@ export default function FilePreviewModal({
 
     const fileService = useWorkspaceFileService(workspacePath);
 
-    // Phase E (PRD 0.2.7): the legacy `apiPost('/agent/save-file')` fallback
-    // is removed — workspace edits go through Rust workspace_files
-    // exclusively. Edit is enabled when `workspacePath` is provided
-    // (fileService.saveFile path) OR an explicit `onSave` prop overrides
-    // (Settings panels editing `~/.myagents/agents/...`).
+    // Workspace edits go through Rust workspace_files exclusively. Edit is
+    // enabled only by an active workspace path.
     // Rich documents are read-only — never engage the edit machinery (autosave,
     // Monaco, the 预览/编辑 segment) even when a workspacePath is present.
-    const canEdit = !richDocKind && !!(workspacePath || onSave);
+    const canEdit = !richDocKind && !!workspacePath;
     // Reveal: explicit `onRevealFile` prop OR `workspacePath` (modal asks
     // fileService directly). Phase D.5 red-line: routes go through Rust
     // workspace_files, never sidecar HTTP. Either path is acceptable, so
-    // Chat.tsx's split-view / fullscreen mounts don't need to wire
-    // onRevealFile manually — passing `workspacePath` is enough.
+    // Callers normally only need to pass `workspacePath`.
     const canReveal = !!(onRevealFile || workspacePath || localPath);
 
     const isMarkdown = useMemo(() => isMarkdownFile(name), [name]);
@@ -426,11 +374,9 @@ export default function FilePreviewModal({
     const isDirectEdit = canEdit;
 
     // ─── State ───────────────────────────────────────────────────────────────
-    // Markdown view-mode toggle (preview vs writable Monaco). Default to preview so opening
-    // a `.md` file shows the rendered version first; user toggles to edit. The
-    // 「新建笔记」 flow opts in to `initialEditMode` so a brand-new empty note
-    // opens directly in the editor without an extra click.
-    const [mdViewMode, setMdViewMode] = useState<'preview' | 'edit'>(initialEditMode ? 'edit' : 'preview');
+    // Markdown view-mode toggle (preview vs writable Monaco). Files always open in preview;
+    // users explicitly opt into editing.
+    const [mdViewMode, setMdViewMode] = useState<'preview' | 'edit'>('preview');
     const [editContent, setEditContent] = useState(content);
     const [savedContent, setSavedContent] = useState(content); // Last saved baseline (for diff/dirty)
     const [lastExternalUpdateAt, setLastExternalUpdateAt] = useState<Date | null>(null);
@@ -464,21 +410,13 @@ export default function FilePreviewModal({
         setMoreMenuOpen(false);
     }, [content, path, name]);
 
-    // Reset markdown view-mode + cancel any in-flight inline rename when the
-    // file identity changes. Modal is reused for split-view file switches
-    // (Chat.tsx mounts one instance and updates props); without these resets,
-    //   - opening a new note via 「新建笔记」 with `initialEditMode=true` while
-    //     the previous file was in 'preview' mode keeps the old mode (Codex
-    //     round-4 CRIT-2);
-    //   - a rename draft from file A could commit against file B if the user
-    //     switches files mid-rename.
+    // Reset the view mode and any rename draft when the file identity changes.
     useEffect(() => {
-        setMdViewMode(initialEditMode ? 'edit' : 'preview');
+        setMdViewMode('preview');
         setIsEditingName(false);
         externalUpdatePendingRef.current = false;
         setLastExternalUpdateAt(null);
         setExternalUpdatePending(false);
-        // eslint-disable-next-line react-hooks/exhaustive-deps -- intentional: only path drives this; initialEditMode is read but does not retrigger
     }, [path]);
 
     useEffect(() => {
@@ -504,26 +442,15 @@ export default function FilePreviewModal({
 
     // ─── Save logic (shared by auto-save and manual save) ────────────────────
     // Stable refs for save dependencies to avoid re-creating callbacks
-    const onSaveRef = useRef(onSave);
-    onSaveRef.current = onSave;
     const fileServiceRef = useRef(fileService);
     fileServiceRef.current = fileService;
     const pathRef = useRef(path);
     pathRef.current = path;
-    const onSavedRef = useRef(onSaved);
-    onSavedRef.current = onSaved;
-    const onExternalContentUpdatedRef = useRef(onExternalContentUpdated);
-    onExternalContentUpdatedRef.current = onExternalContentUpdated;
 
-    /** Core save function — saves the given content string. Phase E (PRD 0.2.7):
-     *  workspace-relative paths go through `fileService.saveFile` (Rust
-     *  `cmd_workspace_save_file`); explicit `onSave` prop still takes
-     *  precedence for non-workspace surfaces (Settings panels editing
-     *  `~/.myagents/...` files via direct fs writes). */
+    /** Core save function: workspace-relative paths go through the Rust workspace
+     * file service. */
     const executeSave = useCallback(async (contentToSave: string, expectedContent?: string) => {
-        if (onSaveRef.current) {
-            await onSaveRef.current(contentToSave);
-        } else if (fileServiceRef.current.isAvailable) {
+        if (fileServiceRef.current.isAvailable) {
             await fileServiceRef.current.saveFile({
                 path: pathRef.current,
                 content: contentToSave,
@@ -606,12 +533,6 @@ export default function FilePreviewModal({
             externalUpdatePendingRef.current = false;
             setExternalUpdatePending(false);
             setLastExternalUpdateAt(now);
-            onExternalContentUpdatedRef.current?.({
-                path: targetPath,
-                name: payload.name,
-                content: payload.content,
-                size: payload.size,
-            });
         } catch {
             // File may be temporarily missing/renamed or too large to preview.
             // Keep the currently visible snapshot instead of flashing an error
@@ -679,7 +600,7 @@ export default function FilePreviewModal({
 
     // ─── Auto-save for direct-edit code files ─────────────────────────────────
 
-    /** Persist the given content to disk, update status indicator, and call onSaved.
+    /** Persist the given content to disk and update the status indicator.
      *  Includes retry-after-busy: if a save is already in-flight, reschedules after it finishes. */
     const doAutoSave = useCallback((contentToSave: string) => {
         if (externalUpdatePendingRef.current) {
@@ -725,7 +646,6 @@ export default function FilePreviewModal({
                         if (isMountedRef.current) setAutoSaveStatus('idle');
                     }, 2000);
                 }
-                onSavedRef.current?.();
                 // After save completes, check if content changed during the save (user kept typing)
                 if (isMountedRef.current && editContentRef.current !== contentToSave) {
                     if (debounceTimerRef.current) clearTimeout(debounceTimerRef.current);
@@ -790,7 +710,6 @@ export default function FilePreviewModal({
                 // fire a second redundant save against the same content. Setting the ref
                 // (not React state) is sufficient because the component is about to unmount.
                 savedContentRef.current = toSave;
-                onSavedRef.current?.();
             } catch {
                 // Save failed on close — don't block the close
                 toastRef.current.error(tRef.current('workspaceFiles.filePreview.toasts.closeAutosaveFailed'));
@@ -822,9 +741,7 @@ export default function FilePreviewModal({
     //
     // Rename uses fileService.rename → Rust `cmd_workspace_rename` (validates
     // Windows reserved names, path traversal, collision; rejects with error
-    // string). Available only when `workspacePath` is set — Settings panels
-    // editing `~/.myagents/agents/...` (which use the `onSave` prop) keep
-    // the filename as a static span.
+    // string). Available only when `workspacePath` is set.
     useEffect(() => {
         handleRenameCommitRef.current = async (next: string) => {
             // Synchronous in-flight guard: Enter on the input followed
@@ -918,43 +835,6 @@ export default function FilePreviewModal({
     // at module-top, before handleClose existed) routes through the autosave-aware path.
     handleCloseRef.current = handleClose;
 
-
-    // ─── Quote handlers ──────────────────────────────────────────────────────
-    // Stable refs for quote callbacks: the Monaco selection listener registers once and
-    // reads via ref so callback identity changes upstream don't tear down the listener.
-    const onQuoteFileRef = useRef(onQuoteFile);
-    onQuoteFileRef.current = onQuoteFile;
-    const onQuoteSelectionRef = useRef(onQuoteSelection);
-    onQuoteSelectionRef.current = onQuoteSelection;
-
-    /** Toolbar「引用文件」: kick off any pending edit to disk, **await** the in-flight save
-     *  before appending `@<path>` to chat input + closing — without the await the user could
-     *  immediately hit ⏎ on the chat input while the file is still being written, causing the
-     *  model to read pre-edit content. Mounted-guard after await: handleClose may have run
-     *  via a different path (Cmd+W) during the save. */
-    const handleQuoteFileClick = useCallback(async () => {
-        if (!onQuoteFileRef.current) return;
-        if (
-            externalUpdatePendingRef.current &&
-            editContentRef.current !== savedContentRef.current
-        ) {
-            toastRef.current.warning(tRef.current('workspaceFiles.filePreview.toasts.externalUpdateConflict'));
-            return;
-        }
-        if (isDirectEdit && editContentRef.current !== savedContentRef.current) {
-            // Kicks off save (no return value); awaits via inFlightPromiseRef below.
-            handleManualFlush();
-        }
-        if (inFlightPromiseRef.current) {
-            try { await inFlightPromiseRef.current; } catch { /* save errors already toast */ }
-        }
-        if (!isMountedRef.current) return;
-        onQuoteFileRef.current(pathRef.current);
-        // Close after quoting. handleClose handles autosave-aware close path; with the
-        // save now flushed, its dirty-check is a no-op (no duplicate save).
-        handleCloseRef.current();
-    }, [isDirectEdit, handleManualFlush]);
-
     const absolutePathForDisplay = useMemo(() => {
         if (localPath) return localPath;
         if (!workspacePath) return path;
@@ -1002,52 +882,6 @@ export default function FilePreviewModal({
         })();
     }, [error, isLoading, isMarkdown, isMdEditView, richDocKind]);
 
-    const handleRevealInTree = useCallback(() => {
-        if (!onRevealInTree || localPath) return;
-        onRevealInTree(pathRef.current);
-        if (!embedded) handleCloseRef.current();
-    }, [embedded, localPath, onRevealInTree]);
-
-    /** Monaco-side selection quote: forwards line range + text to caller. The toolbar
-     *  「引用文件」 path also closes the modal, but selection-quote intentionally does
-     *  NOT — users typically quote multiple ranges in succession when reading code. */
-    const handleMonacoQuote = useCallback((sel: { text: string; startLine: number; endLine: number }) => {
-        onQuoteSelectionRef.current?.(pathRef.current, sel.startLine, sel.endLine, sel.text);
-    }, []);
-
-    // Only pass the Monaco quote callback when the parent opted in — keeps the floating
-    // menu off non-chat surfaces (settings, etc.) for free.
-    const monacoQuote = onQuoteSelection ? handleMonacoQuote : undefined;
-
-    const hasExternalUpdateConflict = useCallback(() => (
-        externalUpdatePendingRef.current &&
-        editContentRef.current !== savedContentRef.current
-    ), []);
-
-    const handleSwitchToBrowserClick = useCallback(() => {
-        if (!onSwitchToBrowser) return;
-        if (isDirectEdit && hasExternalUpdateConflict()) {
-            toastRef.current.warning(tRef.current('workspaceFiles.filePreview.toasts.externalUpdateConflict'));
-            return;
-        }
-        if (isDirectEdit) handleManualFlush();
-        onSwitchToBrowser();
-    }, [hasExternalUpdateConflict, handleManualFlush, isDirectEdit, onSwitchToBrowser]);
-
-    const handleFullscreenClick = useCallback(() => {
-        if (!onFullscreen) return;
-        if (isDirectEdit && hasExternalUpdateConflict()) {
-            toastRef.current.warning(tRef.current('workspaceFiles.filePreview.toasts.externalUpdateConflict'));
-            return;
-        }
-        if (isDirectEdit) {
-            handleManualFlush();
-            onFullscreen(editContentRef.current);
-        } else {
-            onFullscreen();
-        }
-    }, [hasExternalUpdateConflict, handleManualFlush, isDirectEdit, onFullscreen]);
-
     const handleOpenInFinder = useCallback(async () => {
         if (!canReveal) return;
         try {
@@ -1066,11 +900,9 @@ export default function FilePreviewModal({
         }
     }, [canReveal, localPath, onRevealFile, workspacePath]);
 
-    const renderMoreMenu = (compact: boolean) => {
-        const iconClass = compact ? 'h-3.5 w-3.5' : 'h-4 w-4';
-        const buttonClass = compact
-            ? 'rounded-md p-1 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]'
-            : 'rounded-md p-1.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]';
+    const renderMoreMenu = () => {
+        const iconClass = 'h-4 w-4';
+        const buttonClass = 'rounded-md p-1.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]';
         const runMenuAction = (action: () => void | Promise<void>) => {
             setMoreMenuOpen(false);
             void action();
@@ -1097,20 +929,6 @@ export default function FilePreviewModal({
                     placement="bottom-end"
                     className="w-48 py-1"
                 >
-                    {onQuoteFile && (
-                        <MenuItem
-                            icon={<AtSign className="h-3.5 w-3.5" />}
-                            label={t('workspaceFiles.common.quote')}
-                            onClick={() => runMenuAction(handleQuoteFileClick)}
-                        />
-                    )}
-                    {onRevealInTree && !localPath && (
-                        <MenuItem
-                            icon={<LocateFixed className="h-3.5 w-3.5" />}
-                            label={t('workspaceFiles.common.revealInTree')}
-                            onClick={() => runMenuAction(handleRevealInTree)}
-                        />
-                    )}
                     <MenuItem
                         icon={<Copy className="h-3.5 w-3.5" />}
                         label={t('workspaceFiles.common.copyFilePath')}
@@ -1169,8 +987,7 @@ export default function FilePreviewModal({
         if (richDocKind) {
             return (
                 <Suspense fallback={monacoLoading}>
-                    {/* key={path}: a split-view file switch reuses this modal — keying
-                        forces RichDocViewer to remount (clean state + viewer cleanup). */}
+                    {/* Keying by path guarantees clean viewer state and resource cleanup. */}
                     <RichDocViewer key={localPath ?? path} kind={richDocKind} path={path} workspacePath={workspacePath} localPath={localPath} />
                 </Suspense>
             );
@@ -1189,7 +1006,6 @@ export default function FilePreviewModal({
                             onSave={handleManualFlush}
                             initialLineNumber={initialLineNumber}
                             focusTarget={focusTarget}
-                            onQuote={monacoQuote}
                         />
                     </div>
                 </Suspense>
@@ -1238,7 +1054,6 @@ export default function FilePreviewModal({
                         onSave={isDirectEdit ? handleManualFlush : undefined}
                         initialLineNumber={initialLineNumber}
                         focusTarget={focusTarget}
-                        onQuote={monacoQuote}
                     />
                 </div>
             </Suspense>
@@ -1247,85 +1062,7 @@ export default function FilePreviewModal({
 
     const showMdSegment = isMarkdown && canEdit;
 
-    // ─── Embedded mode ────────────────────────────────────────────────────────
-    if (embedded) {
-        // 3-col grid keeps the markdown view-mode toggle visually centered while letting
-        // the file-info column truncate on narrow widths. When the toggle is absent
-        // (non-md or read-only md), the middle column collapses to 0.
-        return (
-            <div className="flex h-full flex-col overflow-hidden">
-                <div className="relative z-10 grid flex-shrink-0 grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-2 px-4 py-2 after:pointer-events-none after:absolute after:inset-x-0 after:top-full after:h-3 after:bg-gradient-to-b after:from-[var(--paper-elevated)] after:to-[var(--paper-elevated-a0)]">
-                    {/* Left: file info */}
-                    <div className="flex min-w-0 items-center gap-2">
-                        <div className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-md bg-[var(--accent-warm-muted)]">
-                            <FileText className="h-3.5 w-3.5 text-[var(--accent)]" />
-                        </div>
-                        <FilenameSlot
-                            name={name}
-                            canRename={canRename}
-                            isEditing={isEditingName}
-                            draft={nameDraft}
-                            onDraftChange={setNameDraft}
-                            onCommit={handleRenameCommit}
-                            onCancel={handleRenameCancel}
-                            onStartEdit={handleStartRename}
-                            busy={renameInFlight}
-                            className="text-sm font-medium text-[var(--ink)]"
-                        />
-                        {isDirectEdit && <AutoSaveIndicator status={autoSaveStatus} />}
-                        <LiveUpdateIndicator updatedAt={lastExternalUpdateAt} pending={externalUpdatePending} />
-                    </div>
-
-                    {/* Middle: markdown view-mode toggle (centered) */}
-                    <div className="flex items-center justify-center">
-                        {showMdSegment && (
-                            <MdViewSegment value={mdViewMode} onChange={setMdViewMode} compact />
-                        )}
-                    </div>
-
-                    {/* Right: actions */}
-                    <div className="flex flex-shrink-0 items-center justify-end gap-2">
-                        {renderMoreMenu(true)}
-
-                        {/* Switch to browser preview — only for HTML files with an active browser */}
-                        {onSwitchToBrowser && (
-                            <Tip label={t('workspaceFiles.filePreview.browserPreview')} position="bottom">
-                                <button type="button" onClick={handleSwitchToBrowserClick}
-                                    aria-label={t('workspaceFiles.filePreview.browserPreview')}
-                                    className="rounded-md p-1 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]">
-                                    <Eye className="h-3.5 w-3.5" />
-                                </button>
-                            </Tip>
-                        )}
-
-                        {onFullscreen && (
-                            <Tip label={t('workspaceFiles.filePreview.fullscreenPreview')} position="bottom">
-                                <button type="button" onClick={handleFullscreenClick}
-                                    aria-label={t('workspaceFiles.filePreview.fullscreenPreview')}
-                                    className="rounded-md p-1 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]">
-                                    <Expand className="h-3.5 w-3.5" />
-                                </button>
-                            </Tip>
-                        )}
-
-                        <Tip label={t('workspaceFiles.common.close')} position="bottom">
-                            <button type="button" onClick={handleClose}
-                                aria-label={t('workspaceFiles.common.close')}
-                                className="rounded-md p-1 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]">
-                                <X className="h-3.5 w-3.5" />
-                            </button>
-                        </Tip>
-                    </div>
-                </div>
-                {/* Content */}
-                <div className="flex-1 overflow-hidden">
-                    {renderPreviewContent()}
-                </div>
-            </div>
-        );
-    }
-
-    // ─── Fullscreen mode (portal) ─────────────────────────────────────────────
+    // ─── Fullscreen portal ────────────────────────────────────────────────────
     return createPortal(
         <OverlayBackdrop onClose={handleClose} className="z-[210]" style={{ padding: '3vh 3vw' }}>
             {/* Modal content */}
@@ -1393,7 +1130,7 @@ export default function FilePreviewModal({
 
                     {/* Right: actions */}
                     <div className="flex flex-shrink-0 items-center justify-end gap-1.5">
-                        {renderMoreMenu(false)}
+                        {renderMoreMenu()}
                         <button
                             type="button"
                             onClick={handleClose}

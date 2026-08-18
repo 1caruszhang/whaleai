@@ -51,8 +51,6 @@ const BlockGroup = memo(function BlockGroup({
             <ProcessRow
               key={i}
               block={block}
-              index={i}
-              totalBlocks={blocks.length}
               isStreaming={isStreamingActive}
               onUserExpand={handleChildExpand}
             />
@@ -72,8 +70,6 @@ const BlockGroup = memo(function BlockGroup({
                     <ProcessRow
                       key={index}
                       block={block}
-                      index={index}
-                      totalBlocks={blocks.length}
                       isStreaming={isStreamingActive}
                       onUserExpand={handleChildExpand}
                     />
@@ -122,8 +118,6 @@ const BlockGroup = memo(function BlockGroup({
               <ProcessRow
                 key={index}
                 block={block}
-                index={index}
-                totalBlocks={blocks.length}
                 isStreaming={isStreamingActive}
                 onUserExpand={handleChildExpand}
               />
@@ -142,8 +136,6 @@ const BlockGroup = memo(function BlockGroup({
           <ProcessRow
             key={index}
             block={block}
-            index={index}
-            totalBlocks={blocks.length}
             isStreaming={isStreamingActive}
             onUserExpand={handleChildExpand}
           />

@@ -31,11 +31,11 @@ async function exitedChildPid(): Promise<number> {
 }
 
 function transcriptPath(sessionId: string): string {
-  return join(testHome, '.myagents', 'sessions', `${sessionId}.jsonl`);
+  return join(testHome, 'Xiaojing', 'sessions', `${sessionId}.jsonl`);
 }
 
 function transcriptLockPath(sessionId: string): string {
-  return join(testHome, '.myagents', 'session-locks', `${sessionId}.jsonl.lock`);
+  return join(testHome, 'Xiaojing', 'session-locks', `${sessionId}.jsonl.lock`);
 }
 
 async function createSeededSession(): Promise<{ id: string; transcript: string }> {
@@ -53,7 +53,7 @@ async function createSeededSession(): Promise<{ id: string; transcript: string }
 }
 
 beforeAll(async () => {
-  testHome = mkdtempSync(join(tmpdir(), 'myagents-issue-522-bootstrap-'));
+  testHome = mkdtempSync(join(tmpdir(), 'xiaojing-issue-522-bootstrap-'));
   originalHome = process.env.HOME;
   originalUserProfile = process.env.USERPROFILE;
   process.env.HOME = testHome;
@@ -81,7 +81,7 @@ describe('issue #522 — replacement bootstrap transcript lock', () => {
     const deadPid = await exitedChildPid();
     const lockPath = transcriptLockPath(session.id);
     mkdirSync(lockPath, { recursive: true });
-    writeFileSync(join(lockPath, 'owner'), `node:${deadPid}\n`, 'utf8');
+    writeFileSync(join(lockPath, 'owner'), `node:${deadPid}:0\n`, 'utf8');
 
     const unhandled: unknown[] = [];
     const onUnhandled = (reason: unknown) => unhandled.push(reason);

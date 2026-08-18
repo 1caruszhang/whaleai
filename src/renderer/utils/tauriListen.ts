@@ -94,7 +94,7 @@ export async function listenWithCleanup<T>(
     // `disposed` covers manual `result.unlisten()` paths where the signal
     // is NEVER aborted by the caller — the in-handler guard `signal.aborted`
     // alone wouldn't gate queued same-microtask events under that path
-    // (Codex review WARN-1). Setting `disposed=true` inside `teardown` lets
+    // Setting `disposed=true` inside `teardown` lets
     // the handler short-circuit regardless of which teardown route fired.
     let disposed = false;
 

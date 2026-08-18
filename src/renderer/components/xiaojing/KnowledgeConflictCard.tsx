@@ -2,6 +2,8 @@ import { Check, GitBranch, ShieldCheck, X } from 'lucide-react';
 import { useMemo, useState } from 'react';
 
 import { useTabApi } from '@/context/TabContext';
+import { unwrapToolResultText } from '../../../shared/toolResult';
+import { KNOWLEDGE_DECIDED_EVENT } from './KnowledgeBatchCard';
 
 type Decision = 'keep-current' | 'adopt-new' | 'split-scope' | 'reject-candidate';
 
@@ -36,7 +38,8 @@ export interface KnowledgeConflictCardData {
 
 export function parseKnowledgeConflictCard(result: string): KnowledgeConflictCardData | null {
   try {
-    const parsed = JSON.parse(result) as KnowledgeConflictCardData;
+    // MCP 结果是 content blocks 包装（`[{type:'text',text:...}]`），先剥壳。
+    const parsed = JSON.parse(unwrapToolResultText(result)) as KnowledgeConflictCardData;
     if (parsed.kind === 'knowledge-conflict-card'
       && parsed.requiresUserDecision === true
       && typeof parsed.candidate?.id === 'string'
@@ -111,6 +114,9 @@ export default function KnowledgeConflictCard({ data }: { data: KnowledgeConflic
       if (!response.success) throw new Error(response.error ?? '知识裁决失败');
       setResolved(response.result?.status ?? decision);
       setShowSplit(false);
+      window.dispatchEvent(new CustomEvent(KNOWLEDGE_DECIDED_EVENT, {
+        detail: { workspaceId: candidate.workspaceId },
+      }));
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {

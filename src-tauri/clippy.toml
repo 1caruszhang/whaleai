@@ -1,4 +1,4 @@
-# MyAgents Rust lint policy
+# Xiaojing Rust lint policy
 #
 # Pit-of-success rule: ALL async tasks created in src-tauri MUST use
 # `tauri::async_runtime::spawn`. Calling `tokio::spawn` directly works in most
@@ -25,7 +25,7 @@ disallowed-methods = [
     # Wrappers in `local_http.rs` are the single legitimate caller — they
     # carry `#[allow(clippy::disallowed_methods)]` on the construction line.
     { path = "reqwest::Client::new", reason = "Use `crate::local_http::builder()` / `json_client()` / `sse_client()` — system proxy intercepts localhost otherwise (502 on dev). CLAUDE.md red-line." },
-    { path = "reqwest::Client::builder", reason = "Use `crate::local_http::builder()` — same pit-of-success rule. External-host builders (R2 / weixin / updater) MUST carry `#[allow(clippy::disallowed_methods)]` per call site so the localhost trap stays banned for everyone else." },
+    { path = "reqwest::Client::builder", reason = "Use `crate::local_http::builder()` for loopback. External GEO clients must carry an explicit allow at their typed adapter boundary." },
     { path = "reqwest::ClientBuilder::new", reason = "Use `crate::local_http::builder()` — same pit-of-success rule." },
     { path = "reqwest::blocking::Client::new", reason = "Use `crate::local_http::blocking_builder()` — same pit-of-success rule." },
     { path = "reqwest::blocking::Client::builder", reason = "Use `crate::local_http::blocking_builder()` — same pit-of-success rule. External-host builders MUST carry `#[allow(clippy::disallowed_methods)]` per call site." },
@@ -38,7 +38,7 @@ disallowed-methods = [
     { path = "which::which", reason = "Use `crate::system_binary::find()` — Finder-launched Tauri apps have a stripped PATH. CLAUDE.md red-line." },
 
     # Subprocess spawn — `crate::process_cmd::new()` sets CREATE_NO_WINDOW on
-    # Windows so background children (sidecar, plugin-bridge, bun init) don't
+    # Windows so background Sidecar and SDK children don't
     # flash a console. The wrapper itself carries
     # `#[allow(clippy::disallowed_methods)]` on its `Command::new` line.
     # CLAUDE.md red-line table.
@@ -51,7 +51,7 @@ disallowed-methods = [
 # Existing call sites using `tokio::task::spawn_blocking` continue to work.
 
 # Unified logging macros: `log::*` macros only write to stdout / env_logger.
-# They bypass the unified log file at `~/.myagents/logs/unified-{date}.log`
+# They bypass the unified log owner in Xiaojing's local-data directory
 # which is the source of truth for Sidecar / React / Rust correlation.
 # `ulog_*!` macros (defined in `logger.rs`) write to stdout AND the unified
 # file AND emit to the React log panel. CLAUDE.md red-line table.

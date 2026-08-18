@@ -1,298 +1,105 @@
-import React, {
-  createContext,
-  useContext,
-  useEffect,
-  useInsertionEffect,
-  useLayoutEffect,
-  useMemo,
-  useState,
-  useSyncExternalStore,
-} from 'react';
-import { emit } from '@tauri-apps/api/event';
-import { getCurrentWindow } from '@tauri-apps/api/window';
+import { createContext, useContext, useMemo, type ReactNode } from 'react';
 
-import { useConfig } from '@/hooks/useConfig';
-import { isTauriEnvironment } from '@/utils/browserMock';
-import { listenWithCleanup } from '@/utils/tauriListen';
-import {
-  normalizeAppearanceMode,
-  normalizeThemeId,
-  type ThemeSelection,
-} from '../../shared/theme';
-import { readThemeBootstrapSelection, writeThemeBootstrapSnapshot } from './bootstrap';
-import { ThemeRegistry, themeRegistry } from './registry';
-import type { ResolvedTheme } from './types';
+import './themes/xiaojing.css';
 
-export const THEME_SELECTION_CHANGED_EVENT = 'theme:selection-changed';
+export type SyntaxStyle = Record<string, Record<string, string | undefined>>;
 
-function getSystemPrefersDark(): boolean {
-  return typeof window !== 'undefined'
-    && typeof window.matchMedia === 'function'
-    && window.matchMedia('(prefers-color-scheme: dark)').matches;
-}
-
-function subscribeSystemColorScheme(onStoreChange: () => void): () => void {
-  if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return () => {};
-  const media = window.matchMedia('(prefers-color-scheme: dark)');
-  media.addEventListener('change', onStoreChange);
-  return () => media.removeEventListener('change', onStoreChange);
-}
-
-const ThemeRuntimeContext = createContext<ResolvedTheme | null>(null);
-
-function normalizeSelection(selection: ThemeSelection): ThemeSelection {
-  return {
-    themeId: normalizeThemeId(selection.themeId),
-    appearanceMode: normalizeAppearanceMode(selection.appearanceMode),
+export interface ResolvedTheme {
+  themeId: 'xiaojing';
+  key: 'xiaojing-dark';
+  hero: {
+    productName: string;
+    slogans: Record<'zh-CN' | 'en-US', string>;
+  };
+  adapters: {
+    prism: SyntaxStyle;
+    monaco: {
+      name: string;
+      fontFamily: string;
+      fontSize: number;
+      lineHeight: number;
+      data: {
+        base: 'vs-dark';
+        inherit: boolean;
+        rules: Array<{ token: string; foreground?: string; fontStyle?: string }>;
+        colors: Record<string, string>;
+      };
+    };
+    mermaid: {
+      theme: 'dark';
+      fontFamily: string;
+      themeVariables: Record<string, string>;
+    };
   };
 }
 
-function applyRootTheme(resolvedTheme: ResolvedTheme): void {
-  const root = document.documentElement;
-  root.dataset.themeId = resolvedTheme.themeId;
-  root.dataset.colorScheme = resolvedTheme.resolvedColorScheme;
-  root.classList.toggle('dark', resolvedTheme.resolvedColorScheme === 'dark');
-  root.style.colorScheme = resolvedTheme.resolvedColorScheme;
+export type MermaidThemeAdapter = ResolvedTheme['adapters']['mermaid'];
+
+const XIAOJING_THEME: ResolvedTheme = {
+  themeId: 'xiaojing',
+  key: 'xiaojing-dark',
+  hero: {
+    productName: '小鲸同学',
+    slogans: {
+      'zh-CN': '让品牌成为 AI 的答案',
+      'en-US': 'Make your brand the AI answer',
+    },
+  },
+  adapters: {
+    prism: {
+      'code[class*="language-"]': { color: '#d8e8f5', fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace' },
+      'pre[class*="language-"]': { color: '#d8e8f5', background: '#071522' },
+      comment: { color: '#7391a8' },
+      keyword: { color: '#7dd3fc' },
+      string: { color: '#86efac' },
+      number: { color: '#fda4af' },
+      function: { color: '#c4b5fd' },
+    },
+    monaco: {
+      name: 'xiaojing-dark',
+      fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+      fontSize: 13,
+      lineHeight: 20,
+      data: {
+        base: 'vs-dark',
+        inherit: true,
+        rules: [],
+        colors: {
+          'editor.background': '#071522',
+          'editor.foreground': '#d8e8f5',
+          'editorLineNumber.foreground': '#567188',
+        },
+      },
+    },
+    mermaid: {
+      theme: 'dark',
+      fontFamily: 'Inter, system-ui, sans-serif',
+      themeVariables: {
+        primaryColor: '#0f3650',
+        primaryTextColor: '#e8f4fb',
+        primaryBorderColor: '#2aa8d8',
+        lineColor: '#74c5e6',
+        secondaryColor: '#10283a',
+        tertiaryColor: '#081b29',
+        background: '#071522',
+        mainBkg: '#0f3650',
+        textColor: '#e8f4fb',
+      },
+    },
+  },
+};
+
+const ThemeContext = createContext<ResolvedTheme>(XIAOJING_THEME);
+
+export function primeXiaojingThemeRuntime(): void {
+  if (typeof document !== 'undefined') document.documentElement.dataset.theme = 'xiaojing';
 }
 
-function syncMainWindowBackground(): void {
-  if (!isTauriEnvironment()) return;
-
-  const currentWindow = getCurrentWindow();
-  const paper = getComputedStyle(document.documentElement).getPropertyValue('--paper').trim();
-  void currentWindow.setBackgroundColor(paper)
-    .catch(error => console.warn('[theme] Failed to sync native window background:', error));
-}
-
-const ACTIVE_THEME_STYLESHEET_ID = 'myagents-active-theme-stylesheet';
-
-function activateThemeStylesheet(resolvedTheme: ResolvedTheme): void {
-  let style = document.getElementById(ACTIVE_THEME_STYLESHEET_ID) as HTMLStyleElement | null;
-  if (!style) {
-    style = document.createElement('style');
-    style.id = ACTIVE_THEME_STYLESHEET_ID;
-    document.head.appendChild(style);
-  }
-  if (style.dataset.themeId !== resolvedTheme.themeId) {
-    // ThemeDefinition owns the exact source that registration validated.
-    // This runtime projection makes a package complete even when its CSS is
-    // not statically present in the entry bundle. The canonical Theme still
-    // imports CSS statically to protect the pre-React first frame.
-    style.textContent = resolvedTheme.definition.stylesheetText;
-    style.dataset.themeId = resolvedTheme.themeId;
-  }
-}
-
-/**
- * Activates the last validated snapshot before React creates its first tree.
- * Optional packages stay side-effect free at module evaluation; this explicit
- * bootstrap closes the canonical-to-preset gap before the first React paint.
- */
-export function primeThemeRuntimeFromBootstrap(
-  storage: Pick<Storage, 'getItem' | 'setItem' | 'removeItem'> | null =
-    typeof localStorage === 'undefined' ? null : localStorage,
-  registry: ThemeRegistry = themeRegistry,
-): ResolvedTheme {
-  const selection = readThemeBootstrapSelection(storage);
-  const resolvedTheme = registry.resolve(
-    selection.themeId,
-    selection.appearanceMode,
-    getSystemPrefersDark(),
-  );
-  activateThemeStylesheet(resolvedTheme);
-  applyRootTheme(resolvedTheme);
-  return resolvedTheme;
-}
-
-export function primeXiaojingThemeRuntime(
-  registry: ThemeRegistry = themeRegistry,
-): ResolvedTheme {
-  const resolvedTheme = registry.resolve("xiaojing", "dark", true);
-  activateThemeStylesheet(resolvedTheme);
-  applyRootTheme(resolvedTheme);
-  return resolvedTheme;
-}
-
-export interface ThemeRuntimeProviderProps {
-  children: React.ReactNode;
-  /** null keeps the pre-React snapshot authoritative until durable config loads. */
-  selection: ThemeSelection | null;
-  /** Whether the durable selection was explicitly chosen by the user. */
-  selectionExplicit?: boolean;
-  registry?: ThemeRegistry;
-  broadcastSelection?: boolean;
-  persistBootstrapSnapshot?: boolean;
-  syncNativeWindowBackground?: boolean;
-}
-
-export function ThemeRuntimeProvider({
-  children,
-  selection,
-  selectionExplicit = true,
-  registry = themeRegistry,
-  broadcastSelection = false,
-  persistBootstrapSnapshot = true,
-  syncNativeWindowBackground = false,
-}: ThemeRuntimeProviderProps) {
-  const [bootstrapSelection] = useState(() => readThemeBootstrapSelection(
-    typeof localStorage === 'undefined' ? null : localStorage,
-  ));
-  const effectiveSelection = useMemo(
-    () => normalizeSelection(selection ?? bootstrapSelection),
-    [bootstrapSelection, selection],
-  );
-  const effectiveSelectionExplicit = selection === null
-    ? bootstrapSelection.themeSelectionExplicit
-    : selectionExplicit;
-  const systemPrefersDark = useSyncExternalStore(
-    subscribeSystemColorScheme,
-    getSystemPrefersDark,
-    () => false,
-  );
-
-  const resolvedTheme = useMemo(
-    () => registry.resolve(
-      effectiveSelection.themeId,
-      effectiveSelection.appearanceMode,
-      systemPrefersDark,
-    ),
-    [effectiveSelection.appearanceMode, effectiveSelection.themeId, registry, systemPrefersDark],
-  );
-
-  useInsertionEffect(() => {
-    activateThemeStylesheet(resolvedTheme);
-  }, [resolvedTheme]);
-
-  useLayoutEffect(() => {
-    applyRootTheme(resolvedTheme);
-    if (syncNativeWindowBackground) syncMainWindowBackground();
-  }, [resolvedTheme, syncNativeWindowBackground]);
-
-  useEffect(() => {
-    // Only the durable main-window selection replaces the bootstrap snapshot.
-    // During ConfigProvider load, selection=null preserves the last-known
-    // correct first frame; floating windows must not become config owners.
-    if (selection === null || !persistBootstrapSnapshot) return;
-    // Persist the resolved ID, not a missing/unknown requested ID. This makes
-    // whole-Theme fallback authoritative on the next pre-React frame too.
-    writeThemeBootstrapSnapshot(localStorage, {
-      themeId: resolvedTheme.themeId,
-      appearanceMode: effectiveSelection.appearanceMode,
-      themeSelectionExplicit: effectiveSelectionExplicit,
-    });
-  }, [
-    effectiveSelection.appearanceMode,
-    effectiveSelectionExplicit,
-    persistBootstrapSnapshot,
-    resolvedTheme.themeId,
-    selection,
-  ]);
-
-  useEffect(() => {
-    if (!broadcastSelection || selection === null || !isTauriEnvironment()) return;
-    void emit(THEME_SELECTION_CHANGED_EVENT, effectiveSelection)
-      .catch(error => console.warn('[theme] Failed to broadcast Theme selection:', error));
-  }, [broadcastSelection, effectiveSelection, selection]);
-
-  return (
-    <ThemeRuntimeContext.Provider value={resolvedTheme}>
-      {children}
-    </ThemeRuntimeContext.Provider>
-  );
-}
-
-export function ConfiguredThemeRuntime({ children }: { children: React.ReactNode }) {
-  const { config, isLoading } = useConfig();
-  const selection = useMemo<ThemeSelection | null>(() => isLoading ? null : ({
-    themeId: config.themeId,
-    appearanceMode: config.appearanceMode,
-  }), [config.appearanceMode, config.themeId, isLoading]);
-  return (
-    <ThemeRuntimeProvider
-      selection={selection}
-      selectionExplicit={config.themeSelectionExplicit === true}
-      broadcastSelection
-      syncNativeWindowBackground
-    >
-      {children}
-    </ThemeRuntimeProvider>
-  );
-}
-
-/** Focused Xiaojing product runtime intentionally exposes one visual mode. */
-export function XiaojingThemeRuntime({
-  children,
-  ownsMainWindowBridge = false,
-}: {
-  children: React.ReactNode;
-  ownsMainWindowBridge?: boolean;
-}) {
-  const selection = useMemo<ThemeSelection>(() => ({
-    themeId: 'xiaojing',
-    appearanceMode: 'dark',
-  }), []);
-  return (
-    <ThemeRuntimeProvider
-      selection={selection}
-      selectionExplicit
-      broadcastSelection={ownsMainWindowBridge}
-      syncNativeWindowBackground={ownsMainWindowBridge}
-    >
-      {children}
-    </ThemeRuntimeProvider>
-  );
-}
-
-export function FloatingThemeRuntime({ children }: { children: React.ReactNode }) {
-  const [selection, setSelection] = useState<ThemeSelection>(() => readThemeBootstrapSelection(
-    typeof localStorage === 'undefined' ? null : localStorage,
-  ));
-
-  useEffect(() => {
-    let cancelled = false;
-    const abortController = new AbortController();
-    let liveEventRevision = 0;
-
-    void (async () => {
-      // Register first. An event emitted before registration is represented by
-      // the durable disk-first config loaded below; an event observed after
-      // registration is newer than that hydration result and must win.
-      if (isTauriEnvironment()) {
-        await listenWithCleanup<ThemeSelection>(THEME_SELECTION_CHANGED_EVENT, event => {
-          liveEventRevision += 1;
-          if (!cancelled) setSelection(normalizeSelection(event.payload));
-        }, abortController.signal);
-      }
-      if (cancelled) return;
-
-      try {
-        const { loadAppConfig } = await import('@/config/services/appConfigService');
-        const config = await loadAppConfig();
-        if (!cancelled && liveEventRevision === 0) {
-          setSelection(normalizeSelection(config));
-        }
-      } catch (error) {
-        console.warn('[theme] Floating window config hydration failed:', error);
-      }
-    })();
-
-    return () => {
-      cancelled = true;
-      abortController.abort();
-    };
-  }, []);
-
-  return (
-    <ThemeRuntimeProvider selection={selection} persistBootstrapSnapshot={false}>
-      {children}
-    </ThemeRuntimeProvider>
-  );
+export function XiaojingThemeRuntime({ children }: { children: ReactNode; ownsMainWindowBridge?: boolean }) {
+  const value = useMemo(() => XIAOJING_THEME, []);
+  return <ThemeContext.Provider value={value}>{children}</ThemeContext.Provider>;
 }
 
 export function useResolvedTheme(): ResolvedTheme {
-  const theme = useContext(ThemeRuntimeContext);
-  if (!theme) {
-    throw new Error('[theme] useResolvedTheme must be used within ThemeRuntimeProvider');
-  }
-  return theme;
+  return useContext(ThemeContext);
 }

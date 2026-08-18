@@ -1,29 +1,9 @@
 import { ArrowLeft, Building2, MessageSquareText, Sparkles } from 'lucide-react';
 
 import xiaojingLogo from '@/assets/brand/xiaojing-logo.png';
-import type { AssistantEntry, EntryIntent, Surface } from '@/analytics';
-import type { Project } from '@/config/types';
-import type { InitialMessage, LaunchSessionBirthHint } from '@/types/tab';
 
-interface XiaojingWelcomeProps {
-  /** Host-owned workspace transition seam. Brand selection currently starts from the sidebar. */
-  onLaunchProject: (
-    project: Project,
-    initialMessage?: InitialMessage,
-    analyticsContext?: {
-      surface?: Surface;
-      entryIntent?: EntryIntent;
-      assistantEntry?: AssistantEntry;
-    },
-    sessionBirthHint?: LaunchSessionBirthHint,
-  ) => void;
-}
-
-/** First-run center surface. The legacy generic Launcher stays compiled but is never the product entry. */
-export default function XiaojingWelcome({ onLaunchProject }: XiaojingWelcomeProps) {
-  // Keep the host transition seam attached to this Tab surface even though
-  // the product's current selection affordance lives in XiaojingSidebar.
-  void onLaunchProject;
+/** Brand-first entry surface for the focused Xiaojing product. */
+export default function XiaojingWelcome() {
   return (
     <main className="flex h-full items-center justify-center overflow-y-auto bg-[var(--paper)] px-8 py-12 text-[var(--ink)]" data-xiaojing-welcome>
       <div className="w-full max-w-3xl">

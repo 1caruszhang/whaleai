@@ -16,80 +16,13 @@
 
 import { invoke } from '@tauri-apps/api/core';
 
-import { i18n } from '@/i18n';
+import type {
+    GeoNotificationLocator,
+    GeoNotificationResolution,
+} from '../../shared/geo/notification';
+import type { NotificationClickPayload } from '@/utils/notificationClickRoute';
 import { isTauriEnvironment } from '../utils/browserMock';
 
-let lastNotifyTime = 0;
-const NOTIFY_THROTTLE_MS = 3000;
-
-let isWindowVisible = true;
-
-/**
- * Update window visibility state.
- * Called by useTrayEvents when window is hidden/shown.
- */
-export function setWindowVisible(visible: boolean): void {
-    isWindowVisible = visible;
-    console.log('[Notification] Window visibility updated:', visible);
-}
-
-/**
- * Returns true when the user isn't actively looking at the app, so a system
- * notification is worth showing.
- */
-export function shouldNotifyUser(): boolean {
-    if (!isWindowVisible) return true;
-    if (document.hidden) return true;
-    if (!document.hasFocus()) return true;
-    return false;
-}
-
-async function notify(title: string, body?: string, tabId?: string): Promise<void> {
-    if (!isTauriEnvironment()) return;
-    if (!shouldNotifyUser()) return;
-
-    const now = Date.now();
-    if (now - lastNotifyTime < NOTIFY_THROTTLE_MS) return;
-    lastNotifyTime = now;
-
-    try {
-        await invoke('cmd_show_notification', {
-            title,
-            body: body ?? '',
-            tabId: tabId ?? null,
-            sessionId: null,
-            workspacePath: null,
-        });
-    } catch (error) {
-        console.warn('[Notification] cmd_show_notification failed:', error);
-    }
-}
-
-function notificationText(key: string, options?: Record<string, unknown>): string {
-    return String(i18n.t(`app:notifications.${key}`, options));
-}
-
-/**
- * Notify that a cron task has completed.
- * Used by the cron path that originates inside Rust — kept on the front-end
- * surface for symmetry, but the cron module emits via Rust directly so the
- * normal flow doesn't pass through this function.
- */
-export function notifyCronTaskComplete(title: string, body: string, tabId?: string): void {
-    void notify(title, body, tabId);
-}
-
-export function notifyPermissionRequest(toolName: string): void {
-    void notify(notificationText('permissionTitle'), notificationText('permissionBody', { toolName }));
-}
-
-export function notifyAskUserQuestion(): void {
-    void notify(notificationText('askUserTitle'), notificationText('askUserBody'));
-}
-
-export function notifyPlanModeRequest(): void {
-    void notify(notificationText('planModeTitle'), notificationText('planModeBody'));
-}
 
 /**
  * Tell Rust the window has just been activated externally — flushes any
@@ -107,6 +40,19 @@ export async function consumePendingNotificationClick(): Promise<boolean> {
     }
 }
 
+/** Installs the cold-start barrier and atomically consumes at most one exact click. */
+export async function notificationClickListenerReady(): Promise<NotificationClickPayload | null> {
+    if (!isTauriEnvironment()) return null;
+    return invoke<NotificationClickPayload | null>('cmd_notification_click_listener_ready');
+}
+
+/** Revalidates every locator component against the Rust-owned workspace store. */
+export async function resolveGeoNotificationLocator(
+    locator: GeoNotificationLocator,
+): Promise<GeoNotificationResolution> {
+    return invoke<GeoNotificationResolution>('cmd_resolve_geo_notification_locator', { locator });
+}
+
 /**
  * Initialize notification service.
  *
@@ -116,6 +62,3 @@ export async function consumePendingNotificationClick(): Promise<boolean> {
  * Windows uses AUMID via NSIS shortcut. Anything we'd do here would just be
  * theatre.
  */
-export async function initNotificationService(): Promise<void> {
-    // No-op kept for symmetry with existing call sites.
-}

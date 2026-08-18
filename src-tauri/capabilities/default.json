@@ -1,12 +1,8 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Minimal permissions for MyAgents desktop app",
-  "windows": [
-    "main",
-    "fb-ball",
-    "fb-companion"
-  ],
+  "description": "小鲸同学桌面壳最小权限",
+  "windows": ["main"],
   "permissions": [
     "core:default",
     "core:window:default",
@@ -50,17 +46,6 @@
       ]
     },
     "shell:allow-open",
-    "updater:default",
-    "updater:allow-check",
-    "updater:allow-download-and-install",
-    "process:allow-restart",
-    "notification:allow-is-permission-granted",
-    "autostart:default",
-    "autostart:allow-is-enabled",
-    "autostart:allow-enable",
-    "autostart:allow-disable",
-    "global-shortcut:allow-register",
-    "global-shortcut:allow-unregister",
-    "global-shortcut:allow-is-registered"
+    "notification:allow-is-permission-granted"
   ]
 }

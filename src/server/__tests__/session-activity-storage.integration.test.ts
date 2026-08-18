@@ -11,7 +11,7 @@ let originalUserProfile: string | undefined;
 let store: SessionStoreModule;
 
 beforeAll(async () => {
-  home = mkdtempSync(join(tmpdir(), 'myagents-session-activity-'));
+  home = mkdtempSync(join(tmpdir(), 'xiaojing-session-activity-'));
   originalHome = process.env.HOME;
   originalUserProfile = process.env.USERPROFILE;
   process.env.HOME = home;
@@ -60,12 +60,12 @@ describe('session activity storage invariant', () => {
     });
     const malformed = await store.updateSessionMetadata(session.id, {
       lastActiveAt: 'not-a-timestamp',
-      favorite: true,
+      lastMessagePreview: 'still applied',
     });
 
     expect(malformed).toMatchObject({
       lastActiveAt: '2026-07-14T11:00:00.000Z',
-      favorite: true,
+      lastMessagePreview: 'still applied',
     });
 
     await store.updateSessionMetadata(session.id, {
@@ -90,14 +90,14 @@ describe('session activity storage invariant', () => {
       }),
       store.updateSessionMetadata(session.id, {
         lastActiveAt: '2026-07-14T11:00:00.000Z',
-        favorite: true,
+        lastMessagePreview: 'concurrent preview',
       }),
     ]);
 
     expect(store.getSessionMetadata(session.id)).toMatchObject({
       lastActiveAt: '2026-07-14T12:00:00.000Z',
       title: 'newer writer',
-      favorite: true,
+      lastMessagePreview: 'concurrent preview',
     });
   });
 });

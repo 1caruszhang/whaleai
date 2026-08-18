@@ -16,8 +16,8 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use super::path_safety::{
-    reject_managed_global_skill_mutation, resolve_existing_inside_workspace,
-    resolve_inside_workspace, validate_external_read_path, validate_workspace_root,
+    resolve_existing_inside_workspace, resolve_inside_workspace, validate_external_read_path,
+    validate_workspace_root,
 };
 
 const MAX_COLLISION_SUFFIX: u32 = 9999;
@@ -37,7 +37,7 @@ pub struct CopyResult {
     pub success: bool,
     pub copied_files: Vec<CopiedFile>,
     /// Per-file failures (blacklist reject, fs error). Cross-review 0.2.33
-    /// (Codex W3): these were log-only, so a drop where EVERY source was
+    /// (security review W3): these were log-only, so a drop where EVERY source was
     /// rejected returned `success:true, copiedFiles:[]` and the frontend
     /// refreshed with no files and no explanation. Same contract as
     /// `InternalCopyResult.errors` — the sibling paste path already
@@ -81,7 +81,6 @@ pub async fn cmd_workspace_copy_paths(
 
     let workspace_root = validate_workspace_root(&workspace)?;
     let target_root = resolve_inside_workspace(&workspace_root, &target_dir)?;
-    reject_managed_global_skill_mutation(&workspace_root, &target_root)?;
     fs::create_dir_all(&target_root)
         .map_err(|e| format!("Failed to create target directory: {}", e))?;
 
@@ -95,9 +94,9 @@ pub async fn cmd_workspace_copy_paths(
             Err(err) => {
                 // Per-file failures continue the batch so the user keeps the
                 // files that did go through — but they must reach the caller,
-                // not just the log (cross-review 0.2.33, Codex W3).
+                // not just the log (cross-review 0.2.33, security review W3).
                 // ulog_* (not log::*) per CLAUDE.md red-line — log::warn!
-                // doesn't reach `~/.myagents/logs/unified-{date}.log`.
+                // doesn't reach the real Xiaojing log directory.
                 crate::ulog_warn!("[workspace_files::copy] skipping {}: {}", source, err);
                 errors.push(format!("{}: {}", source, err));
             }
@@ -138,7 +137,6 @@ pub async fn cmd_workspace_copy_internal(
     }
     let workspace_root = validate_workspace_root(&workspace)?;
     let target_root = resolve_inside_workspace(&workspace_root, target_dir.trim())?;
-    reject_managed_global_skill_mutation(&workspace_root, &target_root)?;
     if !target_root.is_dir() {
         return Err("Target must be an existing directory".to_string());
     }
@@ -308,7 +306,7 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), String> {
         if metadata.is_symlink() {
             // Skip symlinks to avoid escaping the source tree. Mirrors the
             // sidecar `merge_dir_recursive` behavior. Cross-review round 2
-            // (Codex LOW-1): silent skip can drop legitimate symlinks
+            // (security review LOW-1): silent skip can drop legitimate symlinks
             // (npm `node_modules/.bin`, virtualenv `python` link); user
             // discovers files missing in the copied tree without a hint.
             // Log so a grep of unified.log surfaces the skipped paths.
@@ -400,7 +398,7 @@ mod tests {
         let _ = fs::remove_dir_all(&ws);
     }
 
-    // Cross-review (Codex critical): a LEXICAL source resolve let an
+    // Cross-review (security review critical): a LEXICAL source resolve let an
     // intermediate symlink component (`evil → outside`) pass the prefix
     // check while fs::copy followed the link — exfiltrating outside bytes
     // into the AI-readable workspace. Sources must canonicalize.
@@ -429,7 +427,7 @@ mod tests {
         let _ = fs::remove_dir_all(&outside);
     }
 
-    // Cross-review (Codex critical): the into-self check must compare
+    // Cross-review (security review critical): the into-self check must compare
     // CANONICAL paths — a symlink target dir pointing into the source
     // subtree defeats a lexical comparison and the recursive copy chases
     // its own growing destination.
@@ -482,16 +480,16 @@ mod tests {
         let res = cmd_workspace_copy_paths(
             ws.to_string_lossy().to_string(),
             vec![src_file.to_string_lossy().to_string()],
-            "myagents_files".to_string(),
+            "xiaojing_files".to_string(),
             None,
         )
         .await
         .unwrap();
 
         assert_eq!(res.copied_files.len(), 1);
-        assert_eq!(res.copied_files[0].target_path, "myagents_files/foo.txt");
+        assert_eq!(res.copied_files[0].target_path, "xiaojing_files/foo.txt");
         assert_eq!(
-            fs::read(ws.join("myagents_files").join("foo.txt")).unwrap(),
+            fs::read(ws.join("xiaojing_files").join("foo.txt")).unwrap(),
             b"abc"
         );
         let _ = fs::remove_dir_all(&ws);
@@ -611,13 +609,13 @@ mod tests {
         .await
         .unwrap();
         // The batch returns success=true with an empty copied list — and the
-        // per-file failure is reported, not just logged (Codex W3).
+        // per-file failure is reported, not just logged (security review W3).
         assert!(res.copied_files.is_empty());
         assert_eq!(res.errors.len(), 1);
         let _ = fs::remove_dir_all(&ws);
     }
 
-    // Cross-review 0.2.33 (Codex Critical): the EXTERNAL copy path validated
+    // Cross-review 0.2.33 (security review Critical): the EXTERNAL copy path validated
     // sources purely lexically — `<dir>/lure/secret` where `lure → ~/.ssh`
     // passes the credential-dir blacklist (the literal string doesn't start
     // with a blacklisted prefix) while fs::copy follows the intermediate

@@ -8,7 +8,7 @@
 //! ## Usage
 //!
 //! ```rust
-//! use app_lib::local_http;
+//! use xiaojing_lib::local_http;
 //! use std::time::Duration;
 //!
 //! // Simple client with custom timeout
@@ -60,9 +60,9 @@ pub fn json_client(timeout: Duration) -> reqwest::Client {
 ///
 /// No overall timeout — streams stay open until the AI turn completes.
 /// read_timeout is 300s (not 60s) because on fresh Sidecar startup, the SDK's
-/// query() can block the Bun event loop for minutes during session resume +
+/// query() can block the Node event loop for minutes during session resume +
 /// MCP server initialization, preventing heartbeat SSE comments from being sent.
-/// The Bun-side heartbeat is 15s, so 300s provides comfortable margin.
+/// The Sidecar heartbeat is 15s, so 300s provides comfortable margin.
 pub fn sse_client() -> reqwest::Client {
     builder()
         .read_timeout(Duration::from_secs(300))

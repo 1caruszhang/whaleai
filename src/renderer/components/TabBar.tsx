@@ -105,10 +105,20 @@ export default memo(function TabBar({
             return () => cancelAnimationFrame(frameId);
         }
 
+        // RO 回调必须延迟到下一帧：同步 setState 会挂载/卸载 in-flow 的溢出
+        // 菜单按钮、挤压本容器宽度，形成同帧 ResizeObserver 反馈环
+        // （WebKit 控制台的 "ResizeObserver loop completed with undelivered
+        // notifications"）。rAF 后布局已定稿，写状态不再回环。
+        let observerFrameId = 0;
+        const scheduleScrollStateUpdate = () => {
+            cancelAnimationFrame(observerFrameId);
+            observerFrameId = requestAnimationFrame(updateScrollState);
+        };
+
         container.addEventListener('scroll', updateScrollState);
         window.addEventListener('resize', updateScrollState);
         const resizeObserver = typeof ResizeObserver !== 'undefined'
-            ? new ResizeObserver(updateScrollState)
+            ? new ResizeObserver(scheduleScrollStateUpdate)
             : null;
         resizeObserver?.observe(container);
         const fallbackMeasureInterval = resizeObserver
@@ -117,6 +127,7 @@ export default memo(function TabBar({
 
         return () => {
             cancelAnimationFrame(frameId);
+            cancelAnimationFrame(observerFrameId);
             container.removeEventListener('scroll', updateScrollState);
             window.removeEventListener('resize', updateScrollState);
             resizeObserver?.disconnect();
@@ -195,7 +206,7 @@ export default memo(function TabBar({
                         <div
                             className="absolute left-0 top-0 bottom-0 w-6 z-10 pointer-events-none"
                             style={{
-                                background: 'var(--global-sidebar-bg)',
+                                background: 'var(--xiaojing-sidebar-bg)',
                                 WebkitMaskImage: 'linear-gradient(to right, #000 0%, rgba(0, 0, 0, 0) 100%)',
                                 maskImage: 'linear-gradient(to right, #000 0%, rgba(0, 0, 0, 0) 100%)',
                             }}
@@ -207,7 +218,7 @@ export default memo(function TabBar({
                         <div
                             className="absolute right-0 top-0 bottom-0 w-6 z-10 pointer-events-none"
                             style={{
-                                background: 'var(--global-sidebar-bg)',
+                                background: 'var(--xiaojing-sidebar-bg)',
                                 WebkitMaskImage: 'linear-gradient(to left, #000 0%, rgba(0, 0, 0, 0) 100%)',
                                 maskImage: 'linear-gradient(to left, #000 0%, rgba(0, 0, 0, 0) 100%)',
                             }}
@@ -279,20 +290,14 @@ export default memo(function TabBar({
                                 const hasSessionTitle = tab.title && tab.title !== 'New Tab' && tab.title !== 'New Chat';
                                 const displayTitle = fixedViewTitle ?? (hasSessionTitle
                                     ? tab.title
-                                    : tab.agentDir
-                                      ? getFolderName(tab.agentDir)
+                                    : tab.workspacePath
+                                      ? getFolderName(tab.workspacePath)
                                       : tab.title);
-                                const subtitle = tab.agentDir
-                                    ? getFolderName(tab.agentDir)
+                                const subtitle = tab.workspacePath
+                                    ? getFolderName(tab.workspacePath)
                                     : tab.view === 'settings'
                                       ? t('tabs.settings')
-                                      : tab.view === 'capabilities'
-                                        ? t('tabs.capabilities')
-                                      : tab.view === 'taskcenter'
-                                        ? t('tabs.taskCenter')
-                                        : tab.view === 'space'
-                                          ? t('tabs.team')
-                                          : t('tabs.launcher');
+                                      : t('tabs.welcome');
                                 const isActive = tab.id === activeTabId;
                                 return (
                                     <button

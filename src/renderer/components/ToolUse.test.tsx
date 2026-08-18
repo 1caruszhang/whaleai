@@ -1,122 +1,89 @@
-import { fireEvent, screen } from '@testing-library/react';
-import { describe, expect, it } from 'vitest';
-
-import { renderWithTheme as render } from '@/test/renderWithTheme';
-import type { ToolUseSimple } from '@/types/chat';
+/**
+ * 回归：通用工具行此前只展示 MCP FQN 与输入 `{}`，工具结果对用户完全
+ * 不可见（"套壳感"的直接来源）。现登记工具显示动作标签，展开后输入与
+ * 结果分段呈现，含加载/错误态。
+ */
+import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { afterEach, describe, expect, it } from 'vitest';
 
 import ToolUse from './ToolUse';
+import type { ToolUseSimple } from '@/types/chat';
 
-describe('ToolUse specialized result ownership', () => {
-  it('passes a large Bash result intact to the terminal transcript budget', () => {
-    const result = Array.from(
-      { length: 5_001 },
-      (_, index) => `line-${index}-${'x'.repeat(20)}`,
-    ).join('\n');
-    expect(result.length).toBeGreaterThan(50_000);
-    const tool: ToolUseSimple = {
-      id: 'large-bash',
-      name: 'Bash',
-      input: { command: 'generate-output' },
-      streamIndex: 0,
-      result,
-      resultMeta: { status: 'completed', exitCode: 0 },
-    };
-    const { container } = render(<ToolUse tool={tool} />);
+afterEach(() => cleanup());
 
-    expect(container).not.toHaveTextContent('结果过长，已截断');
-    expect(screen.getByRole('button', { name: '展示全部' })).toBeInTheDocument();
+function tool(overrides: Partial<ToolUseSimple>): ToolUseSimple {
+  return {
+    id: 't1',
+    name: 'mcp__xiaojing-geo__inspect_geo_operations',
+    inputJson: '{}',
+    isLoading: false,
+    ...overrides,
+  };
+}
 
-    fireEvent.click(screen.getByRole('button', { name: '展示全部' }));
+/** 生产投影形态：MCP content blocks 数组壳（agent-session applyToolResults）。 */
+function wrappedResultText(payload: unknown): string {
+  return JSON.stringify([{ type: 'text', text: JSON.stringify(payload) }]);
+}
 
-    expect(container).toHaveTextContent('line-4998');
-    expect(container).not.toHaveTextContent('line-5000');
-    expect(screen.getByRole('status')).toHaveTextContent('终端内容过长');
+describe('ToolUse 通用过程行', () => {
+  it('shows the registered action label and hides the empty `{}` input', () => {
+    render(
+      <ToolUse
+        tool={tool({ result: wrappedResultText({ kind: 'session-file-read', ok: true }) })}
+      />,
+    );
+
+    const row = screen.getByRole('button', { name: /查看 GEO 操作/ });
+    expect(row).toBeInTheDocument();
+    fireEvent.click(row);
+    expect(screen.getByText('结果')).toBeInTheDocument();
+    expect(screen.queryByText('{}')).not.toBeInTheDocument();
   });
 
-  it('does not corrupt a large SDK wrapper before Bash separates stderr', () => {
-    const result = JSON.stringify({
-      stdout: 'x'.repeat(210_000),
-      stderr: 'warning from stderr',
-      interrupted: false,
-    });
-    expect(result.length).toBeGreaterThan(200_000);
-    const { container } = render(<ToolUse tool={{
-      id: 'large-sdk-bash',
-      name: 'Bash',
-      input: { command: 'generate-output' },
-      streamIndex: 0,
-      result,
-      resultMeta: { status: 'completed', exitCode: 0 },
-    }} />);
+  it('reveals the tool result with input arguments when expanded', () => {
+    render(
+      <ToolUse
+        tool={tool({
+          name: 'mcp__xiaojing-geo__read_session_file',
+          inputJson: '{"path":"xiaojing_files/s1/notes.md"}',
+          result: wrappedResultText({ kind: 'session-file-read', ok: true }),
+        })}
+      />,
+    );
 
-    expect(container.querySelector('[data-bash-stream="stdout"]')).toBeInTheDocument();
-    expect(container.querySelector('[data-bash-stream="stderr"]')).toHaveTextContent('warning from stderr');
-    expect(container.querySelector('[data-bash-stream="combined"]')).not.toBeInTheDocument();
+    expect(screen.getByText('读取会话文件')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /读取会话文件/ }));
+    expect(screen.getByText('输入')).toBeInTheDocument();
+    expect(screen.getByText(/xiaojing_files\/s1\/notes\.md/)).toBeInTheDocument();
   });
 
-  it('lets Edit parse a >200KB completion instead of showing the stale proposal', () => {
-    const result = JSON.stringify({
-      filePath: '/tmp/large-edit.ts',
-      oldString: 'proposal-old',
-      newString: 'applied-result',
-      originalFile: 'x'.repeat(210_000),
-      structuredPatch: [{
-        oldStart: 1,
-        oldLines: 1,
-        newStart: 1,
-        newLines: 1,
-        lines: ['-proposal-old', '+applied-result'],
-      }],
-      userModified: true,
-      replaceAll: false,
-    });
-    expect(result.length).toBeGreaterThan(200_000);
+  it('falls back to the raw name for unregistered tools', () => {
+    render(<ToolUse tool={tool({ name: 'AskUserQuestion', inputJson: '{"q":1}' })} />);
 
-    const { container } = render(<ToolUse tool={{
-      id: 'large-sdk-edit',
-      name: 'Edit',
-      input: {
-        file_path: '/tmp/large-edit.ts',
-        old_string: 'proposal-old',
-        new_string: 'stale-proposal',
-      },
-      streamIndex: 0,
-      result,
-    }} />);
-
-    expect(container).toHaveTextContent('applied-result');
-    expect(container).not.toHaveTextContent('stale-proposal');
-    expect(container).toHaveTextContent('结果已在审批时调整');
-    expect(container).not.toHaveTextContent('结果过长，已截断');
+    expect(screen.getByText('AskUserQuestion')).toBeInTheDocument();
   });
 
-  it('does not fall back to stale Edit input when the authoritative result was spilled', () => {
-    const preview = '{"filePath":"/tmp/spilled-edit.ts","originalFile":"' + 'x'.repeat(8_000);
-    const { container } = render(<ToolUse tool={{
-      id: 'spilled-sdk-edit',
-      name: 'Edit',
-      input: {
-        file_path: '/tmp/spilled-edit.ts',
-        old_string: 'proposal-old',
-        new_string: 'stale-proposal',
-      },
-      streamIndex: 0,
-      result: preview,
-      resultMeta: {
-        status: 'completed',
-        largeValueRef: {
-          kind: 'ref',
-          id: 'abcdef1234',
-          sizeBytes: 307_436,
-          mimetype: 'text/plain; charset=utf-8',
-          preview,
-          expiresAt: Date.now() + 60_000,
-        },
-      },
-    }} />);
+  it('surfaces running and failed states with text, not color alone', () => {
+    const { unmount } = render(<ToolUse tool={tool({ isLoading: true })} />);
+    fireEvent.click(screen.getByRole('button', { name: /查看 GEO 操作/ }));
+    expect(screen.getByText('执行中')).toBeInTheDocument();
+    unmount();
 
-    expect(container).toHaveTextContent('/tmp/spilled-edit.ts');
-    expect(container).not.toHaveTextContent('stale-proposal');
-    expect(container).toHaveTextContent('变更过大，仅展示有界预览');
+    render(
+      <ToolUse
+        tool={tool({ result: wrappedResultText({ ok: false }), isError: true })}
+      />,
+    );
+    expect(screen.getByText('调用失败')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /查看 GEO 操作/ }));
+    expect(screen.getByText('调用失败')).toBeInTheDocument();
+  });
+
+  it('notes when a long result is truncated', () => {
+    const long = 'x'.repeat(3000);
+    render(<ToolUse tool={tool({ result: wrappedResultText({ text: long }) })} />);
+    fireEvent.click(screen.getByRole('button', { name: /查看 GEO 操作/ }));
+    expect(screen.getByText(/已截断显示/)).toBeInTheDocument();
   });
 });

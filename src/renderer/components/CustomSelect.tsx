@@ -30,6 +30,8 @@ interface CustomSelectProps {
     placeholder?: string;
     triggerIcon?: ReactNode;
     className?: string;
+    /** Accessible name for form usages whose visible label cannot use htmlFor. */
+    ariaLabel?: string;
     /** Keep a portaled menu usable when a compact trigger is narrower than its options. */
     popoverMinWidth?: number;
     /**
@@ -62,6 +64,7 @@ export default function CustomSelect({
     placeholder,
     triggerIcon,
     className,
+    ariaLabel,
     popoverMinWidth,
     size = 'sm',
     compact,
@@ -86,6 +89,7 @@ export default function CustomSelect({
             <button
                 ref={triggerRef}
                 type="button"
+                aria-label={ariaLabel}
                 disabled={disabled}
                 onClick={() => setIsOpen(!isOpen)}
                 className={`flex w-full items-center gap-2 rounded-lg border border-[var(--line)] bg-[var(--paper)] text-left transition-colors hover:border-[var(--ink-subtle)] disabled:cursor-not-allowed disabled:opacity-60 ${

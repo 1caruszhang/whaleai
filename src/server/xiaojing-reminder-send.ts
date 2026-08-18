@@ -12,8 +12,6 @@ import type { ImagePayload } from './types/image';
 
 export interface XiaojingMessageSendResult {
   success: boolean;
-  queued?: boolean;
-  queueId?: string;
   status?: number;
   error?: string;
 }
@@ -37,5 +35,5 @@ export async function sendXiaojingMessage(
   }
   return result.error
     ? { success: false, error: result.error, status: 429 }
-    : { success: true, queued: result.queued, queueId: result.queueId };
+    : { success: true };
 }

@@ -22,14 +22,27 @@ Renderer structured operation / xiaojing product tool
 
 所有请求同时绑定 Sidecar immutable identity、generation、逻辑 Session 和 workspace path。品牌查找不能依赖 catalog 的 current workspace；材料投影与当前请求 workspace 不一致时在解析前失败。
 
+## 异步处理与状态轮询
+
+LLM 抽取可能远超转发控制面请求的 120s 代理超时，因此导入与重试拆成两段：
+
+1. **请求内只做有界存储**（文件复制 / 文本落盘 / 官网抓取，无 LLM），按输入顺序返回 `{entries: [{ok:true, material} | {ok:false, errorCode}]}`。
+2. **抽取在 Sidecar 内按 Session 串行的后台队列执行**；逐材料落 `awaiting-confirmation` / `failed` 终态并尽力推进 GeoOperation 里程碑。队列只活在 Sidecar 进程内，材料与 attempt 状态由 Rust 持久化。
+
+Renderer 对处理中行每 3s 轮询 `/api/xiaojing/materials/status`（带 `materialIds`）；缺省 `materialIds` 的同一路由返回本 Session 最近材料（Rust `/api/brand-materials/list`，按 `updated_at` 倒序、上限 10），用于聊天侧导入区重挂载后恢复在途行与确认卡。非处理中材料在响应中携带批量确认卡投影——确认卡数据以权威候选为源重建，不依赖一次性响应存活。挂载恢复接管的在途行允许直接单材料重试：其原后台队列可能已随 Sidecar 进程消失。
+
+抽取链路（含竞品富化的检索与二次抽取）带 10 分钟硬超时信号；provider 挂起按 `model_failed` 落回 failed 终态，材料不会永远停在 processing。Renderer 传输层失败（代理超时 / IPC / 网络）显示专用 `material_request_failed`，与服务端业务错误码严格区分。
+
 ## 产品入口与 Session 归属
 
-真实用户入口是聊天 Tab 内的 `XiaojingGeoWorkbench` 品牌材料面板。该工作台挂在同一个 `TabProvider` 内，使用当前 Tab 的 `apiPost` 和固化 `sessionId`；`BrandWorkspace` 只可由该 Tab 的 `agentDir` 精确匹配得到，不能用全局 current workspace 补位。没有匹配品牌、仍是 pending Session 或尚无 Session 时不允许提交，并引导用户先在当前聊天建立 Session。
+真实用户入口全部在聊天内（票 27）：粘贴资料与官网 URL（以及文件选择）由聊天输入区的材料导入入口（`XiaojingChatMaterialImport`，挂在聊天输入框上方、同一个 `TabProvider` 内）发起，使用当前 Tab 的 `apiPost` 和固化 `sessionId`；会话附件（文件/图片）路线保持——附件由 Agent 经 `read_session_file` 判断后走 `import_pasted_material` 导入并停在知识裁决门。右侧工作台不挂任何材料面板，材料入口不出现在工作台。`BrandWorkspace` 只可由该 Tab 的 `workspacePath` 精确匹配得到，不能用全局 current workspace 补位；没有匹配品牌时不挂载该入口。仍是 pending Session 或尚无 Session 时不允许提交，并引导用户先在当前聊天建立 Session。
 
 - 文件通过现有 Tauri OS dialog 选择；Renderer 只把路径作为结构化操作参数交给 `importBrandMaterialFiles`，不打开、不解析也不记录路径。界面只显示 basename。
 - 粘贴资料和官网 URL 分别调用 `importBrandMaterialText`、`importBrandMaterialWebsite`，不伪造用户消息来触发导入。
-- 批量文件逐项投影处理中、成功或失败、`materialId` 与候选数；一项失败不遮蔽其他结果。只有已取得 `materialId` 的失败项显示“仅重试此项”，并只调用单材料 retry API。
-- 面板在 deferred chat 阶段不挂载导入操作，避免在 Tab 的真实通信身份就绪前错发到 Global Sidecar。
+- 批量文件逐项投影处理中、成功或失败、`materialId` 与候选数；一项失败不遮蔽其他结果。只有已取得 `materialId` 的失败项显示“仅重试此项”，并只调用单材料 retry API（同样只启动后台抽取，立即返回）。
+- 入口在 deferred chat 阶段禁用导入操作，避免在 Tab 的真实 Session identity 就绪前发起请求。
+- 批量确认卡是权威候选的投影，呈现为字段行复核卡（分层默认与整卡全量采纳语义见
+  `knowledge_authority.md` 与 ADR 0003）：裁决提交后卡片保留、整体变暗并只读（行内呈现逐条裁决结果）；入口重挂载时按 Session 材料列表重建卡片（含已裁决的只读卡）。裁决经 decide 路由提交后，隐藏 reminder 汇总权威结果并唤醒主聊天继续推进当前 GeoOperation。卡片待决期间用户可随时在聊天中以自然语言下达修改（改/删/增候选），Agent 经通用闸门修订工具执行并记 `user-stated`，卡片按既有 3s 轮询重渲染，服务端改动覆盖卡片本地暂存编辑。
 
 ## 三类输入与原始材料
 
@@ -67,9 +80,19 @@ Renderer structured operation / xiaojing product tool
 - 模型抽取不得生成 `asked`，收到非法/asked 值按 `inferred` 处理；
 - provenance 逐候选写入 KnowledgeAuthority 的 candidate/source，模型产物仍统一是待确认候选，不能凭来源级别直接成为 authority。
 
-同 Session 的待确认候选重试只允许 `inferred → asked → extracted` 方向提升来源及 excerpt，低等级结果不能覆盖高等级来源。
+同 Session 的待确认候选重试只允许 `inferred → asked → extracted` 方向提升来源及 excerpt，低等级结果不能覆盖高等级来源。用户经卡片「更改」或聊天修订的候选记 `asked`（用户补充），与该提升方向一致。
 
 每个字段显式属于品牌整体 scope，或属于 BrandWorkspace 已登记的某一产品线；未知产品线降为品牌 scope。品牌与产品线使用不同事实 identity，因此可并存且不会串值。
+
+## 竞品消歧与检索富化
+
+js_ai `material-to-facts` 契约要求 "enrich real competitors"。抽取与富化规则：
+
+- **消歧**：`competitors` 只收直接竞争品牌（同类可替代产品/服务的其他品牌）；合作商、供应商、经销商、上下游公司、投资或母子公司关系属于 `relatedBrands`；品牌自身及其别名不得进入 `competitors`。该规则同时写入抽取 prompt 与富化抽取 prompt。
+- **计数与目标**：已知竞品 = 本次抽取的品牌 scope `competitors` 值 ∪ KnowledgeAuthority 中该 fact key 的已确认权威值；目标 5 家（ranking 陈列位 1 为本品牌、2–6 为竞品，见 `articleGeneration` 质量门）。产品线 scope 竞品计入去重但不计入品牌目标。
+- **富化来源**：不足 5 家且注入 `keywordSearch` 能力时，先用真实检索（ARK `enable_search`，即 js_ai webGrounding 设计）查询「品牌 + 行业 + 主要竞争对手」，再用 extraction 能力做第二次严格 JSON 抽取：只允许输出在检索文本中**字面出现**的公司/品牌名（反虚构），排除品牌自身、已知竞品与 `relatedBrands` 值，逐名给出检索原文 `sourceExcerpt`，数量补足缺口即止。
+- **候选形态**：富化名一律 `inferred`（卡片「待确认」行，带纯视觉逐行确认；整卡确认时随全量采纳进入权威，见 ADR 0003）；与本次已抽出的品牌 scope 竞品**合并为同一条候选**，避免同一 fact key 出现多条候选导致顺序采纳互相覆盖。合并后的候选整体降为 `inferred`，excerpt 合并保留材料与检索两侧证据。
+- **失败语义**：检索或富化解析失败按 independent-best-effort 静默跳过，不产生错误码、不影响主导入结果；后续 ranking 质量门仍会 fail-closed 挡住竞品不足的稿件。
 
 ## 失败、确认与版本
 
@@ -81,9 +104,11 @@ Renderer structured operation / xiaojing product tool
 
 ## 日志与测试
 
-材料流程只允许记录固定 operation、合法 workspace/session/material ID、状态和固定 error code。路径样式 identity 直接投影为 `invalid`；raw error、API Key、URL query、材料正文、模型 prompt/response 均不得写普通日志。
+材料流程只允许记录固定 operation、合法 workspace/session/material ID、状态和固定 error code；Sidecar 以 `[materials]` 前缀输出 `materialLogProjection` 的脱敏投影（导入/抓取启动完成、后台抽取完成或失败、重试）。该投影同时覆盖 HTTP 路由路径与 Agent 工具路径（`import_pasted_material` / `import_website_material` / `retry_brand_material`），工具发起的导入失败不会只存在于 SQLite。路径样式 identity 直接投影为 `invalid`；raw error、API Key、URL query、材料正文、模型 prompt/response 均不得写普通日志。
 
-默认回归覆盖：三类输入、文件白名单与解析、no-follow/品牌隔离/哈希/相对路径、SSRF/DNS/redirect/类型/大小、Profile 字段/provenance/scope、单份失败与最小重试、KnowledgeAuthority 唯一入口、知识快照与旧产物 lineage、日志脱敏。所有网站测试使用注入式 fake fetch。
+失败错误码精确区分：模型输出坏 JSON 落 `model_response_invalid`（同一超时信号内自动重抽一次，两次都坏才落终态）；management hop 自由文本错误落 `material_management_failed`（Rust 材料存储固定码原样透传）。泛化 `material_processing_failed` 只保留给真正未分类的错误。真实 provider 冒烟走 `material-import.credentialed.test.ts`（显式 opt-in，不在默认测试命令内）。
+
+默认回归覆盖：三类输入、文件白名单与解析、no-follow/品牌隔离/哈希/相对路径、SSRF/DNS/redirect/类型/大小、Profile 字段/provenance/scope、单份失败与最小重试、抽取挂起硬超时落 failed、异步启动与状态轮询、会话恢复重建卡片、KnowledgeAuthority 唯一入口、知识快照与旧产物 lineage、日志脱敏。所有网站测试使用注入式 fake fetch。
 
 ## js_ai 交叉核验风险
 

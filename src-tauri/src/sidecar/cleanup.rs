@@ -1,70 +1,19 @@
 use super::*;
 
-// ===== Port File for CLI Discovery =====
-
-/// Write the Global Sidecar port under Xiaojing's local data root.
-pub(super) fn write_global_port_file(port: u16) {
-    if let Some(root) = crate::app_dirs::xiaojing_data_dir() {
-        let port_file = root.join(PORT_FILE_NAME);
-        if let Err(e) = std::fs::write(&port_file, port.to_string()) {
-            ulog_warn!("[sidecar] Failed to write port file {:?}: {}", port_file, e);
-        } else {
-            ulog_info!("[sidecar] Wrote CLI port file: {:?} = {}", port_file, port);
-        }
-    }
-}
-
-/// Remove the port file (called on app exit / sidecar shutdown).
-pub(super) fn remove_global_port_file() {
-    if let Some(root) = crate::app_dirs::xiaojing_data_dir() {
-        let port_file = root.join(PORT_FILE_NAME);
-        let _ = std::fs::remove_file(&port_file);
-    }
-}
-
 // ============= Stale process cleanup =============
 //
-// Two updater/startup recovery pattern sets share the same legacy child
-// signatures. Normal shutdown never consumes either set; live process owners
-// terminate only their exact `ChildTree` containment authority.
-//
-// * [`STARTUP_CLEANUP_PATTERNS`] additionally sweeps sidecars by
-//   [`SIDECAR_MARKER`]. Startup cleanup runs only when `acquire_lock`
+// Startup cleanup sweeps sidecars by [`SIDECAR_MARKER`] only when `acquire_lock`
 //   reports a prior instance — in that scenario the prior instance is
 //   already dead (SIGKILL'd by our lock code or crashed), so any matching
 //   sidecar must be an orphan we legitimately own.
 //
-// * [`CHILD_CLEANUP_PATTERNS`] is updater-only residual recovery and
-//   deliberately **does not** sweep by `SIDECAR_MARKER`. It remains separate
-//   from normal shutdown because update file-lock verification has a distinct
-//   protected-root contract.
-//
 // All forward-slash form — the matcher in `process_cleanup` normalizes
 // `\` → `/` and lowercases both sides before comparison.
-pub(super) const CHILD_CLEANUP_PATTERNS: &[crate::process_cleanup::ProcessPattern] = &[
-    // SDK subprocess spawned by Claude Agent SDK.
-    crate::process_cleanup::ProcessPattern::new("SDK", "claude-agent-sdk"),
-    // MCP servers installed under ~/.myagents/mcp/.
-    crate::process_cleanup::ProcessPattern::new("MCP", ".myagents/mcp/"),
-    // Well-known external MCP packages launched via `bun x` / `npx`.
-    crate::process_cleanup::ProcessPattern::new("MCP-ext", "@playwright/mcp"),
-    crate::process_cleanup::ProcessPattern::new("MCP-ext", "@anthropic-ai/mcp"),
-    // MCP servers running under bundled Node.js (cmd.exe intermediates on
-    // Windows can orphan these; the descendants-by-PPID walk inside
-    // `process_cleanup` catches them regardless).
-    crate::process_cleanup::ProcessPattern::new("nodejs", "/myagents/nodejs/"),
-];
-
-pub(super) const STARTUP_CLEANUP_PATTERNS: &[crate::process_cleanup::ProcessPattern] = &[
-    // Our own Bun sidecar, identified by the argv marker.
-    crate::process_cleanup::ProcessPattern::new("sidecar", SIDECAR_MARKER),
-    // SDK subprocess spawned by Claude Agent SDK.
-    crate::process_cleanup::ProcessPattern::new("SDK", "claude-agent-sdk"),
-    crate::process_cleanup::ProcessPattern::new("MCP", ".myagents/mcp/"),
-    crate::process_cleanup::ProcessPattern::new("MCP-ext", "@playwright/mcp"),
-    crate::process_cleanup::ProcessPattern::new("MCP-ext", "@anthropic-ai/mcp"),
-    crate::process_cleanup::ProcessPattern::new("nodejs", "/myagents/nodejs/"),
-];
+pub(super) const STARTUP_CLEANUP_PATTERNS: &[crate::process_cleanup::ProcessPattern] =
+    &[crate::process_cleanup::ProcessPattern::new(
+        "sidecar",
+        SIDECAR_MARKER,
+    )];
 
 // ===== Startup cleanup synchronization =====
 //
@@ -144,15 +93,7 @@ pub fn wait_for_startup_cleanup(timeout: Duration) -> Result<(), String> {
     Ok(())
 }
 
-/// Fast synchronous preamble — safe to run on the main thread before the
-/// heavy cleanup pass is spawned into a blocking worker. Removes the stale
-/// port file so a lingering CLI read doesn't see a dead port.
-pub fn cleanup_stale_sidecars_preamble() {
-    remove_global_port_file();
-}
-
-/// Heavy cleanup pass — enumerate and kill stale sidecar/SDK/MCP
-/// subprocesses left behind by a prior app instance.
+/// Heavy cleanup pass for stale Sidecar process trees left by a prior instance.
 ///
 /// Intended to run on a blocking tokio worker off the main thread. The
 /// entire Windows path previously took 5–15 seconds synchronously by

@@ -11,7 +11,7 @@ let originalUserProfile: string | undefined;
 let store: SessionStoreModule;
 
 beforeAll(async () => {
-  home = mkdtempSync(join(tmpdir(), 'myagents-session-data-from-metadata-'));
+  home = mkdtempSync(join(tmpdir(), 'xiaojing-session-data-from-metadata-'));
   originalHome = process.env.HOME;
   originalUserProfile = process.env.USERPROFILE;
   process.env.HOME = home;
@@ -40,7 +40,7 @@ describe('SessionStore bulk-read path', () => {
     const snapshot = await store.loadSessionTranscript(metadata.id);
     expect((await store.appendSessionMessages(metadata.id, snapshot.cursor, [message])).ok).toBe(true);
 
-    const sessionsPath = join(home, '.myagents', 'sessions.json');
+    const sessionsPath = join(home, 'Xiaojing', 'sessions.json');
     const persistedIndex = readFileSync(sessionsPath, 'utf-8');
     writeFileSync(sessionsPath, '[]', 'utf-8');
 

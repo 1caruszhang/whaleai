@@ -2,4 +2,3 @@
 
 pub mod bom;
 pub mod file_lock;
-pub mod system_reminder;

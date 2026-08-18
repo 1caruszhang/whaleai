@@ -19,11 +19,11 @@ if (lineCount > 180 || byteCount > 16_000) {
 }
 
 for (const heading of [
-  'Owner 与 authority 优先',
-  '通信分为控制面和大载荷数据面',
-  'Runtime 分流只有一个入口',
-  '按任务加载文档',
-  'Git 与共享工作区',
+  'Owner 与 authority',
+  'Session 与 Sidecar',
+  '通信与持久化',
+  '文档路由',
+  '验证与共享工作区',
 ]) {
   if (!claude.includes(heading)) {
     failures.push(`CLAUDE.md lost attention-critical section: ${heading}`);
@@ -61,20 +61,6 @@ if (
     'README.md states the Rust control-plane rule as an absolute ban and hides the registered ' +
       '/refs and /attachment data-plane exception.',
   );
-}
-if (/external runtimes? (?:go|走).*external-session\.ts/i.test(readme)) {
-  failures.push(
-    'README.md bypasses the SessionEngine facade by presenting external-session.ts as the runtime routing entry.',
-  );
-}
-
-for (const path of [
-  'specs/tech_docs/auto_update.md',
-  'specs/guides/build_and_release_guide.md',
-]) {
-  if (/^\s*git add (?:-A|\.)\s*$/m.test(read(path))) {
-    failures.push(`${path} teaches broad staging; release examples must list their intended files explicitly.`);
-  }
 }
 
 if (failures.length > 0) {

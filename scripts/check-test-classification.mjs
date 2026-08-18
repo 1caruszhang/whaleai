@@ -13,26 +13,12 @@ const ALLOWED_SUFFIXES = [
   '.credentialed.test.ts',
 ];
 const CHILD_PROCESS_ALLOWLIST = new Set([
-  // This regression intentionally verifies config lock serialization across
-  // separate Node processes. Keep the exception narrow so future integration
-  // tests cannot spawn arbitrary network-capable subprocesses unnoticed.
-  'src/server/__tests__/admin-config-lock.integration.test.ts',
   // Proves dead-PID lock recovery with process.execPath running only
   // `process.exit(0)`; the child receives no URL, secret, or network input.
   'src/server/__tests__/file-lock.integration.test.ts',
   // Composes that same short-lived local child with a temp-HOME SessionStore
   // bootstrap. The child exits immediately and cannot perform network I/O.
   'src/server/__tests__/session-lock-bootstrap.integration.test.ts',
-  // Boots the real Sidecar against temp HOME/workspace directories and a
-  // loopback-only HTTP port to verify the required-system-skill API contract.
-  'src/server/__tests__/skills-required.integration.test.ts',
-  // This regression verifies the existing MCP OAuth refresh lock across real
-  // Node processes. Children share only a temp config dir and loopback server.
-  'src/server/__tests__/mcp-oauth.integration.test.ts',
-  // This contract test runs the real Plugin Bridge process against a temp
-  // OpenClaw fixture and a loopback-only fake Rust ingress. It uses no secrets
-  // and cannot reach an external service.
-  'src/server/plugin-bridge/reply-transport.integration.test.ts',
 ]);
 const ANSI_ESCAPE_RE = new RegExp(`${String.fromCharCode(27)}\\[[0-?]*[ -/]*[@-~]`, 'g');
 
@@ -172,8 +158,8 @@ if (childProcessOffenders.length > 0) {
     'Move the test to credentialed, mock the subprocess, or add a narrow allowlist entry with a comment.',
   ].join('\n'));
 }
-if (!scriptIncludes('test', ['test:classification', 'test:build-scripts', 'test:unit', 'test:dom', 'test:integration'])) {
-  errors.push('package.json script "test" must run classification + build scripts + unit + dom + integration.');
+if (!scriptIncludes('test', ['test:classification', 'test:unit', 'test:dom', 'test:integration'])) {
+  errors.push('package.json script "test" must run classification + unit + dom + integration.');
 }
 for (const scriptName of ['test:changed', 'test:watch', 'coverage']) {
   if (!scriptIncludes(scriptName, ['--project unit', '--project dom', '--project integration'])) {
@@ -182,13 +168,13 @@ for (const scriptName of ['test:changed', 'test:watch', 'coverage']) {
 }
 for (const command of [
   'npm run test:classification',
-  'npm run test:build-scripts',
-  'npm run test:integration',
+  'npm run typecheck',
+  'npm run lint',
+  'npm test',
   'npm run build:server',
-  'npm run build:bridge',
-  'npm run build:cli',
   'npm run build:web',
-  'cargo clippy --manifest-path src-tauri/Cargo.toml --locked --all-targets -- -D clippy::disallowed_methods -D clippy::disallowed_macros',
+  'cargo test --manifest-path src-tauri/Cargo.toml',
+  'cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings',
 ]) {
   if (!workflowText.includes(command)) {
     errors.push(`.github/workflows/test.yml must run: ${command}`);

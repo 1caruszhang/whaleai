@@ -3,7 +3,6 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({
   openExternal: vi.fn(),
-  openUrl: vi.fn(),
 }));
 
 vi.mock('@/utils/openExternal', () => ({
@@ -11,7 +10,6 @@ vi.mock('@/utils/openExternal', () => ({
   isExternalUrl: (url: string) => /^https?:\/\//i.test(url),
 }));
 
-import { BrowserPanelContext } from '@/context/BrowserPanelContext';
 import Markdown from './Markdown';
 
 describe('Markdown web links', () => {
@@ -20,29 +18,19 @@ describe('Markdown web links', () => {
     vi.spyOn(window, 'getSelection').mockReturnValue({ toString: () => '' } as Selection);
   });
 
-  it('opens an ordinary click in the Chat-owned BrowserPanel', () => {
-    render(
-      <BrowserPanelContext.Provider value={{ openUrl: mocks.openUrl }}>
-        <Markdown>[Example](https://example.com)</Markdown>
-      </BrowserPanelContext.Provider>,
-    );
+  it('opens an ordinary click with the system handler', () => {
+    render(<Markdown>[Example](https://example.com)</Markdown>);
 
     fireEvent.click(screen.getByRole('link', { name: 'Example' }));
 
-    expect(mocks.openUrl).toHaveBeenCalledWith('https://example.com');
-    expect(mocks.openExternal).not.toHaveBeenCalled();
+    expect(mocks.openExternal).toHaveBeenCalledWith('https://example.com');
   });
 
-  it('keeps Cmd/Ctrl click as an explicit system-browser bypass', () => {
-    render(
-      <BrowserPanelContext.Provider value={{ openUrl: mocks.openUrl }}>
-        <Markdown>[Example](https://example.com)</Markdown>
-      </BrowserPanelContext.Provider>,
-    );
+  it('keeps Cmd/Ctrl click on the same system handler', () => {
+    render(<Markdown>[Example](https://example.com)</Markdown>);
 
     fireEvent.click(screen.getByRole('link', { name: 'Example' }), { ctrlKey: true });
 
     expect(mocks.openExternal).toHaveBeenCalledWith('https://example.com');
-    expect(mocks.openUrl).not.toHaveBeenCalled();
   });
 });

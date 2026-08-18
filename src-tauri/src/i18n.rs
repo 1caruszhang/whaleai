@@ -116,7 +116,7 @@ fn read_ui_language_from(config_path: &std::path::Path) -> UiLanguage {
 }
 
 pub fn current_ui_language() -> UiLanguage {
-    if let Some(dir) = crate::app_dirs::myagents_data_dir() {
+    if let Some(dir) = crate::app_dirs::xiaojing_data_dir() {
         let value = read_ui_language_from(&dir.join("config.json"));
         ulog_debug!("[i18n] disk: uiLanguage={}", value.as_str());
         return value;
@@ -129,7 +129,7 @@ pub fn current_locale() -> SupportedLocale {
 }
 
 fn persist_to_disk(value: UiLanguage) -> Result<(), String> {
-    let dir = crate::app_dirs::myagents_data_dir()
+    let dir = crate::app_dirs::xiaojing_data_dir()
         .ok_or_else(|| "[i18n] cannot resolve data dir".to_string())?;
     let config_path = dir.join("config.json");
     crate::config_io::with_config_lock(&config_path, false, |cfg| {
@@ -148,31 +148,79 @@ fn persist_to_disk(value: UiLanguage) -> Result<(), String> {
     .map(|_| ())
 }
 
-pub fn t<'a>(key: &'a str, locale: SupportedLocale) -> &'a str {
+pub fn t(key: &str, locale: SupportedLocale) -> &str {
     match (locale, key) {
-        (SupportedLocale::ZhCn, "tray.open") => "打开 MyAgents",
-        (SupportedLocale::ZhCn, "tray.settings") => "设置",
-        (SupportedLocale::ZhCn, "tray.forceWakeLock") => "阻止电脑睡眠",
-        (SupportedLocale::ZhCn, "tray.exit") => "退出",
-        (SupportedLocale::ZhCn, "notification.sessionCompleteTitle") => "MyAgents - 任务完成",
+        (SupportedLocale::ZhCn, "notification.sessionCompleteTitle") => "Xiaojing - 任务完成",
         (SupportedLocale::ZhCn, "notification.sessionCompleteBody") => "请您查看结果",
-        (SupportedLocale::ZhCn, "notification.sessionStoppedTitle") => "MyAgents - 任务已停止",
+        (SupportedLocale::ZhCn, "notification.sessionStoppedTitle") => "Xiaojing - 任务已停止",
         (SupportedLocale::ZhCn, "notification.sessionStoppedBody") => "请您查看当前结果",
-        (SupportedLocale::ZhCn, "notification.sessionErrorTitle") => "MyAgents - 任务失败",
+        (SupportedLocale::ZhCn, "notification.sessionErrorTitle") => "Xiaojing - 任务失败",
         (SupportedLocale::ZhCn, "notification.sessionErrorBody") => "请您查看错误详情",
-        (SupportedLocale::EnUs, "tray.open") => "Open MyAgents",
-        (SupportedLocale::EnUs, "tray.settings") => "Settings",
-        (SupportedLocale::EnUs, "tray.forceWakeLock") => "Prevent computer sleep",
-        (SupportedLocale::EnUs, "tray.exit") => "Quit",
-        (SupportedLocale::EnUs, "notification.sessionCompleteTitle") => "MyAgents - Task complete",
+        (SupportedLocale::ZhCn, "notification.geoAwaitingConfirmationTitle") => {
+            "小鲸同学 - 等待确认"
+        }
+        (SupportedLocale::ZhCn, "notification.geoAwaitingConfirmationBody") => {
+            "一个 GEO 操作正在等待您的结构化确认。"
+        }
+        (SupportedLocale::ZhCn, "notification.geoOperationFailedTitle") => {
+            "小鲸同学 - GEO 操作失败"
+        }
+        (SupportedLocale::ZhCn, "notification.geoOperationFailedBody") => {
+            "一个 GEO 操作需要您查看失败状态。"
+        }
+        (SupportedLocale::ZhCn, "notification.geoBatchCompletedTitle") => "小鲸同学 - 批次已完成",
+        (SupportedLocale::ZhCn, "notification.geoBatchCompletedBody") => {
+            "一批 GEO 内容已完成处理，可打开工作台查看。"
+        }
+        (SupportedLocale::ZhCn, "notification.geoPublishFailedTitle") => "小鲸同学 - 发布失败",
+        (SupportedLocale::ZhCn, "notification.geoPublishFailedBody") => {
+            "一个确定性发布执行需要人工查看。"
+        }
+        (SupportedLocale::ZhCn, "notification.geoMonitoringCompletedTitle") => {
+            "小鲸同学 - 监测完成"
+        }
+        (SupportedLocale::ZhCn, "notification.geoMonitoringCompletedBody") => {
+            "一项发布后监测已完成，可打开工作台查看证据。"
+        }
+        (SupportedLocale::EnUs, "notification.sessionCompleteTitle") => "Xiaojing - Task complete",
         (SupportedLocale::EnUs, "notification.sessionCompleteBody") => "Please review the result",
-        (SupportedLocale::EnUs, "notification.sessionStoppedTitle") => "MyAgents - Task stopped",
+        (SupportedLocale::EnUs, "notification.sessionStoppedTitle") => "Xiaojing - Task stopped",
         (SupportedLocale::EnUs, "notification.sessionStoppedBody") => {
             "Please review the current result"
         }
-        (SupportedLocale::EnUs, "notification.sessionErrorTitle") => "MyAgents - Task failed",
+        (SupportedLocale::EnUs, "notification.sessionErrorTitle") => "Xiaojing - Task failed",
         (SupportedLocale::EnUs, "notification.sessionErrorBody") => {
             "Please review the error details"
+        }
+        (SupportedLocale::EnUs, "notification.geoAwaitingConfirmationTitle") => {
+            "Xiaojing - Confirmation needed"
+        }
+        (SupportedLocale::EnUs, "notification.geoAwaitingConfirmationBody") => {
+            "A GEO operation is waiting for structured confirmation."
+        }
+        (SupportedLocale::EnUs, "notification.geoOperationFailedTitle") => {
+            "Xiaojing - GEO operation failed"
+        }
+        (SupportedLocale::EnUs, "notification.geoOperationFailedBody") => {
+            "A GEO operation needs you to review its failure state."
+        }
+        (SupportedLocale::EnUs, "notification.geoBatchCompletedTitle") => {
+            "Xiaojing - Batch completed"
+        }
+        (SupportedLocale::EnUs, "notification.geoBatchCompletedBody") => {
+            "A GEO content batch finished. Open the workbench to review it."
+        }
+        (SupportedLocale::EnUs, "notification.geoPublishFailedTitle") => {
+            "Xiaojing - Publishing failed"
+        }
+        (SupportedLocale::EnUs, "notification.geoPublishFailedBody") => {
+            "A deterministic publishing execution needs manual review."
+        }
+        (SupportedLocale::EnUs, "notification.geoMonitoringCompletedTitle") => {
+            "Xiaojing - Monitoring completed"
+        }
+        (SupportedLocale::EnUs, "notification.geoMonitoringCompletedBody") => {
+            "A post-publish monitoring plan finished. Open the workbench for evidence."
         }
         _ => key,
     }
@@ -192,9 +240,7 @@ pub fn apply_ui_language(
 ) -> Result<UiLanguageChangedPayload, String> {
     let _guard = lock_language_mirrors();
     persist_to_disk(value)?;
-    let locale = effective_locale(value);
     let payload = ui_language_payload(value);
-    crate::tray::apply_tray_locale(app, locale);
     if let Err(e) = app.emit("ui-language-changed", &payload) {
         ulog_warn!("[i18n] emit failed: {e}");
     }
@@ -204,9 +250,7 @@ pub fn apply_ui_language(
 pub fn sync_ui_language_from_config(app: &AppHandle) -> UiLanguageChangedPayload {
     let _guard = lock_language_mirrors();
     let value = current_ui_language();
-    let locale = effective_locale(value);
     let payload = ui_language_payload(value);
-    crate::tray::apply_tray_locale(app, locale);
     if let Err(e) = app.emit("ui-language-changed", &payload) {
         ulog_warn!("[i18n] emit failed: {e}");
     }
@@ -271,7 +315,7 @@ mod tests {
     fn translates_native_session_completion_notifications() {
         assert_eq!(
             t("notification.sessionCompleteTitle", SupportedLocale::ZhCn),
-            "MyAgents - 任务完成"
+            "Xiaojing - 任务完成"
         );
         assert_eq!(
             t("notification.sessionErrorBody", SupportedLocale::EnUs),

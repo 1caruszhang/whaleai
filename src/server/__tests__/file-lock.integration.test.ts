@@ -28,7 +28,7 @@ async function exitedChildPid(): Promise<number> {
 }
 
 beforeEach(() => {
-  scratch = mkdtempSync(join(tmpdir(), 'myagents-file-lock-'));
+  scratch = mkdtempSync(join(tmpdir(), 'xiaojing-file-lock-'));
 });
 
 afterEach(() => {
@@ -75,10 +75,8 @@ describe('withFileLock', () => {
   });
 
   it.each([
-    ['legacy Node owner', (pid: number) => `node:${pid}`],
-    ['current Node owner', (pid: number) => `node:${pid}:0`],
-    ['legacy Rust owner', (pid: number) => `rust:${pid}`],
-    ['current Rust owner', (pid: number) => `rust:${pid}:0`],
+    ['Node owner', (pid: number) => `node:${pid}:0`],
+    ['Rust owner', (pid: number) => `rust:${pid}:0`],
   ] as const)('breaks a fresh lock immediately when its %s pid is confirmed dead', async (_label, ownerForPid) => {
     const deadPid = await exitedChildPid();
     const lockPath = join(scratch, 'fresh-dead.lock');
@@ -113,10 +111,10 @@ describe('withFileLock', () => {
     expect(existsSync(lockPath)).toBe(false);
   });
 
-  it('does not age-break a legacy lock whose owner pid is alive', async () => {
+  it('does not age-break a lock whose owner pid is alive', async () => {
     const lockPath = join(scratch, 'old-live.lock');
     mkdirSync(lockPath);
-    writeFileSync(join(lockPath, 'owner'), `node:${process.pid}\n`, 'utf-8');
+    writeFileSync(join(lockPath, 'owner'), `node:${process.pid}:0\n`, 'utf-8');
     const old = new Date(Date.now() - 120_000);
     utimesSync(lockPath, old, old);
 
@@ -129,7 +127,7 @@ describe('withFileLock', () => {
   it('retains a valid process owner when the liveness probe is inconclusive', async () => {
     const lockPath = join(scratch, 'unobservable-owner.lock');
     mkdirSync(lockPath);
-    writeFileSync(join(lockPath, 'owner'), 'node:123\n', 'utf-8');
+    writeFileSync(join(lockPath, 'owner'), 'node:123:0\n', 'utf-8');
     const old = new Date(Date.now() - 120_000);
     utimesSync(lockPath, old, old);
 

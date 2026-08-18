@@ -6,7 +6,7 @@
 // gap), because the gate was only `isLoading && isLastBlock`. Fix: gate on a
 // message-level `streamingTextActive` flag — set when text deltas arrive, cleared on
 // the text block's content-block-stop — which works for BOTH string-content and
-// block-array messages (Codex review caught that string content has its own render
+// block-array messages (string content has its own render
 // path with no gate). This test pins the gate via real Markdown rendering.
 import { render } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
@@ -14,7 +14,6 @@ import { describe, expect, it, vi } from 'vitest';
 import type { Message as MessageType } from '@/types/chat';
 
 vi.mock('@/context/ImagePreviewContext', () => ({ useImagePreview: () => ({ openPreview: vi.fn() }) }));
-vi.mock('@/analytics', () => ({ track: vi.fn() }));
 
 import Message from './Message';
 
@@ -64,7 +63,7 @@ describe('Message — streaming tail-fade gating (.md-stream-tail)', () => {
   });
 
   it('string-content: NO fade once stopped while still loading (the slow-gap bug)', () => {
-    // Codex issue #1: pure-text messages keep `content` as a string with a separate
+    // Pure-text messages keep `content` as a string with a separate
     // render path that previously had no gate → the last chars stayed faded forever.
     const { container } = render(<Message message={stringMsg(false)} isLoading />);
     expect(hasFade(container)).toBe(false);

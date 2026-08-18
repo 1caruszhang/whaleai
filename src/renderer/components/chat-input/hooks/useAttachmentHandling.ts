@@ -2,17 +2,19 @@ import { open } from '@tauri-apps/plugin-dialog';
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type Dispatch, type MutableRefObject, type RefObject, type SetStateAction } from 'react';
 import { useTranslation } from 'react-i18next';
 
-import type { Provider } from '@/config/types';
-import { modelSupportsModality } from '@/config/services/providerService';
 import { isTauriEnvironment } from '@/utils/browserMock';
-import { renameIfBareClipboardImage } from '@/utils/clipboardImage';
 import { isDebugMode } from '@/utils/debug';
 import { resolveAttachmentUrl } from '@/utils/attachmentUrl';
 import { ALLOWED_IMAGE_MIME_TYPES, isChatImageFile, isImageMimeType } from '@/../shared/fileTypes';
 import type { FileReferenceUndoAction } from '@/hooks/useUndoStack';
 import { normalizeWorkspacePathIdentity } from '@/../shared/workspacePath';
+import {
+  SESSION_FILE_MAX_MESSAGE_FILES,
+  sessionFileReferenceName,
+  sessionFilesTargetDir,
+} from '@/../shared/sessionFileReference';
 
-import type { ImageAttachment } from '../types';
+import type { ImageAttachment, SessionFileRef } from '../types';
 import { MAX_IMAGES, MAX_IMAGE_SIZE } from '../constants';
 
 interface PreparedImageAttachment {
@@ -68,9 +70,6 @@ interface AttachmentImportScope {
 interface UseAttachmentHandlingParams {
   fileService: AttachmentFileService;
   workspacePath?: string | null;
-  provider?: Provider | null;
-  currentModelId?: string | null;
-  isExternalRuntime: boolean;
   attachmentSessionId?: string | null;
   inputValueRef: MutableRefObject<string>;
   textareaRef: RefObject<HTMLTextAreaElement | null>;
@@ -85,21 +84,19 @@ interface UseAttachmentHandlingParams {
 export function useAttachmentHandling({
   fileService,
   workspacePath,
-  provider,
-  currentModelId,
-  isExternalRuntime,
   attachmentSessionId,
   inputValueRef,
-  textareaRef,
+  textareaRef: _textareaRef,
   fileInputRef,
   toastRef,
   undoStack,
-  setInputValue,
+  setInputValue: _setInputValue,
   setShowPlusMenu,
   onWorkspaceRefresh,
 }: UseAttachmentHandlingParams) {
   const { t } = useTranslation('chat');
   const [images, setImageState] = useState<ImageAttachment[]>([]);
+  const [fileRefs, setFileRefs] = useState<SessionFileRef[]>([]);
   const imageCountRef = useRef(0);
   const mountedRef = useRef(true);
   const activeReadersRef = useRef<Set<FileReader>>(new Set());
@@ -165,24 +162,6 @@ export function useAttachmentHandling({
     return true;
   }, [t, toastRef]);
 
-  const insertReferenceText = useCallback((paths: string[]): number => {
-    const currentInput = inputValueRef.current;
-    const cursorPos = Math.min(
-      textareaRef.current?.selectionStart ?? currentInput.length,
-      currentInput.length,
-    );
-    const references = paths.map(path => `@${path}`).join(' ');
-
-    const before = currentInput.slice(0, cursorPos);
-    const after = currentInput.slice(cursorPos);
-    const insertedText = references + ' ';
-    const newValue = before + insertedText + after;
-
-    inputValueRef.current = newValue;
-    setInputValue(newValue);
-    return cursorPos;
-  }, [inputValueRef, setInputValue, textareaRef]);
-
   const addImage = useCallback((file: File, importScope: AttachmentImportScope) => {
     if (!ALLOWED_IMAGE_MIME_TYPES.includes(file.type)) {
       toastRef.current.warning(t('input.attachments.unsupportedImageType'));
@@ -244,6 +223,63 @@ export function useAttachmentHandling({
     setImages((prev) => prev.filter((img) => img.id !== id));
   }, [setImages]);
 
+  const addFileRefs = useCallback((entries: Array<{ referencePath: string }>): number => {
+    let accepted = 0;
+    setFileRefs((prev) => {
+      const next = [...prev];
+      for (const entry of entries) {
+        if (next.length >= SESSION_FILE_MAX_MESSAGE_FILES) break;
+        if (next.some((ref) => ref.referencePath === entry.referencePath)) {
+          accepted += 1;
+          continue;
+        }
+        next.push({
+          id: `file-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
+          referencePath: entry.referencePath,
+          name: sessionFileReferenceName(entry.referencePath),
+        });
+        accepted += 1;
+      }
+      return next;
+    });
+    return accepted;
+  }, []);
+
+  const removeFileRef = useCallback((id: string) => {
+    setFileRefs((prev) => prev.filter((ref) => ref.id !== id));
+  }, []);
+
+  const clearFileRefs = useCallback((): number => {
+    let cleared = 0;
+    setFileRefs((prev) => {
+      cleared = prev.length;
+      return [];
+    });
+    return cleared;
+  }, []);
+
+  /** 会话文件必须落在会话私有目录；没有会话身份时拒绝落盘。 */
+  const requireSessionFilesTargetDir = useCallback((): string | null => {
+    if (!attachmentSessionId) {
+      toastRef.current.error(t('input.attachments.sessionNotReadyForFiles'));
+      return null;
+    }
+    return sessionFilesTargetDir(attachmentSessionId);
+  }, [attachmentSessionId, t, toastRef]);
+
+  const pushFileRefUndo = useCallback((paths: string[]) => {
+    const batchId = undoStack.generateBatchId();
+    for (const path of paths) {
+      undoStack.push({
+        type: 'file-reference',
+        batchId,
+        insertedText: `@${path} `,
+        insertPosition: inputValueRef.current.length,
+        copiedFilePath: path,
+      });
+    }
+  }, [inputValueRef, undoStack]);
+
   const fileToBase64 = useCallback((file: File): Promise<string> => {
     return new Promise((resolve, reject) => {
       const reader = new FileReader();
@@ -302,21 +338,6 @@ export function useAttachmentHandling({
       }
     }
 
-    const fallbackImagesToFiles =
-      imageFiles.length > 0 &&
-      !isExternalRuntime &&
-      !modelSupportsModality(provider, currentModelId, 'image');
-
-    if (fallbackImagesToFiles) {
-      toastRef.current.info(
-        t('input.attachments.imagesConvertedToFiles'),
-      );
-      for (const img of imageFiles) {
-        otherFiles.push(renameIfBareClipboardImage(img));
-      }
-      imageFiles.length = 0;
-    }
-
     for (const file of imageFiles) {
       addImage(file, importScope);
     }
@@ -331,6 +352,8 @@ export function useAttachmentHandling({
         );
         return;
       }
+      const targetDir = requireSessionFilesTargetDir();
+      if (!targetDir) return;
       try {
         const base64Files = await Promise.all(
           otherFiles.map(async (file) => ({
@@ -342,7 +365,7 @@ export function useAttachmentHandling({
 
         const result = await fileService.importBase64Files({
           files: base64Files,
-          targetDir: 'myagents_files',
+          targetDir,
         });
         if (!isImportScopeCurrent(importScope)) return;
 
@@ -351,25 +374,17 @@ export function useAttachmentHandling({
         }
 
         try {
-          await fileService.addGitignore({ pattern: 'myagents_files/' });
+          await fileService.addGitignore({ pattern: 'xiaojing_files/' });
         } catch {
           // Non-fatal, continue silently.
         }
 
         if (!isImportScopeCurrent(importScope)) return;
-        const cursorPos = insertReferenceText(result.files);
-
-        const batchId = undoStack.generateBatchId();
-
-        for (const filePath of result.files) {
-          undoStack.push({
-            type: 'file-reference',
-            batchId,
-            insertedText: `@${filePath} `,
-            insertPosition: cursorPos,
-            copiedFilePath: filePath,
-          });
+        const added = addFileRefs(result.files.map((referencePath) => ({ referencePath })));
+        if (added < result.files.length) {
+          toastRef.current.warning(t('input.attachments.maxFiles', { count: SESSION_FILE_MAX_MESSAGE_FILES }));
         }
+        pushFileRefUndo(result.files);
 
         if (userIntendedFileCount > 0) {
           toastRef.current.success(t('input.attachments.filesAdded', { count: userIntendedFileCount }));
@@ -382,7 +397,7 @@ export function useAttachmentHandling({
         toastRef.current.error(err instanceof Error ? err.message : t('input.attachments.fileUploadFailed'));
       }
     }
-  }, [fileService, workspacePath, addImage, undoStack, fileToBase64, isImportScopeCurrent, onWorkspaceRefresh, provider, currentModelId, isExternalRuntime, toastRef, insertReferenceText, t]);
+  }, [fileService, workspacePath, addImage, fileToBase64, isImportScopeCurrent, onWorkspaceRefresh, toastRef, t, requireSessionFilesTargetDir, addFileRefs, pushFileRefUndo]);
 
   const processDroppedFilePaths = useCallback(async (paths: string[]) => {
     const importScope = currentImportScopeRef.current;
@@ -412,20 +427,7 @@ export function useAttachmentHandling({
       }
     }
 
-    const fallbackImagesToFiles =
-      imagePaths.length > 0 &&
-      !isExternalRuntime &&
-      !modelSupportsModality(provider, currentModelId, 'image');
-
     const userIntendedPathCount = otherPaths.length;
-
-    if (fallbackImagesToFiles) {
-      toastRef.current.info(
-        t('input.attachments.imagesConvertedToFiles'),
-      );
-      otherPaths.push(...imagePaths);
-      imagePaths.length = 0;
-    }
 
     if (imagePaths.length > 0) {
       if (!attachmentSessionId) {
@@ -471,10 +473,12 @@ export function useAttachmentHandling({
     }
 
     if (otherPaths.length > 0) {
+      const targetDir = requireSessionFilesTargetDir();
+      if (!targetDir) return;
       try {
         const result = await fileService.copyPaths({
           sourcePaths: otherPaths,
-          targetDir: 'myagents_files',
+          targetDir,
           autoRename: true,
         });
         if (!isImportScopeCurrent(importScope)) return;
@@ -489,25 +493,18 @@ export function useAttachmentHandling({
         }
 
         try {
-          await fileService.addGitignore({ pattern: 'myagents_files/' });
+          await fileService.addGitignore({ pattern: 'xiaojing_files/' });
         } catch {
           // Non-fatal, continue silently.
         }
 
         if (!isImportScopeCurrent(importScope)) return;
-        const cursorPos = insertReferenceText(successfulCopies.map(f => f.targetPath));
-
-        const batchId = undoStack.generateBatchId();
-
-        for (const file of successfulCopies) {
-          undoStack.push({
-            type: 'file-reference',
-            batchId,
-            insertedText: `@${file.targetPath} `,
-            insertPosition: cursorPos,
-            copiedFilePath: file.targetPath,
-          });
+        const referencePaths = successfulCopies.map((file) => file.targetPath);
+        const added = addFileRefs(referencePaths.map((referencePath) => ({ referencePath })));
+        if (added < referencePaths.length) {
+          toastRef.current.warning(t('input.attachments.maxFiles', { count: SESSION_FILE_MAX_MESSAGE_FILES }));
         }
+        pushFileRefUndo(referencePaths);
 
         if (userIntendedPathCount > 0) {
           if (successfulCopies.length < otherPaths.length) {
@@ -527,7 +524,7 @@ export function useAttachmentHandling({
         toastRef.current.error(err instanceof Error ? err.message : t('input.attachments.fileCopyFailed'));
       }
     }
-  }, [fileService, workspacePath, addPreparedImageAttachment, undoStack, isImportScopeCurrent, onWorkspaceRefresh, provider, currentModelId, isExternalRuntime, attachmentSessionId, toastRef, insertReferenceText, t]);
+  }, [fileService, workspacePath, addPreparedImageAttachment, isImportScopeCurrent, onWorkspaceRefresh, attachmentSessionId, toastRef, t, requireSessionFilesTargetDir, addFileRefs, pushFileRefUndo]);
 
   const handleUploadButtonClick = useCallback(async () => {
     setShowPlusMenu(false);
@@ -593,6 +590,9 @@ export function useAttachmentHandling({
     images,
     setImages,
     removeImage,
+    fileRefs,
+    removeFileRef,
+    clearFileRefs,
     processDroppedFiles,
     processDroppedFilePaths,
     handleUploadButtonClick,

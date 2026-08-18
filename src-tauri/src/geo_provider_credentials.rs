@@ -21,6 +21,7 @@ const DISTRIBUTION_BASE_URL: &str = "https://vip.chaojimeijie.com/api";
 
 pub(crate) const SIDECAR_ENV_NAMES: &[&str] = &[
     "XIAOJING_ARK_API_KEY",
+    "XIAOJING_ARK_CONFIGURATION_FINGERPRINT",
     "XIAOJING_ARK_EMBEDDING_API_KEY",
     "XIAOJING_ARK_EMBEDDING_ENDPOINT_ID",
     "XIAOJING_OSS_ACCESS_KEY_ID",
@@ -368,6 +369,83 @@ fn hmac_sha256(key: &[u8], message: &[u8]) -> Vec<u8> {
     outer.finalize().to_vec()
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct PublishObjectStorageCredential {
+    pub access_key_id: String,
+    pub access_key_secret: String,
+    pub bucket: String,
+    pub region: String,
+    pub public_base_url: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct PublishDistributionCredential {
+    pub app_id: String,
+    pub secret: String,
+    pub base_url: String,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct PublishProviderCredentials {
+    pub object_storage: Option<PublishObjectStorageCredential>,
+    pub distribution: Option<PublishDistributionCredential>,
+}
+
+/// Rust-only credential projection for the deterministic PublishScheduler.
+/// Callers must never serialize, log, persist, or send this value to a Sidecar.
+pub(crate) fn load_publish_provider_credentials() -> Result<PublishProviderCredentials, String> {
+    let (oss, _) = load_service(GeoProviderServiceId::ObjectStorage)?;
+    let (distribution, _) = load_service(GeoProviderServiceId::Distribution)?;
+    let object_storage = oss
+        .as_ref()
+        .map(|value| {
+            Ok::<PublishObjectStorageCredential, String>(PublishObjectStorageCredential {
+                access_key_id: config_value(value, "accessKeyId")
+                    .ok_or("OSS AccessKey ID 未配置")?
+                    .to_string(),
+                access_key_secret: config_value(value, "accessKeySecret")
+                    .ok_or("OSS AccessKey Secret 未配置")?
+                    .to_string(),
+                bucket: config_value(value, "bucket")
+                    .ok_or("OSS Bucket 未配置")?
+                    .to_string(),
+                region: config_value(value, "region")
+                    .unwrap_or("oss-cn-beijing")
+                    .to_string(),
+                public_base_url: config_value(value, "publicBaseUrl").map(str::to_string),
+            })
+        })
+        .transpose()?;
+    let distribution = distribution
+        .as_ref()
+        .map(|value| {
+            Ok::<PublishDistributionCredential, String>(PublishDistributionCredential {
+                app_id: config_value(value, "appId")
+                    .ok_or("超级媒介 AppID 未配置")?
+                    .to_string(),
+                secret: config_value(value, "secret")
+                    .ok_or("超级媒介 Secret 未配置")?
+                    .to_string(),
+                base_url: config_value(value, "baseUrl")
+                    .unwrap_or(DISTRIBUTION_BASE_URL)
+                    .to_string(),
+            })
+        })
+        .transpose()?;
+    Ok(PublishProviderCredentials {
+        object_storage,
+        distribution,
+    })
+}
+
+pub(crate) fn publish_hmac_sha1(key: &[u8], message: &[u8]) -> Vec<u8> {
+    hmac_sha1(key, message)
+}
+
+pub(crate) fn publish_hmac_sha256(key: &[u8], message: &[u8]) -> Vec<u8> {
+    hmac_sha256(key, message)
+}
+
 pub(crate) fn inject_into_sidecar(command: &mut std::process::Command) -> Result<(), String> {
     for name in SIDECAR_ENV_NAMES {
         command.env_remove(name);
@@ -379,6 +457,14 @@ pub(crate) fn inject_into_sidecar(command: &mut std::process::Command) -> Result
 
     if let Some(value) = ark.as_ref().and_then(|value| config_value(value, "apiKey")) {
         command.env("XIAOJING_ARK_API_KEY", value);
+    }
+    if let Some(value) = ark.as_ref() {
+        let encoded =
+            serde_json::to_vec(value).map_err(|_| "GEO Provider 配置指纹生成失败".to_string())?;
+        command.env(
+            "XIAOJING_ARK_CONFIGURATION_FINGERPRINT",
+            format!("{:x}", Sha256::digest(encoded)),
+        );
     }
     if let Some(value) = embedding
         .as_ref()

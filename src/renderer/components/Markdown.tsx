@@ -20,9 +20,9 @@ import { useTranslation } from 'react-i18next';
 import CodeBlock from './markdown/CodeBlock';
 import InlineCode from './markdown/InlineCode';
 import MermaidDiagram from './markdown/MermaidDiagram';
-import { useOpenWebLink } from '@/context/BrowserPanelContext';
 import { useFileLinkAction } from '@/context/FileActionContext';
 import { useWorkspaceFileService } from '@/hooks/useWorkspaceFileService';
+import { openExternal } from '@/utils/openExternal';
 import { preprocessMarkdownContent } from '@/utils/markdownPreprocess';
 import {
   MARKDOWN_REHYPE_PLUGINS,
@@ -86,8 +86,9 @@ const REHYPE_PLUGINS_STREAMING: ComponentProps<typeof ReactMarkdown>['rehypePlug
   rehypeStreamTail as unknown as NonNullable<ComponentProps<typeof ReactMarkdown>['rehypePlugins']>[number],
 ];
 
-// Custom link component that opens links in embedded browser panel (if available)
-// or falls back to system browser. Supports text selection for copying.
+// Custom link component that routes web links to the system browser and local links
+// through the workspace file-action owner.
+// or falls back to the system browser. Supports text selection for copying.
 // Strips react-markdown's hast `node` prop so it doesn't get spread onto the DOM <a>.
 const MarkdownLink = memo(function MarkdownLink({
   href,
@@ -96,7 +97,6 @@ const MarkdownLink = memo(function MarkdownLink({
   ...props
 }: React.ComponentProps<'a'> & { node?: unknown }) {
   const fileLinkAction = useFileLinkAction();
-  const openWebLink = useOpenWebLink();
 
   const handleClick = (e: React.MouseEvent<HTMLAnchorElement>) => {
     e.preventDefault();
@@ -106,13 +106,11 @@ const MarkdownLink = memo(function MarkdownLink({
     const hasSelection = selection && selection.toString().length > 0;
 
     if (!hasSelection && href) {
-      // Cmd (macOS) / Ctrl (Win/Linux) + click bypasses the embedded browser
-      // panel and opens directly in the system default browser.
       const forceExternal = e.metaKey || e.ctrlKey;
       if (fileLinkAction?.openFileLink(href, { forceExternal })) {
         return;
       }
-      openWebLink(href, { forceExternal });
+      void openExternal(href);
     }
   };
 
@@ -390,8 +388,7 @@ function safeDecodeURIComponent(str: string): string {
  * Image component that resolves relative paths via the Rust workspace_files
  * download command. Only used when basePath is provided (file preview mode).
  *
- * Phase D.5: switched from sidecar `/agent/download` HTTP fetch to
- * `useWorkspaceFileService.readFileAsBlobUrl` invoke. The blob-URL handle
+ * Uses `useWorkspaceFileService.readFileAsBlobUrl`; the blob-URL handle
  * is the source of truth for cleanup — calling `handle.revoke()` on unmount
  * frees the object URL.
  *
@@ -413,7 +410,7 @@ function MarkdownImageInner({ src, alt, basePath, workspacePath }: {
   // CRITICAL: `basePath` is the doc's dir RELATIVE to the workspace; it MUST
   // NOT be passed as the workspace root to the hook (Rust `validate_workspace_root`
   // requires an absolute path and would reject). Pre-Phase-D.5 the sidecar
-  // resolved relative paths against its ambient `currentAgentDir`; in
+  // resolved relative paths against its ambient `currentWorkspacePath`; in
   // Phase D.5 the renderer threads `workspacePath` explicitly.
   const fileService = useWorkspaceFileService(workspacePath);
 

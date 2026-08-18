@@ -23,12 +23,10 @@
  *
  * Logging convention: callers should log the cancel reason via `console.warn`
  * with a `[Module]` prefix; Pattern 6's `withLogContext` will auto-inject
- * correlation IDs (sessionId/tabId/turnId/requestId) into the LogEntry.
+ * correlation IDs into the persisted log entry.
  */
 
 import { fetch as undiciFetch } from 'undici';
-
-import { getGeneralRequestDispatcher } from '../proxy-state';
 
 type GeneralFetchTransport = (
   url: string,
@@ -296,22 +294,12 @@ export async function cancellableFetch(
   const timeoutMs = opts?.timeoutMs ?? 30_000;
   return withAbortSignal(
     opts?.parentSignal,
-    (signal) => fetchWithGeneralProxy(url, { ...(init ?? {}), signal }),
+    async (signal) => await generalFetchTransport(url, {
+      ...(init ?? {}),
+      signal,
+    } as Parameters<typeof undiciFetch>[1]) as Response,
     { timeoutMs },
   );
-}
-
-/** Fetch through the current general network baseline without adding a timeout. */
-export async function fetchWithGeneralProxy(
-  url: string,
-  init?: RequestInit,
-): Promise<Response> {
-  const dispatcher = getGeneralRequestDispatcher();
-  const response = await generalFetchTransport(url, {
-    ...(init ?? {}),
-    dispatcher,
-  } as Parameters<typeof undiciFetch>[1]);
-  return response as unknown as Response;
 }
 
 /** Replace the transport in deterministic tests; production always uses undici. */

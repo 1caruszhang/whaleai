@@ -3,7 +3,7 @@ import { useTranslation } from 'react-i18next';
 
 /**
  * Unified "AI 启动中" boot overlay — the frosted-glass loading state shown from the
- * instant a chat is entered (Launcher→Chat) until the session is ready.
+ * instant a chat is entered until the Session is ready.
  *
  * Rendered in TWO phases so the whole entry is ONE continuous loading state:
  *   1. App's Suspense fallback while the lazy Chat chunk resolves (before mount) —

@@ -2,8 +2,9 @@ use super::*;
 
 /// Wait for a new sidecar to become healthy using TCP-level check.
 /// For initial startup, TCP check is sufficient and more reliable because:
-/// - Bun starts listening on TCP port before HTTP handler is fully ready
+/// - Node starts listening on TCP port before HTTP handler is fully ready
 /// - TCP check has been proven stable in production
+///
 /// Note: For REUSING an existing sidecar, use check_sidecar_http_health() instead
 ///
 /// `alive_check`: optional closure that returns `true` if the sidecar process is still alive.
@@ -68,10 +69,6 @@ pub(super) fn wait_for_health(
 /// passes. Returns Ok if the sidecar reports ready within `timeout_secs`,
 /// Err with the structured failure phase + error if it reports `failed`, or
 /// Err with a timeout message otherwise.
-///
-/// Tolerates older sidecar builds (no /health/ready) by treating a 404 as
-/// "ready" (best-effort backward compat — older sidecars used the bare /health
-/// as both signals).
 pub(super) fn wait_for_readiness(port: u16, timeout_secs: u64) -> Result<(), String> {
     let url = format!("http://127.0.0.1:{}/health/ready", port);
     let client = match crate::local_http::blocking_builder()
@@ -88,10 +85,6 @@ pub(super) fn wait_for_readiness(port: u16, timeout_secs: u64) -> Result<(), Str
         match client.get(&url).send() {
             Ok(resp) => {
                 let status = resp.status();
-                if status == reqwest::StatusCode::NOT_FOUND {
-                    // Older sidecar; treat as ready.
-                    return Ok(());
-                }
                 if status.is_success() {
                     return Ok(());
                 }

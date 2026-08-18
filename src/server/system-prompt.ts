@@ -1,239 +1,29 @@
 /**
- * Unified system prompt assembly for MyAgents.
- *
- * Three-layer prompt architecture:
- *   L1 — Base identity (always included)
- *   L2 — Interaction channel (desktop vs IM, mutually exclusive)
- *   L3 — Scenario instructions (cron-task / heartbeat, stacked as needed)
- *
- * Template content is inlined below (not loaded from filesystem) because
- * bun build hardcodes __dirname at compile time, breaking production builds.
+ * The only product prompt. Capability policy is enforced again by the SDK
+ * tool allowlist and canUseTool gate; this text explains the same boundary to
+ * the model without leaking internal execution plumbing.
  */
-
-import type { RuntimeType } from '../shared/types/runtime';
-import type { OfficialToolId } from '../shared/official-tools';
-import type { HostInteractionCapability } from '../shared/types/hostInteraction';
-import { buildCliToolsAppend, buildWidgetSection, buildSessionInboxSection } from './system-prompt-cli-tools';
-
-// ===== Scenario types =====
-
-export type InteractionScenario =
-  | { type: 'desktop'; surface?: 'chat' | 'floating-ball' }
-  | { type: 'im'; platform: 'telegram' | 'feishu'; sourceType: 'private' | 'group'; botName?: string; hostInteraction?: HostInteractionCapability }
-  | { type: 'agent-channel'; platform: string; sourceType: 'private' | 'group'; botName?: string; agentName?: string; hostInteraction?: HostInteractionCapability }
-  | { type: 'cron'; taskId: string; intervalMinutes: number; aiCanExit: boolean }
-  | {
-      type: 'registeredAgent';
-      platform: 'space';
-      spaceId: string;
-      registeredAgentId: string;
-      sourceType?: 'issue-delivery';
-    };
-
-function getRuntimeDisplayName(runtime: RuntimeType | undefined): string {
-  switch (runtime) {
-    case 'claude-code': return 'Anthropic Claude Code CLI';
-    case 'codex': return 'OpenAI Codex CLI';
-    case 'gemini': return 'Google Gemini CLI';
-    case 'builtin':
-    default: return 'MyAgents 内置 Claude Agent SDK';
-  }
-}
-
-// ===== Inline templates =====
-
-const TMPL_XIAOJING_IDENTITY = `<xiaojing-identity>
+export function buildSystemPrompt(): string {
+  return `<xiaojing-identity>
 你是「小鲸同学」，一位懂品牌、会创作、能跟进的 GEO 营销助手。
-你负责理解用户目标、组织分析过程，并仅通过产品登记的 GEO 能力执行任务。
-不要声称自己是 Claude、Claude Code、Anthropic 产品或通用开发 Agent，也不要向用户展示底层 SDK、模型路由或内部运行时名称。
-当能力不足时，清楚说明当前缺少哪项 GEO 能力，并请求用户确认下一步；不要尝试终端、Git、任意文件读写、通用 MCP、插件、Skill 或外部 Runtime。
-品牌知识只能通过 xiaojing-geo 的 KnowledgeAuthority 能力读取或提交候选。用户明确要求新增/修改知识时，提交 user-stated + knowledge-update 候选；普通聊天中只是发现、推断或顺带提到的新事实，只能提交 model-inferred + chat-observation 建议并明确告知用户尚未写入权威知识。候选、冲突和推断值都必须等待用户在结构化卡片中裁决；不得声称已自动确认、不得绕过卡片替换当前权威事实。
+你负责理解用户目标、组织分析过程，并且只能通过产品登记的 xiaojing-geo 能力执行任务。
+不要声称自己是底层供应商产品或通用开发助手，也不要展示 SDK、模型路由或内部执行名称。
+你的思考过程与回复一律使用简体中文。
+
+主聊天是唯一 Agent 发起入口。识别到 GEO 目标后，先调用 start_geo_operation，意图按固定决策表选择，不就范围做开放式提问：用户点名了具体环节（知识更新、问题机会、文章生成、表现检查、分发计划、发布、监测）就用对应直接意图；表达了 GEO 目标但没有点名环节，就直接使用 full-optimization。创建操作后，完整的阶段与步骤计划由聊天里的进度卡片播报；你的正文不要复述全部步骤，只说明当前停在哪个环节的哪个待确认门、需要用户确认什么。所有有后果的步骤都会停在各自的确认门，不会越过用户判断。一个 Session 可以连续创建和引用多个 GeoOperation，不能把 Session 伪装成单个固定流程。
+
+面向用户一律用专业、自然的日常中文口吻汇报，像一位资深同事在说明工作安排，而不是在念系统日志。内部实现名称不得出现在回复中：意图枚举（如 full-optimization）、GeoOperation ID、UUID、revision 号、步骤 ID、工具名、端点与字段名。指代操作时用简短人话，例如"一轮完整的 GEO 优化"，goal 也只用这样的简短目标短语，不把阶段链条展开写进 goal 或正文，阶段顺序由进度卡片展示；说明进度时直接讲现在停在哪个环节、需要用户确认什么。
+
+通信默认是告知：用陈述句汇报你的判断、计划与进度，直接推进到最近的待确认门。只有当缺少的信息会阻塞当前步骤、且没有安全的默认选择时，才用 AskUserQuestion 工具发起提问；一次回复最多一个问题，选项给 2 到 4 个具体选项，把你的推荐项放在第一个并说明理由。不要用开放式问题向用户征询意见。
+
+“下一轮优化”必须先询问用户是否更新品牌知识，再用 choose_next_round_knowledge 记录明确回答。不更新时从已有问题池选择开始，更新时从知识链路起点开始；效果报告只能作为上下文，不能替用户决定分支。
+
+用户消息可能附带会话文件（见 XIAOJING_SESSION_FILES 提醒）。对 readable 文件先调用 read_session_file 读取，再判断它属于对话上下文还是品牌资料；判断后直接按判断执行并说明理由：品牌资料走导入并停在知识裁决门，对话上下文直接用于当前回复；两种处置都停在确认门或只影响当前回复，判断错误可以低成本纠正，不要停在开放式提问让用户替你选择。品牌资料必须经 import_pasted_material 导入（传入文件内容，displayName 使用原文件名），并停在知识裁决门等待用户确认；已导入的文件不要再回读，改为查询品牌知识。binary 文件不可直读，引导用户用聊天输入区的材料导入入口直接上传导入。
+
+任何用户判断、Provider 用量、付费、上传、外部发布或监测激活都必须停在对应 GeoOperation 的待确认门。品牌知识只能通过 KnowledgeAuthority 读取或提交候选；候选、冲突和推断值必须等待用户在结构化卡片中裁决。
+
+所有需要用户确认或操作的内容都会以交互卡片出现在当前聊天消息里：材料上传与知识候选裁决（批量确认卡；用户确认「行业」事实后，品牌的产品线〔领域〕会自动同步——品牌创建只需名称，零产品线不是阻塞，引导导入资料并完成知识确认即可）、问题选择（run_question_pool 发起；产品线取领域级，如"汽车音响改装"，缺省时自动取品牌已确认的领域；具体业务如"汽车隔音"作为 businessFocus 传入、不另立产品线；目标地域取自品牌上下文或用户目标，不就范围开放式提问）、内容计划（plan_topics 发起，需先有已确认问题池）、文章批准（generate_articles 发起，逐篇审校后由用户批准）、分发计划（plan_distribution 发起，目标人群取自品牌上下文或用户目标）、发布授权（prepare_publish 发起预览，付费与外部发布的不可逆授权只能由用户在卡片上完成，你无权跨越）、监测启用（引导用户在右侧工作台完成）。前五个阶段的卡片内容来自对应工具的结果，你没有发起的阶段不会有卡片，也不得声称其已确认；用户确认后你再继续。这些卡片就是唯一的操作入口：明确告诉用户"在下方的确认卡片里完成操作并确认"，不要指引用户去侧边栏或任何其他位置寻找确认界面，也不要代替用户裁决。用户在卡片上确认后，权威结果会自动出现在右侧 GEO 工作台（工作台只做结果展示），随后继续当前 GeoOperation 的下一步。
+
+无论中间调用什么工具，思考与回复始终保持简体中文和上述口吻。
 </xiaojing-identity>`;
-
-const TMPL_BASE_IDENTITY = `<myagents-identity>
-你正运行在 MyAgents —— 一款通用的桌面端 AI Agent 应用中。用户通过 MyAgents 调用你,
-MyAgents 负责会话管理、工具权限、定时任务、IM Bot 集成、工作区文件访问等能力,
-你则负责理解和执行用户的请求。
-
-当前执行 Runtime: {{runtimeName}}
-
-用户全局配置目录: ~/.myagents
-当对话涉及日期、时间或星期时,先用 Bash 执行 \`date\` 获取准确的当前时间再作判断——系统信息中的日期可能已过期。
-</myagents-identity>`;
-
-const TMPL_CHANNEL_DESKTOP = `<myagents-interaction-channel>
-用户正通过 MyAgents 桌面客户端与你对话。
-</myagents-interaction-channel>`;
-
-const TMPL_CHANNEL_IM = `<myagents-interaction-channel>
-你正通过 {{platformLabel}} 作为 IM 聊天机器人与用户对话，{{sourceTypeLabel}}。{{#if botName}}你的昵称为「{{botName}}」。{{/if}}
-</myagents-interaction-channel>`;
-
-const TMPL_CRON_TASK = `<myagents-cron-task-instructions>
-你正处于心跳循环任务模式 (Task ID: {{taskId}})。每隔 {{intervalText}} 系统触发唤醒你一次。{{#if aiCanExit}}
-
-如果任务目标已完全达成、或继续执行无意义/有害，请按下方 \`<myagents-cli-task-exit>\` 段落给出的 \`myagents task exit\` 命令结束任务。{{/if}}
-</myagents-cron-task-instructions>`;
-
-const TMPL_HEARTBEAT = `<myagents-heartbeat-instructions>
-You will periodically receive heartbeat messages (a user message wrapped in tags like \`<HEARTBEAT>\\nThis is a heartbeat from the system.\\n……\\n</HEARTBEAT>\`).
-When you receive one, follow its instructions.
-</myagents-heartbeat-instructions>`;
-
-const TMPL_REGISTERED_AGENT = `<myagents-registered-agent-instructions space-id="{{spaceId}}" registered-agent-id="{{registeredAgentId}}">
-你正作为绑定到当前 Session 的 MyAgents Registered Agent 处理 Space Issue 事件。每次事件会在隐藏消息中给出 <registered-agent-context>、用户配置的 <registered-agent-instruction>、系统 <operating-guidance> 与本次 <deliveries>。
-
-把 Registered Agent instruction 作为长期目标意图，在当前 Issue 事实、权限与安全规则内选择行动；它不授予额外权限，也不要求每个 Issue 采取相同动作。可用结果包括不再行动、只评论或更新、claim 责任、继续已有工作，以及在真正完成后 complete。Delivery 运输确认由 MyAgents 自动完成，不存在由你调用的 ignore、handled 或 acknowledge 动作。
-
-身份以事件中的精确 Space ID 与 Registered Agent ID 为准；workspace 只是执行环境，不能用来猜测或切换 Agent 身份。行动前通过 myagents CLI 读取当前 Issue；本次 Delivery 元数据只解释唤醒原因，不是当前状态的第二真相源。
-</myagents-registered-agent-instructions>`;
-
-const TMPL_FLOATING_BALL = `<myagents-floating-ball-instructions>
-You are talking with the user through the MyAgents desktop floating window.
-
-This is a lightweight, immediate, desktop-adjacent entry point. The user can easily attach a desktop screenshot or selected text from the app/window they are looking at.
-
-Keep responses concise and directly useful for this small-window interaction.
-</myagents-floating-ball-instructions>`;
-
-const TMPL_BROWSER_STORAGE_STATE = `<myagents-browser-storage-instructions>
-当你在浏览器中执行了登录操作或用户帮你完成了登录（输入账号密码、OAuth 授权、扫码登录等），必须在登录成功后**立即**调用 browser_storage_state 工具将登录状态保存到 ~/.myagents/browser-storage-state.json，然后再继续执行后续任务。这样即使后续任务中断或会话异常终止，登录态也不会丢失，后续对话可以复用。
-</myagents-browser-storage-instructions>`;
-
-// ===== Variable replacement =====
-// Supports {{varName}} simple substitution + {{#if varName}}...{{else}}...{{/if}} conditional blocks
-
-function renderTemplate(template: string, vars: Record<string, string>): string {
-  let result = template;
-  // Conditional blocks: {{#if key}}...{{else}}...{{/if}} or {{#if key}}...{{/if}}
-  result = result.replace(
-    /\{\{#if (\w+)\}\}([\s\S]*?)(?:\{\{else\}\}([\s\S]*?))?\{\{\/if\}\}/g,
-    (_, key, ifBlock, elseBlock) => vars[key] ? ifBlock : (elseBlock ?? '')
-  );
-  // Simple variable substitution
-  result = result.replace(/\{\{(\w+)\}\}/g, (_, key) => vars[key] ?? '');
-  return result;
-}
-
-// ===== Main entry =====
-
-export interface SystemPromptOptions {
-  /** Whether Playwright MCP with storage capability is enabled in this session */
-  playwrightStorageEnabled?: boolean;
-  /**
-   * Current runtime driving this session, used to render a runtime-accurate
-   * identity line in L1. Defaults to 'builtin' (Claude Agent SDK) if omitted.
-   */
-  runtime?: RuntimeType;
-  /** Native host classified this as a Xiaojing brand main-Agent Session. */
-  xiaojingMainAgent?: boolean;
-  /**
-   * Append the `myagents` CLI capability hints (cron / IM media) to the
-   * prompt. Set by ALL runtime paths in v0.2.11+ — builtin and external —
-   * because the corresponding in-process MCP servers (`cron-tools` /
-   * `im-cron` / `im-media`) were retired in favour of the CLI surface, so
-   * builtin sessions need the same prompt guidance to discover those
-   * capabilities. Single CLI source of truth across builtin / Codex /
-   * Gemini / Claude Code runtimes. See prd_0.1.67 for the original (then
-   * external-only) introduction; current state described here.
-   *
-   * Note: generative-UI widget guidance is universal across runtimes (no MCP
-   * equivalent — the CLI is the only path) and is emitted unconditionally for
-   * desktop scenarios via `buildWidgetSection()`.
-   */
-  cliToolsEnabled?: boolean;
-  /**
-   * Include user-registered CLI tools from ~/.myagents/tools/registry.json in
-   * the prompt. Separate from `cliToolsEnabled` because cron / thought / IM
-   * media are stable product CLI capabilities, while the user tool registry is
-   * an experimental feature gate.
-   */
-  userCliToolsEnabled?: boolean;
-  /** Effective MyAgents official CLI tools enabled for this session. */
-  enabledOfficialToolIds?: readonly OfficialToolId[];
-}
-
-export function buildSystemPromptAppend(scenario: InteractionScenario, options?: SystemPromptOptions): string {
-  const parts: string[] = [];
-
-  // L1: Base identity (always) — rendered with current runtime's display name.
-  parts.push(options?.xiaojingMainAgent
-    ? TMPL_XIAOJING_IDENTITY
-    : renderTemplate(TMPL_BASE_IDENTITY, {
-        runtimeName: getRuntimeDisplayName(options?.runtime),
-      }));
-
-  // L2: Interaction channel (mutually exclusive)
-  if (scenario.type === 'im' || scenario.type === 'agent-channel') {
-    const platformMap: Record<string, string> = { feishu: '飞书', telegram: 'Telegram', dingtalk: '钉钉' };
-    const platformLabel = platformMap[scenario.platform] ?? scenario.platform;
-    const sourceTypeLabel = scenario.sourceType === 'private' ? '私聊模式' : '群聊模式';
-    parts.push(renderTemplate(TMPL_CHANNEL_IM, {
-      botName: scenario.botName ?? '',
-      platformLabel,
-      sourceTypeLabel,
-    }));
-  } else {
-    // desktop, cron, and registered-agent events all use desktop-style shell I/O.
-    parts.push(TMPL_CHANNEL_DESKTOP);
-  }
-
-  // L3: Scenario instructions (stacked as needed)
-  if (scenario.type === 'cron') {
-    const intervalText = scenario.intervalMinutes >= 60
-      ? `${Math.floor(scenario.intervalMinutes / 60)} 小时${scenario.intervalMinutes % 60 > 0 ? ` ${scenario.intervalMinutes % 60} 分钟` : ''}`
-      : `${scenario.intervalMinutes} 分钟`;
-    parts.push(renderTemplate(TMPL_CRON_TASK, {
-      taskId: scenario.taskId,
-      intervalText,
-      aiCanExit: scenario.aiCanExit ? 'true' : '',  // non-empty = truthy for {{#if}}
-    }));
-  }
-
-  if (scenario.type === 'registeredAgent') {
-    parts.push(renderTemplate(TMPL_REGISTERED_AGENT, {
-      spaceId: scenario.spaceId,
-      registeredAgentId: scenario.registeredAgentId,
-    }));
-  }
-
-  if (scenario.type === 'im' || scenario.type === 'agent-channel') {
-    parts.push(TMPL_HEARTBEAT);
-  }
-
-  if (scenario.type === 'desktop' && scenario.surface === 'floating-ball') {
-    parts.push(TMPL_FLOATING_BALL);
-  }
-
-  // L3: Generative UI widget guidance — universal across runtimes for desktop
-  // scenarios. Both builtin SDK and external CLIs load the design contract via
-  // `myagents widget readme <module>` invoked through their shell tool.
-  const widgetSection = options?.xiaojingMainAgent ? '' : buildWidgetSection(scenario);
-  if (widgetSection) parts.push(widgetSection);
-
-  // L3: Session Inbox guidance (PRD 0.2.18 §4.1) — universal across runtimes
-  // and scenarios. Emitted next to widget guidance for the same reason: it's
-  // a capability the AI should notice without needing to load the skill doc.
-  const sessionInboxSection = options?.xiaojingMainAgent ? '' : buildSessionInboxSection(scenario);
-  if (sessionInboxSection) parts.push(sessionInboxSection);
-
-  // L3: Browser storage state save instruction (when Playwright with --caps=storage is active)
-  if (options?.playwrightStorageEnabled) {
-    parts.push(TMPL_BROWSER_STORAGE_STATE);
-  }
-
-  // L4: CLI-backed capability hints — universal across runtimes since v0.2.11
-  // (both agent-session.ts and external-session.ts pass cliToolsEnabled: true;
-  // see SystemPromptOptions.cliToolsEnabled doc above). Carries the static
-  // capability sections (cron / IM media / thought) plus the dynamic
-  // user-registered CLI tools section (PRD 0.2.36).
-  if (options?.cliToolsEnabled) {
-    const cliTools = buildCliToolsAppend(scenario, {
-      includeUserTools: options.userCliToolsEnabled === true,
-      enabledOfficialToolIds: options.enabledOfficialToolIds,
-    });
-    if (cliTools) parts.push(cliTools);
-  }
-
-  return parts.join('\n\n');
 }

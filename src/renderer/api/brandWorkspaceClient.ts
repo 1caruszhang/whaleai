@@ -1,4 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
+import type { GeoSessionStatus } from '../../shared/geo/notification';
+import type { SessionDeleteResult } from './tauriClient';
 
 export type BrandSessionTitleSource = 'default' | 'auto' | 'user';
 
@@ -19,12 +21,7 @@ export interface BrandSession {
   createdAt: string;
   lastActiveAt: string;
   archivedAt?: string | null;
-}
-
-export interface BrandSessionDraft {
-  id: string;
-  workspaceId: string;
-  workspacePath: string;
+  geoStatus?: GeoSessionStatus | null;
 }
 
 export interface BrandWorkspaceBootstrap {
@@ -64,10 +61,6 @@ export function createBrandWorkspace(
 
 export function switchBrandWorkspace(workspaceId: string): Promise<BrandWorkspace> {
   return invoke('cmd_brand_workspace_switch', { workspaceId });
-}
-
-export function createBrandSessionDraft(workspaceId: string): Promise<BrandSessionDraft> {
-  return invoke('cmd_brand_session_draft', { workspaceId });
 }
 
 export function commitBrandSession(
@@ -112,4 +105,54 @@ export function previewBrandSessionDeletion(
   sessionId: string,
 ): Promise<BrandSessionDeletionPreview> {
   return invoke('cmd_brand_session_delete_preview', { workspaceId, sessionId });
+}
+
+export interface BrandWorkspaceDeletionScope {
+  sessions: number;
+  chatTranscripts: number;
+  knowledgeFacts: number;
+  operations: number;
+  articles: number;
+  materials: number;
+  monitorPlans: number;
+}
+
+/** 品牌删除预览：sessionIds 供 App 计算可释放 Tab 与卸载范围。 */
+export interface BrandWorkspaceDeletionPreview {
+  workspaceId: string;
+  name: string;
+  sessionIds: string[];
+  scope: BrandWorkspaceDeletionScope;
+  confirmationToken: string;
+}
+
+export interface BrandReleasableTab {
+  sessionId: string;
+  tabId: string;
+}
+
+export function previewBrandWorkspaceDeletion(
+  workspaceId: string,
+): Promise<BrandWorkspaceDeletionPreview> {
+  return invoke('cmd_brand_workspace_delete_preview', { workspaceId });
+}
+
+function rejectionMessage(error: unknown): string | undefined {
+  return typeof error === 'string' && error.trim() ? error : undefined;
+}
+
+export async function deleteBrandWorkspace(
+  workspaceId: string,
+  confirmationToken: string,
+  releasableTabs: readonly BrandReleasableTab[],
+): Promise<SessionDeleteResult> {
+  try {
+    return await invoke<SessionDeleteResult>('cmd_brand_workspace_delete', {
+      workspaceId,
+      confirmationToken,
+      releasableTabs: [...releasableTabs],
+    });
+  } catch (error) {
+    return { deleted: false, reason: 'unexpected', message: rejectionMessage(error) };
+  }
 }

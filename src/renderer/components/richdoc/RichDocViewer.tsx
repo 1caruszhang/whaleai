@@ -4,8 +4,8 @@
  * Responsibilities (the sub-viewers stay dumb):
  *  - Fetch bytes via the existing Rust `cmd_workspace_download_file` channel
  *    (base64, ≤25MB). RichDocViewer is keyed by `path` at the mount site, so a
- *    split-view file switch remounts it with fresh state instead of showing the
- *    previous document; a `cancelled` flag drops a fetch that resolves post-unmount.
+ *    file switch remounts it with fresh state; a `cancelled` flag drops a fetch
+ *    that resolves post-unmount.
  *  - Unified state machine: loading / too-large / error / ready. Both the Rust
  *    "max 25 MB" rejection and any sub-viewer parse failure degrade to the same
  *    "open with default app" affordance.

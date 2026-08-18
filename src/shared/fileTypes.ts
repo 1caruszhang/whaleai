@@ -4,7 +4,7 @@
  * Used by both frontend and backend for consistent file type detection.
  */
 
-/** Image file extensions that should be treated as image attachments (not copied to myagents_files) */
+/** Image file extensions that should be treated as image attachments (not copied to xiaojing_files) */
 export const IMAGE_EXTENSIONS = new Set([
   'png',
   'jpg',
@@ -73,7 +73,7 @@ export function isImageMimeType(mimeType: string): boolean {
  * Known binary file extensions that cannot be previewed as text.
  * Strategy: blocklist binary → everything else is assumed text-previewable.
  * This covers far more file types than a text allowlist ever could
- * (.dev.vars, .env.dev, Makefile, LICENSE, .tool-versions, etc.).
+ * (.dev.vars, .env.dev, Makefile, README, .tool-versions, etc.).
  */
 export const BINARY_EXTENSIONS = new Set([
   // Images (superset of IMAGE_EXTENSIONS — includes raw/vector formats)
@@ -105,10 +105,10 @@ export const BINARY_EXTENSIONS = new Set([
  * Uses a binary-blocklist strategy: any file that is NOT a known binary format
  * and NOT an image is considered previewable. This naturally covers dotfiles
  * (.env, .gitignore), multi-dot names (.dev.vars, .env.dev), and extensionless
- * files (Makefile, LICENSE, Dockerfile).
+ * files (Makefile, README, Dockerfile).
  */
 export function isPreviewable(filename: string): boolean {
-  // Extensionless files (Makefile, Dockerfile, LICENSE, etc.) are text
+  // Extensionless files (Makefile, Dockerfile, README, etc.) are text
   const ext = getFileExtension(filename);
   if (!ext || ext === filename.toLowerCase()) return true;
   return !BINARY_EXTENSIONS.has(ext);

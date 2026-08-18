@@ -1,6 +1,5 @@
 // Sidecar process management module
-// Handles spawning, monitoring, and shutting down multiple Bun backend server instances
-// Supports per-Tab isolation with independent Sidecar processes
+// Handles spawning, monitoring, and shutting down one Node Sidecar per Session.
 
 use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader};
@@ -25,13 +24,9 @@ use crate::proxy_config;
 pub(crate) mod background;
 pub(crate) mod cleanup;
 pub(crate) mod commands;
-pub(crate) mod cron_execute;
 pub(crate) mod health;
 pub(crate) mod instances;
-pub(crate) mod legacy;
 pub(crate) mod manager;
-pub(crate) mod proxy;
-pub(crate) mod runtime_identity;
 pub(crate) mod session_lifecycle;
 pub(crate) mod shutdown;
 pub(crate) mod spawn;
@@ -42,81 +37,37 @@ use background::check_sidecar_session_state;
 #[allow(unused_imports)]
 pub use background::{
     cancel_background_completion, cmd_cancel_background_completion, cmd_get_background_sessions,
-    cmd_start_background_completion, start_background_completion,
-    start_headless_background_completion, BackgroundCompletionResult,
+    cmd_start_background_completion, start_background_completion, BackgroundCompletionResult,
 };
-use cleanup::CHILD_CLEANUP_PATTERNS;
 pub use cleanup::{
-    cleanup_stale_sidecars, cleanup_stale_sidecars_preamble, init_startup_cleanup_barrier,
-    mark_startup_cleanup_done, recover_proxy_spills_after_startup_cleanup,
-    wait_for_startup_cleanup,
+    cleanup_stale_sidecars, init_startup_cleanup_barrier, mark_startup_cleanup_done,
+    recover_proxy_spills_after_startup_cleanup, wait_for_startup_cleanup,
 };
-use cleanup::{remove_global_port_file, write_global_port_file, STARTUP_CLEANUP_PATTERNS};
 #[allow(unused_imports)]
 pub use commands::cmd_reconcile_session_tab_activation;
-#[allow(unused_imports)]
-pub use cron_execute::{
-    ensure_goal_sidecar_owner, execute_cron_task, execute_goal_turn, CronExecutePayload,
-    CronExecuteResponse, GoalExecutePayload, GoalExecuteResponse,
-};
 use health::{check_sidecar_http_health, wait_for_health, wait_for_readiness};
 #[cfg(windows)]
 pub(crate) use instances::restart_xiaojing_session_sidecars;
 pub use instances::{
-    forward_terminal_events_to_renderer, get_tab_server_url, get_tab_sidecar_status,
-    monitor_global_sidecar, monitor_session_sidecars, monitor_turn_wake_lock, start_global_sidecar,
-    start_tab_sidecar, stop_tab_sidecar,
-};
-pub use legacy::{
-    check_process_alive, ensure_sidecar_running, get_sidecar_status, restart_sidecar,
-    start_sidecar, stop_sidecar,
+    forward_terminal_events_to_renderer, monitor_session_sidecars, monitor_turn_wake_lock,
 };
 #[allow(unused_imports)]
 pub use manager::create_sidecar_manager;
 pub(crate) use manager::FrontendSidecarBinding;
-pub use manager::{
-    create_sidecar_state, LegacySidecarConfig, ManagedSidecar, ManagedSidecarManager,
-    SidecarManager, SidecarStatus,
-};
-#[allow(unused_imports)]
-pub use proxy::cmd_propagate_proxy;
-#[allow(unused_imports)]
-pub use runtime_identity::cmd_can_restore_session;
-pub(crate) use runtime_identity::resolve_agent_runtime_identity_by_id_from_config;
-#[cfg(test)]
-use runtime_identity::resolve_session_runtime_identity_from_json;
-#[allow(unused_imports)]
-use runtime_identity::{
-    resolve_agent_runtime_from_config, resolve_agent_runtime_identity_from_config,
-    resolve_session_runtime_identity_full_from_json, validate_sidecar_runtime_invariant,
-    RuntimeIdentity,
-};
-#[allow(unused_imports)]
-pub use runtime_identity::{
-    resolve_session_runtime_identity, resolve_session_runtime_identity_full,
-};
+pub use manager::{ManagedSidecarManager, SidecarManager};
 pub(crate) use session_lifecycle::{
-    acquire_session_lifecycle, ensure_session_sidecar_with_lifecycle,
-    ensure_session_sidecar_with_runtime_identity_override,
-    ensure_session_sidecar_with_runtime_identity_override_lifecycle,
-    ensure_session_sidecar_with_runtime_identity_override_lifecycle_held,
-    finish_runtime_drift_transition, finish_session_owner_release, has_persisted_session_owner,
-    SessionLifecycleGuard,
+    acquire_session_lifecycle, ensure_session_sidecar, ensure_session_sidecar_with_lifecycle,
+    finish_session_owner_release,
 };
 #[allow(unused_imports)]
 pub use session_lifecycle::{
-    cmd_delete_session_if_unowned, cmd_ensure_session_sidecar, cmd_get_session_generation,
-    cmd_get_session_port, cmd_has_session_sidecar, cmd_release_session_sidecar,
-    cmd_release_tab_session, cmd_session_has_persistent_owners, cmd_upgrade_session_id,
-    get_session_generation, get_session_sidecar_port, has_session_sidecar, release_session_sidecar,
-    EnsureSidecarResult,
+    cmd_delete_session_if_unowned, cmd_ensure_session_sidecar, cmd_release_tab_session,
+    cmd_session_has_persistent_owners, release_session_sidecar, EnsureSidecarResult,
 };
 pub use shutdown::{
-    begin_app_exit_shutdown, begin_lifecycle_spawn_permit, begin_update_shutdown,
-    is_update_shutdown_in_progress, shutdown_for_update_verified, stop_all_sidecars,
-    LifecycleSpawnPermit,
+    begin_app_exit_shutdown, begin_lifecycle_spawn_permit, is_app_shutdown_in_progress,
+    stop_all_sidecars,
 };
-pub use spawn::find_node_executable_pub;
 pub(crate) use spawn::normalize_external_path;
 use spawn::{
     diagnose_immediate_exit, diagnose_node_not_found, find_node_executable, find_server_script,
@@ -125,11 +76,7 @@ use spawn::{
 pub(crate) use stdio::{classify_sidecar_stderr, SidecarStderrLevel};
 #[allow(unused_imports)]
 pub use types::SidecarInfo;
-use types::{
-    decide_runtime_identity_drift_result, normalize_runtime_name, normalize_runtime_source_name,
-    owner_prefers_live_agent_runtime, resolve_runtime_for_owner, sidecar_removal_event_policy,
-    ExistingSidecarReuse,
-};
+use types::{sidecar_removal_event_policy, ExistingSidecarReuse};
 
 /// Probe the next process-wide Sidecar port without retaining lifecycle state.
 /// Callers clone the allocator handle while the manager is locked, then perform
@@ -170,16 +117,16 @@ fn next_sidecar_port_candidate(counter: &AtomicU16) -> u16 {
     }
 }
 pub(crate) use types::{
-    DispatchDrain, DispatchGate, DispatchLease, DispatchReplacement, SessionCompletionClaim,
-    SessionGenerationDrain, SidecarRetirement,
+    DispatchDrain, DispatchGate, DispatchLease, SessionCompletionClaim, SessionGenerationDrain,
+    SidecarRetirement,
 };
-pub use types::{RuntimeDriftResult, SessionSidecar, SidecarInstance, SidecarOwner, SidecarState};
+pub use types::{SessionSidecar, SidecarOwner, SidecarState};
 
 // Ensure file descriptor limit is increased only once (unix only)
 #[cfg(unix)]
 static RLIMIT_INIT: Once = Once::new();
 
-/// Increase file descriptor limit to prevent "low max file descriptors" error from Bun
+/// Increase the file descriptor limit for the long-lived Node Sidecar.
 /// This is especially important on macOS where the default soft limit is often 2560
 #[cfg(unix)]
 fn ensure_high_file_descriptor_limit() {
@@ -245,62 +192,18 @@ const HEALTH_CHECK_DELAY_CAP_MS: u64 = 500;
 const HEALTH_CHECK_DELAY_START_MS: u64 = 50;
 const HEALTH_CHECK_TIMEOUT_MS: u64 = 100;
 // HTTP health check for existing sidecar.
-// 2000ms accommodates Windows systems under startup load (Defender, proxy, Plugin Bridge init).
-// Previously 500ms which caused false "unhealthy" during busy startup windows.
+// 2000ms accommodates Windows systems under startup load.
 const HTTP_HEALTH_CHECK_TIMEOUT_MS: u64 = 2000;
-// Grace period after sidecar creation during which the health monitor skips checks.
-// Prevents the monitor from killing a sidecar that's still completing its initial startup
-// (TCP health check, Bun init, Plugin Bridge, etc.), especially on Windows with Defender.
-const STARTUP_GRACE_SECS: u64 = 45;
 // Port range: 500 ports (31415-31914)
 const PORT_RANGE: u16 = 500;
-// Special identifier for global sidecar (used by Settings page)
-pub const GLOBAL_SIDECAR_ID: &str = "__global__";
 // Process identification marker (used to identify our sidecar processes)
 // This marker is added to all sidecar commands for reliable process identification
-const SIDECAR_MARKER: &str = "--myagents-sidecar";
-const SESSION_DELETE_AUTHORITY_ENV: &str = "MYAGENTS_SESSION_DELETE_AUTHORITY";
-const SESSION_DELETE_AUTHORITY_HEADER: &str = "X-MyAgents-Session-Delete-Authority";
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum SidecarProcessRole {
-    Global,
-    Session,
-}
-
-impl SidecarProcessRole {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Global => "global",
-            Self::Session => "session",
-        }
-    }
-}
-
-fn append_sidecar_role_arg(cmd: &mut std::process::Command, role: SidecarProcessRole) {
-    cmd.arg("--sidecar-role").arg(role.as_str());
-}
-
-fn configure_session_delete_authority(
-    cmd: &mut std::process::Command,
-    role: SidecarProcessRole,
-) -> Option<String> {
-    if role != SidecarProcessRole::Global {
-        return None;
-    }
-    let token = uuid::Uuid::new_v4().to_string();
-    cmd.env(SESSION_DELETE_AUTHORITY_ENV, &token);
-    Some(token)
-}
-
-/// Append the shared Node entrypoint argv used by both generic/global and
-/// Session-centric spawn paths. Keeping role serialization in this production
-/// builder makes a missing role impossible in either caller.
+const SIDECAR_MARKER: &str = "--xiaojing-sidecar";
+/// Append the canonical Session Sidecar entrypoint argv.
 fn append_sidecar_entrypoint_args(
     cmd: &mut std::process::Command,
     script_path: &std::path::Path,
     port: u16,
-    role: SidecarProcessRole,
 ) {
     if script_path.extension().and_then(|s| s.to_str()) == Some("ts") {
         cmd.arg("--import").arg("tsx/esm");
@@ -309,26 +212,56 @@ fn append_sidecar_entrypoint_args(
         .arg("--port")
         .arg(port.to_string())
         .arg(SIDECAR_MARKER);
-    append_sidecar_role_arg(cmd, role);
 }
 
+// ===== Crashed Node Tracking =====
+// When a bundled Node.js crashes with STATUS_ACCESS_VIOLATION (0xC0000005) on Windows —
+// usually a missing VC++ runtime DLL or some AV-injection incompatibility — mark it as
+// crashed so subsequent spawn attempts fail closed instead of repeatedly launching it.
+static CRASHED_NODE_PATHS: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+
+#[allow(dead_code)] // Only called from #[cfg(windows)] blocks; harmless on other platforms
+fn mark_node_as_crashed(path: &std::path::Path) {
+    let normalized = normalize_external_path(path.to_path_buf());
+    // unwrap_or_else recovers from Mutex poisoning — the body is trivial (Vec::push),
+    // so the data is still consistent even if a previous holder panicked.
+    let mut paths = CRASHED_NODE_PATHS.lock().unwrap_or_else(|e| e.into_inner());
+    if !paths.iter().any(|p| p == &normalized) {
+        paths.push(normalized.clone());
+        ulog_warn!(
+            "[sidecar] Marked node as crashed (will try system fallback on next attempt): {:?}",
+            normalized
+        );
+    }
+}
+
+fn is_node_crashed(path: &std::path::Path) -> bool {
+    let normalized = normalize_external_path(path.to_path_buf());
+    let paths = CRASHED_NODE_PATHS.lock().unwrap_or_else(|e| e.into_inner());
+    paths.iter().any(|x| x == &normalized)
+}
+
+/// On Windows, check if the process exited with STATUS_ACCESS_VIOLATION (0xC0000005)
+/// and mark the bundled Node binary as crashed for this process lifetime.
+#[cfg(target_os = "windows")]
+fn maybe_mark_crashed_node(status: &std::process::ExitStatus, node_path: &std::path::Path) {
+    let code = status.code().unwrap_or(0) as u32;
+    if code == 0xc0000005 {
+        mark_node_as_crashed(node_path);
+    }
+}
+
+// ===== Proxy Configuration =====
+// Default values (must match TypeScript PROXY_DEFAULTS in types.ts)
+// Proxy configuration is now managed by the shared proxy_config module
+// See src/proxy_config.rs for implementation details
+
 #[cfg(test)]
-mod sidecar_process_role_tests {
+mod sidecar_entrypoint_tests {
     use super::{
-        append_sidecar_entrypoint_args, append_sidecar_role_arg,
-        configure_session_delete_authority, next_sidecar_port_candidate, SidecarProcessRole,
-        BASE_PORT, PORT_RANGE, SESSION_DELETE_AUTHORITY_ENV,
+        append_sidecar_entrypoint_args, next_sidecar_port_candidate, BASE_PORT, PORT_RANGE,
     };
     use std::path::Path;
-
-    fn role_args(role: SidecarProcessRole) -> Vec<String> {
-        let mut command = crate::process_cmd::new("node");
-        append_sidecar_role_arg(&mut command, role);
-        command
-            .get_args()
-            .map(|arg| arg.to_string_lossy().into_owned())
-            .collect()
-    }
 
     #[test]
     fn concurrent_port_candidate_wrap_never_rolls_the_counter_back() {
@@ -356,118 +289,16 @@ mod sidecar_process_role_tests {
     }
 
     #[test]
-    fn global_and_session_roles_have_explicit_node_argv() {
-        assert_eq!(
-            role_args(SidecarProcessRole::Global),
-            vec!["--sidecar-role", "global"]
-        );
-        assert_eq!(
-            role_args(SidecarProcessRole::Session),
-            vec!["--sidecar-role", "session"]
-        );
-    }
-
-    #[test]
-    fn production_entrypoint_builder_always_serializes_its_role() {
-        let mut global = crate::process_cmd::new("node");
-        append_sidecar_entrypoint_args(
-            &mut global,
-            Path::new("server-dist.js"),
-            31415,
-            SidecarProcessRole::Global,
-        );
-        let global_args: Vec<_> = global
-            .get_args()
-            .map(|arg| arg.to_string_lossy().into_owned())
-            .collect();
-        assert!(global_args
-            .windows(2)
-            .any(|pair| pair == ["--sidecar-role", "global"]));
-
+    fn production_entrypoint_builder_is_session_only() {
         let mut session = crate::process_cmd::new("node");
-        append_sidecar_entrypoint_args(
-            &mut session,
-            Path::new("server.ts"),
-            31416,
-            SidecarProcessRole::Session,
-        );
+        append_sidecar_entrypoint_args(&mut session, Path::new("server.ts"), 31416);
         let session_args: Vec<_> = session
             .get_args()
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect();
-        assert!(session_args
-            .windows(2)
-            .any(|pair| pair == ["--sidecar-role", "session"]));
+        assert!(!session_args.iter().any(|arg| arg == "--sidecar-role"));
         assert!(session_args
             .windows(2)
             .any(|pair| pair == ["--import", "tsx/esm"]));
     }
-
-    #[test]
-    fn only_global_sidecar_receives_session_delete_authority() {
-        let mut global = crate::process_cmd::new("node");
-        let global_token =
-            configure_session_delete_authority(&mut global, SidecarProcessRole::Global)
-                .expect("global authority token");
-        assert!(!global_token.is_empty());
-        assert!(global.get_envs().any(|(key, value)| {
-            key == SESSION_DELETE_AUTHORITY_ENV
-                && value.and_then(|value| value.to_str()) == Some(global_token.as_str())
-        }));
-
-        let mut session = crate::process_cmd::new("node");
-        assert!(
-            configure_session_delete_authority(&mut session, SidecarProcessRole::Session).is_none()
-        );
-        assert!(!session
-            .get_envs()
-            .any(|(key, _)| key == SESSION_DELETE_AUTHORITY_ENV));
-    }
 }
-
-// Port file for CLI discovery — written when Global Sidecar starts,
-// read by `cli.rs` to know which port to connect to.
-const PORT_FILE_NAME: &str = "sidecar.port";
-
-// ===== Crashed Node Tracking =====
-// When a bundled Node.js crashes with STATUS_ACCESS_VIOLATION (0xC0000005) on Windows —
-// usually a missing VC++ runtime DLL or some AV-injection incompatibility — mark it as
-// crashed so subsequent spawn attempts fall through to system Node.
-// v0.1.x tracked Bun crashes here (AVX2 baseline issue); Node has its own failure modes.
-static CRASHED_NODE_PATHS: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
-
-#[allow(dead_code)] // Only called from #[cfg(windows)] blocks; harmless on other platforms
-fn mark_node_as_crashed(path: &std::path::Path) {
-    let normalized = normalize_external_path(path.to_path_buf());
-    // unwrap_or_else recovers from Mutex poisoning — the body is trivial (Vec::push),
-    // so the data is still consistent even if a previous holder panicked.
-    let mut paths = CRASHED_NODE_PATHS.lock().unwrap_or_else(|e| e.into_inner());
-    if !paths.iter().any(|p| p == &normalized) {
-        paths.push(normalized.clone());
-        ulog_warn!(
-            "[sidecar] Marked node as crashed (will try system fallback on next attempt): {:?}",
-            normalized
-        );
-    }
-}
-
-fn is_node_crashed(path: &std::path::Path) -> bool {
-    let normalized = normalize_external_path(path.to_path_buf());
-    let paths = CRASHED_NODE_PATHS.lock().unwrap_or_else(|e| e.into_inner());
-    paths.iter().any(|x| x == &normalized)
-}
-
-/// On Windows, check if the process exited with STATUS_ACCESS_VIOLATION (0xC0000005)
-/// and mark the node binary as crashed for fallback to system node.
-#[cfg(target_os = "windows")]
-fn maybe_mark_crashed_node(status: &std::process::ExitStatus, node_path: &std::path::Path) {
-    let code = status.code().unwrap_or(0) as u32;
-    if code == 0xc0000005 {
-        mark_node_as_crashed(node_path);
-    }
-}
-
-// ===== Proxy Configuration =====
-// Default values (must match TypeScript PROXY_DEFAULTS in types.ts)
-// Proxy configuration is now managed by the shared proxy_config module
-// See src/proxy_config.rs for implementation details

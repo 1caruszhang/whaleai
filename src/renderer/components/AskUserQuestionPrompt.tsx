@@ -171,7 +171,7 @@ export function AskUserQuestionPrompt({ request, onSubmit, onCancel }: AskUserQu
         setIsSubmitting(true);
 
         // Convert answers to the runtime format. Builtin/CC questions omit
-        // `id` and keep the historical numeric keys; Codex app-server requires
+        // `id` and keep the historical numeric keys; the wire contract requires
         // native question ids in ToolRequestUserInputResponse.answers.
         const formattedAnswers: Record<string, string> = {};
         request.questions.forEach((question, idx) => {

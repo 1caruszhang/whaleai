@@ -1,69 +1,4 @@
-/**
- * Unified log retention policy for `~/.myagents/logs/`.
- *
- * Single source of truth for retention across all log sources the Sidecar
- * writes. Replaces v0.2.7's split between `UnifiedLogger.cleanupOldUnifiedLogs`
- * (unified file cleanup) and `AgentLogger.cleanupOldLogs` (per-session
- * cleanup) — those duplicated the age-cutoff logic, applied different
- * (or absent) byte budgets, and ran independently on startup so behavior
- * across sources was incoherent.
- *
- * Sources covered here:
- *
- *   - `unified`  — `unified-{date}.log` plus rotated `unified-{date}.{ts}.log`.
- *                  Captures merged React/Node/Rust output. The actively-
- *                  writing file is protected by name (the only source where
- *                  this matters; sessions never collide on filename).
- *
- *   - `session`  — `{date}-{sessionId}.log`. Per-session AgentLogger output.
- *                  v0.2.7 had **no byte budget at all** for these — a power
- *                  user with hundreds of sessions could fill disk silently.
- *                  Now bounded.
- *
- * Crash artifacts (`~/.myagents/logs/crash/*.log`) have a separate policy
- * owned by the always-present Tauri application process. Node Sidecars only
- * own their individual lazy writer and single-file ceiling; they never race
- * to evict files from the shared directory.
- *
- * Policy per source (each independent):
- *
- *   - `maxAgeMs`   hard age ceiling — files older than this are deleted
- *                  regardless of any other consideration. The cheap
- *                  predictable retention.
- *
- *   - `maxBytes`   total byte budget for the source. When the source is
- *                  over budget, evict oldest-by-mtime files UNTIL EITHER
- *                  total falls below budget OR every remaining file is
- *                  inside the floor (see below).
- *
- *   - `floorMs`    protected recent window. Files modified within this
- *                  window are NEVER evicted by the byte budget, even if
- *                  total exceeds it. Fundamental safety: when a user is
- *                  actively debugging, the logs they need to see are
- *                  always there. The age cutoff still applies, but it's
- *                  much larger than the floor by design (`maxAgeMs >>
- *                  floorMs`).
- *
- *   - `protectActiveFile`  when true, the actively-writing file is also
- *                  protected from byte-budget eviction (race-defense:
- *                  rotation just renamed it, mtime might be older than
- *                  expected). Required for `unified`; not for `session`
- *                  (per-session has no single "active" path — many
- *                  sessions write concurrently — and they all fall
- *                  inside the floor anyway).
- *
- * The sweep is idempotent and safe to run any time. Sidecar runs it on
- * startup and on a 1-hour timer; this catches gradual growth without
- * waiting for a 50MB rotation event (the v0.2.7 trigger), and runs even
- * when the user is light enough that no rotation ever happens.
- *
- * Issue #121 (2026-05): the v0.2.7 split + missing per-session budget
- * meant a heavy user could lose recent unified logs to silent budget
- * eviction, while session logs grew without bound. Symptoms looked like
- * "the upgrade ate my logs" because eviction happened on the next
- * Sidecar startup after the upgrade. Unifying retention makes both
- * failure modes structurally impossible.
- */
+/** Bounded retention for Sidecar unified diagnostic logs. */
 
 import { readdirSync, statSync, unlinkSync } from 'fs';
 import { join } from 'path';
@@ -98,21 +33,6 @@ const SOURCE_POLICIES: ReadonlyArray<SourcePolicy> = [
     maxAgeMs: 30 * DAY_MS,
     floorMs: 7 * DAY_MS,
     maxBytes: 5 * GB,
-    protectActiveFile: true,
-  },
-  {
-    source: 'session',
-    // {YYYY-MM-DD}-{sessionId}.log — sessionId is uuid-ish, but the date
-    // prefix is the only stable shape we can match on.
-    matches: (f) => /^\d{4}-\d{2}-\d{2}-/.test(f) && f.endsWith('.log') && !f.startsWith('unified-'),
-    maxAgeMs: 30 * DAY_MS,
-    floorMs: 7 * DAY_MS,
-    maxBytes: 2 * GB,
-    // Code-review #124-followup (2026-05): a long-lived session whose log file
-    // mtime drifts past the floor would be unlinked under the budget while
-    // `AgentLogger`'s open WriteStream still pointed at it — broken writes
-    // on Windows / macOS, ghost writes on Linux. Flip `protectActiveFile` on
-    // and have callers pass the active log path in `activeFilePaths`.
     protectActiveFile: true,
   },
 ];
@@ -155,7 +75,7 @@ export interface SweepOptions {
   activeFilePaths?: ReadonlySet<string>;
   /**
    * Override the logs directory. Defaults to the project's LOGS_DIR
-   * (`~/.myagents/logs/`). Tests pass a scratch dir.
+   * (Xiaojing local-data `logs/`). Tests pass a scratch dir.
    */
   logsDir?: string;
   /**

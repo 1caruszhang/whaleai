@@ -1,7 +1,27 @@
+import type {
+  KnowledgeCardCandidate,
+  KnowledgeCandidatesCardData,
+} from "./knowledgeCard";
+
 export const MATERIAL_ERROR_CODES = [
   'material_type_unsupported',
   'material_import_failed',
+  // Renderer 传输层失败（代理超时/IPC/网络）：导入请求本身没有送达业务层，
+  // 与服务端业务错误码严格区分。
+  'material_request_failed',
   'material_content_unavailable',
+  // management hop 的自由文本错误(传输层、SQLite 错误串)与 Rust 材料存储
+  // 固定码:显式登记后可被 errorCode() 精确命中,不再落入泛化兜底。
+  'material_management_failed',
+  'material_management_unavailable',
+  'material_source_rejected',
+  'material_source_unreadable',
+  'material_too_large',
+  'material_store_failed',
+  'material_hash_mismatch',
+  'material_processing_unavailable',
+  'material_input_kind_invalid',
+  'material_text_size_invalid',
   'material_parse_failed',
   'material_empty',
   'model_failed',
@@ -34,6 +54,8 @@ export interface MaterialProcessSuccess<TMaterial = unknown> {
   ok: true;
   material: TMaterial;
   candidateIds: string[];
+  /** 卡片裁决所需的候选投影；失败结果没有该字段。 */
+  candidates?: KnowledgeCardCandidate[];
   attemptNumber: number;
 }
 
@@ -46,3 +68,21 @@ export interface MaterialProcessFailure {
 export type MaterialProcessResult<TMaterial = unknown> =
   | MaterialProcessSuccess<TMaterial>
   | MaterialProcessFailure;
+
+/**
+ * 导入/重试的异步启动结果（按输入顺序）：存储阶段成功进入后台抽取的
+ * 材料，或存储阶段即失败（文件不可读、URL 被拒等）的固定错误码。
+ */
+export type MaterialImportEntry<TMaterial = unknown> =
+  | { ok: true; material: TMaterial }
+  | { ok: false; errorCode: MaterialErrorCode };
+
+export interface MaterialImportStarted<TMaterial = unknown> {
+  entries: MaterialImportEntry<TMaterial>[];
+}
+
+/** 状态轮询/会话恢复的单条结果；非处理中材料附带批量确认卡数据。 */
+export interface MaterialStatusEntry<TMaterial = unknown> {
+  material: TMaterial;
+  card: KnowledgeCandidatesCardData | null;
+}

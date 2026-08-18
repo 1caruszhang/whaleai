@@ -52,7 +52,7 @@ struct CrashRetentionResult {
 /// Start the one application-lifetime owner. The first pass handles upgrade
 /// backlog even if no Global or Session Sidecar is ever started.
 pub fn start_crash_artifact_retention_owner() {
-    let Some(data_dir) = crate::app_dirs::myagents_data_dir() else {
+    let Some(data_dir) = crate::app_dirs::xiaojing_data_dir() else {
         ulog_warn!("[crash-retention] Home directory unavailable; retention disabled");
         return;
     };
@@ -126,15 +126,13 @@ fn sweep_crash_artifacts(
         let is_expired = now
             .duration_since(artifact.modified)
             .is_ok_and(|age| age > policy.max_age);
-        if is_oversized || is_expired {
-            if fs::remove_file(&artifact.path).is_ok() {
-                if is_oversized {
-                    result.oversized_deleted += 1;
-                } else {
-                    result.age_deleted += 1;
-                }
-                continue;
+        if (is_oversized || is_expired) && fs::remove_file(&artifact.path).is_ok() {
+            if is_oversized {
+                result.oversized_deleted += 1;
+            } else {
+                result.age_deleted += 1;
             }
+            continue;
         }
         survivors.push(artifact);
     }

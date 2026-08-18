@@ -33,19 +33,17 @@ describe('Node unified logger stdio ownership', () => {
 
     const logger = await import('./logger');
     const { appendUnifiedLog } = await import('./UnifiedLogger');
-    logger.initLogger(() => []);
+    logger.initLogger();
 
     console.warn('one warning');
     console.error('one error');
-    logger.sendLog('error', 'manual error');
 
     expect(rawWarn).not.toHaveBeenCalled();
     expect(rawError).not.toHaveBeenCalled();
-    expect(vi.mocked(appendUnifiedLog)).toHaveBeenCalledTimes(3);
+    expect(vi.mocked(appendUnifiedLog)).toHaveBeenCalledTimes(2);
     expect(vi.mocked(appendUnifiedLog).mock.calls.map(([entry]) => entry)).toEqual([
       expect.objectContaining({ level: 'warn', message: 'one warning' }),
       expect.objectContaining({ level: 'error', message: 'one error' }),
-      expect.objectContaining({ level: 'error', message: 'manual error' }),
     ]);
 
     logger.restoreConsole();

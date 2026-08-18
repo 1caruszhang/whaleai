@@ -14,8 +14,6 @@ const mocks = vi.hoisted(() => ({
   openWithDefault: vi.fn(),
   openPathWithDefault: vi.fn(),
   openPathExternal: vi.fn(),
-  onOpenMyAgentsPreview: vi.fn(),
-  onRevealInTree: vi.fn(),
   toastInfo: vi.fn(),
   toastError: vi.fn(),
 }));
@@ -41,8 +39,8 @@ vi.mock('@/context/ImagePreviewContext', () => ({
 }));
 
 vi.mock('@/components/FilePreviewModal', () => ({
-  default: ({ path, content }: { path: string; content: string }) => (
-    <output data-testid="fullscreen-file-preview">{JSON.stringify({ path, content })}</output>
+  default: ({ path, content, initialLineNumber }: { path: string; content: string; initialLineNumber?: number }) => (
+    <output data-testid="fullscreen-file-preview">{JSON.stringify({ path, content, initialLineNumber })}</output>
   ),
 }));
 
@@ -67,28 +65,11 @@ import { FileActionProvider } from '@/context/FileActionContext';
 
 import Markdown from './Markdown';
 
-const WORKSPACE = '/Users/zhihu/Documents/project/MyAgents';
+const WORKSPACE = '/Users/zhihu/Documents/project/Xiaojing';
 
-function renderMarkdown(markdown: string, onFilePreviewExternal = vi.fn()) {
+function renderMarkdown(markdown: string) {
   render(
-    <FileActionProvider
-      workspacePath={WORKSPACE}
-      onFilePreviewExternal={onFilePreviewExternal}
-      onRevealInTree={mocks.onRevealInTree}
-    >
-      <Markdown>{markdown}</Markdown>
-    </FileActionProvider>,
-  );
-  return { onFilePreviewExternal };
-}
-
-function renderFloatingMarkdown(markdown: string) {
-  render(
-    <FileActionProvider
-      workspacePath={WORKSPACE}
-      menuProfile="floatingBall"
-      onOpenMyAgentsPreview={mocks.onOpenMyAgentsPreview}
-    >
+    <FileActionProvider workspacePath={WORKSPACE}>
       <Markdown>{markdown}</Markdown>
     </FileActionProvider>,
   );
@@ -134,8 +115,8 @@ describe('Markdown local file links', () => {
     });
   });
 
-  it('opens workspace absolute path links in the MyAgents file preview instead of the system default app', async () => {
-    const { onFilePreviewExternal } = renderMarkdown(
+  it('opens workspace absolute path links in the Xiaojing file preview instead of the system default app', async () => {
+    renderMarkdown(
       `[Message.tsx](${WORKSPACE}/src/renderer/components/Message.tsx)`,
     );
     mocks.checkPaths.mockResolvedValue({
@@ -145,8 +126,7 @@ describe('Markdown local file links', () => {
     fireEvent.click(screen.getByRole('link', { name: 'Message.tsx' }));
 
     await waitFor(() => {
-      expect(onFilePreviewExternal).toHaveBeenCalledWith(expect.objectContaining({
-        name: 'Message.tsx',
+      expect(screen.getByTestId('fullscreen-file-preview')).toHaveTextContent(JSON.stringify({
         path: 'src/renderer/components/Message.tsx',
         content: 'export default function Message() {}',
       }));
@@ -155,7 +135,7 @@ describe('Markdown local file links', () => {
   });
 
   it('preserves line suffixes from clickable file links', async () => {
-    const { onFilePreviewExternal } = renderMarkdown(
+    renderMarkdown(
       `[Message.tsx](${WORKSPACE}/src/renderer/components/Message.tsx:42)`,
     );
     mocks.checkPaths.mockResolvedValue({
@@ -165,8 +145,9 @@ describe('Markdown local file links', () => {
     fireEvent.click(screen.getByRole('link', { name: 'Message.tsx' }));
 
     await waitFor(() => {
-      expect(onFilePreviewExternal).toHaveBeenCalledWith(expect.objectContaining({
+      expect(screen.getByTestId('fullscreen-file-preview')).toHaveTextContent(JSON.stringify({
         path: 'src/renderer/components/Message.tsx',
+        content: 'export default function Message() {}',
         initialLineNumber: 42,
       }));
     });
@@ -207,16 +188,13 @@ describe('Markdown local file links', () => {
     mocks.checkLocalPaths.mockResolvedValue({
       results: { [localPath]: { exists: true, type: 'file' } },
     });
-    const { onFilePreviewExternal } = renderMarkdown(`[Other.ts](${localPath})`);
+    renderMarkdown(`[Other.ts](${localPath})`);
 
     fireEvent.click(screen.getByRole('link', { name: 'Other.ts' }));
 
     await waitFor(() => {
-      expect(onFilePreviewExternal).toHaveBeenCalledWith(expect.objectContaining({
-        name: 'Other.ts',
+      expect(screen.getByTestId('fullscreen-file-preview')).toHaveTextContent(JSON.stringify({
         path: localPath,
-        localPath,
-        sourceScope: 'local',
         content: 'export const other = true;',
       }));
     });
@@ -311,7 +289,7 @@ describe('Markdown local file links', () => {
     await waitFor(() => expect(mocks.toastError).toHaveBeenCalledWith('文件不存在或无法访问'));
   });
 
-  it('reveals a workspace directory in the file tree on primary click', async () => {
+  it('opens a workspace directory with the system handler on primary click', async () => {
     mocks.checkPaths.mockResolvedValue({
       results: { ['src/renderer/components']: { exists: true, type: 'dir' } },
     });
@@ -319,8 +297,7 @@ describe('Markdown local file links', () => {
 
     fireEvent.click(screen.getByRole('link', { name: 'Components' }));
 
-    await waitFor(() => expect(mocks.onRevealInTree).toHaveBeenCalledWith('src/renderer/components'));
-    expect(mocks.openWithDefault).not.toHaveBeenCalled();
+    await waitFor(() => expect(mocks.openWithDefault).toHaveBeenCalledWith({ path: 'src/renderer/components' }));
   });
 
   it('uses the workspace-aware system opener for an explicit Cmd/Ctrl file click', async () => {
@@ -337,29 +314,6 @@ describe('Markdown local file links', () => {
     expect(mocks.openExternal).not.toHaveBeenCalled();
   });
 
-  it('opens previewable workspace links through the floating-ball MyAgents preview bridge', async () => {
-    renderFloatingMarkdown(
-      `[Message.tsx](${WORKSPACE}/src/renderer/components/Message.tsx:42)`,
-    );
-    mocks.checkPaths.mockResolvedValue({
-      results: { ['src/renderer/components/Message.tsx']: { exists: true, type: 'file' } },
-    });
-
-    fireEvent.click(screen.getByRole('link', { name: 'Message.tsx' }));
-
-    await waitFor(() => {
-      expect(mocks.onOpenMyAgentsPreview).toHaveBeenCalledWith(
-        'src/renderer/components/Message.tsx',
-        {
-          displayPath: `${WORKSPACE}/src/renderer/components/Message.tsx:42`,
-          initialLineNumber: 42,
-        },
-      );
-    });
-    expect(mocks.readPreview).not.toHaveBeenCalled();
-    expect(mocks.openWithDefault).not.toHaveBeenCalled();
-  });
-
   it('opens the shared file menu on right-click for workspace Markdown file links', async () => {
     mocks.checkPaths.mockResolvedValue({
       results: { ['src/renderer/components/Message.tsx']: { exists: true, type: 'file' } },
@@ -370,7 +324,7 @@ describe('Markdown local file links', () => {
 
     await screen.findByText('预览');
     const labels = screen.getAllByRole('button').map((b) => b.textContent);
-    expect(labels).toEqual(['预览', '复制', '引用', '打开', '打开所在文件夹', '在文件目录中展示']);
+    expect(labels).toEqual(['预览', '复制', '打开', '打开所在文件夹']);
   });
 
   it('right-clicks real local directories without offering preview', async () => {
@@ -384,7 +338,7 @@ describe('Markdown local file links', () => {
 
     await screen.findByText('复制');
     const labels = screen.getAllByRole('button').map((b) => b.textContent);
-    expect(labels).toEqual(['复制', '引用', '打开', '打开所在文件夹']);
+    expect(labels).toEqual(['复制', '打开', '打开所在文件夹']);
     expect(screen.queryByText('预览')).not.toBeInTheDocument();
   });
 });

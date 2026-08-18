@@ -34,7 +34,7 @@ export default class AppErrorBoundary extends Component<Props, State> {
     }
 
     componentDidCatch(error: Error, info: ErrorInfo) {
-        // frontendLogger captures console.error → unified log
+        // Keep the original error visible to WebView diagnostics.
         console.error('[AppErrorBoundary] Unhandled React error:', error, info.componentStack);
     }
 

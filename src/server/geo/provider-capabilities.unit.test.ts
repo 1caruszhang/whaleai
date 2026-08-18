@@ -57,6 +57,10 @@ describe("GEO typed provider capabilities", () => {
     await capabilities.generation.complete([
       { role: "user", content: "generate" },
     ]);
+    await capabilities.generation.complete(
+      [{ role: "user", content: "title plan" }],
+      { purpose: "title-planning" },
+    );
     await capabilities.reflection.complete([
       { role: "user", content: "review" },
     ]);
@@ -65,13 +69,77 @@ describe("GEO typed provider capabilities", () => {
     expect(calls.map(({ body }) => body.model)).toEqual([
       "deepseek-chat",
       "doubao-seed-2-0-pro-260215",
+      "doubao-seed-2-0-lite-260428",
       "deepseek-v4-pro",
       "doubao-seed-2-0-lite-260428",
     ]);
-    expect(calls[3].url).toBe(
+    expect(calls[4].url).toBe(
       "https://ark.cn-beijing.volces.com/api/v3/chat/completions",
     );
-    expect(calls[3].body.enable_search).toBe(true);
+    expect(calls[4].body.enable_search).toBe(true);
+  });
+
+  it("exposes honest baseline availability and uses the real ARK doubao_app route", async () => {
+    const fakeFetch = vi.fn(
+      async (_input: string | URL | Request, _init?: RequestInit) =>
+        jsonResponse({
+          output_text: "鲸跃汽车值得考虑。",
+          output: [],
+        }),
+    );
+    const unavailable = createGeoProviderCapabilities({});
+    expect(unavailable.keywordSearch.baselineEngines()).toMatchObject([
+      { id: "doubao", available: false },
+    ]);
+
+    const capabilities = createGeoProviderCapabilities(
+      {
+        arkApiKey: "ark-test",
+        arkConfigurationFingerprint: "config-fingerprint-1",
+      },
+      { fetch: fakeFetch as typeof fetch },
+    );
+    expect(capabilities.keywordSearch.baselineEngines()).toMatchObject([
+      {
+        id: "doubao",
+        available: true,
+        snapshot: {
+          provider: "volcengine",
+          endpointFamily: "ark-responses",
+          searchMode: "doubao-app-ai-search",
+          configurationFingerprint: "config-fingerprint-1",
+        },
+      },
+    ]);
+    expect(
+      JSON.stringify(capabilities.keywordSearch.baselineEngines()),
+    ).not.toContain("ark-test");
+
+    const result = await capabilities.keywordSearch.probeQuestion(
+      "doubao",
+      "成都汽车音响改装哪家好？",
+    );
+    expect(result.rawEvidence).toMatchObject({
+      output_text: "鲸跃汽车值得考虑。",
+    });
+    const [url, init] = fakeFetch.mock.calls[0];
+    expect(String(url)).toBe(
+      "https://ark.cn-beijing.volces.com/api/v3/responses",
+    );
+    expect((init?.headers as Record<string, string>)["ark-beta-doubao-app"]).toBe(
+      "true",
+    );
+    expect(JSON.parse(String(init?.body))).toEqual({
+      model: "doubao-seed-2-0-lite-260428",
+      input: [{ role: "user", content: "成都汽车音响改装哪家好？" }],
+      stream: false,
+      tools: [
+        {
+          type: "doubao_app",
+          feature: { ai_search: { type: "enabled" } },
+        },
+      ],
+    });
   });
 
   it("uses one text per ARK embedding request, preserves order, and enforces 2048 dimensions", async () => {

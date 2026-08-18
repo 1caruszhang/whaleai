@@ -226,8 +226,8 @@ describe("GEO port contract", () => {
         "active-model",
       ],
       pinned: {
-        question_pool: ["volcengine", "doubao-seed-2-0-mini-260428"],
-        title: ["volcengine", "doubao-seed-2-0-mini-260428"],
+        question_pool: ["volcengine", "doubao-seed-2-0-lite-260428"],
+        title: ["volcengine", "doubao-seed-2-0-lite-260428"],
         draft: ["volcengine", "doubao-seed-2-0-pro-260215"],
       },
       extractionDefault: "deepseek-chat",

@@ -12,7 +12,7 @@
  *
  * Isolation: `vi.mock('../logUtils')` redirects LOGS_DIR to a per-run
  * tmpdir BEFORE UnifiedLogger imports it, so the test never writes to
- * the developer's real `~/.myagents/logs/`. (Prior versions polluted
+ * the developer's real Xiaojing log directory. (Prior versions polluted
  * the real unified log with thousands of `[bench]` entries every run.)
  */
 
@@ -27,12 +27,12 @@ import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vites
 const { TEST_LOGS_ROOT, TEST_LOGS_DIR } = vi.hoisted(() => {
   // Use only globals available pre-import: `process` + a unique suffix.
   const root = `${process.env.TMPDIR ?? '/tmp'}`.replace(/\/+$/, '')
-    + `/myagents-unified-log-test-${process.pid}-${Date.now()}`;
+    + `/xiaojing-unified-log-test-${process.pid}-${Date.now()}`;
   return { TEST_LOGS_ROOT: root, TEST_LOGS_DIR: `${root}/logs` };
 });
 
 vi.mock('../logUtils', () => ({
-  MYAGENTS_DIR: TEST_LOGS_ROOT,
+  XIAOJING_DIR: TEST_LOGS_ROOT,
   LOGS_DIR: TEST_LOGS_DIR,
   ensureLogsDir: () => {
     if (!existsSync(TEST_LOGS_DIR)) {
@@ -93,7 +93,7 @@ afterAll(() => {
 
 function makeEntry(i: number): LogEntry {
   return {
-    source: 'bun',
+    source: 'node',
     level: 'info',
     message: `[bench] entry ${i}`,
     // Match production's localTimestamp() format so log-line timestamps

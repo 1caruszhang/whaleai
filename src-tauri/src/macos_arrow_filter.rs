@@ -40,8 +40,6 @@
 //! See `specs/tech_docs/macos_arrow_key_leak_investigation.md` for the
 //! full investigation log and the C0-control-codepoint discovery.
 
-#![cfg(target_os = "macos")]
-
 use std::sync::Once;
 
 use objc2::ffi::{class_addMethod, class_getSuperclass, objc_msgSendSuper, objc_super};

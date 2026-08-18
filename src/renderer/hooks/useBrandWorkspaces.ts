@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { isTauriEnvironment } from '@/utils/browserMock';
+import { listenWithCleanup } from '@/utils/tauriListen';
 
 import {
   archiveBrandSession,
@@ -7,12 +9,14 @@ import {
   createBrandWorkspace,
   listBrandSessions,
   previewBrandSessionDeletion,
+  previewBrandWorkspaceDeletion,
   renameBrandSession,
   switchBrandWorkspace,
   type BrandSession,
   type BrandSessionDeletionPreview,
   type BrandSessionTitleSource,
   type BrandWorkspace,
+  type BrandWorkspaceDeletionPreview,
 } from '@/api/brandWorkspaceClient';
 
 export interface BrandWorkspaceState {
@@ -33,6 +37,8 @@ export interface BrandWorkspaceState {
   renameSession: (workspaceId: string, sessionId: string, title: string) => Promise<void>;
   archiveSession: (workspaceId: string, sessionId: string, archived: boolean) => Promise<void>;
   previewDeletion: (workspaceId: string, sessionId: string) => Promise<BrandSessionDeletionPreview>;
+  previewWorkspaceDeletion: (workspaceId: string) => Promise<BrandWorkspaceDeletionPreview>;
+  refreshBootstrap: () => Promise<void>;
   removeDeletedSessionProjection: (workspaceId: string, sessionId: string) => void;
 }
 
@@ -87,6 +93,20 @@ export function useBrandWorkspaces(): BrandWorkspaceState {
       cancelled = true;
       sessionLoadGeneration.current += 1;
     };
+  }, [refreshSessions]);
+
+  useEffect(() => {
+    if (!isTauriEnvironment()) return;
+    const controller = new AbortController();
+    void listenWithCleanup<{ workspaceId: string; sessionId: string }>(
+      'geo:status-changed',
+      (event) => {
+        if (event.payload.workspaceId !== currentWorkspaceRef.current?.id) return;
+        void refreshSessions(event.payload.workspaceId).catch(() => undefined);
+      },
+      controller.signal,
+    );
+    return () => controller.abort();
   }, [refreshSessions]);
 
   const createWorkspace = useCallback(async (name: string, productLines: string[]) => {
@@ -149,6 +169,20 @@ export function useBrandWorkspaces(): BrandWorkspaceState {
     previewBrandSessionDeletion(workspaceId, sessionId)
   ), []);
 
+  const previewWorkspaceDeletion = useCallback((workspaceId: string) => (
+    previewBrandWorkspaceDeletion(workspaceId)
+  ), []);
+
+  /** 删除品牌后由后端决定新的 current；重新拉取 bootstrap 对齐权威状态。 */
+  const refreshBootstrap = useCallback(async () => {
+    const bootstrap = await bootstrapBrandWorkspaces();
+    setWorkspaces(bootstrap.workspaces);
+    setCurrentWorkspace(bootstrap.currentWorkspace ?? null);
+    currentWorkspaceRef.current = bootstrap.currentWorkspace ?? null;
+    setError(null);
+    await refreshSessions(bootstrap.currentWorkspace?.id);
+  }, [refreshSessions]);
+
   const removeDeletedSessionProjection = useCallback((workspaceId: string, sessionId: string) => {
     if (currentWorkspaceRef.current?.id === workspaceId) {
       setSessions((current) => current.filter((item) => item.id !== sessionId));
@@ -168,6 +202,8 @@ export function useBrandWorkspaces(): BrandWorkspaceState {
     renameSession,
     archiveSession,
     previewDeletion,
+    previewWorkspaceDeletion,
+    refreshBootstrap,
     removeDeletedSessionProjection,
   };
 }

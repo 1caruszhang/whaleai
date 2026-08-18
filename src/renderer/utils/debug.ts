@@ -5,8 +5,8 @@
  * across different build configurations:
  * 
  * - `npm run dev:web` (Vite dev server): Always debug mode
- * - `build_dev.sh` (Dev build): Debug mode via VITE_DEBUG_MODE=true
- * - `build_macos.sh` (Production build): Not debug mode
+ * - Local Vite build: Debug mode via VITE_DEBUG_MODE=true
+ * - Tauri production build: Not debug mode
  * 
  * Usage:
  * ```tsx
@@ -33,7 +33,7 @@ declare const __BUILD_VERSIONS__: {
  * 
  * Debug mode is enabled when:
  * 1. Running via Vite dev server (import.meta.env.DEV)
- * 2. Built with VITE_DEBUG_MODE=true (e.g., build_dev.sh)
+ * 2. Built with VITE_DEBUG_MODE=true
  * 
  * Note: __DEBUG_MODE__ is replaced at compile time by Vite's define option.
  * 
@@ -72,4 +72,3 @@ export interface BuildVersions {
 export function getBuildVersions(): BuildVersions {
     return __BUILD_VERSIONS__;
 }
-

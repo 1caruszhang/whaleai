@@ -1,6 +1,6 @@
 //! Save edited workspace file content (Phase D.5 / E1 migration).
 //!
-//! Mirrors sidecar `/agent/save-file` semantics:
+//! The Rust owner enforces these semantics:
 //! - File MUST already exist (this command does NOT create — that's
 //!   `cmd_workspace_new_file`'s job; `FilePreviewModal` only opens
 //!   existing files for edit, so this distinction matches the UX path).
@@ -17,8 +17,8 @@
 use std::fs;
 
 use super::path_safety::{
-    atomic_write_file, atomic_write_file_if_current, reject_managed_global_skill_mutation,
-    resolve_existing_inside_workspace, validate_workspace_root,
+    atomic_write_file, atomic_write_file_if_current, resolve_existing_inside_workspace,
+    validate_workspace_root,
 };
 
 const MAX_CONTENT_BYTES: usize = 2 * 1024 * 1024;
@@ -41,7 +41,6 @@ pub async fn cmd_workspace_save_file(
     }
     let workspace_root = validate_workspace_root(&workspace)?;
     let resolved = resolve_existing_inside_workspace(&workspace_root, trimmed)?;
-    reject_managed_global_skill_mutation(&workspace_root, &resolved)?;
 
     // `resolved` is canonicalized — the symlink-escape gate is closed by
     // `resolve_existing_inside_workspace`. Use `symlink_metadata` for the

@@ -2,8 +2,8 @@ import { describe, it, expect } from 'vitest';
 import { normalizeWorkspacePathIdentity, workspacePathsEqual } from './workspacePath';
 
 describe('normalizeWorkspacePathIdentity', () => {
-  // Mirrors the Rust `normalize_path_*` tests in src-tauri/src/cron_task.rs so
-  // the renderer identity stays byte-for-byte aligned with the Rust grouping.
+  // Mirrors the Rust workspace-path tests so renderer identity stays
+  // byte-for-byte aligned with Rust grouping.
   it('converts Windows separators and lowercases the drive identity', () => {
     expect(normalizeWorkspacePathIdentity('C:\\Users\\me\\project\\')).toBe(
       'c:/users/me/project',
@@ -39,13 +39,13 @@ describe('normalizeWorkspacePathIdentity', () => {
 });
 
 describe('workspacePathsEqual', () => {
-  // The exact #320 regression: projects.json stores backslashes, cron_tasks.json
-  // stores forward slashes. Exact `===` returned false → "找不到工作区".
+  // A persisted Windows path can use either separator. Exact `===` returned
+  // false and made the same workspace appear missing.
   it('treats Windows backslash and forward-slash forms as the same workspace (#320)', () => {
     expect(
       workspacePathsEqual(
-        'C:\\Users\\Administrator\\.myagents\\projects\\mino',
-        'C:/Users/Administrator/.myagents/projects/mino',
+        'C:\\Users\\Administrator\\Xiaojing\\brands\\sample',
+        'C:/Users/Administrator/Xiaojing/brands/sample',
       ),
     ).toBe(true);
   });

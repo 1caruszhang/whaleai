@@ -9,7 +9,7 @@
 // Prior state: 13 files each re-implemented the pattern by hand —
 // `absolute top-full` positioning, `document.addEventListener('mousedown')`
 // outside-click, and a hodgepodge of `shadow-{sm,md,lg,xl}` / radii /
-// z-indexes. Those copies had divergent bugs (ThoughtCard clipped on
+// z-indexes. Those copies had divergent clipping bugs on
 // last-card menus, some missed Escape, some didn't flip on small
 // viewports). This primitive replaces them.
 //
@@ -55,7 +55,7 @@ export interface PopoverProps {
    * Rationale: a Popover anchored to a button *inside* an overlay should float
    * above that overlay's panel, not disappear behind it. The earlier default
    * of 40 predated the OverlayBackdrop stacking hierarchy and caused
-   * RuntimeSelector / SkillDetailPanel / AgentDetailPanel / BugReportOverlay
+   * Rich file and GEO panels
    * dropdowns to render behind their own host overlay — user visible as
    * "click the dropdown and nothing happens" (issue reported 2026-04-23).
    *

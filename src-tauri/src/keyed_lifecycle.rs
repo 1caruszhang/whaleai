@@ -50,14 +50,6 @@ impl KeyedLifecycleRegistry {
         }
         KeyedLifecycleGuard { _guards: guards }
     }
-
-    pub(crate) async fn try_acquire(&self, key: &str) -> Option<KeyedLifecycleGuard> {
-        let lock = self.locks_for(&[key]).await.into_iter().next()?;
-        let guard = lock.try_lock_owned().ok()?;
-        Some(KeyedLifecycleGuard {
-            _guards: vec![guard],
-        })
-    }
 }
 
 pub(crate) struct KeyedLifecycleGuard {

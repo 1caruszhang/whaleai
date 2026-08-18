@@ -1,4 +1,4 @@
-use super::manager::{RuntimeDriftTransition, SessionOwnerRelease};
+use super::manager::SessionOwnerRelease;
 use super::*;
 
 pub(crate) type SessionLifecycleGuard = crate::keyed_lifecycle::KeyedLifecycleGuard;
@@ -57,42 +57,11 @@ fn finish_unowned_session_after_drain(
     Ok(())
 }
 
-pub(crate) fn finish_runtime_drift_transition(
-    manager: &ManagedSidecarManager,
-    transition: RuntimeDriftTransition,
-) -> Result<RuntimeDriftResult, String> {
-    let RuntimeDriftTransition { result, drain } = transition;
-    if let Some(drain) = drain {
-        drain.wait();
-        let retired = {
-            let mut manager_guard = manager.lock().map_err(|error| error.to_string())?;
-            manager_guard.finish_runtime_drift_retirement(&drain)
-        };
-        drop(retired);
-    }
-    Ok(result)
-}
-
 pub(crate) async fn has_persisted_session_owner(session_id: &str) -> Result<bool, String> {
-    Ok(crate::session_goal::get_session_goal_manager()
-        .has_session_identity_protection(session_id)
-        .await
-        .map_err(|error| error.to_string())?
-        || crate::task_scheduler::has_persistent_task_for_session(session_id).await)
+    crate::brand_workspace::has_active_post_publish_monitor_for_session(session_id)
 }
 
-async fn has_non_tab_session_owner(
-    session_id: &str,
-    agents: &crate::im::ManagedAgents,
-    im_bots: &crate::im::ManagedImBots,
-) -> Result<bool, String> {
-    if has_persisted_session_owner(session_id).await? {
-        return Ok(true);
-    }
-    Ok(crate::im::session_delivery::has_session_binding(agents, im_bots, session_id).await)
-}
-
-// ============= Session-Centric Sidecar API (v0.1.11) =============
+// ============= Session-Centric Sidecar API =============
 
 /// Result returned from ensure_session_sidecar
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -120,14 +89,12 @@ const RECOVERY_ATTEMPT_STALE: &str = "RECOVERY_ATTEMPT_STALE";
 /// async wrapper below. The health monitor is the sole direct caller because
 /// it already holds the lifecycle guard while preserving the dead owner object
 /// across restart failure.
-pub(crate) fn ensure_session_sidecar_with_runtime_identity_override<R: Runtime>(
+pub(crate) fn ensure_session_sidecar<R: Runtime>(
     app_handle: &AppHandle<R>,
     manager: &ManagedSidecarManager,
     session_id: &str,
     workspace_path: &std::path::Path,
     owner: SidecarOwner,
-    runtime_override: Option<String>,
-    runtime_source_override: Option<String>,
     expected_recovery_epoch: Option<u64>,
 ) -> Result<EnsureSidecarResult, String> {
     let _lifecycle_spawn_permit = begin_lifecycle_spawn_permit()?;
@@ -137,8 +104,6 @@ pub(crate) fn ensure_session_sidecar_with_runtime_identity_override<R: Runtime>(
         session_id,
         workspace_path,
         owner,
-        runtime_override,
-        runtime_source_override,
         0,
         expected_recovery_epoch,
     );
@@ -220,87 +185,25 @@ pub(crate) async fn ensure_session_sidecar_with_lifecycle<R: Runtime>(
     workspace_path: PathBuf,
     owner: SidecarOwner,
 ) -> Result<EnsureSidecarResult, String> {
-    ensure_session_sidecar_with_runtime_identity_override_lifecycle(
-        app_handle,
-        manager,
-        session_id,
-        workspace_path,
-        owner,
-        None,
-        None,
-    )
-    .await
-}
-
-pub(crate) async fn ensure_session_sidecar_with_runtime_identity_override_lifecycle<R: Runtime>(
-    app_handle: AppHandle<R>,
-    manager: ManagedSidecarManager,
-    session_id: String,
-    workspace_path: PathBuf,
-    owner: SidecarOwner,
-    runtime_override: Option<String>,
-    runtime_source_override: Option<String>,
-) -> Result<EnsureSidecarResult, String> {
     let lifecycle = Arc::new(acquire_session_lifecycle(&[&session_id]).await);
-    ensure_session_sidecar_with_runtime_identity_override_lifecycle_held(
-        lifecycle,
-        app_handle,
-        manager,
-        session_id,
-        workspace_path,
-        owner,
-        runtime_override,
-        runtime_source_override,
-    )
-    .await
-}
-
-/// Blocking-thread ensure for a caller that already owns this Session's
-/// lifecycle authority. The shared lease keeps that exact acquisition alive
-/// through readiness without attempting to re-enter the non-reentrant lock.
-///
-/// Task reservation is the non-generic caller: the exact execution retains a
-/// shared handle until SessionStore metadata is born, while the worker moves
-/// its handle through Sidecar ensure. Other callers use the wrapper above.
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn ensure_session_sidecar_with_runtime_identity_override_lifecycle_held<
-    R: Runtime,
->(
-    lifecycle: Arc<SessionLifecycleGuard>,
-    app_handle: AppHandle<R>,
-    manager: ManagedSidecarManager,
-    session_id: String,
-    workspace_path: PathBuf,
-    owner: SidecarOwner,
-    runtime_override: Option<String>,
-    runtime_source_override: Option<String>,
-) -> Result<EnsureSidecarResult, String> {
-    // Keep the caller's authority alive until the blocking ensure and its
-    // readiness wait finish. This is intentionally not a fresh acquisition.
     let _lifecycle = lifecycle;
     let ensure_app_handle = app_handle.clone();
     let event_session_id = session_id.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
-        ensure_session_sidecar_with_runtime_identity_override(
+        ensure_session_sidecar(
             &ensure_app_handle,
             &manager,
             &session_id,
             &workspace_path,
             owner,
-            runtime_override,
-            runtime_source_override,
             None,
         )
     })
     .await
     .map_err(|error| format!("ensure_session_sidecar blocking task failed: {error:?}"))??;
 
-    // Every newly-created process starts a fresh liveRevision epoch. Emit from
-    // the shared async ensure authority (not just the renderer command) so a
-    // Task/IM/Goal revive cannot leave an attached Tab comparing revisions
-    // from the previous process. First-ever creates are harmless: renderer
-    // consumers filter by their currently attached Session, and pending births
-    // already ignore this event.
+    // Every newly-created process starts a fresh liveRevision epoch. Renderer
+    // consumers filter the event by their currently attached Session.
     if result.is_new {
         let _ = app_handle.emit(
             "session-sidecar:restarted",
@@ -313,93 +216,12 @@ pub(crate) async fn ensure_session_sidecar_with_runtime_identity_override_lifecy
     Ok(result)
 }
 
-fn resolve_runtime_identity_for_owner(
-    owner: &SidecarOwner,
-    runtime_override: Option<&str>,
-    runtime_source_override: Option<&str>,
-    session_runtime_identity: Option<RuntimeIdentity>,
-    agent_runtime_identity: Option<RuntimeIdentity>,
-) -> RuntimeIdentity {
-    let session_runtime = session_runtime_identity
-        .as_ref()
-        .map(|identity| identity.runtime.clone());
-    let agent_runtime = agent_runtime_identity
-        .as_ref()
-        .map(|identity| identity.runtime.clone());
-    let resolved_runtime = resolve_runtime_for_owner(
-        runtime_override.map(str::to_string),
-        owner,
-        session_runtime,
-        agent_runtime,
-    );
-    let resolved_runtime_name = normalize_runtime_name(resolved_runtime.as_deref()).to_string();
-    let resolved_runtime_source = if resolved_runtime_name == "builtin" {
-        None
-    } else if runtime_override.is_some() {
-        Some(runtime_source_override.unwrap_or("system-cli"))
-    } else if session_runtime_identity
-        .as_ref()
-        .map(|identity| identity.runtime.as_str())
-        == Some(resolved_runtime_name.as_str())
-        && !owner_prefers_live_agent_runtime(owner)
-    {
-        session_runtime_identity
-            .as_ref()
-            .and_then(|identity| identity.runtime_source.as_deref())
-    } else if agent_runtime_identity
-        .as_ref()
-        .map(|identity| identity.runtime.as_str())
-        == Some(resolved_runtime_name.as_str())
-    {
-        agent_runtime_identity
-            .as_ref()
-            .and_then(|identity| identity.runtime_source.as_deref())
-    } else {
-        Some("system-cli")
-    };
-    RuntimeIdentity::new(Some(&resolved_runtime_name), resolved_runtime_source)
-}
-
-fn resolve_expected_runtime_identity(
-    session_id: &str,
-    workspace_path: &std::path::Path,
-    owner: &SidecarOwner,
-    runtime_override: Option<&str>,
-    runtime_source_override: Option<&str>,
-) -> RuntimeIdentity {
-    // Brand workspaces have one product runtime. Persisted metadata, caller
-    // overrides, and agent config cannot opt a Xiaojing Session into a CLI
-    // runtime before the process is born.
-    if crate::brand_workspace::is_brand_workspace_path(workspace_path) {
-        return RuntimeIdentity::new(Some("builtin"), None);
-    }
-    // Existing Session metadata is authoritative for desktop-style owners.
-    // A metadata creator has no Session row yet, so it follows the exact same
-    // override -> Agent resolution that the spawn path uses. Live IM owners
-    // intentionally ignore Session metadata and follow the Agent default.
-    let session_runtime_identity = if owner_prefers_live_agent_runtime(owner) {
-        None
-    } else {
-        resolve_session_runtime_identity_full(session_id)
-    };
-    let agent_runtime_identity = resolve_agent_runtime_identity_from_config(workspace_path);
-    resolve_runtime_identity_for_owner(
-        owner,
-        runtime_override,
-        runtime_source_override,
-        session_runtime_identity,
-        agent_runtime_identity,
-    )
-}
-
 fn ensure_session_sidecar_attempt<R: Runtime>(
     app_handle: &AppHandle<R>,
     manager: &ManagedSidecarManager,
     session_id: &str,
     workspace_path: &std::path::Path,
     owner: SidecarOwner,
-    runtime_override: Option<String>,
-    runtime_source_override: Option<String>,
     attempt: u32,
     expected_recovery_epoch: Option<u64>,
 ) -> Result<EnsureSidecarResult, String> {
@@ -409,11 +231,8 @@ fn ensure_session_sidecar_attempt<R: Runtime>(
             session_id, MAX_ENSURE_ATTEMPTS
         ));
     }
-    if attempt == 0 {
-        // Session Sidecars use this lifecycle path rather than the tab/global
-        // instance path. Apply the same CLI admission contract before any
-        // existing Session is reused or a new process is born.
-        crate::cli::ensure_launcher()?;
+    if !crate::brand_workspace::is_brand_workspace_path(workspace_path) {
+        return Err("Session workspace is outside Xiaojing BrandWorkspace".to_string());
     }
     ulog_info!(
         "[sidecar] ensure_session_sidecar called for session: {}, owner: {:?} (attempt {})",
@@ -423,30 +242,16 @@ fn ensure_session_sidecar_attempt<R: Runtime>(
     );
     let ensure_started = trace_start();
     let owner_for_trace = format!("{:?}", owner);
-    let expected_runtime_identity = resolve_expected_runtime_identity(
-        session_id,
-        workspace_path,
-        &owner,
-        runtime_override.as_deref(),
-        runtime_source_override.as_deref(),
-    );
-    let requested_runtime_for_trace = expected_runtime_identity.runtime.clone();
     emit_perf_trace(
         PerfTrace::new(PerfTraceName::SidecarBoot, "ensure_start")
             .session_id(Some(session_id))
-            .runtime(Some(&requested_runtime_for_trace))
             .detail("owner", &owner_for_trace),
     );
 
-    // Ensure file descriptor limit is high enough for Bun
+    // Ensure the file descriptor limit is high enough for the Node Sidecar.
     ensure_high_file_descriptor_limit();
 
-    // Block briefly if startup cleanup is still running — same barrier as
-    // `start_tab_sidecar`. Without this, Cron task recovery / session-monitor
-    // auto-restart / IM message arrival during the startup window would spawn
-    // a new session sidecar that races with the stale-process sweep (the very
-    // case db58545 set out to prevent). In the common case this returns
-    // immediately (AtomicBool load; cleanup completes in ~50 ms).
+    // Do not spawn while prior-instance cleanup still owns process authority.
     wait_for_startup_cleanup(Duration::from_secs(15))?;
 
     ulog_debug!("[sidecar] Acquiring manager lock...");
@@ -467,31 +272,7 @@ fn ensure_session_sidecar_attempt<R: Runtime>(
     // Phase 2: Do HTTP health check (without lock)
     // Phase 3: Re-acquire lock and finalize decision
 
-    // Note: there used to be an inline drift check for Agent-owner Sidecars
-    // here, but it's been removed as of v0.1.66. Drift is now handled at the
-    // IM router layer (`SessionRouter::check_and_reset_on_runtime_drift`)
-    // which runs BEFORE `ensure_session_sidecar` and regenerates the peer
-    // session_id on drift. By the time we reach here:
-    //
-    //   - IM message path (router-driven): the router already forked to a
-    //     fresh session_id, so `session_id` has no existing Sidecar and the
-    //     spawn path below uses the owner-aware priority chain to pick the
-    //     correct runtime from agent config.
-    //
-    //   - memory auto-update callers: they target an existing session_id
-    //     that may be shared with a desktop Tab. Killing the Sidecar here
-    //     would orphan the Tab's SSE stream. Better to let memory_auto_update
-    //     reuse the existing (possibly stale-runtime) Sidecar — memory file
-    //     updates are runtime-agnostic so a mismatched runtime doesn't
-    //     actually break anything.
-    //
-    // The priority chain at the spawn path below still enforces "Agent owner
-    // uses agent config, not session metadata" so fresh spawns for Agent
-    // owners always honor the user's latest runtime choice, including the
-    // external → builtin switch direction.
-
     let mut replace_existing = false;
-    let mut clear_generation_after_replace = false;
     let existing_sidecar_info: Option<ExistingSidecarReuse> = {
         let generation = manager_guard.current_generation(session_id);
         if let Some(sidecar) = manager_guard.sidecars.get_mut(session_id) {
@@ -504,27 +285,10 @@ fn ensure_session_sidecar_attempt<R: Runtime>(
                 replace_existing = true;
                 None
             } else if sidecar.is_reusable() {
-                if validate_sidecar_runtime_invariant(
-                    session_id,
-                    &expected_runtime_identity,
-                    sidecar.runtime.as_deref(),
-                    sidecar.runtime_source.as_deref(),
-                    "reuse-healthy-precheck",
-                )
-                .is_err()
-                {
-                    replace_existing = true;
-                    clear_generation_after_replace = true;
-                    None
-                } else {
-                    // Healthy — needs HTTP verification outside the lock
-                    Some(ExistingSidecarReuse::Healthy {
-                        port: sidecar.port,
-                        generation,
-                        runtime: normalize_runtime_name(sidecar.runtime.as_deref()).to_string(),
-                        runtime_source: sidecar.runtime_source.clone(),
-                    })
-                }
+                Some(ExistingSidecarReuse::Healthy {
+                    port: sidecar.port,
+                    generation,
+                })
             } else if sidecar.is_starting() {
                 // Starting — another thread is doing wait_for_health/readiness.
                 // Add the owner now, then wait for /health/ready outside the lock.
@@ -534,28 +298,12 @@ fn ensure_session_sidecar_attempt<R: Runtime>(
                     sidecar.port,
                     owner
                 );
-                if validate_sidecar_runtime_invariant(
-                    session_id,
-                    &expected_runtime_identity,
-                    sidecar.runtime.as_deref(),
-                    sidecar.runtime_source.as_deref(),
-                    "reuse-starting",
-                )
-                .is_err()
-                {
-                    replace_existing = true;
-                    clear_generation_after_replace = true;
-                    None
-                } else {
-                    let owner_added = sidecar.add_owner(owner.clone());
-                    Some(ExistingSidecarReuse::Starting {
-                        port: sidecar.port,
-                        generation,
-                        runtime: normalize_runtime_name(sidecar.runtime.as_deref()).to_string(),
-                        runtime_source: sidecar.runtime_source.clone(),
-                        owner_added,
-                    })
-                }
+                let owner_added = sidecar.add_owner(owner.clone());
+                Some(ExistingSidecarReuse::Starting {
+                    port: sidecar.port,
+                    generation,
+                    owner_added,
+                })
             } else {
                 Some(ExistingSidecarReuse::Draining(DispatchGate::close(
                     &sidecar.dispatch_gate,
@@ -567,9 +315,6 @@ fn ensure_session_sidecar_attempt<R: Runtime>(
     };
     if replace_existing {
         manager_guard = replace_session_sidecar_after_drain(manager, manager_guard, session_id)?;
-        if clear_generation_after_replace {
-            manager_guard.clear_generation(session_id);
-        }
     }
 
     // If we found a running sidecar, verify HTTP health (with lock released).
@@ -577,27 +322,13 @@ fn ensure_session_sidecar_attempt<R: Runtime>(
     // can replace the sidecar during this window. We use a generation counter to detect this
     // and avoid accidentally killing the healthy replacement.
     if let Some(existing) = existing_sidecar_info {
-        let (
-            port,
-            pre_gen,
-            runtime_for_trace,
-            runtime_source_for_trace,
-            wait_for_starting,
-            joined_owner_added,
-        ) = match existing {
-            ExistingSidecarReuse::Healthy {
-                port,
-                generation,
-                runtime,
-                runtime_source,
-            } => (port, generation, runtime, runtime_source, false, false),
+        let (port, pre_gen, wait_for_starting, joined_owner_added) = match existing {
+            ExistingSidecarReuse::Healthy { port, generation } => (port, generation, false, false),
             ExistingSidecarReuse::Starting {
                 port,
                 generation,
-                runtime,
-                runtime_source,
                 owner_added,
-            } => (port, generation, runtime, runtime_source, true, owner_added),
+            } => (port, generation, true, owner_added),
             ExistingSidecarReuse::Draining(drain) => {
                 drop(manager_guard);
                 finish_unowned_session_after_drain(manager, session_id, drain)?;
@@ -607,24 +338,17 @@ fn ensure_session_sidecar_attempt<R: Runtime>(
                     session_id,
                     workspace_path,
                     owner,
-                    runtime_override,
-                    runtime_source_override,
                     attempt + 1,
                     expected_recovery_epoch,
                 );
             }
         };
-        let runtime_source_label =
-            normalize_runtime_source_name(&runtime_for_trace, runtime_source_for_trace.as_deref())
-                .to_string();
         drop(manager_guard);
 
         let check_started = trace_start();
         emit_perf_trace(
             PerfTrace::new(PerfTraceName::SidecarBoot, "reuse_check_start")
                 .session_id(Some(session_id))
-                .runtime(Some(&runtime_for_trace))
-                .detail("runtimeSource", &runtime_source_label)
                 .detail("port", port)
                 .detail("starting", wait_for_starting),
         );
@@ -638,8 +362,6 @@ fn ensure_session_sidecar_attempt<R: Runtime>(
             PerfTrace::new(PerfTraceName::SidecarBoot, "reuse_check_end")
                 .duration_ms(elapsed_ms(check_started))
                 .session_id(Some(session_id))
-                .runtime(Some(&runtime_for_trace))
-                .detail("runtimeSource", &runtime_source_label)
                 .status(if http_healthy { "ok" } else { "error" })
                 .detail("port", port)
                 .detail("starting", wait_for_starting),
@@ -663,7 +385,6 @@ fn ensure_session_sidecar_attempt<R: Runtime>(
                 "[sidecar] Session {} generation changed ({} → {}) during HTTP check on port {}, checking replacement",
                 session_id, pre_gen, post_gen, port
             );
-            let mut remove_replacement_for_runtime_drift = false;
             if let Some(sidecar) = manager_guard.sidecars.get_mut(session_id) {
                 if !sidecar.is_dead() {
                     ulog_info!(
@@ -672,41 +393,21 @@ fn ensure_session_sidecar_attempt<R: Runtime>(
                         sidecar.port,
                         sidecar.state
                     );
-                    if validate_sidecar_runtime_invariant(
+                    drop(manager_guard);
+                    return ensure_session_sidecar_attempt(
+                        app_handle,
+                        manager,
                         session_id,
-                        &expected_runtime_identity,
-                        sidecar.runtime.as_deref(),
-                        sidecar.runtime_source.as_deref(),
-                        "reuse-replacement",
-                    )
-                    .is_err()
-                    {
-                        remove_replacement_for_runtime_drift = true;
-                    } else {
-                        drop(manager_guard);
-                        return ensure_session_sidecar_attempt(
-                            app_handle,
-                            manager,
-                            session_id,
-                            workspace_path,
-                            owner,
-                            runtime_override,
-                            runtime_source_override,
-                            attempt + 1,
-                            expected_recovery_epoch,
-                        );
-                    }
+                        workspace_path,
+                        owner,
+                        attempt + 1,
+                        expected_recovery_epoch,
+                    );
                 }
-            }
-            if remove_replacement_for_runtime_drift {
-                manager_guard =
-                    replace_session_sidecar_after_drain(manager, manager_guard, session_id)?;
-                manager_guard.clear_generation(session_id);
             }
             // Replacement sidecar process also dead — fall through to create
         } else if http_healthy {
             // Same generation, HTTP healthy — try to reuse
-            let mut remove_for_runtime_drift = false;
             if let Some(sidecar) = manager_guard.sidecars.get_mut(session_id) {
                 if sidecar.port == port && sidecar.is_reusable() {
                     ulog_info!(
@@ -715,83 +416,50 @@ fn ensure_session_sidecar_attempt<R: Runtime>(
                         port,
                         owner
                     );
-                    if validate_sidecar_runtime_invariant(
-                        session_id,
-                        &expected_runtime_identity,
-                        sidecar.runtime.as_deref(),
-                        sidecar.runtime_source.as_deref(),
-                        "reuse-http-healthy",
-                    )
-                    .is_err()
-                    {
-                        remove_for_runtime_drift = true;
-                    } else {
-                        sidecar.add_owner(owner.clone());
-                        emit_perf_trace(
-                            PerfTrace::new(PerfTraceName::SidecarBoot, "ensure_done")
-                                .duration_ms(elapsed_ms(ensure_started))
-                                .session_id(Some(session_id))
-                                .runtime(Some(&runtime_for_trace))
-                                .detail("runtimeSource", &runtime_source_label)
-                                .status("ok")
-                                .detail("port", port)
-                                .detail("is_new", false)
-                                .detail(
-                                    "reuse",
-                                    if wait_for_starting {
-                                        "starting-ready"
-                                    } else {
-                                        "healthy"
-                                    },
-                                ),
-                        );
-                        return Ok(EnsureSidecarResult {
-                            port,
-                            is_new: false,
-                            generation: pre_gen,
-                        });
-                    }
+                    sidecar.add_owner(owner.clone());
+                    emit_perf_trace(
+                        PerfTrace::new(PerfTraceName::SidecarBoot, "ensure_done")
+                            .duration_ms(elapsed_ms(ensure_started))
+                            .session_id(Some(session_id))
+                            .status("ok")
+                            .detail("port", port)
+                            .detail("is_new", false)
+                            .detail(
+                                "reuse",
+                                if wait_for_starting {
+                                    "starting-ready"
+                                } else {
+                                    "healthy"
+                                },
+                            ),
+                    );
+                    return Ok(EnsureSidecarResult {
+                        port,
+                        is_new: false,
+                        generation: pre_gen,
+                    });
                 } else if sidecar.port == port && wait_for_starting {
                     ulog_info!(
                         "[sidecar] Session {} starting Sidecar reached readiness on port {}, adding owner {:?}",
                         session_id, port, owner
                     );
-                    if validate_sidecar_runtime_invariant(
-                        session_id,
-                        &expected_runtime_identity,
-                        sidecar.runtime.as_deref(),
-                        sidecar.runtime_source.as_deref(),
-                        "reuse-starting-ready",
-                    )
-                    .is_err()
-                    {
-                        remove_for_runtime_drift = true;
-                    } else {
-                        sidecar.state = SidecarState::Healthy;
-                        sidecar.add_owner(owner.clone());
-                        emit_perf_trace(
-                            PerfTrace::new(PerfTraceName::SidecarBoot, "ensure_done")
-                                .duration_ms(elapsed_ms(ensure_started))
-                                .session_id(Some(session_id))
-                                .runtime(Some(&runtime_for_trace))
-                                .detail("runtimeSource", &runtime_source_label)
-                                .status("ok")
-                                .detail("port", port)
-                                .detail("is_new", false)
-                                .detail("reuse", "starting-ready"),
-                        );
-                        return Ok(EnsureSidecarResult {
-                            port,
-                            is_new: false,
-                            generation: pre_gen,
-                        });
-                    }
+                    sidecar.state = SidecarState::Healthy;
+                    sidecar.add_owner(owner.clone());
+                    emit_perf_trace(
+                        PerfTrace::new(PerfTraceName::SidecarBoot, "ensure_done")
+                            .duration_ms(elapsed_ms(ensure_started))
+                            .session_id(Some(session_id))
+                            .status("ok")
+                            .detail("port", port)
+                            .detail("is_new", false)
+                            .detail("reuse", "starting-ready"),
+                    );
+                    return Ok(EnsureSidecarResult {
+                        port,
+                        is_new: false,
+                        generation: pre_gen,
+                    });
                 }
-            }
-            if remove_for_runtime_drift {
-                manager_guard =
-                    replace_session_sidecar_after_drain(manager, manager_guard, session_id)?;
-                manager_guard.clear_generation(session_id);
             }
             // Sidecar gone but generation unchanged (removed without replacement)
             ulog_info!(
@@ -813,7 +481,7 @@ fn ensure_session_sidecar_attempt<R: Runtime>(
                 // the same Starting sidecar), `add_owner` returned false; removing
                 // it here would empty the shared owner set and tear down a sidecar
                 // the other caller is still legitimately starting (cross-review
-                // Codex Critical #2). Leave teardown to whoever truly owns it.
+                // security review Critical #2). Leave teardown to whoever truly owns it.
                 let should_stop = if joined_owner_added {
                     if let Some(sidecar) = manager_guard.sidecars.get_mut(session_id) {
                         let (removed, last_owner_removed) = sidecar.remove_owner(&owner);
@@ -851,18 +519,16 @@ fn ensure_session_sidecar_attempt<R: Runtime>(
             workspace_path,
             owner,
             manager_guard,
-            runtime_override.as_deref(),
-            runtime_source_override.as_deref(),
-            &expected_runtime_identity,
-            attempt,
-            expected_recovery_epoch,
+            CreationAttempt {
+                attempt,
+                expected_recovery_epoch,
+            },
         );
         if let Ok(ensure_result) = &result {
             emit_perf_trace(
                 PerfTrace::new(PerfTraceName::SidecarBoot, "ensure_done")
                     .duration_ms(elapsed_ms(ensure_started))
                     .session_id(Some(session_id))
-                    .runtime(Some(&requested_runtime_for_trace))
                     .status("ok")
                     .detail("port", ensure_result.port)
                     .detail("is_new", ensure_result.is_new),
@@ -879,18 +545,16 @@ fn ensure_session_sidecar_attempt<R: Runtime>(
         workspace_path,
         owner,
         manager_guard,
-        runtime_override.as_deref(),
-        runtime_source_override.as_deref(),
-        &expected_runtime_identity,
-        attempt,
-        expected_recovery_epoch,
+        CreationAttempt {
+            attempt,
+            expected_recovery_epoch,
+        },
     );
     if let Ok(ensure_result) = &result {
         emit_perf_trace(
             PerfTrace::new(PerfTraceName::SidecarBoot, "ensure_done")
                 .duration_ms(elapsed_ms(ensure_started))
                 .session_id(Some(session_id))
-                .runtime(Some(&requested_runtime_for_trace))
                 .status("ok")
                 .detail("port", ensure_result.port)
                 .detail("is_new", ensure_result.is_new),
@@ -901,6 +565,11 @@ fn ensure_session_sidecar_attempt<R: Runtime>(
 
 /// Helper function to create a new session sidecar
 /// Extracted to avoid code duplication and handle the mutex guard properly
+struct CreationAttempt {
+    attempt: u32,
+    expected_recovery_epoch: Option<u64>,
+}
+
 fn create_new_session_sidecar<'a, R: Runtime>(
     app_handle: &AppHandle<R>,
     manager: &'a ManagedSidecarManager,
@@ -908,11 +577,7 @@ fn create_new_session_sidecar<'a, R: Runtime>(
     workspace_path: &std::path::Path,
     owner: SidecarOwner,
     mut manager_guard: std::sync::MutexGuard<'a, SidecarManager>,
-    runtime_override: Option<&str>,
-    runtime_source_override: Option<&str>,
-    resolved_identity: &RuntimeIdentity,
-    attempt: u32,
-    expected_recovery_epoch: Option<u64>,
+    creation: CreationAttempt,
 ) -> Result<EnsureSidecarResult, String> {
     let boot_started = trace_start();
 
@@ -932,10 +597,8 @@ fn create_new_session_sidecar<'a, R: Runtime>(
                 session_id,
                 workspace_path,
                 owner,
-                runtime_override.map(str::to_string),
-                runtime_source_override.map(str::to_string),
-                attempt + 1,
-                expected_recovery_epoch,
+                creation.attempt + 1,
+                creation.expected_recovery_epoch,
             );
         }
         // Exists but process dead — remove before creating fresh
@@ -959,7 +622,7 @@ fn create_new_session_sidecar<'a, R: Runtime>(
     drop(manager_guard);
     let port = allocate_sidecar_port(&port_allocator)?;
     let mut manager_guard = manager.lock().map_err(|error| error.to_string())?;
-    if expected_recovery_epoch.is_some_and(|epoch| {
+    if creation.expected_recovery_epoch.is_some_and(|epoch| {
         !manager_guard.recovery_attempt_is_authorized(session_id, epoch, &owner)
     }) {
         return Err(RECOVERY_ATTEMPT_STALE.to_string());
@@ -972,10 +635,8 @@ fn create_new_session_sidecar<'a, R: Runtime>(
             session_id,
             workspace_path,
             owner,
-            runtime_override.map(str::to_string),
-            runtime_source_override.map(str::to_string),
-            attempt + 1,
-            expected_recovery_epoch,
+            creation.attempt + 1,
+            creation.expected_recovery_epoch,
         );
     }
 
@@ -988,11 +649,18 @@ fn create_new_session_sidecar<'a, R: Runtime>(
 
     // Build command (see sibling SessionSidecar path for the tsx-loader rationale)
     let mut cmd = crate::process_cmd::new(&node_path);
-    append_sidecar_entrypoint_args(&mut cmd, &script_path, port, SidecarProcessRole::Session);
-    cmd.arg("--agent-dir").arg(workspace_path);
+    append_sidecar_entrypoint_args(&mut cmd, &script_path, port);
+    cmd.arg("--workspace-dir").arg(workspace_path);
 
-    // Pass session_id to Bun for real sessions (not pending-xxx)
-    // so Bun uses the same UUID as Rust/SDK, enabling resume on crash recovery
+    // Windows release builds are self-contained. Keep these paths as separate
+    // environment values so Unicode, whitespace and percent signs are never
+    // interpreted by a shell. Missing resources fail before a Session process
+    // is created; there is no fallback to a user-installed Node or Git.
+    #[cfg(target_os = "windows")]
+    super::spawn::apply_windows_bundled_runtime(app_handle, &mut cmd)?;
+
+    // Pass session_id to Node for real sessions (not pending-xxx)
+    // so the Sidecar uses the same UUID as Rust/SDK during crash recovery.
     if !session_id.starts_with("pending-") {
         cmd.arg("--session-id").arg(session_id);
     }
@@ -1005,10 +673,10 @@ fn create_new_session_sidecar<'a, R: Runtime>(
     // Apply proxy policy: user proxy / inherit system / protect localhost (pit-of-success)
     proxy_config::apply_to_subprocess(&mut cmd);
 
-    // Inject management API port for Bun→Rust IPC (v0.1.21)
+    // Inject the management API port for Sidecar → Rust control-plane IPC.
     let mgmt_port = crate::management_api::get_management_port();
     if mgmt_port > 0 {
-        cmd.env("MYAGENTS_MANAGEMENT_PORT", mgmt_port.to_string());
+        cmd.env("XIAOJING_MANAGEMENT_PORT", mgmt_port.to_string());
     }
     if let Some(data_root) = crate::app_dirs::xiaojing_data_dir() {
         cmd.env("XIAOJING_DATA_ROOT", data_root);
@@ -1017,8 +685,10 @@ fn create_new_session_sidecar<'a, R: Runtime>(
         crate::deepseek_credentials::inject_into_sidecar(&mut cmd)?;
         crate::geo_provider_credentials::inject_into_sidecar(&mut cmd)?;
         cmd.env("XIAOJING_MAIN_AGENT", "1");
-        cmd.env_remove("MYAGENTS_RUNTIME");
-        cmd.env_remove("MYAGENTS_RUNTIME_SOURCE");
+        cmd.env(
+            "XIAOJING_GEO_AUTONOMY_PROFILE",
+            crate::geo_autonomy::read_geo_autonomy_profile(),
+        );
     } else {
         cmd.env_remove(crate::deepseek_credentials::SIDECAR_SECRET_ENV);
         cmd.env_remove("DEEPSEEK_API_KEY");
@@ -1029,26 +699,15 @@ fn create_new_session_sidecar<'a, R: Runtime>(
             cmd.env_remove(name);
         }
         cmd.env_remove("XIAOJING_MAIN_AGENT");
+        cmd.env_remove("XIAOJING_GEO_AUTONOMY_PROFILE");
     }
 
-    // Reuse validation and process spawn consume the same identity snapshot for
-    // this ensure attempt. In particular, missing Session metadata is not an
-    // implicit builtin identity for a metadata creator.
-    if let Some(runtime) = resolved_identity.runtime_for_env() {
-        cmd.env("MYAGENTS_RUNTIME", runtime);
-    }
-    if let Some(runtime_source) = resolved_identity.runtime_source_for_env() {
-        cmd.env("MYAGENTS_RUNTIME_SOURCE", runtime_source);
-    }
     let sidecar_generation = manager_guard.next_generation(session_id);
-    cmd.env("MYAGENTS_SIDECAR_ID", session_id);
+    cmd.env("XIAOJING_SIDECAR_ID", session_id);
     cmd.env(
-        "MYAGENTS_SIDECAR_GENERATION",
+        "XIAOJING_SIDECAR_GENERATION",
         sidecar_generation.to_string(),
     );
-    let runtime_for_trace = resolved_identity.runtime.clone();
-    let runtime_source_for_trace = resolved_identity.runtime_source_label().to_string();
-
     cmd.stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .stdin(Stdio::null());
@@ -1057,8 +716,6 @@ fn create_new_session_sidecar<'a, R: Runtime>(
     emit_perf_trace(
         PerfTrace::new(PerfTraceName::SidecarBoot, "spawn_start")
             .session_id(Some(session_id))
-            .runtime(Some(&runtime_for_trace))
-            .detail("runtimeSource", &runtime_source_for_trace)
             .detail("owner", format!("{:?}", owner)),
     );
     let mut child = crate::process_cmd::spawn_tree(&mut cmd).map_err(|e| {
@@ -1068,8 +725,6 @@ fn create_new_session_sidecar<'a, R: Runtime>(
             PerfTrace::new(PerfTraceName::SidecarBoot, "spawn_failed")
                 .duration_ms(elapsed_ms(boot_started))
                 .session_id(Some(session_id))
-                .runtime(Some(&runtime_for_trace))
-                .detail("runtimeSource", &runtime_source_for_trace)
                 .status("error")
                 .detail("error", e.to_string()),
         );
@@ -1079,8 +734,6 @@ fn create_new_session_sidecar<'a, R: Runtime>(
         PerfTrace::new(PerfTraceName::SidecarBoot, "spawned")
             .duration_ms(elapsed_ms(boot_started))
             .session_id(Some(session_id))
-            .runtime(Some(&runtime_for_trace))
-            .detail("runtimeSource", &runtime_source_for_trace)
             .status("ok")
             .detail("port", port),
     );
@@ -1091,19 +744,18 @@ fn create_new_session_sidecar<'a, R: Runtime>(
         let session_id_for_log = session_id_clone.clone();
         thread::spawn(move || {
             let reader = BufReader::new(stdout);
-            let mut bun_logger_active = false;
-            for line in reader.lines().flatten() {
-                // Once Bun's unified logger is initialized, ALL console.log output is
-                // written directly to the unified log file by Bun's logger interceptor.
-                // Capturing stdout after this point causes 100% duplication ([BUN] + [bun-out]).
-                // Only pre-logger startup lines need to go through bun-out.
-                if !bun_logger_active {
+            let mut node_logger_active = false;
+            for line in reader.lines().map_while(Result::ok) {
+                // Once Node's unified logger is initialized, console output is
+                // written directly to the unified log file. Only pre-logger
+                // startup lines need to be forwarded from stdout.
+                if !node_logger_active {
                     if line.contains("[Logger] Unified logging initialized") {
-                        bun_logger_active = true;
+                        node_logger_active = true;
                     }
-                    ulog_info!("[bun-out][session:{}] {}", session_id_for_log, line);
+                    ulog_info!("[node-out][session:{}] {}", session_id_for_log, line);
                 }
-                // After logger init: silently drop stdout (Bun logger handles it)
+                // After logger init, drop stdout to avoid duplicate log entries.
             }
         });
     }
@@ -1112,16 +764,16 @@ fn create_new_session_sidecar<'a, R: Runtime>(
         let session_id_for_log = session_id_clone.clone();
         thread::spawn(move || {
             let reader = BufReader::new(stderr);
-            for line in reader.lines().flatten() {
+            for line in reader.lines().map_while(Result::ok) {
                 match classify_sidecar_stderr(&line) {
                     SidecarStderrLevel::Info => {
-                        ulog_info!("[bun-err][session:{}] {}", session_id_for_log, line)
+                        ulog_info!("[node-err][session:{}] {}", session_id_for_log, line)
                     }
                     SidecarStderrLevel::Warn => {
-                        ulog_warn!("[bun-err][session:{}] {}", session_id_for_log, line)
+                        ulog_warn!("[node-err][session:{}] {}", session_id_for_log, line)
                     }
                     SidecarStderrLevel::Error => {
-                        ulog_error!("[bun-err][session:{}] {}", session_id_for_log, line)
+                        ulog_error!("[node-err][session:{}] {}", session_id_for_log, line)
                     }
                 }
             }
@@ -1144,8 +796,6 @@ fn create_new_session_sidecar<'a, R: Runtime>(
             PerfTrace::new(PerfTraceName::SidecarBoot, "spawn_immediate_exit")
                 .duration_ms(elapsed_ms(boot_started))
                 .session_id(Some(session_id))
-                .runtime(Some(&runtime_for_trace))
-                .detail("runtimeSource", &runtime_source_for_trace)
                 .status("error")
                 .detail("status", format!("{:?}", status)),
         );
@@ -1166,10 +816,6 @@ fn create_new_session_sidecar<'a, R: Runtime>(
         completion_claims: HashSet::new(),
         dispatch_gate: DispatchGate::new(),
         created_at: std::time::Instant::now(),
-        runtime: resolved_identity.runtime_for_env().map(str::to_string),
-        runtime_source: resolved_identity
-            .runtime_source_for_env()
-            .map(str::to_string),
     };
 
     manager_guard.insert_sidecar_at_generation(session_id, sidecar_generation, sidecar);
@@ -1194,8 +840,8 @@ fn create_new_session_sidecar<'a, R: Runtime>(
 
     // Wait for health (TCP up). Then wait for /health/ready (deferred init
     // complete) so renderer-driven session startup gates on actual readiness,
-    // not just liveness. Other startup paths (cron / IM bot) keep the looser
-    // liveness-only contract — they don't surface a "still warming up" UI.
+    // not just liveness. GEO monitoring can acquire its owner only after the
+    // same readiness fence has settled.
     let health_started = trace_start();
     match wait_for_health(port, Some(alive_check)) {
         Ok(()) => {
@@ -1203,7 +849,6 @@ fn create_new_session_sidecar<'a, R: Runtime>(
                 PerfTrace::new(PerfTraceName::SidecarBoot, "tcp_live")
                     .duration_ms(elapsed_ms(health_started))
                     .session_id(Some(session_id))
-                    .runtime(Some(&runtime_for_trace))
                     .status("ok")
                     .detail("port", port),
             );
@@ -1221,7 +866,6 @@ fn create_new_session_sidecar<'a, R: Runtime>(
                     PerfTrace::new(PerfTraceName::SidecarBoot, "ready_failed")
                         .duration_ms(elapsed_ms(readiness_started))
                         .session_id(Some(session_id))
-                        .runtime(Some(&runtime_for_trace))
                         .status("error")
                         .detail("port", port)
                         .detail("error", &e),
@@ -1261,7 +905,6 @@ fn create_new_session_sidecar<'a, R: Runtime>(
                 PerfTrace::new(PerfTraceName::SidecarBoot, "ready_ok")
                     .duration_ms(elapsed_ms(boot_started))
                     .session_id(Some(session_id))
-                    .runtime(Some(&runtime_for_trace))
                     .status("ok")
                     .detail("port", port),
             );
@@ -1277,7 +920,6 @@ fn create_new_session_sidecar<'a, R: Runtime>(
                 PerfTrace::new(PerfTraceName::SidecarBoot, "tcp_live_failed")
                     .duration_ms(elapsed_ms(health_started))
                     .session_id(Some(session_id))
-                    .runtime(Some(&runtime_for_trace))
                     .status("error")
                     .detail("port", port)
                     .detail("error", &e),
@@ -1290,7 +932,7 @@ fn create_new_session_sidecar<'a, R: Runtime>(
                 .map(|s| s.port == port)
                 .unwrap_or(false);
             let retired = if port_matches {
-                // Check exit status and mark crashed bun for fallback
+                // Check exit status and fence a repeatedly crashing bundled Node.
                 #[cfg(target_os = "windows")]
                 if let Some(sidecar) = manager_guard.sidecars.get_mut(session_id) {
                     if let Ok(Some(status)) = sidecar.process.try_wait() {
@@ -1313,10 +955,6 @@ fn create_new_session_sidecar<'a, R: Runtime>(
     }
 }
 
-/// Release an owner from a Session's Sidecar.
-/// If this was the last owner, the Sidecar is stopped.
-///
-/// Returns true if the Sidecar was stopped (no more owners).
 pub(crate) fn finish_session_owner_release(
     manager: &ManagedSidecarManager,
     release: SessionOwnerRelease,
@@ -1327,21 +965,13 @@ pub(crate) fn finish_session_owner_release(
         drain,
     } = release;
     if let Some(drain) = drain {
-        // The exact generation remains manager-authoritative with admission
-        // closed while this waits. No global manager mutex is held here.
         drain.wait();
         let retired = {
-            // Owner removal already committed before the drain. Recovering a
-            // poisoned lock here is required to finish that same transition;
-            // returning an error would strand a half-retired Sidecar that no
-            // caller can safely roll back.
             let mut manager_guard = manager
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             manager_guard.finish_unowned_session_retirement(&drain)
         };
-        // SessionSidecar::drop terminates the already-drained process. Keep it
-        // outside the manager guard even though the second wait is immediate.
         drop(retired);
     }
     Ok((removed, stopped))
@@ -1359,70 +989,26 @@ pub fn release_session_sidecar(
         manager_guard.remove_session_owner(session_id, owner)
     };
     let (removed, stopped) = finish_session_owner_release(manager, release)?;
-
     if removed {
-        if stopped {
-            ulog_info!(
-                "[sidecar] Released owner {:?} from session {}, Sidecar stopped (last owner)",
-                owner,
-                session_id
-            );
-        } else {
-            ulog_info!(
-                "[sidecar] Released owner {:?} from session {}, Sidecar continues running",
-                owner,
-                session_id
-            );
-        }
+        ulog_info!(
+            "[sidecar] Released owner {:?} from session {}; stopped={}",
+            owner,
+            session_id,
+            stopped
+        );
         Ok(stopped)
     } else {
-        ulog_debug!(
-            "[sidecar] Session {} has no Sidecar to release owner {:?} from",
-            session_id,
-            owner
-        );
         Ok(false)
     }
 }
 
-/// Get the port for a Session's Sidecar
-pub fn get_session_sidecar_port(
-    manager: &ManagedSidecarManager,
-    session_id: &str,
-) -> Result<Option<u16>, String> {
-    let mut manager_guard = manager.lock().map_err(|e| e.to_string())?;
-    Ok(manager_guard.get_session_port(session_id))
-}
-
-/// Check whether a Session has a live Sidecar entry, including one still starting.
-pub fn has_session_sidecar(
-    manager: &ManagedSidecarManager,
-    session_id: &str,
-) -> Result<bool, String> {
-    let mut manager_guard = manager.lock().map_err(|e| e.to_string())?;
-    Ok(manager_guard.has_session_sidecar(session_id))
-}
-
-/// Get the current sidecar generation for a Session, if Rust still tracks one.
-pub fn get_session_generation(
-    manager: &ManagedSidecarManager,
-    session_id: &str,
-) -> Result<Option<u64>, String> {
-    let manager_guard = manager.lock().map_err(|e| e.to_string())?;
-    Ok(manager_guard.generation_for(session_id))
-}
-
-// ============= Session-Centric Tauri Commands =============
-
 fn is_canonical_session_id(session_id: &str) -> bool {
-    let len = session_id.len();
-    (1..=99).contains(&len)
+    (1..=99).contains(&session_id.len())
         && session_id
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
 }
 
-/// Ensure a Session has a Sidecar running, adding the specified owner
 #[tauri::command]
 #[allow(non_snake_case)]
 pub async fn cmd_ensure_session_sidecar(
@@ -1435,119 +1021,24 @@ pub async fn cmd_ensure_session_sidecar(
 ) -> Result<EnsureSidecarResult, String> {
     let owner = match ownerType.as_str() {
         "tab" => SidecarOwner::Tab(ownerId),
-        "companion" => SidecarOwner::Companion(ownerId),
-        "task" => SidecarOwner::Task(ownerId),
-        "im_bot" | "agent" => SidecarOwner::Agent(ownerId),
-        _ => return Err(format!("Invalid owner type: {}", ownerType)),
+        _ => return Err(format!("Invalid owner type: {ownerType}")),
     };
-
-    let workspace_path = PathBuf::from(&workspacePath);
-    // The async lifecycle entrypoint owns both the per-session deletion fence
-    // and the blocking-thread handoff for the full cold boot/readiness wait.
-    let manager = state.inner().clone();
-    ensure_session_sidecar_with_lifecycle(app_handle, manager, sessionId, workspace_path, owner)
-        .await
-}
-
-/// Release an owner from a Session's Sidecar
-#[tauri::command]
-#[allow(non_snake_case)]
-pub async fn cmd_release_session_sidecar(
-    state: tauri::State<'_, ManagedSidecarManager>,
-    sessionId: String,
-    ownerType: String,
-    ownerId: String,
-) -> Result<bool, String> {
-    let owner = match ownerType.as_str() {
-        "tab" => SidecarOwner::Tab(ownerId),
-        "companion" => SidecarOwner::Companion(ownerId),
-        "background_completion" => SidecarOwner::BackgroundCompletion(ownerId),
-        "im_bot" | "agent" => SidecarOwner::Agent(ownerId),
-        _ => return Err(format!("Invalid owner type: {}", ownerType)),
-    };
-
-    let manager = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        release_session_sidecar(&manager, &sessionId, &owner)
-    })
+    ensure_session_sidecar_with_lifecycle(
+        app_handle,
+        state.inner().clone(),
+        sessionId,
+        PathBuf::from(workspacePath),
+        owner,
+    )
     .await
-    .map_err(|error| format!("Session owner release task failed: {error:?}"))?
-}
-
-/// Get the ready port for a Session's Sidecar.
-#[tauri::command]
-#[allow(non_snake_case)]
-pub fn cmd_get_session_port(
-    state: tauri::State<'_, ManagedSidecarManager>,
-    sessionId: String,
-) -> Result<Option<u16>, String> {
-    get_session_sidecar_port(&state, &sessionId)
-}
-
-/// Check whether a Session has a live Sidecar entry, including Starting.
-#[tauri::command]
-#[allow(non_snake_case)]
-pub fn cmd_has_session_sidecar(
-    state: tauri::State<'_, ManagedSidecarManager>,
-    sessionId: String,
-) -> Result<bool, String> {
-    has_session_sidecar(&state, &sessionId)
-}
-
-/// Get the current sidecar generation for a Session, if any.
-#[tauri::command]
-#[allow(non_snake_case)]
-pub fn cmd_get_session_generation(
-    state: tauri::State<'_, ManagedSidecarManager>,
-    sessionId: String,
-) -> Result<Option<u64>, String> {
-    get_session_generation(&state, &sessionId)
-}
-
-/// Upgrade a session ID (e.g., from "pending-xxx" to real session ID)
-/// This updates HashMap keys without stopping the Sidecar.
-#[tauri::command]
-#[allow(non_snake_case)]
-pub async fn cmd_upgrade_session_id(
-    state: tauri::State<'_, ManagedSidecarManager>,
-    oldSessionId: String,
-    newSessionId: String,
-    tabId: String,
-) -> Result<bool, String> {
-    let _lifecycle = acquire_session_lifecycle(&[&oldSessionId, &newSessionId]).await;
-    {
-        let manager = state.lock().map_err(|e| e.to_string())?;
-        if manager.session_id_upgrade_is_already_applied_for_tab(
-            &oldSessionId,
-            &newSessionId,
-            &tabId,
-        ) {
-            return Ok(true);
-        }
-    }
-    if has_persisted_session_owner(&oldSessionId).await?
-        || has_persisted_session_owner(&newSessionId).await?
-    {
-        return Ok(false);
-    }
-    let mut manager = state.lock().map_err(|e| e.to_string())?;
-    if manager.session_has_persistent_owners(&oldSessionId)
-        || manager.session_has_persistent_owners(&newSessionId)
-    {
-        return Ok(false);
-    }
-    Ok(manager.upgrade_session_id_for_tab(&oldSessionId, &newSessionId, &tabId))
 }
 
 /// Check whether a session identity must remain stable after a Tab detaches.
-/// Includes both live background owners and durable Task/Goal state whose
-/// physical Sidecar owner may still be attaching or recovering.
+/// Includes live background owners and durable GEO monitoring state.
 #[tauri::command]
 #[allow(non_snake_case)]
 pub async fn cmd_session_has_persistent_owners(
     state: tauri::State<'_, ManagedSidecarManager>,
-    agent_state: tauri::State<'_, crate::im::ManagedAgents>,
-    im_state: tauri::State<'_, crate::im::ManagedImBots>,
     sessionId: String,
 ) -> Result<bool, String> {
     let sidecars = state.inner().clone();
@@ -1555,8 +1046,7 @@ pub async fn cmd_session_has_persistent_owners(
         let manager = sidecars.lock().unwrap_or_else(|e| e.into_inner());
         manager.session_has_persistent_owners(&sessionId)
     };
-    Ok(has_live_owner
-        || has_non_tab_session_owner(&sessionId, agent_state.inner(), im_state.inner()).await?)
+    Ok(has_live_owner || has_persisted_session_owner(&sessionId).await?)
 }
 
 /// Delete a transcript while releasing only the exact mounted Tab owners named
@@ -1591,8 +1081,6 @@ impl SessionDeleteCommandResult {
 #[allow(non_snake_case)]
 pub async fn cmd_delete_session_if_unowned(
     state: tauri::State<'_, ManagedSidecarManager>,
-    agent_state: tauri::State<'_, crate::im::ManagedAgents>,
-    im_state: tauri::State<'_, crate::im::ManagedImBots>,
     sessionId: String,
     releasableTabIds: Vec<String>,
     brandWorkspaceId: Option<String>,
@@ -1601,24 +1089,11 @@ pub async fn cmd_delete_session_if_unowned(
     if !is_canonical_session_id(&sessionId) {
         return Ok(SessionDeleteCommandResult::refused("invalid-session-id"));
     }
-    // Fast negative for the common active Task/Goal case. A fresh Session
-    // creator may retain the lifecycle guard until metadata birth; waiting on
-    // that guard before looking at the already-published durable/transient
-    // owner would make a delete click hang for the entire AI turn. This is
-    // only a UX shortcut: the same predicate is checked again under the guard
-    // below, which remains the correctness boundary for false -> true races.
-    if has_non_tab_session_owner(&sessionId, agent_state.inner(), im_state.inner()).await? {
+    if has_persisted_session_owner(&sessionId).await? {
         return Ok(SessionDeleteCommandResult::refused("in-use"));
     }
     let _lifecycle = acquire_session_lifecycle(&[&sessionId]).await;
-    // Do not lock IM routers while holding the Session lifecycle fence: IM
-    // message/runtime paths take router → lifecycle. Configured dormant
-    // bindings are disk-only and safe to repeat here. Any live binding that
-    // appears after the preflight first attaches an Agent owner under this same
-    // fence, and `session_has_owners` below catches it.
-    if has_persisted_session_owner(&sessionId).await?
-        || crate::im::session_delivery::configured_session_binding_exists(&sessionId)
-    {
+    if has_persisted_session_owner(&sessionId).await? {
         return Ok(SessionDeleteCommandResult::refused("in-use"));
     }
     let sidecars = state.inner().clone();
@@ -1646,22 +1121,10 @@ pub async fn cmd_delete_session_if_unowned(
         // The activity request intentionally runs without the manager lock.
         // Revalidate owners before the storage mutation while the outer
         // per-Session lifecycle fence still excludes new owner acquisition.
-        let mut manager = sidecars.lock().map_err(|error| error.to_string())?;
+        let manager = sidecars.lock().map_err(|error| error.to_string())?;
         if manager.session_has_unreleasable_owners(&sessionId, &releasable_tab_ids) {
             return Ok(SessionDeleteCommandResult::refused("in-use"));
         }
-        let delete_authority = {
-            let Some(instance) = manager.get_instance_mut(GLOBAL_SIDECAR_ID) else {
-                return Ok(SessionDeleteCommandResult::refused("authority-unavailable"));
-            };
-            if !instance.is_running() {
-                return Ok(SessionDeleteCommandResult::refused("authority-unavailable"));
-            }
-            let Some(delete_authority) = instance.session_delete_authority.clone() else {
-                return Ok(SessionDeleteCommandResult::refused("authority-unavailable"));
-            };
-            delete_authority
-        };
         drop(manager);
         let brand_deletion = match (
             brandWorkspaceId.as_deref(),
@@ -1686,62 +1149,14 @@ pub async fn cmd_delete_session_if_unowned(
                 }
             }
         };
-        let delete_dispatch = {
-            let mut manager = sidecars.lock().map_err(|error| error.to_string())?;
-            match manager.acquire_global_dispatch() {
-                Ok(dispatch) => dispatch,
-                Err(_) => {
-                    drop(manager);
-                    cancel_brand_admission();
-                    return Ok(SessionDeleteCommandResult::refused("authority-unavailable"));
-                }
-            }
-        };
-        let delete_transcript = || -> Result<(SessionDeleteCommandResult, bool), String> {
-            let client = crate::local_http::blocking_builder()
-                .timeout(Duration::from_secs(15))
-                .build()
-                .map_err(|error| format!("Failed to create local HTTP client: {error}"))?;
-            let delete_url = delete_dispatch.url_for_path(&format!("/sessions/{sessionId}"))?;
-            let response = client
-                .delete(delete_url)
-                .header(SESSION_DELETE_AUTHORITY_HEADER, delete_authority)
-                .send()
-                .map_err(|error| format!("Failed to delete session: {error}"))?;
-            let status = response.status();
-            let body = response
-                .text()
-                .unwrap_or_else(|_| "<unreadable response>".to_string());
-            if status.is_success() {
-                Ok((SessionDeleteCommandResult::deleted(), true))
-            } else {
-                match status.as_u16() {
-                    403 => Ok((
-                        SessionDeleteCommandResult::refused("protected-session"),
-                        false,
-                    )),
-                    404 => Ok((SessionDeleteCommandResult::refused("not-found"), true)),
-                    409 => Ok((SessionDeleteCommandResult::refused("in-use"), false)),
-                    _ => Err(format!(
-                        "Global Sidecar failed to delete session (HTTP {status}): {body}"
-                    )),
-                }
-            }
-        };
-        let deletion = delete_transcript();
-        // The dispatch lease covers only request/response materialization.
-        drop(delete_dispatch);
-        let (result, terminal) = match deletion {
-            Ok(deletion) => deletion,
+        let result = match crate::session_metadata::delete_session_storage(&sessionId) {
+            Ok(true) => SessionDeleteCommandResult::deleted(),
+            Ok(false) => SessionDeleteCommandResult::refused("not-found"),
             Err(error) => {
                 cancel_brand_admission();
                 return Err(error);
             }
         };
-        if !terminal {
-            cancel_brand_admission();
-            return Ok(result);
-        }
         if let Some((store, workspace_id, confirmation_token)) = &brand_deletion {
             store.mark_session_transcript_deleted(workspace_id, &sessionId, confirmation_token)?;
             store.finalize_session_deletion(workspace_id, &sessionId, confirmation_token)?;
@@ -1766,8 +1181,140 @@ pub async fn cmd_delete_session_if_unowned(
     .map_err(|error| format!("Session deletion task failed: {error:?}"))?
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrandReleasableTab {
+    pub session_id: String,
+    pub tab_id: String,
+}
+
+/// Brand-level deletion: remove every Session transcript of the workspace,
+/// stop its Sidecars, drop the catalog entry, and delete the workspace
+/// directory. Refusals mirror `cmd_delete_session_if_unowned` — the same
+/// persisted-owner, unreleasable-owner and busy-Sidecar predicates — applied
+/// to every Session the brand DB lists.
+#[tauri::command]
+#[allow(non_snake_case)]
+pub async fn cmd_brand_workspace_delete(
+    state: tauri::State<'_, ManagedSidecarManager>,
+    workspaceId: String,
+    confirmationToken: String,
+    releasableTabs: Vec<BrandReleasableTab>,
+) -> Result<SessionDeleteCommandResult, String> {
+    let store = crate::brand_workspace::production_store()?;
+    let session_ids = store.workspace_session_ids(&workspaceId)?;
+    if session_ids.iter().any(|id| !is_canonical_session_id(id)) {
+        return Ok(SessionDeleteCommandResult::refused("invalid-session-id"));
+    }
+    // Preflight before the fence only preserves already-mounted state on
+    // refusal; every mutation below re-validates under the lifecycle fence.
+    for session_id in &session_ids {
+        if has_persisted_session_owner(session_id).await? {
+            return Ok(SessionDeleteCommandResult::refused("in-use"));
+        }
+    }
+    let session_refs = session_ids.iter().map(String::as_str).collect::<Vec<_>>();
+    let _lifecycle = acquire_session_lifecycle(&session_refs).await;
+    for session_id in &session_ids {
+        if has_persisted_session_owner(session_id).await? {
+            return Ok(SessionDeleteCommandResult::refused("in-use"));
+        }
+    }
+    let sidecars = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let releasable_per_session = releasableTabs.into_iter().fold(
+            std::collections::HashMap::<String, std::collections::HashSet<String>>::new(),
+            |mut map, tab| {
+                map.entry(tab.session_id).or_default().insert(tab.tab_id);
+                map
+            },
+        );
+        let ports = {
+            let manager = sidecars.lock().map_err(|error| error.to_string())?;
+            for session_id in &session_ids {
+                let releasable = releasable_per_session
+                    .get(session_id)
+                    .cloned()
+                    .unwrap_or_default();
+                if manager.session_has_unreleasable_owners(session_id, &releasable) {
+                    return Ok(SessionDeleteCommandResult::refused("in-use"));
+                }
+            }
+            session_ids
+                .iter()
+                .filter_map(|session_id| {
+                    manager
+                        .get_session_sidecar(session_id)
+                        .filter(|sidecar| sidecar.is_reusable())
+                        .map(|sidecar| sidecar.port)
+                })
+                .collect::<Vec<_>>()
+        };
+        // The activity request intentionally runs without the manager lock.
+        for port in ports {
+            match super::background::check_sidecar_is_busy(port) {
+                Some(false) => {}
+                Some(true) => return Ok(SessionDeleteCommandResult::refused("in-use")),
+                None => return Ok(SessionDeleteCommandResult::refused("activity-unavailable")),
+            }
+        }
+        // Revalidate owners before the storage mutation while the outer
+        // per-Session lifecycle fence still excludes new owner acquisition.
+        {
+            let manager = sidecars.lock().map_err(|error| error.to_string())?;
+            for session_id in &session_ids {
+                let releasable = releasable_per_session
+                    .get(session_id)
+                    .cloned()
+                    .unwrap_or_default();
+                if manager.session_has_unreleasable_owners(session_id, &releasable) {
+                    return Ok(SessionDeleteCommandResult::refused("in-use"));
+                }
+            }
+        }
+        store.admit_workspace_deletion(&workspaceId, &confirmationToken)?;
+        let cancel_admission = || {
+            if let Err(error) =
+                store.cancel_workspace_deletion_admission(&workspaceId, &confirmationToken)
+            {
+                crate::ulog_warn!(
+                    "[brand-workspace] failed to cancel brand deletion admission: {error}"
+                );
+            }
+        };
+        for session_id in &session_ids {
+            if let Err(error) = crate::session_metadata::delete_session_storage(session_id) {
+                cancel_admission();
+                return Err(error);
+            }
+        }
+        // Release the App-authorized Tab owners before removing the workspace
+        // directory so every matching Sidecar process has stopped first.
+        let releases = {
+            let mut manager = sidecars.lock().map_err(|error| error.to_string())?;
+            let mut releases = Vec::new();
+            for (session_id, tab_ids) in releasable_per_session {
+                for tab_id in tab_ids {
+                    releases.push(manager.release_tab_session(&session_id, &tab_id, false));
+                }
+            }
+            releases
+        };
+        for release in releases {
+            finish_session_owner_release(&sidecars, release)?;
+        }
+        if let Err(error) = store.finalize_workspace_deletion(&workspaceId, &confirmationToken) {
+            cancel_admission();
+            return Err(error);
+        }
+        Ok(SessionDeleteCommandResult::deleted())
+    })
+    .await
+    .map_err(|error| format!("Brand workspace deletion task failed: {error:?}"))?
+}
+
 /// Release a Tab owner under the Session lifecycle guard. This prevents a
-/// newly-created Goal/Agent owner from landing between the renderer-side
+/// newly-created persistent owner from landing between the renderer-side
 /// presence check and owner removal.
 #[tauri::command]
 #[allow(non_snake_case)]
@@ -1791,72 +1338,44 @@ pub async fn cmd_release_tab_session(
     .map_err(|error| format!("Tab Session release task failed: {error:?}"))?
 }
 
+#[tauri::command]
+#[allow(non_snake_case)]
+pub fn cmd_can_restore_session(sessionId: String, workspacePath: String) -> bool {
+    if crate::workspace_files::path_safety::validate_workspace_root(&workspacePath).is_err()
+        || !crate::brand_workspace::is_brand_workspace_path(std::path::Path::new(&workspacePath))
+    {
+        return false;
+    }
+    let Some(path) = crate::app_dirs::xiaojing_data_dir().map(|root| root.join("sessions.json"))
+    else {
+        return false;
+    };
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    let Ok(sessions) =
+        serde_json::from_str::<serde_json::Value>(crate::utils::bom::strip_bom(&content))
+    else {
+        return false;
+    };
+    sessions.as_array().is_some_and(|items| {
+        items.iter().any(|session| {
+            session.get("id").and_then(serde_json::Value::as_str) == Some(&sessionId)
+                && session
+                    .get("workspacePath")
+                    .and_then(serde_json::Value::as_str)
+                    == Some(&workspacePath)
+        })
+    })
+}
+
 #[cfg(test)]
 mod session_lifecycle_tests {
     use super::{
-        acquire_session_lifecycle, is_canonical_session_id, resolve_runtime_identity_for_owner,
-        validate_sidecar_runtime_invariant, EnsureSidecarResult, RuntimeIdentity,
-        SessionDeleteCommandResult, SidecarOwner,
+        acquire_session_lifecycle, is_canonical_session_id, EnsureSidecarResult,
+        SessionDeleteCommandResult,
     };
     use std::time::Duration;
-
-    #[test]
-    fn metadata_creator_uses_agent_runtime_for_external_reuse_and_spawn() {
-        let expected = resolve_runtime_identity_for_owner(
-            &SidecarOwner::Task("task-a".to_string()),
-            None,
-            None,
-            None,
-            Some(RuntimeIdentity::new(
-                Some("codex"),
-                Some("managed-provider"),
-            )),
-        );
-
-        assert_eq!(expected.runtime, "codex");
-        assert_eq!(expected.runtime_source.as_deref(), Some("managed-provider"));
-        assert!(validate_sidecar_runtime_invariant(
-            "metadata-creator",
-            &expected,
-            Some("codex"),
-            Some("managed-provider"),
-            "test-healthy-reuse",
-        )
-        .is_ok());
-        assert!(validate_sidecar_runtime_invariant(
-            "metadata-creator",
-            &expected,
-            Some("codex"),
-            Some("managed-provider"),
-            "test-starting-reuse",
-        )
-        .is_ok());
-        assert!(validate_sidecar_runtime_invariant(
-            "metadata-creator",
-            &expected,
-            None,
-            None,
-            "test-wrong-builtin-reuse",
-        )
-        .is_err());
-    }
-
-    #[test]
-    fn metadata_creator_runtime_override_wins_before_metadata_birth() {
-        let expected = resolve_runtime_identity_for_owner(
-            &SidecarOwner::Task("task-a".to_string()),
-            Some("gemini"),
-            Some("system-cli"),
-            None,
-            Some(RuntimeIdentity::new(
-                Some("codex"),
-                Some("managed-provider"),
-            )),
-        );
-
-        assert_eq!(expected.runtime, "gemini");
-        assert_eq!(expected.runtime_source.as_deref(), Some("system-cli"));
-    }
 
     #[test]
     fn deletion_accepts_only_one_canonical_session_path_segment() {

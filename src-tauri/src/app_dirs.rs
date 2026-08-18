@@ -1,15 +1,15 @@
 //! Centralized application data directory and PID lock file management.
 //!
-//! All code that needs `~/.myagents/` SHOULD use [`myagents_data_dir()`] instead of
+//! All code that needs `Xiaojing local-data root/` SHOULD use [`xiaojing_data_dir()`] instead of
 //! hardcoding the path. This enables future dev/prod isolation (separate data dirs
 //! for debug vs release builds) with a single change to this module.
 //!
 //! ## PID Lock File
 //!
-//! `~/.myagents/app.lock` contains the PID of the running MyAgents instance.
+//! `Xiaojing local-data root/app.lock` contains the PID of the running Xiaojing instance.
 //! - Written by [`acquire_lock()`] during app startup (after single-instance check).
-//! - Read by build scripts (`build_dev.sh`, `start_dev.sh`) to precisely kill the
-//!   running instance before starting a new one.
+//! - Read by the native startup owner to classify a fresh launch, replacement,
+//!   or crash recovery before child-process cleanup.
 //! - Removed by [`release_lock()`] on graceful exit.
 //!
 //! The **return value** of [`acquire_lock`] is also used by [`crate::sidecar::
@@ -25,62 +25,39 @@ use crate::{ulog_error, ulog_info, ulog_warn};
 
 const LAST_EXIT_FILE: &str = "last-exit.json";
 
-/// Record that the app exited cleanly — i.e. the user deliberately quit
-/// (Cmd+Q / Dock / tray "Exit"), as opposed to an update-restart or a crash.
-///
-/// Called from the single `RunEvent::ExitRequested` chokepoint. `is_restart`
-/// MUST be `code == Some(tauri::RESTART_EXIT_CODE)` from that event: Tauri fires
-/// ExitRequested with that exit code for BOTH update paths — the plugin-process
-/// `relaunch()` (`request_restart`) AND `AppHandle::restart` — so gating on it
-/// structurally covers every restart without a flag any call site could forget.
-/// A deliberate quit carries `code: None` (Cmd+Q / Dock) or `Some(0)` (tray
-/// `app.exit(0)`), neither of which equals `RESTART_EXIT_CODE`.
+/// Record that the app exited cleanly through the single
+/// `RunEvent::ExitRequested` chokepoint rather than crashing.
 ///
 /// The renderer reads-and-clears the marker on boot (`consumeCleanExitMarker` in
 /// `lastExitMarker.ts`): present ⇒ "user quit on purpose → boot fresh"; absent
-/// (crash, or update-restart suppressed here) ⇒ "offer to restore last session"
+/// crash ⇒ "offer to restore last session"
 /// via the title-bar pill (Issue #309).
 ///
 /// Best-effort with `sync_all` so it survives the imminent process exit. A lost
 /// write only costs a dismissable restore pill on the next launch — the safe
 /// failure direction.
-pub fn record_clean_exit(is_restart: bool) {
-    let Some(dir) = myagents_data_dir() else {
+pub fn record_clean_exit() {
+    let Some(dir) = xiaojing_data_dir() else {
         return;
     };
-    match write_clean_exit_marker(&dir, is_restart) {
-        Ok(true) => ulog_info!("[app-lock] Clean-exit marker recorded"),
-        Ok(false) => {} // update-restart: intentionally no marker
+    match write_clean_exit_marker(&dir) {
+        Ok(()) => ulog_info!("[app-lock] Clean-exit marker recorded"),
         Err(e) => ulog_warn!("[app-lock] Failed to record clean-exit marker: {}", e),
     }
 }
 
 /// Testable core of [`record_clean_exit`]. Writes `{ "clean": true }` to
-/// `<dir>/last-exit.json` and returns `Ok(true)`, UNLESS `is_restart` is set
-/// (update-restart) in which case it writes nothing and returns `Ok(false)` —
-/// leaving the marker absent so the next boot offers to restore the session.
-fn write_clean_exit_marker(dir: &std::path::Path, is_restart: bool) -> std::io::Result<bool> {
+/// `<dir>/last-exit.json`.
+fn write_clean_exit_marker(dir: &std::path::Path) -> std::io::Result<()> {
     let path = dir.join(LAST_EXIT_FILE);
-    if is_restart {
-        // Update-restart: write nothing AND clear any pre-existing marker, so a
-        // stale `{"clean":true}` (e.g. one the renderer failed to delete on a
-        // prior boot) can't survive to mask this update → the next boot must see
-        // "absent" and offer restore. Ignore NotFound (the common case).
-        match fs::remove_file(&path) {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(e),
-        }
-        return Ok(false);
-    }
     use std::io::Write;
     let mut f = fs::File::create(&path)?;
     f.write_all(br#"{"clean":true}"#)?;
     f.sync_all()?;
-    Ok(true)
+    Ok(())
 }
 
-/// Outcome of [`acquire_lock`] — encodes whether a prior MyAgents instance
+/// Outcome of [`acquire_lock`] — encodes whether a prior Xiaojing instance
 /// existed on this machine when we started.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LockAcquireResult {
@@ -88,7 +65,7 @@ pub enum LockAcquireResult {
     /// full uninstall / manual data wipe). Caller can skip stale-process
     /// scans because there are no possible orphans.
     FreshLaunch,
-    /// Lock file existed and pointed at a live MyAgents process — we killed
+    /// Lock file existed and pointed at a live Xiaojing process — we killed
     /// it before taking over. Orphan children are likely.
     ReplacedRunning,
     /// Lock file existed but pointed at a dead PID — previous instance
@@ -97,7 +74,7 @@ pub enum LockAcquireResult {
 }
 
 impl LockAcquireResult {
-    /// `true` if a prior MyAgents instance may have left orphaned child
+    /// `true` if a prior Xiaojing instance may have left orphaned child
     /// processes. The startup cleanup pass should run.
     pub fn had_prior_instance(self) -> bool {
         !matches!(self, Self::FreshLaunch)
@@ -106,29 +83,21 @@ impl LockAcquireResult {
 
 /// Return Xiaojing's local application data root.
 ///
-/// Windows resolves this to `%LOCALAPPDATA%/Xiaojing`. The product deliberately
-/// does not probe or migrate `~/.myagents`; all compatibility callers below are
-/// redirected to this root so a hidden legacy read cannot become a second
-/// brand/config authority.
+/// Windows resolves this to `%LOCALAPPDATA%/Xiaojing`. No predecessor path is
+/// probed, migrated, or deleted.
 pub fn xiaojing_data_dir() -> Option<PathBuf> {
     dirs::data_local_dir().map(|root| root.join("Xiaojing"))
 }
 
-/// Compatibility name retained while legacy modules are removed during the
-/// product expansion. It is a path alias only; it never points at `.myagents`.
-pub fn myagents_data_dir() -> Option<PathBuf> {
-    xiaojing_data_dir()
-}
-
 /// Path to the PID lock file.
 fn lock_file_path() -> Option<PathBuf> {
-    myagents_data_dir().map(|d| d.join("app.lock"))
+    xiaojing_data_dir().map(|d| d.join("app.lock"))
 }
 
-/// Write the current process PID to `~/.myagents/app.lock` and report
+/// Write the current process PID to `Xiaojing local-data root/app.lock` and report
 /// whether a prior instance's state was encountered.
 ///
-/// If an existing lock file contains a PID of a still-running MyAgents process,
+/// If an existing lock file contains a PID of a still-running Xiaojing process,
 /// that process is killed with SIGKILL before the new PID is written. This handles
 /// the case where macOS auto-restarts a killed `.app` (Automatic Termination)
 /// before the new build starts, leaving two instances fighting over shared resources.
@@ -158,9 +127,9 @@ pub fn acquire_lock() -> LockAcquireResult {
                         // with the same PID (rare) or we're restarting in
                         // place. Treat as crash recovery.
                         LockAcquireResult::CrashRecovery
-                    } else if is_myagents_process(old_pid) {
+                    } else if is_xiaojing_process(old_pid) {
                         ulog_warn!(
-                            "[app-lock] Killing stale MyAgents instance (PID {}) before acquiring lock",
+                            "[app-lock] Killing stale Xiaojing instance (PID {}) before acquiring lock",
                             old_pid
                         );
                         kill_pid(old_pid);
@@ -209,13 +178,13 @@ pub fn release_lock() {
     }
 }
 
-/// Check if a PID belongs to a running MyAgents process (not just any process).
+/// Check if a PID belongs to a running Xiaojing process (not just any process).
 /// Prevents SIGKILL-ing an unrelated process that recycled the stale PID.
 ///
 /// Unified implementation via `sysinfo` — native API on both platforms, no
 /// subprocess spawn (replacing the prior `ps -p …` on Unix and `tasklist`
 /// on Windows which cost 100–500 ms each).
-fn is_myagents_process(pid: u32) -> bool {
+fn is_xiaojing_process(pid: u32) -> bool {
     // First check existence cheaply via `kill(pid, 0)` on Unix, or skip on
     // Windows where sysinfo already short-circuits on unknown PIDs.
     #[cfg(unix)]
@@ -228,14 +197,14 @@ fn is_myagents_process(pid: u32) -> bool {
         }
     }
 
-    crate::process_cleanup::is_myagents_pid(pid)
+    crate::process_cleanup::is_xiaojing_pid(pid)
 }
 
 /// Kill a process with SIGKILL (Unix) or TerminateProcess (Windows).
 #[cfg(unix)]
 fn kill_pid(pid: u32) {
     // SAFETY: SIGKILL is a valid signal for any PID we own permission to kill.
-    // Caller has already verified this PID is a MyAgents process.
+    // Caller has already verified this PID is a Xiaojing process.
     unsafe {
         libc::kill(pid as i32, libc::SIGKILL);
     }
@@ -260,31 +229,8 @@ mod clean_exit_tests {
     #[test]
     fn deliberate_quit_writes_clean_marker() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let wrote = write_clean_exit_marker(dir.path(), false).expect("write");
-        assert!(wrote);
+        write_clean_exit_marker(dir.path()).expect("write");
         let body = std::fs::read_to_string(dir.path().join(LAST_EXIT_FILE)).expect("read");
         assert_eq!(body, r#"{"clean":true}"#);
-    }
-
-    // An update-restart (is_restart=true) writes NOTHING, leaving the marker
-    // absent so the next boot offers to restore (preserves the #232 intent).
-    #[test]
-    fn update_restart_writes_no_marker() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let wrote = write_clean_exit_marker(dir.path(), true).expect("noop");
-        assert!(!wrote);
-        assert!(!dir.path().join(LAST_EXIT_FILE).exists());
-    }
-
-    // An update-restart also CLEARS a pre-existing marker (e.g. one the renderer
-    // failed to delete on a prior boot), so a stale `{"clean":true}` can't
-    // survive to mask the update → next boot must offer restore.
-    #[test]
-    fn update_restart_clears_stale_marker() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        std::fs::write(dir.path().join(LAST_EXIT_FILE), r#"{"clean":true}"#).expect("seed");
-        let wrote = write_clean_exit_marker(dir.path(), true).expect("clear");
-        assert!(!wrote);
-        assert!(!dir.path().join(LAST_EXIT_FILE).exists());
     }
 }

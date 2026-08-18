@@ -15,7 +15,7 @@ describe('getAppDataDir', () => {
     expect(getAppDataDir()).toBe(resolve('C:\\Users\\tester\\AppData\\Local\\Xiaojing'));
   });
 
-  it('never discovers the legacy home directory in production fallback mode', () => {
+  it('uses only the platform local-data convention in production fallback mode', () => {
     vi.stubEnv('XIAOJING_DATA_ROOT', '');
     vi.stubEnv('NODE_ENV', 'production');
     vi.stubEnv('VITEST', '');
@@ -23,7 +23,6 @@ describe('getAppDataDir', () => {
     const dataDir = getAppDataDir();
 
     expect(dataDir).toBe(resolveLocalDataDir(platform(), process.env, homedir()));
-    expect(dataDir).not.toContain('.myagents');
   });
 });
 

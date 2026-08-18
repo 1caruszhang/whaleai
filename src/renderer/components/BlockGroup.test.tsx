@@ -17,12 +17,12 @@ function thinking(i: number): ContentBlock {
   return { type: 'thinking', thinking: `REASON_${i}`, isComplete: true, thinkingDurationMs: 1000 } as ContentBlock;
 }
 
-function task(i: number): ContentBlock {
+function geoTool(i: number): ContentBlock {
   return {
     type: 'tool_use',
     tool: {
       id: `task-${i}`,
-      name: 'Task',
+      name: 'mcp__xiaojing-geo__inspect_brand_context',
       input: {},
       inputJson: '{}',
       result: '{}',
@@ -31,7 +31,7 @@ function task(i: number): ContentBlock {
 }
 
 function processRowCount(container: HTMLElement): number {
-  return container.querySelectorAll('button[aria-expanded]').length;
+  return container.querySelectorAll('[data-process-row]').length;
 }
 
 describe('BlockGroup compact folding', () => {
@@ -47,7 +47,7 @@ describe('BlockGroup compact folding', () => {
   });
 
   it('folds 4 blocks into first + more + latest and expands all on demand', () => {
-    const blocks = Array.from({ length: 4 }, (_, i) => task(i));
+    const blocks = Array.from({ length: 4 }, (_, i) => geoTool(i));
     const { container } = render(<BlockGroup blocks={blocks} isStreaming={false} />);
 
     expect(processRowCount(container)).toBe(2);
@@ -66,12 +66,12 @@ describe('BlockGroup compact folding', () => {
   });
 
   it('switches from 3 visible rows to the compact layout when streaming appends a fourth block', () => {
-    const firstThree = Array.from({ length: 3 }, (_, i) => task(i));
+    const firstThree = Array.from({ length: 3 }, (_, i) => geoTool(i));
     const { container, rerender } = render(<BlockGroup blocks={firstThree} isStreaming />);
 
     expect(processRowCount(container)).toBe(3);
 
-    rerender(<BlockGroup blocks={[...firstThree, task(3)]} isStreaming />);
+    rerender(<BlockGroup blocks={[...firstThree, geoTool(3)]} isStreaming />);
 
     expect(processRowCount(container)).toBe(2);
     expect(container.querySelector('[data-tool-id="task-0"]')).toBeTruthy();

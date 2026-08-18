@@ -37,7 +37,7 @@ pub(crate) fn classify_sidecar_stderr(line: &str) -> SidecarStderrLevel {
     }
     // WARN: real warnings the sidecar emits via `console.warn`. The
     // `[sdk-shim]` "not implemented in Bridge mode" lines warn that an
-    // openclaw plugin reached for an SDK method the bridge doesn't
+    // A dependency reached for an SDK method unavailable in this build.
     // implement. They are expected (the shim is intentionally partial)
     // but worth keeping visible at WARN level for plugin developers.
     if head.starts_with("[sdk-shim]") {

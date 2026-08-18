@@ -9,11 +9,10 @@ import { dismissTopmost } from '@/utils/closeLayer';
 function makeTab(id: string, title = id): Tab {
     return {
         id,
-        agentDir: '/workspace/demo',
+        workspacePath: '/workspace/demo',
         sessionId: `session-${id}`,
         view: 'chat',
         title,
-        sidecarConfigDisposition: 'push',
     };
 }
 
@@ -170,7 +169,7 @@ describe('TabBar', () => {
     it('does not repeat the workspace when it matches the session title', () => {
         const sameNameTab = {
             ...makeTab('tab-1', 'demo'),
-            agentDir: '/workspace/demo',
+            workspacePath: '/workspace/demo',
         };
         renderTabBar({ tabs: [sameNameTab] });
 
@@ -204,7 +203,7 @@ describe('TabBar', () => {
     it('gives the full title width to a long session title', () => {
         const tabWithLongLabels = {
             ...makeTab('tab-1', 'A generated title that must keep the remaining tab width'),
-            agentDir: '/workspace/a-very-long-agent-workspace-name',
+            workspacePath: '/workspace/a-very-long-agent-workspace-name',
         };
         renderTabBar({ tabs: [tabWithLongLabels] });
 

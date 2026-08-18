@@ -1,6 +1,6 @@
 param(
-    [ValidateSet("x64", "arm64")]
-    [string[]]$Arch = @()
+    [ValidateSet("x64")]
+    [string[]]$Arch = @("x64")
 )
 
 $ErrorActionPreference = "Stop"
@@ -25,22 +25,16 @@ function Get-SdkVersion {
     $pkg = Get-Content (Join-Path $ProjectDir "package.json") -Raw | ConvertFrom-Json
     $deps = $pkg.optionalDependencies
     $x64 = $deps.'@anthropic-ai/claude-agent-sdk-win32-x64'
-    $arm64 = $deps.'@anthropic-ai/claude-agent-sdk-win32-arm64'
-    if (-not $x64 -and -not $arm64) {
-        throw "Claude Agent SDK win32 optionalDependencies are missing"
+    if (-not $x64) {
+        throw "Claude Agent SDK win32-x64 optionalDependency is missing"
     }
-    if ($x64 -and $arm64 -and $x64 -ne $arm64) {
-        throw "Claude Agent SDK win32 package versions differ: x64=$x64, arm64=$arm64"
-    }
-    if ($x64) { return $x64 }
-    return $arm64
+    return $x64
 }
 
 function Get-ExpectedMachine {
     param([string]$PackageArch)
     switch ($PackageArch) {
         "x64" { return 0x8664 }
-        "arm64" { return 0xAA64 }
         default { throw "Unsupported Claude SDK arch: $PackageArch" }
     }
 }
@@ -231,12 +225,8 @@ function Repair-SdkPackage {
 
 $sdkVersion = Get-SdkVersion
 
-if ($Arch.Count -eq 0) {
-    switch ($env:PROCESSOR_ARCHITECTURE) {
-        "AMD64" { $Arch = @("x64") }
-        "ARM64" { $Arch = @("arm64") }
-        default { throw "Unsupported Windows host arch: $env:PROCESSOR_ARCHITECTURE" }
-    }
+if ($env:PROCESSOR_ARCHITECTURE -ne "AMD64") {
+    throw "Ticket 22 supports native Windows x64 only"
 }
 
 foreach ($archName in $Arch) {

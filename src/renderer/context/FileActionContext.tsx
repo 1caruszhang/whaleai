@@ -6,7 +6,7 @@
  *
  * Only provided inside Chat; Settings / other pages get null from useFileAction().
  */
-import { AtSign, Copy, ExternalLink, Eye, FolderOpen, LocateFixed, PanelRightOpen } from 'lucide-react';
+import { Copy, ExternalLink, Eye, FolderOpen } from 'lucide-react';
 import {
   createContext,
   lazy,
@@ -82,9 +82,8 @@ export interface FileActionContextValue {
     target: FileActionTarget,
     options?: { displayPath?: string },
   ) => void;
-  /** Execute the target's primary action. Previewable files open internally,
-   *  workspace directories reveal in the tree, and unsupported targets report
-   *  a non-destructive hint instead of launching an OS application. */
+  /** Execute the target's primary action. Previewable files open internally;
+   *  other safe targets use the OS handler. */
   openFileTarget: (
     target: FileActionTarget,
     options?: { displayPath?: string; forceExternal?: boolean },
@@ -105,46 +104,12 @@ export interface FileLinkActionContextValue {
 interface FileActionProviderProps {
   children: ReactNode;
   /** Workspace path for resolving relative paths (Phase D.5: was previously
-   *  inferred from sidecar's `currentAgentDir`; now passed explicitly so the
+   *  inferred from sidecar's `currentWorkspacePath`; now passed explicitly so the
    *  Provider doesn't depend on a sidecar). */
   workspacePath: string | null;
-  /** Callback to insert @-reference into the chat input. */
-  onInsertReference?: (paths: string[]) => void;
   /** Controlled invalidation signal (workspace watcher / explicit refresh).
    *  Do not wire per-tool completion: that previously caused requery storms. */
   refreshTrigger?: number;
-  /** When provided, "预览" routes to this callback (split-view) instead of fullscreen modal. */
-  onFilePreviewExternal?: (file: {
-    name: string;
-    content: string;
-    size: number;
-    path: string;
-    sourceScope?: FileActionScope;
-    localPath?: string;
-    richDocKind?: RichDocKind;
-    initialLineNumber?: number;
-    focusTarget?: FilePreviewFocusTarget;
-  }) => void;
-  /** Append `@<path> ` to chat input — wired to FilePreviewModal's「引用文件」button.
-   *  Distinct from `onInsertReference` (cursor-insert, no trailing space) — the toolbar
-   *  button always appends to end with trailing space, matching the「丢进对话框继续聊」 UX. */
-  onQuoteFile?: (path: string) => void;
-  /** Append `@<path>#L<start>[-L<end>] ` to chat input — wired to FilePreviewModal's
-   *  Monaco selection-quote affordance. */
-  onQuoteSelection?: (path: string, startLine: number, endLine: number) => void;
-  /** Reveal a workspace-relative path in the right-side directory tree (expand
-   *  ancestors + select + scroll into view). Reuses the same mechanism as the
-   *  search panel's「在文件目录中展示」. When omitted, the menu item is hidden. */
-  onRevealInTree?: (path: string) => void;
-  /** Menu surface. Default keeps the full Chat menu; floatingBall uses the
-   *  companion-specific four-action menu requested for the mini window. */
-  menuProfile?: 'default' | 'floatingBall';
-  /** Floating-ball only: raise MyAgents, focus the session tab, and open the
-   *  given workspace-relative file in the main preview surface. */
-  onOpenMyAgentsPreview?: (
-    path: string,
-    options?: { displayPath?: string; initialLineNumber?: number },
-  ) => void;
 }
 
 // ---------- Context ----------
@@ -195,7 +160,7 @@ function targetFileName(path: string): string {
   return path.split(/[/\\]/).pop() ?? path;
 }
 
-export function FileActionProvider({ children, workspacePath, onInsertReference, refreshTrigger, onFilePreviewExternal, onQuoteFile, onQuoteSelection, onRevealInTree, menuProfile = 'default', onOpenMyAgentsPreview }: FileActionProviderProps) {
+export function FileActionProvider({ children, workspacePath, refreshTrigger }: FileActionProviderProps) {
   const { t } = useTranslation('app');
   const fileService = useWorkspaceFileService(workspacePath);
   const { openPreview: openImagePreview } = useImagePreview();
@@ -208,19 +173,6 @@ export function FileActionProvider({ children, workspacePath, onInsertReference,
   toastRef.current = toast;
 
   const [menuState, setMenuState] = useState<FileMenuState | null>(null);
-
-  // Stabilise callbacks via refs
-  const onInsertReferenceRef = useRef(onInsertReference);
-  onInsertReferenceRef.current = onInsertReference;
-
-  const onFilePreviewExternalRef = useRef(onFilePreviewExternal);
-  onFilePreviewExternalRef.current = onFilePreviewExternal;
-
-  const onRevealInTreeRef = useRef(onRevealInTree);
-  onRevealInTreeRef.current = onRevealInTree;
-
-  const onOpenMyAgentsPreviewRef = useRef(onOpenMyAgentsPreview);
-  onOpenMyAgentsPreviewRef.current = onOpenMyAgentsPreview;
 
   // Stabilise fileService so async closures see the latest service without
   // re-binding callbacks. Mirrors the React-stability rules pattern used
@@ -359,8 +311,7 @@ export function FileActionProvider({ children, workspacePath, onInsertReference,
     };
   }, []);
 
-  // Flush pending paths to the backend (Rust workspace_files::check_paths
-  // since Phase D.5 — used to be sidecar `/agent/check-paths`).
+  // Flush pending paths through Rust workspace_files::check_paths.
   const flushPendingPaths = useCallback(() => {
     const targetEntries = Array.from(pendingTargetsRef.current.entries());
     const targets = targetEntries.map(([, target]) => target);
@@ -609,11 +560,7 @@ export function FileActionProvider({ children, workspacePath, onInsertReference,
         initialLineNumber: options?.initialLineNumber,
         focusTarget,
       };
-      if (onFilePreviewExternalRef.current) {
-        onFilePreviewExternalRef.current(fileData);
-      } else {
-        setPreviewFile({ ...fileData, isLoading: false, error: null });
-      }
+      setPreviewFile({ ...fileData, isLoading: false, error: null });
       return true;
     }
 
@@ -640,47 +587,7 @@ export function FileActionProvider({ children, workspacePath, onInsertReference,
 
     if (!isPreviewable(fileName)) return false;
 
-    // Route to split-view if external handler provided
-    if (onFilePreviewExternalRef.current) {
-      void (async () => {
-        try {
-          const resp = scope === 'local'
-            ? await svc.readLocalPreview({ fullPath: path, workspace: workspaceForLocal })
-            : await svc.readPreview({ path });
-          if (!isMountedRef.current) return;
-          onFilePreviewExternalRef.current?.({
-            name: resp.name,
-            content: resp.content,
-            size: resp.size,
-            path,
-            sourceScope: scope,
-            localPath,
-            initialLineNumber: options?.initialLineNumber,
-            focusTarget,
-          });
-        } catch (err) {
-          if (!isMountedRef.current) return;
-          invalidateTarget({ scope, path });
-          console.error('[FileAction] Failed to load preview:', err);
-          toastRef.current?.error(t('fileActions.previewLoadFailed'));
-          setPreviewFile({
-            name: fileName,
-            content: '',
-            size: 0,
-            path,
-            sourceScope: scope,
-            localPath,
-            initialLineNumber: options?.initialLineNumber,
-            focusTarget,
-            isLoading: false,
-            error: err instanceof Error ? err.message : 'Failed to load file',
-          });
-        }
-      })();
-      return true;
-    }
-
-    // Fallback: show fullscreen modal immediately in loading state
+    // Show the focused preview modal immediately in loading state.
     setPreviewFile({
       name: fileName,
       content: '',
@@ -797,23 +704,8 @@ export function FileActionProvider({ children, workspacePath, onInsertReference,
       }
 
       if (pathInfo.type === 'dir') {
-        if (target.scope === 'workspace' && onRevealInTreeRef.current) {
-          onRevealInTreeRef.current(target.path);
-        } else {
-          toastRef.current?.info(t('fileActions.directoryNotInWorkspace'));
-        }
+        openTargetWithDefault(target);
         return;
-      }
-
-      if (menuProfile === 'floatingBall' && target.scope === 'workspace' && onOpenMyAgentsPreviewRef.current) {
-        const fileName = targetFileName(target.path);
-        if (isPreviewable(fileName) || !!getRichDocKind(fileName)) {
-          const displayPath = options?.displayPath ?? target.path;
-          onOpenMyAgentsPreviewRef.current(target.path, target.initialLineNumber
-            ? { displayPath, initialLineNumber: target.initialLineNumber }
-            : { displayPath });
-          return;
-        }
       }
 
       if (handlePreview(target.path, {
@@ -825,7 +717,7 @@ export function FileActionProvider({ children, workspacePath, onInsertReference,
 
       toastRef.current?.info(t('fileActions.previewUnsupported'));
     })();
-  }, [handlePreview, menuProfile, openTargetWithDefault, revalidateTarget, t]);
+  }, [handlePreview, openTargetWithDefault, revalidateTarget, t]);
 
   const openFileTargetMenu = useCallback((
     x: number,
@@ -861,10 +753,6 @@ export function FileActionProvider({ children, workspacePath, onInsertReference,
     openFileTargetMenu(x, y, target, { displayPath: href });
     return true;
   }, [openFileTargetMenu, workspacePath]);
-
-  const handleReference = useCallback((path: string) => {
-    onInsertReferenceRef.current?.([path]);
-  }, []);
 
   // Copy the path VERBATIM — exactly the text shown in the chip (所见所得),
   // whatever the model wrote (relative or absolute). The menu's `path` is the
@@ -914,54 +802,12 @@ export function FileActionProvider({ children, workspacePath, onInsertReference,
     });
   }, [invalidateTarget, t, workspacePath]);
 
-  const handleRevealInTree = useCallback((path: string) => {
-    onRevealInTreeRef.current?.(path);
-  }, []);
-
-  const handleOpenMyAgentsPreview = useCallback((path: string, displayPath?: string, initialLineNumber?: number): void => {
-    onOpenMyAgentsPreviewRef.current?.(path, initialLineNumber
-      ? { displayPath, initialLineNumber }
-      : { displayPath });
-  }, []);
-
   // Build menu items
   const menuItems = useMemo((): ContextMenuItem[] => {
     if (!menuState || menuState.contextIdentity !== cacheContextIdentity) return [];
     const { path, scope, pathType, displayPath, initialLineNumber } = menuState;
     const fileName = targetFileName(path);
     const items: ContextMenuItem[] = [];
-
-    if (menuProfile === 'floatingBall') {
-      const canOpenMyAgentsPreview =
-        scope === 'workspace' &&
-        pathType === 'file' &&
-        !!onOpenMyAgentsPreviewRef.current &&
-        (isPreviewable(fileName) || !!getRichDocKind(fileName));
-
-      return [
-        {
-          label: t('fileActions.copy'),
-          icon: <Copy className="h-4 w-4" />,
-          onClick: () => handleCopyPath(displayPath),
-        },
-        {
-          label: t('fileActions.reference'),
-          icon: <AtSign className="h-4 w-4" />,
-          onClick: () => handleReference(path),
-        },
-        {
-          label: t('fileActions.openContainingFolder'),
-          icon: <FolderOpen className="h-4 w-4" />,
-          onClick: () => handleOpenInFinder(path, scope),
-        },
-        {
-          label: t('fileActions.openMyAgentsPreview'),
-          icon: <PanelRightOpen className="h-4 w-4" />,
-          disabled: !canOpenMyAgentsPreview,
-          onClick: () => handleOpenMyAgentsPreview(path, displayPath, initialLineNumber),
-        },
-      ];
-    }
 
     if (pathType === 'file') {
       const canPreview = isPreviewable(fileName) || isImageFile(fileName) || !!getRichDocKind(fileName);
@@ -980,12 +826,6 @@ export function FileActionProvider({ children, workspacePath, onInsertReference,
     });
 
     items.push({
-      label: t('fileActions.reference'),
-      icon: <AtSign className="h-4 w-4" />,
-      onClick: () => handleReference(path),
-    });
-
-    items.push({
       label: t('fileActions.open'),
       icon: <ExternalLink className="h-4 w-4" />,
       onClick: () => handleOpenWithDefault(path, scope),
@@ -997,18 +837,8 @@ export function FileActionProvider({ children, workspacePath, onInsertReference,
       onClick: () => handleOpenInFinder(path, scope),
     });
 
-    // Reveal in the right-side directory tree — only when the host wired it up
-    // (i.e. a workspace tree exists to reveal into). Works for files and dirs.
-    if (scope === 'workspace' && onRevealInTreeRef.current) {
-      items.push({
-        label: t('fileActions.revealInTree'),
-        icon: <LocateFixed className="h-4 w-4" />,
-        onClick: () => handleRevealInTree(path),
-      });
-    }
-
     return items;
-  }, [cacheContextIdentity, menuState, menuProfile, t, handlePreview, handleCopyPath, handleReference, handleOpenWithDefault, handleOpenInFinder, handleRevealInTree, handleOpenMyAgentsPreview]);
+  }, [cacheContextIdentity, menuState, t, handlePreview, handleCopyPath, handleOpenWithDefault, handleOpenInFinder]);
 
   // ---------- Context value ----------
   const contextValue = useMemo<FileActionContextValue>(() => ({
@@ -1060,6 +890,7 @@ export function FileActionProvider({ children, workspacePath, onInsertReference,
               workspacePath={previewFile.sourceScope === 'local' ? null : workspacePath}
               initialLineNumber={previewFile.initialLineNumber}
               focusTarget={previewFile.focusTarget}
+              externalRefreshSignal={refreshTrigger}
               onClose={() => setPreviewFile(null)}
               onRenamed={(newPath, newName) => {
                 // Update local preview state so subsequent saves target the new
@@ -1068,8 +899,7 @@ export function FileActionProvider({ children, workspacePath, onInsertReference,
                   prev ? { ...prev, path: newPath, name: newName } : prev,
                 );
               }}
-              // Phase D.5: route reveal-in-finder through fileService rather
-              // than letting the modal fall back to sidecar `/agent/open-in-finder`.
+              // Route reveal-in-finder through the workspace file service.
               onRevealFile={async () => {
                 const p = previewFile.path;
                 if (previewFile.sourceScope === 'local') {
@@ -1078,8 +908,6 @@ export function FileActionProvider({ children, workspacePath, onInsertReference,
                   await fileServiceRef.current.openInFinder({ path: p });
                 }
               }}
-              onQuoteFile={onQuoteFile}
-              onQuoteSelection={onQuoteSelection}
             />
           </Suspense>
         )}

@@ -48,7 +48,7 @@ export const MARKDOWN_REHYPE_PLUGINS: ComponentProps<typeof ReactMarkdown>['rehy
 /**
  * Convert YAML frontmatter (---\n...\n---) to a fenced yaml code block
  * so the existing CodeBlock component renders it with syntax highlighting.
- * Only applied in raw/file-preview mode where skill/agent .md files are displayed.
+ * Only applied in raw file-preview mode.
  */
 export function convertFrontmatter(content: string): string {
   if (!content) return '';

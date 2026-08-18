@@ -17,6 +17,7 @@ Operation 状态为 `ready / queued / running / awaiting-confirmation / paused /
 - 开始 exact ready step 时递增 `executionGeneration`；完成后只激活下一个既有步骤。最后一步完成才进入 `succeeded`，不存在把全部步骤一次性改成成功的通用入口。
 - running Operation 只有保存 `safeToResume=true` 的结构化 checkpoint 后才能暂停或进入 `recovering`；进程恢复时先持久化该显式状态，再由 `resume` 把 running step 放回 ready 并递增 execution generation。checkpoint 只含当前/已完成 step identity 和已持久化 unit refs，不复制 Provider 正文、密钥或请求体。
 - retry 只接受带 `retryable=true` 的结构化失败，并继续使用 exact artifact/unit owner 的最小重试语义。取消是终态；失败记录 terminal time，但可通过 revision CAS 进入新的 execution generation。
+- 控制类动作（pause/resume/retry/cancel）转换失败时，Rust 错误文本携带当前状态与该状态下合法的控制动作（如 `geo_operation_transition_invalid:ready (valid control actions: pause, cancel)`）；Agent 工具 `control_geo_operation` 把失败包装为 `ok:false` 结构化结果并附恢复指引（先 `inspect_geo_operations` 取最新 revision），不依赖裸 throw 的 isError 单行文本。
 - `inputRefs` 固定调用前依赖，`artifactRefs` 只追加已持久化结果；完整优化引用 09–15 的真实产物，不建立第二套产物表。
 
 ## 多 Session 后台执行与应用级 admission

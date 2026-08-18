@@ -1,4 +1,4 @@
-// MyAgents architectural-boundary lint via dependency-cruiser.
+// Xiaojing architectural-boundary lint via dependency-cruiser.
 //
 // This file holds the "module-graph" rules that ESLint can't express:
 // "module A is not allowed to import from module B." Each rule below
@@ -63,8 +63,6 @@ module.exports = {
           '(^|/)tsconfig\\.json$',
           '(^|/)(babel|nodemon|jest|vitest|webpack|esbuild|vite|tailwind|postcss|stylelint)\\.config\\.(js|cjs|mjs|ts)$',
           '^src/server/index\\.ts$', // sidecar entry
-          '^src/server/plugin-bridge/main\\.ts$', // bridge entry
-          '^src/cli/myagents\\.ts$', // CLI entry
           '^src/renderer/main\\.tsx$', // renderer entry
           '^src-tauri/', // Rust files: depcruise sees them only via fs walk; not part of TS graph
           // Type-only files. Since we set tsPreCompilationDeps:false, dep-cruiser
@@ -76,50 +74,26 @@ module.exports = {
           //   *Types.ts     — `src/**/treeTypes.ts`, `src/**/AgentTypes.ts`, etc.
           '(/|^)types/[^/]+\\.ts$',
           '(/|^)types\\.ts$',
-          '(/|^)[^/]+[Tt]ypes\\.ts$'
+          '(/|^)[^/]+[Tt]ypes\\.ts$',
+          '^src/shared/geo/(?:brandHistory|notification)\\.ts$'
         ]
       },
       to: {}
     },
     {
-      // CLAUDE.md red-line: builtin MCP files (`src/server/tools/*.ts`)
+      // The fixed GEO MCP factory must not pull in the persistent session owner.
       // run inside Sidecar but MUST stay isolated from the agent-session
       // module — they're loaded lazily at MCP-server-creation time, and
       // pulling in agent-session's transitive deps (SDK, zod, session
-      // store, IM bus, …) would either re-trigger the cold-start tax that
+      // store, background owners, …) would either re-trigger the cold-start tax that
       // the lazy-load is designed to avoid, OR create a circular dep
       // (agent-session imports from tools/ to register them).
-      name: 'tools-no-import-agent-session',
+      name: 'geo-tool-no-import-agent-session',
       severity: 'error',
       comment:
-        'src/server/tools/* MUST NOT import agent-session — would either re-trigger the cold-start singleton tax that the lazy-load architecture avoids, or create a circular import (agent-session is the one that calls into tools/ to register MCP servers). Restructure: pass any data the tool needs through the createXxxServer() factory args, not a top-level import.',
-      from: { path: '^src/server/tools/[^/]+\\.ts$' },
+        'The GEO MCP factory MUST NOT import agent-session: doing so creates an owner cycle and eagerly loads the persistent session. Pass required values through the factory argument.',
+      from: { path: '^src/server/tools/xiaojing-geo-tool\\.ts$' },
       to: { path: '^src/server/agent-session\\.ts$' }
-    },
-    {
-      // Builtin MCP factory isolation: tools shouldn't import each other
-      // either. They're standalone factories registered into a single
-      // registry. Cross-tool imports would couple their lazy-load
-      // lifecycles and risk re-introducing eager-load bugs.
-      // The registry + meta files are the legitimate cross-tool surface.
-      name: 'tools-no-cross-imports',
-      severity: 'error',
-      comment:
-        'Builtin MCP tool files in src/server/tools/ MUST NOT import each other — each is an independent lazy-loaded factory, cross-imports would couple their cold-start lifecycles and could resurrect the eager-load tax (~500–1000ms per tool) that the createXxxServer() pattern is designed to defer. Use src/server/tools/builtin-mcp-registry.ts or builtin-mcp-meta.ts as the shared surface.',
-      from: {
-        path: '^src/server/tools/[^/]+\\.ts$',
-        pathNot: [
-          '^src/server/tools/builtin-mcp-registry\\.ts$',
-          '^src/server/tools/builtin-mcp-meta\\.ts$'
-        ]
-      },
-      to: {
-        path: '^src/server/tools/[^/]+\\.ts$',
-        pathNot: [
-          '^src/server/tools/builtin-mcp-registry\\.ts$',
-          '^src/server/tools/builtin-mcp-meta\\.ts$'
-        ]
-      }
     },
     {
       // Process boundary: renderer runs in WebView, sidecar runs in
@@ -167,7 +141,7 @@ module.exports = {
       name: 'theme-consumers-public-api-only',
       severity: 'error',
       comment:
-        'Renderer Theme consumers MUST NOT import Theme internals — binding to myagents-default, registry implementation, or private adapter files makes a future complete Theme require consumer edits and can create mixed palettes. Import only the public `@/theme` entry; files inside src/renderer/theme may compose their own package internals.',
+        'Renderer Theme consumers MUST NOT import Theme internals — binding to registry implementation or private adapter files makes a future complete Theme require consumer edits and can create mixed palettes. Import only the public `@/theme` entry; files inside src/renderer/theme may compose their own package internals.',
       from: {
         path: '^src/renderer/(?!theme/)',
         pathNot: ['\\.(?:test|spec)\\.[cm]?[jt]sx?$']
@@ -181,14 +155,6 @@ module.exports = {
   options: {
     doNotFollow: {
       path: ['node_modules']
-    },
-    // Auto-generated SDK shim (~80 files at sdk-shim/plugin-sdk/*.js):
-    // these are dynamically loaded by the bridge runtime via filename,
-    // so they look like orphans to the static graph. Excluded entirely
-    // from the cruise — orphan warnings here are noise, not signal.
-    // Kept in sync with the same exclusion in eslint.config.js (line 17).
-    exclude: {
-      path: '^src/server/plugin-bridge/sdk-shim/'
     },
     // tsPreCompilationDeps: false → skip `import type` and other
     // type-only imports. Those are erased at compile time and don't

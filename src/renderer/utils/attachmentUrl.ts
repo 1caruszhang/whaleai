@@ -1,19 +1,19 @@
 // Resolve a persisted attachment to a URL the WebView can render.
 //
-// Production (Tauri): `resolveMyAgentsProtocolUrl('/attachment/<rel>')` hits
+// Production (Tauri): `resolveXiaojingProtocolUrl('/attachment/<rel>')` hits
 // the async URI scheme handler in `src-tauri/src/attachment_protocol.rs`
-// (`myagents://...` on macOS/Linux, `http://myagents.localhost/...` on
-// Windows). The handler serves bytes from `~/.myagents/attachments/<rel>`
+// (`xiaojing://...` on macOS/Linux, `http://xiaojing.localhost/...` on
+// Windows). The handler serves bytes from Xiaojing's local-data attachment store
 // through the WebView resource pipeline. Zero JSON round-trip, zero base64
 // bloat, zero main-thread read.
 //
 // Browser dev (vite): the scheme isn't registered, so we fall back to
-// `/api/attachment/<rel>` served by the Node Sidecar. proxyFetch on the global sidecar
+// `/api/attachment/<rel>` served by the current Session Sidecar. The registered data plane
 // handles the routing; using an absolute path here lets <img src> go through
 // the vite dev server proxy without needing a Tauri bridge.
 
 import { isTauri } from '@/api/tauriClient';
-import { resolveMyAgentsProtocolUrl } from '@/utils/myagentsProtocol';
+import { resolveXiaojingProtocolUrl } from '@/utils/xiaojingProtocol';
 
 function encodeRelative(rel: string): string {
   return rel.split('/').map(encodeURIComponent).join('/');
@@ -31,7 +31,7 @@ export function resolveAttachmentUrl(att: {
   }
   const encoded = encodeRelative(rel);
   if (isTauri()) {
-    return resolveMyAgentsProtocolUrl(`/attachment/${encoded}`);
+    return resolveXiaojingProtocolUrl(`/attachment/${encoded}`);
   }
   return `/api/attachment/${encoded}`;
 }

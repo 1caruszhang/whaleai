@@ -4,17 +4,14 @@
 //! redirects, certain "Save As UTF-8" toolchains) prepend a U+FEFF BOM to
 //! UTF-8 files. `serde_json::from_str` does NOT tolerate the BOM and fails
 //! with `expected value at line 1 column 1`. When the user manually edited
-//! `~/.myagents/config.json` with such a tool, MyAgents would log the parse
+//! Xiaojing's local-data `config.json` with such a tool, the app would log the parse
 //! error and fall back to the `.bak` backup — an opaque failure mode that
-//! looked like data loss. MyAgents itself never writes BOM (`serde_json::to_string_pretty`
+//! looked like data loss. Xiaojing itself never writes BOM (`serde_json::to_string_pretty`
 //! produces clean UTF-8), so the fix is read-side: strip BOM before parsing.
 //!
 //! Use this helper at every JSON-reader site whose **source file** might be
-//! externally edited (`config.json`, `cron_tasks.json`, `sessions.json`) — the
-//! rule is keyed on the data source, not the consumer. The search indexer and
-//! IM memory-update task also read `sessions.json` directly and so must
-//! `strip_bom()` too. Pure app-internal files (Tantivy index segments,
-//! ephemeral caches) don't need it.
+//! externally edited (`config.json`, `sessions.json`) — the rule is keyed on
+//! the data source, not the consumer. Pure app-internal files don't need it.
 
 /// Strip a leading UTF-8 BOM (U+FEFF) from a string slice. Returns the input
 /// unchanged when no BOM is present (zero allocations either way).

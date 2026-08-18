@@ -52,6 +52,11 @@ describe('KnowledgeConflictCard', () => {
     expect(parseKnowledgeConflictCard('{"kind":"other"}')).toBeNull();
   });
 
+  it('解析生产投影的 MCP content blocks 包装形态（回归）', () => {
+    const wrapped = JSON.stringify([{ type: 'text', text: JSON.stringify(card) }]);
+    expect(parseKnowledgeConflictCard(wrapped)).toEqual(card);
+  });
+
   it('shows all four decisions and submits a structured action without a chat message', async () => {
     render(<KnowledgeConflictCard data={card} />);
 

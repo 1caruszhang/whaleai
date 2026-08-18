@@ -1,8 +1,0 @@
-{
-  "schemaVersion": 1,
-  "id": "mino-seedling-folder",
-  "displayName": "Mino Seedling Folder",
-  "description": "Growing folder creature for Always Evolving.",
-  "author": "MyAgents / image-gen reference / deterministic hatch-pet repair",
-  "spritesheetPath": "spritesheet.webp"
-}

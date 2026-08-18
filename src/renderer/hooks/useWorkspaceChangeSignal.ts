@@ -7,8 +7,7 @@ import { useWorkspaceFileService } from './useWorkspaceFileService';
  * Ref-counted workspace filesystem change signal.
  *
  * Rust emits a coarse `workspace:files-changed:<eventKey>` event. Consumers
- * decide what to revalidate: DirectoryPanel refreshes the tree, FilePreviewModal
- * re-reads only the currently open file.
+ * decide what to revalidate; the file preview re-reads only its open file.
  */
 export function useWorkspaceChangeSignal(
   workspacePath: string | null,

@@ -298,11 +298,16 @@ export function buildKeywordMiningPrompt(input: {
   productLine: string;
   brandNames: readonly string[];
   knowledgeSummary: string;
+  /** 领域内的具体业务焦点（如"汽车隔音"）；缺省=整个产品线领域。 */
+  businessFocus?: string;
 }): string {
   return [
     `目标地域：【${input.region}】`,
     `行业：【${input.industry}】`,
-    `产品线：【${input.productLine}】`,
+    `产品线（领域）：【${input.productLine}】`,
+    ...(input.businessFocus
+      ? [`具体业务焦点：【${input.businessFocus}】（挖词围绕该业务，但不超出产品线领域）`]
+      : []),
     `已确认知识摘要：${input.knowledgeSummary}`,
     "基于真实联网搜索生成潜在客户使用的搜索词。只返回 JSON。",
     "三类必须递进：core=地域+核心品类；scene=地域+处境/服务场景；longtail=在前两类上增加价格、决策、口碑、攻略、资质、效果、售后、时效、对比或人群限定。",

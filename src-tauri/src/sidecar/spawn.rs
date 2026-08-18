@@ -10,8 +10,8 @@ pub(super) fn is_port_available(port: u16) -> bool {
 /// Normalize a path for use with external processes.
 ///
 /// On Windows, Tauri's `resource_dir()` and Rust's `current_exe()` / `canonicalize()`
-/// return paths with the `\\?\` extended-length prefix. Most external tools (Bun, Node,
-/// npm) cannot handle this prefix — they silently hang or fail.
+/// return paths with the `\\?\` extended-length prefix. Node and npm cannot
+/// reliably handle this prefix — they may silently hang or fail.
 ///
 /// This function strips the prefix on Windows; on other platforms it's a no-op.
 pub(crate) fn normalize_external_path(path: PathBuf) -> PathBuf {
@@ -23,6 +23,99 @@ pub(crate) fn normalize_external_path(path: PathBuf) -> PathBuf {
         }
     }
     path
+}
+
+/// Runtime resources owned by one packaged Windows x64 Session Sidecar.
+///
+/// This is deliberately a resource layout, not a new Tauri `externalBin` or a
+/// second process owner. The existing Session lifecycle still owns Node and
+/// Node launches the exact Claude Agent SDK executable declared here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg(any(target_os = "windows", test))]
+pub(super) struct WindowsBundledRuntimeLayout {
+    pub claude_executable: PathBuf,
+    pub sharp_node_modules: PathBuf,
+    pub git_bash: PathBuf,
+    pub git_path_prefixes: [PathBuf; 3],
+}
+
+#[cfg(any(target_os = "windows", test))]
+pub(super) fn windows_bundled_runtime_layout(
+    resources: &std::path::Path,
+) -> WindowsBundledRuntimeLayout {
+    let portable_git = resources.join("portable-git");
+    WindowsBundledRuntimeLayout {
+        claude_executable: resources.join("claude-agent-sdk").join("claude.exe"),
+        sharp_node_modules: resources.join("sharp-runtime").join("node_modules"),
+        git_bash: portable_git.join("bin").join("bash.exe"),
+        git_path_prefixes: [
+            portable_git.join("cmd"),
+            portable_git.join("bin"),
+            portable_git.join("mingw64").join("bin"),
+        ],
+    }
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn validate_windows_bundled_runtime_layout(
+    layout: &WindowsBundledRuntimeLayout,
+) -> Result<(), String> {
+    let required = [
+        (
+            "claude-agent-sdk/claude.exe",
+            layout.claude_executable.as_path(),
+        ),
+        (
+            "sharp-runtime/node_modules",
+            layout.sharp_node_modules.as_path(),
+        ),
+        ("portable-git/bin/bash.exe", layout.git_bash.as_path()),
+        ("portable-git/cmd", layout.git_path_prefixes[0].as_path()),
+        ("portable-git/bin", layout.git_path_prefixes[1].as_path()),
+        (
+            "portable-git/mingw64/bin",
+            layout.git_path_prefixes[2].as_path(),
+        ),
+    ];
+    for (relative, path) in required {
+        if !path.exists() {
+            return Err(format!(
+                "Windows x64 runtime resource missing: {relative}. Reinstall the application."
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+pub(super) fn apply_windows_bundled_runtime<R: Runtime>(
+    app_handle: &AppHandle<R>,
+    command: &mut std::process::Command,
+) -> Result<(), String> {
+    let resources = app_handle
+        .path()
+        .resource_dir()
+        .map_err(|_| "Windows x64 runtime resource directory is unavailable".to_string())?;
+    let mut layout = windows_bundled_runtime_layout(&resources);
+    validate_windows_bundled_runtime_layout(&layout)?;
+
+    layout.claude_executable = normalize_external_path(layout.claude_executable);
+    layout.sharp_node_modules = normalize_external_path(layout.sharp_node_modules);
+    layout.git_bash = normalize_external_path(layout.git_bash);
+    layout.git_path_prefixes = layout.git_path_prefixes.map(normalize_external_path);
+
+    let mut path_entries = layout.git_path_prefixes.to_vec();
+    if let Some(inherited) = std::env::var_os("PATH") {
+        path_entries.extend(std::env::split_paths(&inherited));
+    }
+    let joined_path = std::env::join_paths(path_entries)
+        .map_err(|_| "Windows x64 bundled PATH contains an invalid entry".to_string())?;
+
+    command.env("XIAOJING_CLAUDE_CODE_EXECUTABLE", layout.claude_executable);
+    command.env("CLAUDE_CODE_GIT_BASH_PATH", layout.git_bash);
+    command.env("NODE_PATH", layout.sharp_node_modules);
+    command.env("PATH", joined_path);
+    Ok(())
 }
 
 /// Diagnose why Node executable was not found and return a user-friendly error message.
@@ -54,15 +147,14 @@ pub(super) fn diagnose_node_not_found<R: Runtime>(app_handle: &AppHandle<R>) -> 
         "Node.js runtime not found. {} | \
          Possible causes: (1) Bundled Node not downloaded — run scripts/download_nodejs.sh. \
          (2) Antivirus quarantined node.exe on Windows — check Windows Security > Protection History. \
-         (3) Installation is corrupted — try reinstalling. \
-         Workaround: install Node.js manually from https://nodejs.org (v20+).",
+         (3) Installation is corrupted — reinstall the application.",
         diag
     );
     ulog_error!("[sidecar] {}", msg);
     msg
 }
 
-/// Diagnose why bun process exited immediately and return a user-friendly error message.
+/// Diagnose why the bundled Node process exited immediately.
 pub(super) fn diagnose_immediate_exit(
     status: &std::process::ExitStatus,
     node_path: &std::path::Path,
@@ -76,31 +168,19 @@ pub(super) fn diagnose_immediate_exit(
         // 0xc0000142 (STATUS_DLL_INIT_FAILED) = DLL initialization failed
         let code = status.code().unwrap_or(0) as u32;
         let hint = match code {
-            0xc0000135 => {
-                "Missing system DLL (likely VCRUNTIME140.dll). \
-                 Please install Visual C++ Redistributable: \
-                 https://aka.ms/vs/17/release/vc_redist.x64.exe"
-            }
+            0xc0000135 => "A required DLL is missing. The packaged Windows x64 import closure is incomplete; reinstall the application and collect diagnostics if the error persists.",
             0xc0000142 => {
-                "DLL initialization failed. \
-                 Please install Visual C++ Redistributable: \
-                 https://aka.ms/vs/17/release/vc_redist.x64.exe"
+                "A packaged DLL failed to initialize. Reinstall the application and collect diagnostics if the error persists."
             }
             0xc0000005 => {
-                "STATUS_ACCESS_VIOLATION — bundled bun.exe may require AVX2 instructions \
-                 (unsupported in many virtual machines and older CPUs). \
-                 Install bun globally via: powershell -c \"irm bun.sh/install.ps1 | iex\" \
-                 (or: npm install -g bun). Both auto-select a compatible baseline build. \
-                 The app will fall back to the system-installed bun on the next attempt."
+                "STATUS_ACCESS_VIOLATION — bundled node.exe crashed. \
+                 Check Windows Security > Protection History and verify the installation."
             }
             0xc0000022 => {
-                "Access denied — antivirus may be blocking bun.exe. \
+                "Access denied — antivirus may be blocking node.exe. \
                  Check Windows Security > Protection History, or add the install directory to exclusions."
             }
-            1 => {
-                "Node exited with code 1. Check if Git for Windows is installed \
-                 (required by Claude Agent SDK): https://git-scm.com/downloads/win"
-            }
+            1 => "Node exited with code 1. The bundled Claude Agent SDK or PortableGit runtime may be incomplete; reinstall the application.",
             _ => "",
         };
 
@@ -136,11 +216,6 @@ pub(super) fn find_node_executable<R: Runtime>(app_handle: &AppHandle<R>) -> Opt
     find_node_executable_inner(app_handle).map(normalize_external_path)
 }
 
-/// Public wrapper for find_node_executable (used by im::bridge module).
-pub fn find_node_executable_pub<R: Runtime>(app_handle: &AppHandle<R>) -> Option<PathBuf> {
-    find_node_executable(app_handle)
-}
-
 /// Build the canonical Node.js path relative to a given resources directory.
 /// macOS/Linux: <resources>/nodejs/bin/node
 /// Windows:     <resources>\nodejs\node.exe
@@ -156,10 +231,8 @@ pub(super) fn node_path_in_resources(resources: &std::path::Path) -> PathBuf {
 }
 
 pub(super) fn find_node_executable_inner<R: Runtime>(app_handle: &AppHandle<R>) -> Option<PathBuf> {
-    // Bundled Node.js lives under resource_dir/nodejs/ (shipped by build_*.sh
-    // via scripts/download_nodejs.sh). Unlike the prior Bun externalBin
-    // flow, Node.js is a binary + lib directory combo that can't ride
-    // Tauri's externalBin — it's a plain resource copy.
+    // Bundled Node.js lives under resource_dir/nodejs/ and is staged by
+    // scripts/download_nodejs.sh as a plain Tauri resource tree.
     match app_handle.path().resource_dir() {
         Ok(resource_dir) => {
             ulog_info!("[sidecar] resource_dir resolved to: {:?}", resource_dir);
@@ -226,26 +299,9 @@ pub(super) fn find_node_executable_inner<R: Runtime>(app_handle: &AppHandle<R>) 
         }
     }
 
-    // Last resort: system Node.js from PATH. Dev-mode fallback so `npm run dev` /
-    // `./start_dev.sh` works on machines where bundled Node hasn't been downloaded yet.
-    #[cfg(target_os = "windows")]
-    {
-        if let Some(path) =
-            crate::system_binary::find("node.exe").or_else(|| crate::system_binary::find("node"))
-        {
-            ulog_info!("Using system node: {:?}", path);
-            return Some(path);
-        }
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        if let Some(path) = crate::system_binary::find("node") {
-            ulog_info!("Using system node: {:?}", path);
-            return Some(path);
-        }
-    }
-
-    ulog_error!("[sidecar] Node executable not found in any location. Checked: resource_dir, exe-relative, PATH");
+    ulog_error!(
+        "[sidecar] Bundled Node executable not found in resource or executable-relative locations"
+    );
     None
 }
 
@@ -274,13 +330,6 @@ pub(super) fn find_server_script_inner<R: Runtime>(_app_handle: &AppHandle<R>) -
                         bundled_script
                     );
                     return Some(bundled_script);
-                }
-
-                // Legacy check: Check for server/index.ts (Development / Legacy)
-                let legacy_script = resource_dir.join("server").join("index.ts");
-                if legacy_script.exists() {
-                    ulog_info!("Using bundled server script (legacy): {:?}", legacy_script);
-                    return Some(legacy_script);
                 }
             }
             Err(e) => {
@@ -324,4 +373,40 @@ pub(super) fn find_server_script_inner<R: Runtime>(_app_handle: &AppHandle<R>) -
 
     ulog_error!("[sidecar] Server script not found in any location");
     None
+}
+
+#[cfg(test)]
+mod windows_runtime_layout_tests {
+    use super::{validate_windows_bundled_runtime_layout, windows_bundled_runtime_layout};
+
+    #[test]
+    fn layout_preserves_unicode_spaces_percent_and_long_segments() {
+        let long_segment = "长路径".repeat(48);
+        let root = std::path::PathBuf::from("C:\\Users\\测试 用户%25")
+            .join(long_segment)
+            .join("resources");
+        let layout = windows_bundled_runtime_layout(&root);
+
+        assert_eq!(
+            layout.claude_executable,
+            root.join("claude-agent-sdk").join("claude.exe")
+        );
+        assert_eq!(
+            layout.sharp_node_modules,
+            root.join("sharp-runtime").join("node_modules")
+        );
+        assert_eq!(
+            layout.git_bash,
+            root.join("portable-git").join("bin").join("bash.exe")
+        );
+    }
+
+    #[test]
+    fn validation_fails_closed_without_every_required_resource() {
+        let temp = tempfile::tempdir().unwrap();
+        let layout = windows_bundled_runtime_layout(temp.path());
+        let error = validate_windows_bundled_runtime_layout(&layout).unwrap_err();
+        assert!(error.contains("claude-agent-sdk/claude.exe"));
+        assert!(!error.contains(&temp.path().to_string_lossy().to_string()));
+    }
 }

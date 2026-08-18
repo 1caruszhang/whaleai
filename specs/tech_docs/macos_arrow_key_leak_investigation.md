@@ -166,7 +166,7 @@ Rust 的 keyDown probe 日志 `chars=class=__NSCFString len=1 units=[U+F702]` �
 
 - [ ] 连续按 ← 100 次（key-repeat），输入框无 □
 - [ ] 中文 IME composition 中按 ←/→，无 □ 且不打断 IME
-- [ ] 在 launcher 输入框、Chat 输入框、ThoughtInput 三处分别复测
+- [ ] 在欢迎页输入框、Chat 输入框和其它文本域分别复测
 - [ ] `unified-{date}.log` 中 cleanup pass 命中数 ≥ keyDown probe 命中数（说明每次 keyDown 都被擦干净了）
 - [ ] 边界场景：cursor 在文本起点按 ←、cursor 在末尾按 →（最容易触发泄漏）
 - [ ] window switch / multi-tab 切换后再按方向键仍生效

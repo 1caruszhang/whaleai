@@ -1,14 +1,14 @@
 //! Read a workspace file as text for the preview modal.
 //!
-//! Mirrors sidecar `/agent/file` semantics:
+//! The Rust owner enforces these semantics:
 //!   * Resolve relative path inside workspace.
 //!   * Reject if file doesn't exist.
 //!   * Reject non-previewable types (binary / unknown — UI shows the modal
 //!     only when content can be displayed as text).
 //!   * Cap response at 2MB so a forgotten 50MB JSON doesn't pin the IPC
 //!     channel.
-//! Returns the same `{ content, name, size }` shape so DirectoryPanel's
-//! `FilePreviewModal` consumer doesn't need a parallel branch.
+//!
+//! Returns the stable `{ content, name, size }` renderer shape.
 
 use std::fs;
 use std::io::Read;
@@ -123,7 +123,7 @@ fn read_preview_resolved(
 
 /// Mirrors `src/shared/fileTypes.ts::isPreviewable`: **binary-blocklist** strategy.
 /// Anything NOT a known binary extension is considered previewable; extensionless
-/// names (Makefile, LICENSE, .gitignore, Caddyfile, etc.) are always previewable.
+/// names (Makefile, README, .gitignore, Caddyfile, etc.) are always previewable.
 ///
 /// Cross-review caught the original allowlist as a real UX regression — sidecar
 /// `isPreviewableText` falls through to this same blocklist via `isPreviewable`,
@@ -132,7 +132,7 @@ fn read_preview_resolved(
 fn is_previewable(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
     // No dot, or a trailing dot with no real extension → extensionless file
-    // (Makefile, LICENSE, `foo.`) — previewable. For dotfiles (`.zshrc`,
+    // (Makefile, README, `foo.`) — previewable. For dotfiles (`.zshrc`,
     // `.gitignore`) `rsplit_once` returns `("", "zshrc")` — `e` is non-empty
     // and we then check the binary blocklist, matching `src/shared/fileTypes.ts`
     // exactly: `.zshrc` is previewable (zshrc not binary), `.exe` is not
@@ -251,7 +251,7 @@ mod tests {
     #[tokio::test]
     async fn allows_extensionless_files() {
         let ws = make_test_workspace("preview_extless");
-        for name in ["Makefile", "LICENSE", "Dockerfile", "Caddyfile"] {
+        for name in ["Makefile", "README", "Dockerfile", "Caddyfile"] {
             fs::write(ws.join(name), "content").unwrap();
             let res =
                 cmd_workspace_read_preview(ws.to_string_lossy().to_string(), name.to_string())

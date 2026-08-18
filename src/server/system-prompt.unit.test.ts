@@ -24,7 +24,9 @@ describe('buildSystemPrompt', () => {
     expect(prompt).toContain('点名了具体环节');
     expect(prompt).toContain('没有点名环节');
     expect(prompt).toContain('full-optimization');
-    expect(prompt).toContain('把步骤计划告诉用户');
+    // 阶段计划由进度卡片播报，正文只讲当前停靠的确认门，不复述全部步骤。
+    expect(prompt).toContain('由聊天里的进度卡片播报');
+    expect(prompt).toContain('不要复述全部步骤');
     expect(prompt).not.toContain('只有用户明确要求完整');
     expect(prompt).not.toContain('让用户选择');
   });
@@ -40,6 +42,17 @@ describe('buildSystemPrompt', () => {
     expect(prompt).toContain('待确认门');
     expect(prompt).toContain('不要代替用户裁决');
     expect(prompt).not.toMatch(/ANTHROPIC|API[_ ]?KEY|localhost|127\.0\.0\.1|XIAOJING_PORT/);
+  });
+
+  // GD-12 回归：对用户汇报必须用自然中文口吻，内部枚举/ID/revision
+  // 等工程术语不得泄露到用户可见回复（决策表内部仍可用枚举名）。
+  it('speaks natural Chinese and never surfaces internal engineering terms', () => {
+    expect(prompt).toContain('专业、自然的日常中文口吻');
+    expect(prompt).toContain('内部实现名称不得出现在回复中');
+    // goal 与指代操作都用简短目标短语；阶段链条由进度卡片展示，不复述。
+    expect(prompt).toContain('指代操作时用简短人话');
+    expect(prompt).toContain('不把阶段链条展开写进 goal 或正文');
+    expect(prompt).toContain('始终保持简体中文');
   });
 });
 
@@ -76,10 +89,28 @@ describe('session-files reminder copy stays in sync with the system prompt', () 
     expect(prompt).toContain('查询品牌知识');
   });
 
-  it('both sides route binary files to the brand-material panel and act instead of open-ended asking', () => {
-    expect(reminder).toContain('brand-material panel');
-    expect(prompt).toContain('品牌材料面板');
+  it('both sides route binary files to the chat input material import entry and act instead of open-ended asking', () => {
+    expect(reminder).toContain('material import entry in the chat input area');
+    expect(prompt).toContain('材料导入入口');
     expect(reminder).toContain('do not stop at an open-ended question');
     expect(prompt).toContain('不要停在开放式提问');
+  });
+
+  // GD-13 回归：所有闸门的操作入口统一为聊天内的交互卡片，
+  // 卡片内容来自 agent 工具结果，右侧工作台只做结果展示。
+  it('makes the in-chat gate cards the single entry for every confirmation', () => {
+    expect(prompt).toContain('唯一的操作入口');
+    expect(prompt).toContain('run_question_pool');
+    expect(prompt).toContain('产品线取领域级');
+    expect(prompt).toContain('自动取品牌已确认的领域');
+    expect(prompt).toContain('品牌创建只需名称');
+    expect(prompt).toContain('businessFocus');
+    expect(prompt).toContain('plan_topics');
+    expect(prompt).toContain('generate_articles');
+    expect(prompt).toContain('plan_distribution');
+    expect(prompt).toContain('prepare_publish');
+    expect(prompt).toContain('你没有发起的阶段不会有卡片');
+    expect(prompt).toContain('工作台只做结果展示');
+    expect(prompt).toContain('你无权跨越');
   });
 });

@@ -4,10 +4,17 @@ import {
   XIAOJING_GEO_PROVIDER_DEFAULTS,
   type GeoProviderCapabilitySlot,
 } from "../../shared/geo/providerCapabilities";
+import {
+  GEO_BASELINE_POLICY_VERSION,
+  type GeoBaselineEngineAvailability,
+  type GeoBaselineEngineId,
+  type GeoBaselineProviderSnapshot,
+} from "../../shared/geo/baseline";
 
 export interface GeoProviderRuntimeSecrets {
   deepseekApiKey?: string;
   arkApiKey?: string;
+  arkConfigurationFingerprint?: string;
   embeddingApiKey?: string;
   embeddingEndpointId?: string;
   ossAccessKeyId?: string;
@@ -29,13 +36,26 @@ export interface GeoTextCapability {
   readonly slot: "extraction" | "generation" | "reflection";
   complete(
     messages: readonly GeoTextMessage[],
-    options?: { signal?: AbortSignal },
+    options?: {
+      signal?: AbortSignal;
+      /** Title planning keeps the js_ai dev pinned mini route without adding a ninth slot. */
+      purpose?: "title-planning";
+      maxTokens?: number;
+      temperature?: number;
+      topP?: number;
+    },
   ): Promise<string>;
 }
 
 export interface GeoKeywordSearchCapability {
   readonly slot: "keyword-search";
   search(prompt: string, options?: { signal?: AbortSignal }): Promise<string>;
+  baselineEngines(): readonly GeoBaselineEngineAvailability[];
+  probeQuestion(
+    engineId: GeoBaselineEngineId,
+    question: string,
+    options?: { signal?: AbortSignal },
+  ): Promise<{ rawEvidence: unknown; snapshot: GeoBaselineProviderSnapshot }>;
 }
 
 export interface GeoEmbeddingCapability {
@@ -57,8 +77,17 @@ export interface GeoDistributionResource {
   id: number;
   name: string;
   status?: number;
-  price?: string | number;
-  published_rate?: number;
+  price?: string | number | null;
+  published_rate?: number | null;
+  entrance_link?: string | null;
+  remark?: string | null;
+  channel_type?: number | null;
+  industry_category?: number | null;
+  area?: number | null;
+  can_weekend?: boolean | null;
+  publish_speed?: number | null;
+  published_avg?: number | null;
+  platform?: number | null;
   [key: string]: unknown;
 }
 
@@ -107,6 +136,7 @@ export function captureGeoProviderRuntimeSecrets(
   const read = (name: string) => env[name]?.trim() || undefined;
   const secrets: GeoProviderRuntimeSecrets = {
     arkApiKey: read("XIAOJING_ARK_API_KEY"),
+    arkConfigurationFingerprint: read("XIAOJING_ARK_CONFIGURATION_FINGERPRINT"),
     embeddingApiKey: read("XIAOJING_ARK_EMBEDDING_API_KEY"),
     embeddingEndpointId: read("XIAOJING_ARK_EMBEDDING_ENDPOINT_ID"),
     ossAccessKeyId: read("XIAOJING_OSS_ACCESS_KEY_ID"),
@@ -121,6 +151,7 @@ export function captureGeoProviderRuntimeSecrets(
   for (const name of [
     ...secretTransportEnvNames,
     "XIAOJING_ARK_EMBEDDING_ENDPOINT_ID",
+    "XIAOJING_ARK_CONFIGURATION_FINGERPRINT",
     "XIAOJING_OSS_BUCKET",
     "XIAOJING_OSS_REGION",
     "XIAOJING_OSS_PUBLIC_BASE_URL",
@@ -174,7 +205,12 @@ async function openAiChat(
   apiKey: string,
   model: string,
   messages: readonly GeoTextMessage[],
-  signal?: AbortSignal,
+  options?: {
+    signal?: AbortSignal;
+    maxTokens?: number;
+    temperature?: number;
+    topP?: number;
+  },
 ): Promise<string> {
   const response = await fetchImpl(endpoint, {
     method: "POST",
@@ -182,8 +218,19 @@ async function openAiChat(
       Authorization: `Bearer ${apiKey}`,
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({ model, messages, stream: false }),
-    signal,
+    body: JSON.stringify({
+      model,
+      messages,
+      stream: false,
+      ...(options?.maxTokens !== undefined
+        ? { max_tokens: options.maxTokens }
+        : {}),
+      ...(options?.temperature !== undefined
+        ? { temperature: options.temperature }
+        : {}),
+      ...(options?.topP !== undefined ? { top_p: options.topP } : {}),
+    }),
+    signal: options?.signal,
   });
   if (!response.ok) throw safeUpstreamFailure(slot, response.status);
   const payload = (await response.json()) as {
@@ -224,6 +271,18 @@ export function createGeoProviderCapabilities(
   const now = deps.now ?? (() => new Date());
   const deepseekEndpoint = `${XIAOJING_GEO_PROVIDER_DEFAULTS.deepseekOpenAiBaseUrl}/chat/completions`;
   const arkEndpoint = `${XIAOJING_GEO_PROVIDER_DEFAULTS.arkPaygoBaseUrl}/chat/completions`;
+  const arkResponsesEndpoint = `${XIAOJING_GEO_PROVIDER_DEFAULTS.arkPaygoBaseUrl}/responses`;
+  const doubaoBaselineSnapshot: GeoBaselineProviderSnapshot = {
+    engineId: "doubao",
+    provider: "volcengine",
+    capabilitySlot: "keyword-search",
+    model: XIAOJING_GEO_PROVIDER_DEFAULTS.keywordSearchModel,
+    endpointFamily: "ark-responses",
+    searchMode: "doubao-app-ai-search",
+    configurationFingerprint:
+      secrets.arkConfigurationFingerprint ?? "development-config-unversioned",
+    policyVersion: GEO_BASELINE_POLICY_VERSION,
+  };
 
   const textCapability = (
     slot: "extraction" | "generation" | "reflection",
@@ -239,9 +298,11 @@ export function createGeoProviderCapabilities(
           slot,
           endpoint,
           apiKey(),
-          model,
+          slot === "generation" && options?.purpose === "title-planning"
+            ? XIAOJING_GEO_PROVIDER_DEFAULTS.titlePlanningModel
+            : model,
           messages,
-          options?.signal,
+          options,
         );
       } catch (error) {
         throw sanitizeGeoProviderError(error, secrets);
@@ -258,6 +319,20 @@ export function createGeoProviderCapabilities(
     ),
     keywordSearch: {
       slot: "keyword-search",
+      baselineEngines() {
+        const available = Boolean(secrets.arkApiKey);
+        return [
+          {
+            id: "doubao",
+            label: "豆包 AI 搜索",
+            available,
+            ...(!available
+              ? { unavailableReason: "豆包 / ARK Provider 尚未配置" }
+              : {}),
+            snapshot: doubaoBaselineSnapshot,
+          },
+        ];
+      },
       async search(prompt, options) {
         try {
           const response = await fetchImpl(arkEndpoint, {
@@ -283,6 +358,42 @@ export function createGeoProviderCapabilities(
           if (typeof content !== "string")
             throw new Error("keyword-search 返回了无效响应");
           return content;
+        } catch (error) {
+          throw sanitizeGeoProviderError(error, secrets);
+        }
+      },
+      async probeQuestion(engineId, question, options) {
+        if (engineId !== "doubao") {
+          throw new Error(`geo_baseline_engine_unsupported:${engineId}`);
+        }
+        if (!question.trim()) throw new Error("geo_baseline_question_required");
+        try {
+          const response = await fetchImpl(arkResponsesEndpoint, {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${required(secrets.arkApiKey, "keyword-search")}`,
+              "Content-Type": "application/json",
+              "ark-beta-doubao-app": "true",
+            },
+            body: JSON.stringify({
+              model: doubaoBaselineSnapshot.model,
+              input: [{ role: "user", content: question.trim() }],
+              stream: false,
+              tools: [
+                {
+                  type: "doubao_app",
+                  feature: { ai_search: { type: "enabled" } },
+                },
+              ],
+            }),
+            signal: options?.signal,
+          });
+          if (!response.ok)
+            throw safeUpstreamFailure("keyword-search", response.status);
+          return {
+            rawEvidence: (await response.json()) as unknown,
+            snapshot: doubaoBaselineSnapshot,
+          };
         } catch (error) {
           throw sanitizeGeoProviderError(error, secrets);
         }

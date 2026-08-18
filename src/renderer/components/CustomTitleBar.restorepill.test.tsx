@@ -55,7 +55,7 @@ describe('CustomTitleBar — 恢复对话 pill (Issue #309)', () => {
         const { container } = renderBar();
         const titlebar = container.querySelector('.custom-titlebar');
 
-        expect(titlebar).toHaveClass('bg-[var(--global-sidebar-bg)]', 'pl-2');
+        expect(titlebar).toHaveClass('bg-[var(--xiaojing-sidebar-bg)]', 'pl-2');
         expect(titlebar).not.toHaveClass('bg-[var(--paper)]', 'border-b', 'border-[var(--line)]');
         expect(titlebar).not.toHaveClass('bg-gradient-to-b', 'from-[var(--paper)]', 'to-[var(--paper-inset)]/30');
     });
@@ -92,7 +92,7 @@ describe('CustomTitleBar — 恢复对话 pill (Issue #309)', () => {
         expect(tauriDragRegions.length).toBeGreaterThanOrEqual(2);
         expect(tauriDragRegions.some((node) => (node as HTMLElement).style.width === '30px')).toBe(true);
         expect(tauriDragRegions.some((node) => (node as HTMLElement).className.includes('w-1'))).toBe(true);
-        expect(container.querySelector('[data-myagents-titlebar-drag-region]')).toBeNull();
+        expect(container.querySelector('[data-xiaojing-titlebar-drag-region]')).toBeNull();
         expect(tabbarHost?.className).toContain('flex-1');
     });
 

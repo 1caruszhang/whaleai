@@ -11,8 +11,6 @@
 //!
 //! Each test cleans up its own directory; we don't share state across tests.
 
-#![cfg(test)]
-
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -26,7 +24,7 @@ pub fn make_test_workspace(scope: &str) -> PathBuf {
         .or_else(|| dirs::home_dir().map(|h| h.join(".cache")))
         .expect("no home dir for test scratch space");
     let dir = root
-        .join("myagents-tests")
+        .join("xiaojing-tests")
         .join(format!("{}_{}_{}", scope, std::process::id(), n));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("create scratch dir");

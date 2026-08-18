@@ -59,7 +59,7 @@ export default memo(function SortableTabItem({
     // gives an untitled chat tab a useful identity. Fixed product tabs remain
     // localized chrome.
     const hasSessionTitle = tab.title && tab.title !== 'New Tab' && tab.title !== 'New Chat';
-    const workspaceTitle = tab.agentDir ? getFolderName(tab.agentDir) : undefined;
+    const workspaceTitle = tab.workspacePath ? getFolderName(tab.workspacePath) : undefined;
     const displayTitle = fixedViewTitle ?? (hasSessionTitle
         ? tab.title
         : (workspaceTitle ?? tab.title));

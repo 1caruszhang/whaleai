@@ -95,14 +95,14 @@ const MAX_PROCESS_PID = 0x7fffffff;
 
 /** Parse the exact shared v1 process-owner grammar and numeric range. */
 function parseProcessOwner(owner: string): ProcessOwner | null {
-  const match = /^(node|rust):(\d+)(?::(\d+))?$/.exec(owner);
+  const match = /^(node|rust):(\d+):(\d+)$/.exec(owner);
   if (!match) return null;
 
   const pid = Number(match[2]);
   if (!Number.isSafeInteger(pid) || pid <= 0 || pid > MAX_PROCESS_PID) return null;
 
-  const startMs = match[3] === undefined ? null : Number(match[3]);
-  if (startMs !== null && (!Number.isSafeInteger(startMs) || startMs < 0)) return null;
+  const startMs = Number(match[3]);
+  if (!Number.isSafeInteger(startMs) || startMs < 0) return null;
 
   return { pid };
 }
@@ -110,11 +110,10 @@ function parseProcessOwner(owner: string): ProcessOwner | null {
 /**
  * Try to break an existing lock whose owner is no longer authoritative.
  *
- * Owner file format (Pattern 5 + fix #4):
+ * Owner file format:
  *   - `node:<pid>:<startMs>` / `rust:<pid>:<startMs>`  →
  *       check pid liveness via `process.kill(pid, 0)`. `startMs` remains part
  *       of the v1 release token, but is not strong PID-reuse evidence.
- *   - `node:<pid>` / `rust:<pid>`        → legacy 2-tuple, pid liveness only
  *   - `renderer:<ts>`                    → renderer pids aren't observable, skip
  *                                          pid check; only stale-by-age may break it.
  *

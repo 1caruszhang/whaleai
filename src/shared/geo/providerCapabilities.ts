@@ -59,6 +59,10 @@ export const XIAOJING_GEO_PROVIDER_DEFAULTS = {
   mainAgentModel: "deepseek-v4-pro",
   extractionModel: "deepseek-chat",
   keywordSearchModel: "doubao-seed-2-0-lite-260428",
+  // Title planning rides the same lite tier as keyword search; the mini
+  // variant (doubao-seed-2-0-mini-260428) is not provisioned on paygo
+  // accounts and answers HTTP 404 on /chat/completions.
+  titlePlanningModel: "doubao-seed-2-0-lite-260428",
   generationModel: "doubao-seed-2-0-pro-260215",
   reflectionModel: "deepseek-v4-pro",
   embeddingDimensions: 2048,
@@ -109,7 +113,11 @@ export const GEO_PROVIDER_CAPABILITY_CATALOG: readonly GeoProviderCapabilitySpec
       provider: "豆包 / ARK",
       model: XIAOJING_GEO_PROVIDER_DEFAULTS.generationModel,
       endpoint: `${XIAOJING_GEO_PROVIDER_DEFAULTS.arkPaygoBaseUrl}/chat/completions`,
-      semantics: { protocol: "openai-chat", billingSurface: "paygo" },
+      semantics: {
+        protocol: "openai-chat",
+        billingSurface: "paygo",
+        titlePlanningModel: XIAOJING_GEO_PROVIDER_DEFAULTS.titlePlanningModel,
+      },
     },
     {
       slot: "reflection",

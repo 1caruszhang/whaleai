@@ -7,6 +7,7 @@ use serde::Serialize;
 use serde_json::Value;
 use tauri::{AppHandle, Emitter};
 
+use crate::utils::file_lock::{with_file_lock_blocking, FileLockError, FileLockOptions};
 use crate::{ulog_info, ulog_warn};
 
 const SESSION_METADATA_CHANGED_EVENT: &str = "session:metadata-changed";
@@ -14,9 +15,188 @@ const PROJECTION_DEBOUNCE_WINDOW: Duration = Duration::from_millis(300);
 const WATCHER_RESTART_DELAY: Duration = Duration::from_secs(2);
 
 fn sessions_path() -> Result<std::path::PathBuf, String> {
-    crate::app_dirs::myagents_data_dir()
+    crate::app_dirs::xiaojing_data_dir()
         .map(|dir| dir.join("sessions.json"))
-        .ok_or_else(|| "无法定位 MyAgents 数据目录".to_string())
+        .ok_or_else(|| "无法定位 Xiaojing 数据目录".to_string())
+}
+
+fn storage_error(message: impl Into<String>) -> FileLockError {
+    FileLockError::Io(std::io::Error::other(message.into()))
+}
+
+fn read_session_rows_for_write(path: &Path) -> Result<Vec<Value>, FileLockError> {
+    match std::fs::read_to_string(path) {
+        Ok(content) => serde_json::from_str(crate::utils::bom::strip_bom(&content))
+            .map_err(|error| storage_error(format!("解析 sessions.json 失败：{error}"))),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(error) => Err(FileLockError::Io(error)),
+    }
+}
+
+fn write_session_rows(path: &Path, rows: &[Value]) -> Result<(), FileLockError> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| storage_error("sessions.json 缺少父目录"))?;
+    std::fs::create_dir_all(parent).map_err(FileLockError::Io)?;
+    let bytes = serde_json::to_vec_pretty(rows)
+        .map_err(|error| storage_error(format!("序列化 sessions.json 失败：{error}")))?;
+    crate::workspace_files::path_safety::atomic_write_file(path, &bytes).map_err(storage_error)
+}
+
+fn validate_session_identity(session_id: &str) -> Result<(), String> {
+    if session_id.is_empty()
+        || session_id.len() > 99
+        || !session_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+    {
+        return Err("Session ID 格式无效".to_string());
+    }
+    Ok(())
+}
+
+fn mutate_session_rows<T>(
+    mutator: impl FnOnce(&mut Vec<Value>) -> Result<T, FileLockError>,
+) -> Result<T, String> {
+    let path = sessions_path()?;
+    let lock_path = path.with_file_name("sessions.lock");
+    with_file_lock_blocking(&lock_path, FileLockOptions::default(), move || {
+        let mut rows = read_session_rows_for_write(&path)?;
+        let result = mutator(&mut rows)?;
+        write_session_rows(&path, &rows)?;
+        Ok(result)
+    })
+    .map_err(String::from)
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreatedSessionMetadata {
+    id: String,
+    workspace_path: String,
+    title: String,
+    created_at: String,
+    last_active_at: String,
+    unified_session: bool,
+    title_source: String,
+}
+
+#[tauri::command]
+#[allow(non_snake_case)]
+pub async fn cmd_create_session_metadata(
+    workspacePath: String,
+    title: String,
+) -> Result<CreatedSessionMetadata, String> {
+    crate::workspace_files::path_safety::validate_workspace_root(&workspacePath)?;
+    if !crate::brand_workspace::is_brand_workspace_path(Path::new(&workspacePath)) {
+        return Err("Session 必须属于 Xiaojing BrandWorkspace".to_string());
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let now = chrono::Utc::now().to_rfc3339();
+        let metadata = CreatedSessionMetadata {
+            id: session_id.clone(),
+            workspace_path: workspacePath,
+            title: title.trim().to_string(),
+            created_at: now.clone(),
+            last_active_at: now,
+            unified_session: true,
+            title_source: "default".to_string(),
+        };
+        let value = serde_json::to_value(&metadata)
+            .map_err(|error| format!("序列化 Session metadata 失败：{error}"))?;
+        mutate_session_rows(move |rows| {
+            rows.push(value);
+            Ok(metadata)
+        })
+    })
+    .await
+    .map_err(|error| format!("创建 Session metadata 任务失败：{error}"))?
+}
+
+#[tauri::command]
+#[allow(non_snake_case)]
+pub async fn cmd_update_session_title(sessionId: String, title: String) -> Result<bool, String> {
+    validate_session_identity(&sessionId)?;
+    let title = title.trim().to_string();
+    if title.is_empty() {
+        return Err("Session 标题不能为空".to_string());
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        mutate_session_rows(move |rows| {
+            let Some(row) = rows
+                .iter_mut()
+                .find(|row| row.get("id").and_then(Value::as_str) == Some(&sessionId))
+            else {
+                return Ok(false);
+            };
+            let object = row
+                .as_object_mut()
+                .ok_or_else(|| storage_error("Session metadata row 格式无效"))?;
+            object.insert("title".to_string(), Value::String(title));
+            object.insert("titleSource".to_string(), Value::String("user".to_string()));
+            Ok(true)
+        })
+    })
+    .await
+    .map_err(|error| format!("更新 Session 标题任务失败：{error}"))?
+}
+
+pub(crate) fn delete_session_storage(session_id: &str) -> Result<bool, String> {
+    validate_session_identity(session_id)?;
+    let index_path = sessions_path()?;
+    let data_root = index_path
+        .parent()
+        .ok_or_else(|| "sessions.json 缺少父目录".to_string())?
+        .to_path_buf();
+    let transcript_lock = data_root
+        .join("session-locks")
+        .join(format!("{session_id}.jsonl.lock"));
+    let session_id = session_id.to_string();
+    with_file_lock_blocking(&transcript_lock, FileLockOptions::default(), move || {
+        let index_lock = data_root.join("sessions.lock");
+        with_file_lock_blocking(&index_lock, FileLockOptions::default(), move || {
+            let mut rows = read_session_rows_for_write(&index_path)?;
+            let before = rows.len();
+            // 会话私有暂存目录挂在品牌工作区下；删除会话时一并清理（ADR-0001）。
+            let session_workspace_root = rows
+                .iter()
+                .find(|row| row.get("id").and_then(Value::as_str) == Some(&session_id))
+                .and_then(|row| row.get("workspacePath").and_then(Value::as_str))
+                .map(str::to_owned);
+            rows.retain(|row| row.get("id").and_then(Value::as_str) != Some(&session_id));
+            if rows.len() == before {
+                return Ok(false);
+            }
+            write_session_rows(&index_path, &rows)?;
+            let transcript = data_root
+                .join("sessions")
+                .join(format!("{session_id}.jsonl"));
+            if let Err(error) = std::fs::remove_file(&transcript) {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    return Err(FileLockError::Io(error));
+                }
+            }
+            let attachments = data_root.join("attachments").join(&session_id);
+            if let Err(error) = std::fs::remove_dir_all(&attachments) {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    return Err(FileLockError::Io(error));
+                }
+            }
+            if let Some(workspace_root) = session_workspace_root {
+                let session_files = std::path::Path::new(&workspace_root)
+                    .join("xiaojing_files")
+                    .join(&session_id);
+                if let Err(error) = std::fs::remove_dir_all(&session_files) {
+                    if error.kind() != std::io::ErrorKind::NotFound {
+                        return Err(FileLockError::Io(error));
+                    }
+                }
+            }
+            Ok(true)
+        })
+    })
+    .map_err(String::from)
 }
 
 fn redact_session_metadata(mut session: Value) -> Option<Value> {
@@ -42,7 +222,7 @@ fn redact_session_metadata(mut session: Value) -> Option<Value> {
     Some(session)
 }
 
-fn read_session_metadata(agent_dir: Option<String>) -> Result<Vec<Value>, String> {
+fn read_session_metadata(workspace_path: Option<String>) -> Result<Vec<Value>, String> {
     let path = sessions_path()?;
     let content = match std::fs::read_to_string(&path) {
         Ok(content) => content,
@@ -58,18 +238,18 @@ fn read_session_metadata(agent_dir: Option<String>) -> Result<Vec<Value>, String
     let sessions: Vec<Value> = serde_json::from_str(crate::utils::bom::strip_bom(&content))
         .map_err(|e| format!("解析 sessions.json 失败：{} ({})", path.display(), e))?;
     let sessions_dir = path.parent().unwrap_or(Path::new(".")).join("sessions");
-    let agent_dir_identity = agent_dir
+    let workspace_identity = workspace_path
         .as_deref()
-        .map(crate::cron_task::normalize_path)
+        .map(crate::workspace_path::normalize_workspace_path_identity)
         .filter(|value| !value.is_empty());
 
     let mut out = Vec::with_capacity(sessions.len());
     for session in sessions {
-        if let Some(expected) = agent_dir_identity.as_deref() {
+        if let Some(expected) = workspace_identity.as_deref() {
             let current = session
-                .get("agentDir")
+                .get("workspacePath")
                 .and_then(Value::as_str)
-                .map(crate::cron_task::normalize_path);
+                .map(crate::workspace_path::normalize_workspace_path_identity);
             if current.as_deref() != Some(expected) {
                 continue;
             }
@@ -84,13 +264,14 @@ fn read_session_metadata(agent_dir: Option<String>) -> Result<Vec<Value>, String
     Ok(out)
 }
 
-/// Lightweight launcher/history metadata read. This intentionally avoids the
-/// global Node sidecar so the Launcher can show recent conversations before the
-/// AI runtime finishes cold-starting.
+/// Lightweight history metadata read owned entirely by Rust, so recent
+/// conversations are available before a Session Sidecar finishes cold-starting.
 #[tauri::command]
 #[allow(non_snake_case)]
-pub async fn cmd_list_session_metadata(agentDir: Option<String>) -> Result<Vec<Value>, String> {
-    tauri::async_runtime::spawn_blocking(move || read_session_metadata(agentDir))
+pub async fn cmd_list_session_metadata(
+    workspacePath: Option<String>,
+) -> Result<Vec<Value>, String> {
+    tauri::async_runtime::spawn_blocking(move || read_session_metadata(workspacePath))
         .await
         .map_err(|e| format!("读取会话元数据任务失败：{}", e))?
 }
@@ -100,7 +281,7 @@ type SessionProjectionSnapshot = HashMap<String, Value>;
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct SessionMetadataChangedPayload {
-    agent_dirs: Vec<String>,
+    workspace_paths: Vec<String>,
 }
 
 fn projection_snapshot(sessions: Vec<Value>) -> SessionProjectionSnapshot {
@@ -119,29 +300,29 @@ fn read_projection_snapshot() -> Result<SessionProjectionSnapshot, String> {
 
 /// Return `None` when the visible Session projection is unchanged. `Some([])`
 /// is meaningful: a malformed historical row can change without carrying an
-/// agentDir, in which case the renderer conservatively invalidates all loaded
+/// workspacePath, in which case the renderer conservatively invalidates all loaded
 /// workspace slices.
-fn changed_agent_dirs(
+fn changed_workspace_paths(
     previous: &SessionProjectionSnapshot,
     current: &SessionProjectionSnapshot,
 ) -> Option<Vec<String>> {
     let mut changed = false;
-    let mut agent_dirs = BTreeSet::new();
+    let mut workspace_paths = BTreeSet::new();
 
     for (id, current_session) in current {
         if previous.get(id) == Some(current_session) {
             continue;
         }
         changed = true;
-        if let Some(agent_dir) = current_session.get("agentDir").and_then(Value::as_str) {
-            agent_dirs.insert(agent_dir.to_string());
+        if let Some(workspace_path) = current_session.get("workspacePath").and_then(Value::as_str) {
+            workspace_paths.insert(workspace_path.to_string());
         }
-        if let Some(agent_dir) = previous
+        if let Some(workspace_path) = previous
             .get(id)
-            .and_then(|session| session.get("agentDir"))
+            .and_then(|session| session.get("workspacePath"))
             .and_then(Value::as_str)
         {
-            agent_dirs.insert(agent_dir.to_string());
+            workspace_paths.insert(workspace_path.to_string());
         }
     }
 
@@ -150,20 +331,23 @@ fn changed_agent_dirs(
             continue;
         }
         changed = true;
-        if let Some(agent_dir) = previous_session.get("agentDir").and_then(Value::as_str) {
-            agent_dirs.insert(agent_dir.to_string());
+        if let Some(workspace_path) = previous_session
+            .get("workspacePath")
+            .and_then(Value::as_str)
+        {
+            workspace_paths.insert(workspace_path.to_string());
         }
     }
 
-    changed.then(|| agent_dirs.into_iter().collect())
+    changed.then(|| workspace_paths.into_iter().collect())
 }
 
-fn changed_agent_dirs_from_baseline(
+fn changed_workspace_paths_from_baseline(
     previous: Option<&SessionProjectionSnapshot>,
     current: &SessionProjectionSnapshot,
 ) -> Option<Vec<String>> {
     match previous {
-        Some(previous) => changed_agent_dirs(previous, current),
+        Some(previous) => changed_workspace_paths(previous, current),
         // Unknown is not the same state as an empty projection. We cannot
         // recover old workspace identities after a failed baseline read, so
         // the first successful read must invalidate every loaded slice even
@@ -233,7 +417,7 @@ fn run_session_metadata_watcher(app_handle: AppHandle) -> Result<(), String> {
     if let Err(error) = app_handle.emit(
         SESSION_METADATA_CHANGED_EVENT,
         SessionMetadataChangedPayload {
-            agent_dirs: Vec::new(),
+            workspace_paths: Vec::new(),
         },
     ) {
         ulog_warn!(
@@ -270,15 +454,15 @@ fn run_session_metadata_watcher(app_handle: AppHandle) -> Result<(), String> {
                 continue;
             }
         };
-        let change = changed_agent_dirs_from_baseline(snapshot.as_ref(), &current);
+        let change = changed_workspace_paths_from_baseline(snapshot.as_ref(), &current);
         snapshot = Some(current);
-        let Some(agent_dirs) = change else {
+        let Some(workspace_paths) = change else {
             continue;
         };
 
         if let Err(error) = app_handle.emit(
             SESSION_METADATA_CHANGED_EVENT,
-            SessionMetadataChangedPayload { agent_dirs },
+            SessionMetadataChangedPayload { workspace_paths },
         ) {
             ulog_warn!("[session-metadata] projection event emit failed: {}", error);
         }
@@ -326,7 +510,7 @@ pub fn spawn_session_metadata_watcher(app_handle: AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::{
-        changed_agent_dirs, changed_agent_dirs_from_baseline, is_session_projection_path,
+        changed_workspace_paths, changed_workspace_paths_from_baseline, is_session_projection_path,
         projection_snapshot, redact_session_metadata, SessionProjectionSnapshot,
     };
     use serde_json::{json, Value};
@@ -349,7 +533,7 @@ mod tests {
     }
 
     #[test]
-    fn projects_legacy_message_count_as_turn_count() {
+    fn projects_persisted_message_count_as_turn_count() {
         let value = redact_session_metadata(json!({
             "id": "session-1",
             "stats": {
@@ -380,18 +564,18 @@ mod tests {
     #[test]
     fn projection_diff_routes_create_update_move_and_delete_to_affected_workspaces() {
         let previous = projection_snapshot(vec![
-            json!({ "id": "updated", "agentDir": "/work/a", "title": "Old" }),
-            json!({ "id": "moved", "agentDir": "/work/a", "title": "Move" }),
-            json!({ "id": "deleted", "agentDir": "/work/c", "title": "Delete" }),
+            json!({ "id": "updated", "workspacePath": "/work/a", "title": "Old" }),
+            json!({ "id": "moved", "workspacePath": "/work/a", "title": "Move" }),
+            json!({ "id": "deleted", "workspacePath": "/work/c", "title": "Delete" }),
         ]);
         let current = projection_snapshot(vec![
-            json!({ "id": "updated", "agentDir": "/work/a", "title": "New" }),
-            json!({ "id": "moved", "agentDir": "/work/b", "title": "Move" }),
-            json!({ "id": "created", "agentDir": "/work/d", "title": "Create" }),
+            json!({ "id": "updated", "workspacePath": "/work/a", "title": "New" }),
+            json!({ "id": "moved", "workspacePath": "/work/b", "title": "Move" }),
+            json!({ "id": "created", "workspacePath": "/work/d", "title": "Create" }),
         ]);
 
         assert_eq!(
-            changed_agent_dirs(&previous, &current),
+            changed_workspace_paths(&previous, &current),
             Some(vec![
                 "/work/a".to_string(),
                 "/work/b".to_string(),
@@ -399,9 +583,9 @@ mod tests {
                 "/work/d".to_string(),
             ]),
         );
-        assert_eq!(changed_agent_dirs(&current, &current), None);
+        assert_eq!(changed_workspace_paths(&current, &current), None);
         assert_eq!(
-            changed_agent_dirs(&SessionProjectionSnapshot::new(), &current),
+            changed_workspace_paths(&SessionProjectionSnapshot::new(), &current),
             Some(vec![
                 "/work/a".to_string(),
                 "/work/b".to_string(),
@@ -409,7 +593,7 @@ mod tests {
             ]),
         );
         assert_eq!(
-            changed_agent_dirs_from_baseline(None, &SessionProjectionSnapshot::new()),
+            changed_workspace_paths_from_baseline(None, &SessionProjectionSnapshot::new()),
             Some(Vec::new()),
         );
     }
@@ -417,13 +601,13 @@ mod tests {
     #[test]
     fn projection_path_matching_is_structural_across_apfs_aliases() {
         assert!(is_session_projection_path(Path::new(
-            "/System/Volumes/Data/Users/alice/.myagents/sessions.json"
+            "/System/Volumes/Data/Users/alice/Library/Application Support/Xiaojing/sessions.json"
         )));
         assert!(is_session_projection_path(Path::new(
-            "/System/Volumes/Data/Users/alice/.myagents/sessions/session-1.jsonl"
+            "/System/Volumes/Data/Users/alice/Library/Application Support/Xiaojing/sessions/session-1.jsonl"
         )));
         assert!(!is_session_projection_path(Path::new(
-            "/Users/alice/.myagents/sessions.json.tmp"
+            "/Users/alice/Library/Application Support/Xiaojing/sessions.json.tmp"
         )));
         assert!(!is_session_projection_path(Path::new(
             "/Users/alice/other/session-1.jsonl"

@@ -9,30 +9,16 @@
  * we use decorations: false on Windows for custom title bar styling.
  */
 
-import { Minus, Square, X, RefreshCw, RotateCcw, Copy } from 'lucide-react';
+import { Minus, Square, X, RotateCcw, Copy } from 'lucide-react';
 import { type CSSProperties, type ReactNode, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { isTauri } from '@/api/tauriClient';
 
 interface CustomTitleBarProps {
     children: ReactNode;  // TabBar component
-    /** Whether an update is ready to install */
-    updateReady?: boolean;
-    /** Version of the update ready to install */
-    updateVersion?: string | null;
-    /** Whether an install is currently in flight (post-click). When true the
-     *  button shows a spinner and is disabled to prevent double-clicks. */
-    updateInstalling?: boolean;
-    /** Whether a silent download is replacing the pending bytes. When true
-     *  the button hides entirely — clicking install mid-replacement would
-     *  land on inconsistent cache/disk state. The button reappears with the
-     *  new version once the replacement commits. */
-    updatePreparing?: boolean;
-    /** Callback when user clicks "Restart to Update" */
-    onRestartAndUpdate?: () => void;
     /** Number of restorable conversations from the previous session (Issue
      *  #309). `> 0` shows the "恢复对话" pill; surfaced by App only when the last
-     *  exit was NOT a deliberate quit (crash / update-restart). */
+     *  exit was NOT a deliberate quit. */
     restoreCount?: number;
     /** Click the pill body → restore the previous session. */
     onRestoreSession?: () => void;
@@ -58,11 +44,6 @@ function TitlebarDragSpacer({ className = '', style }: { className?: string; sty
 
 export default function CustomTitleBar({
     children,
-    updateReady,
-    updateVersion,
-    updateInstalling,
-    updatePreparing,
-    onRestartAndUpdate,
     restoreCount = 0,
     onRestoreSession,
     onDismissRestore,
@@ -153,7 +134,7 @@ export default function CustomTitleBar({
 
     return (
         <div
-            className="custom-titlebar flex h-11 flex-shrink-0 items-center bg-[var(--global-sidebar-bg)] pl-2"
+            className="custom-titlebar flex h-11 flex-shrink-0 items-center bg-[var(--xiaojing-sidebar-bg)] pl-2"
         >
             {/* Windows: keep a reliable left-edge drag target even when tabs fill the bar. */}
             {isWindows && (
@@ -175,12 +156,8 @@ export default function CustomTitleBar({
             {/* Right side actions. Buttons are non-drag; explicit gaps remain draggable. */}
             <div className="flex h-full flex-shrink-0 items-center" data-no-drag>
                 <TitlebarDragSpacer className="w-1" />
-                {/* "恢复对话" pill (Issue #309) — opt-in restore of the previous
-                    session, shown only when the last exit was NOT a deliberate
-                    quit (crash / update-restart; decided in App). A compound
-                    pill: the body restores, the trailing ✕ dismisses. Lower
-                    emphasis than the green update pill (a soft terracotta tint,
-                    not a call-to-action) since it's optional and dismissable. */}
+                {/* Opt-in restore of the previous session. It is shown only
+                    after an unclean exit; the body restores and ✕ dismisses. */}
                 {restoreCount > 0 && (
                     <>
                         <div
@@ -211,31 +188,6 @@ export default function CustomTitleBar({
                                 <X className="h-3 w-3" />
                             </button>
                         </div>
-                        <TitlebarDragSpacer className="w-1" />
-                    </>
-                )}
-                {/* Update button - only shown when update is ready AND no
-                    silent replacement download is in flight. Spinner +
-                    disabled state during install so the user sees immediate
-                    feedback on click. Hidden during silent download because
-                    the pending bytes are about to be replaced — clicking
-                    install mid-replacement could land on inconsistent
-                    cache/disk state. Reappears automatically when the
-                    replacement commits (with the new version). */}
-                {updateReady && !updatePreparing && (
-                    <>
-                        <button
-                            onClick={updateInstalling ? undefined : onRestartAndUpdate}
-                            disabled={updateInstalling}
-                            className="flex h-7 items-center gap-1.5 px-3 rounded-full text-xs font-medium text-[var(--on-success)] bg-[var(--success)] shadow-sm transition-all hover:bg-[var(--success)] active:scale-95 disabled:opacity-80 disabled:cursor-wait"
-                            title={updateInstalling
-                                ? t('titlebar.installingUpdate')
-                                : (updateVersion ? t('titlebar.updateToVersion', { version: updateVersion }) : t('titlebar.restartAndUpdate'))}
-                            data-no-drag
-                        >
-                            <RefreshCw className={`h-3.5 w-3.5 ${updateInstalling ? 'animate-spin' : ''}`} />
-                            <span>{updateInstalling ? t('titlebar.installing') : t('titlebar.restartUpdate')}</span>
-                        </button>
                         <TitlebarDragSpacer className="w-1" />
                     </>
                 )}

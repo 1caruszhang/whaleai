@@ -1,0 +1,157 @@
+import { describe, expect, it, vi } from "vitest";
+
+import type { GeoBaselineProviderSnapshot } from "../../shared/geo/baseline";
+import type { GeoKeywordSearchCapability } from "./provider-capabilities";
+import {
+  checkPublishedPageAccess,
+  PostPublishBaselineProbeService,
+} from "./post-publish-monitoring";
+
+const snapshot: GeoBaselineProviderSnapshot = {
+  engineId: "doubao" as const,
+  provider: "volcengine",
+  capabilitySlot: "keyword-search" as const,
+  model: "doubao-test",
+  endpointFamily: "ark-responses",
+  searchMode: "doubao-app-ai-search",
+  configurationFingerprint: "fingerprint",
+  policyVersion: "xiaojing-geo-baseline-v1" as const,
+};
+const sourceSnapshot: GeoBaselineProviderSnapshot = {
+  ...snapshot,
+  model: "doubao-source-a",
+  configurationFingerprint: "source-fingerprint-a",
+};
+
+function provider(rawEvidence: unknown): GeoKeywordSearchCapability {
+  return {
+    slot: "keyword-search",
+    search: vi.fn(),
+    baselineEngines: () => [
+      { id: "doubao", label: "豆包", available: true, snapshot },
+    ],
+    probeQuestion: vi.fn().mockResolvedValue({ rawEvidence, snapshot }),
+  };
+}
+
+describe("PostPublishBaselineProbeService", () => {
+  it("reuses the Ticket 09 parser and keeps raw evidence, citations and exact article ids", async () => {
+    const rawEvidence = {
+      output: [
+        {
+          type: "message",
+          content: [
+            {
+              type: "output_text",
+              text: "TOP 2：小鲸，值得选择。",
+              annotations: [
+                {
+                  type: "url_citation",
+                  url: "https://brand.test/article-1#source",
+                  title: "品牌文章",
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    };
+    const result = await new PostPublishBaselineProbeService(
+      provider(rawEvidence),
+    ).probe({
+      engineId: "doubao",
+      questionId: "q1",
+      question: "哪家好？",
+      sourceProviderSnapshot: sourceSnapshot,
+      brandNames: ["小鲸"],
+      publishedArticles: [
+        { articleId: "article-1", url: "https://brand.test/article-1" },
+      ],
+    });
+    expect(result.evidence.rawEvidence).toBe(rawEvidence);
+    expect(result.evidence.sourceProviderSnapshot).toBe(sourceSnapshot);
+    expect(result.evidence.providerSnapshot).toBe(snapshot);
+    expect(result.evidence.rawAnswer).toContain("小鲸");
+    expect(result.evidence.rankPosition).toBe(2);
+    expect(result.evidence.citedArticleIds).toEqual(["article-1"]);
+    expect(result.evidence.citedUrls).toEqual([
+      "https://brand.test/article-1",
+    ]);
+  });
+
+  it("does not estimate a rank from a plain brand mention", async () => {
+    const result = await new PostPublishBaselineProbeService(
+      provider({ output: [{ content: [{ text: "小鲸值得选择" }] }] }),
+    ).probe({
+      engineId: "doubao",
+      questionId: "q1",
+      question: "哪家好？",
+      sourceProviderSnapshot: sourceSnapshot,
+      brandNames: ["小鲸"],
+      publishedArticles: [],
+    });
+    expect(result.evidence.analysis.brandMentioned).toBe(true);
+    expect(result.evidence.rankPosition).toBeNull();
+  });
+
+  it("fails explicitly when the real typed engine is unavailable", async () => {
+    const unavailable = provider({});
+    unavailable.baselineEngines = () => [
+      { id: "doubao", label: "豆包", available: false, snapshot },
+    ];
+    await expect(
+      new PostPublishBaselineProbeService(unavailable).probe({
+        engineId: "doubao",
+        questionId: "q1",
+        question: "哪家好？",
+        sourceProviderSnapshot: sourceSnapshot,
+        brandNames: ["小鲸"],
+        publishedArticles: [],
+      }),
+    ).rejects.toThrow("post_publish_monitor_provider_unavailable");
+  });
+});
+
+describe("published page SSRF guard", () => {
+  it("rejects an initial private target before DNS or fetch", async () => {
+    const fetch = vi.fn();
+    const dispatcherFor = vi.fn();
+    await expect(
+      checkPublishedPageAccess("https://127.0.0.1/private", {
+        fetch,
+        dispatcherFor,
+      }),
+    ).rejects.toThrow("published_page_url_rejected");
+    expect(dispatcherFor).not.toHaveBeenCalled();
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("rejects DNS resolving inward before any request", async () => {
+    const fetch = vi.fn();
+    await expect(
+      checkPublishedPageAccess("https://public.example/a", {
+        fetch,
+        dispatcherFor: async () => {
+          throw new Error("resolved to RFC1918");
+        },
+      }),
+    ).rejects.toThrow("published_page_url_rejected");
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("never follows a public response to a private redirect target", async () => {
+    const fetch = vi.fn(async () =>
+      new Response(null, {
+        status: 302,
+        headers: { location: "https://169.254.169.254/latest/meta-data" },
+      }),
+    );
+    await expect(
+      checkPublishedPageAccess("https://public.example/a", {
+        fetch,
+        dispatcherFor: async () => undefined,
+      }),
+    ).rejects.toThrow("published_page_redirect_rejected");
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+});

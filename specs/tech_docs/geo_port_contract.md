@@ -21,9 +21,10 @@ GitHub Actions 在通用 unit gate 之前单独执行该入口，使 js_ai 行�
 - `BrandWorkspace` 是唯一品牌业务边界；不存在第二层 Project 业务实体。
 - `Session` 只拥有聊天与 Agent 上下文，一个 Session 可产生多个 `GeoOperation`，但不能直接改共享品牌事实。
 - `GeoOperation` 是一次更新知识、生成问题、生成文章、发布或探测；明确请求只组合必要步骤。
+- GeoOperation 的机器可读 lifecycle、input/artifact reference、safe checkpoint、下一轮分支和 confirmation authority 由 `src/shared/geo/operation.ts` 单点定义；完整不变量见 [`geo_operations.md`](./geo_operations.md)。
 - `KnowledgeAuthority` 是接受权威事实的唯一业务入口。模型和 UI 只能提交候选事实或结构化用户决策；同一事实键冲突与并发版本由它裁决。
 - `GeoArtifact` 是带版本、来源和知识版本的业务产物。历史文章与问题不会因知识更新被静默改写。
-- Managed Task 仅保存监测唤醒引用，不复制 GEO 阶段、Operation 或产物状态，也不形成 Task Center 产品界面。
+- 监测调度记录仅保存唤醒引用，不复制 GEO 阶段、Operation 或产物状态；调度本身不形成独立产品界面，品牌级「效果」入口只做只读展示与显式启用门。
 - `PublishScheduler` 确定性拥有付费订单的幂等、排期、提交、同步与重试；模型不能临场替代它。
 
 品牌知识切片的可执行边界由 [`knowledge_authority.md`](./knowledge_authority.md) 细化：事实 identity 由标准化 `subject / predicate / scope / effectiveFrom / effectiveTo` 共同决定；模型推断、用户陈述和普通聊天发现都先停在待确认候选。用户只可通过结构化卡片选择 `keep-current / adopt-new / split-scope / reject-candidate`；确认 `adopt-new` 后，同键同值只合并来源，同键异值才替换并升版。所有成功裁决都带 expected current version 并进入审计。
@@ -46,6 +47,8 @@ GitHub Actions 在通用 unit gate 之前单独执行该入口，使 js_ai 行�
 | publish               | 已确认分发计划                     | `PublishScheduler` 创建、提交、同步和重试幂等订单                                                 |
 
 文章主状态保持 `planned → drafting → draft_ready → reviewing → approved → published → assigning → scheduling → monitoring → done`；异常态为 `pending_confirmation`、`generation_failed`、`rejected`。`draft_ready → reviewing` 只消费草稿确认，不能重新生成刚确认的正文。
+
+基线探测差异注记（用户已拍板）：js_ai 把“优化前检测”嵌在主流程内；本产品主链（full-optimization，18 步）不内嵌基线探测，基线是品牌级「效果」入口的按需动作，`performance-inspection` 直接意图保留条件化补充探测。勿据此在主链恢复基线步骤。
 
 五类内容的唯一集合是 `guide / showcase / ranking / news / news_light`。旧注释中的“四类”“六类”以及旧调研里的“每主题最多三类”均不是当前代码事实；`dev` 当前实现允许每主题 1–5 类，并对整批五类覆盖做下限补齐。
 
@@ -85,6 +88,10 @@ GitHub Actions 在通用 unit gate 之前单独执行该入口，使 js_ai 行�
 模型路由顺序为显式阶段配置 → 阶段默认 pin → 当前 active model。`question_pool` 与 `title` pin 到 `volcengine / doubao-seed-2-0-mini-260428`，`draft` pin 到 `volcengine / doubao-seed-2-0-pro-260215`；pin 后只调用该模型，不走 failover。抽取默认 `deepseek-chat`。关键词挖掘单独走 Volcengine paygo `/api/v3`，以 body parameter `enable_search=true` 联网，不能误发到 agent-plan endpoint。
 
 Prompt 文字可以演进，但以下结构不能变：档案输出 14 字段及逐字段来源；关键词输出三类 JSON 和热度档且不含品牌名；Question 只含 text / recommended，不携带内容类型；主题合并覆盖每个输入问题；标题遵守五类 style、长度、品牌与 ranking 当前年份规则；正文输入已确认事实和类型模板，输出 plain Markdown 且不得残留 `【】`；全局召回输出 channel name / URL / topicNumbers，非法 topic number 只丢编号、不丢合法渠道。
+
+主题计划的结构化 projection 额外固定携带 source question-pool id/revision、knowledge version、topics、items、provider snapshot 与 model attempts。每个 item 必须绑定 `sourceQuestionIds / topicId / contentType / typeSelectionReason / plannedFacts`；`plannedFacts` 的 key、predicate 和 normalized value 必须逐项来自该 plan 固定的 knowledge snapshot，模型不得自由发明。增删改、局部重生成与确认全部使用 `planId + expectedRevision` CAS；confirmed plan 不可再 mutate，局部重生成必须原样保留 user-edited 或 approved 项。
+
+文章 operation 只能固定消费 confirmed plan 的 selected approved items，或固定的 direct `count / themes / contentType / constraints` spec；两者都在开始时钉住 knowledge version 和逐篇 planned facts。每次生成、编辑、重生成和审核都携带 exact operation/article identity、expected revision 与持久化 claim token。正文由 Rust 磁盘 owner 保存，SQLite 仅存路径/hash/版本/audit；批准复制 exact draft revision 为 immutable approved body，后续草稿不能覆盖。正文生成与审校不得隐式启动 baseline、渠道召回、发布或监测。
 
 并发发生在明确层级：文章生命周期默认并发 5、其余 FIFO 排队且单篇失败隔离；每文章 Supervisor 互斥；embedding 并发 2 并保持输入顺序；豆包 App passive 召回因 2 QPS 使用两槽，普通 web_search 可全并发；双腿信源并行；全局召回与正文生成 fire-and-forget 并发，passive 与 active 召回也并行；品牌写串行、读并发。
 

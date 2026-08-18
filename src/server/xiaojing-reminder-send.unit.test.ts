@@ -37,6 +37,7 @@ describe('sendXiaojingMessage — reminder delivery never throws (GD-8④)', () 
 
   it('maps a structured enqueue error to success=false with 429', async () => {
     enqueueUserMessage.mockResolvedValueOnce({
+      accepted: false,
       error: 'agent busy',
     } as Awaited<ReturnType<typeof enqueueUserMessage>>);
     const result = await sendXiaojingMessage('reminder', undefined, '/tmp/workspace');
@@ -47,13 +48,12 @@ describe('sendXiaojingMessage — reminder delivery never throws (GD-8④)', () 
 
   it('passes through a successful enqueue', async () => {
     enqueueUserMessage.mockResolvedValueOnce({
-      queued: true,
-      queueId: 'q-1',
+      accepted: true,
     } as Awaited<ReturnType<typeof enqueueUserMessage>>);
     const result = await sendXiaojingMessage('reminder', undefined, '/tmp/workspace', [
       'xiaojing_files/s/a.md',
     ]);
-    expect(result).toEqual({ success: true, queued: true, queueId: 'q-1' });
+    expect(result).toEqual({ success: true });
     expect(enqueueUserMessage).toHaveBeenCalledWith('reminder', undefined, [
       'xiaojing_files/s/a.md',
     ]);

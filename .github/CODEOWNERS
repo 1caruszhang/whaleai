@@ -1,6 +1,0 @@
-# Default review owner for this private repository.
-* @1caruszhang
-
-# Architecture and compatibility contracts require explicit owner review.
-/specs/ @1caruszhang
-/src/shared/geo/ @1caruszhang

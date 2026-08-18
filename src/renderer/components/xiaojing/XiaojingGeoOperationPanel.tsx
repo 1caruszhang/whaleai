@@ -92,13 +92,13 @@ const TERMINAL = new Set<GeoOperationStatus>([
   "cancelled",
 ]);
 
-/** 通知深链的产物卡落到骨架的哪个阶段。 */
+/** 通知深链的产物卡落到骨架的哪个阶段。监测告警深链（票 32）改落
+ * 「效果」整页，不再进入工作台骨架。 */
 const NAVIGATION_CARD_PHASE: Partial<
   Record<GeoNavigationTarget["card"], string>
 > = {
   "article-generation": "content",
   "publish-execution": "publishing",
-  "post-publish-monitoring": "monitoring",
 };
 
 function activeStep(
@@ -377,15 +377,6 @@ export default memo(function XiaojingGeoOperationPanel({
             workspaceId={workspace.id}
             executionId={target.artifact.id}
             refreshKey={refreshKey}
-          />
-        );
-      }
-      if (target?.card === "post-publish-monitoring") {
-        return (
-          <XiaojingPostPublishMonitoringPanel
-            workspaceId={workspace.id}
-            planId={target.artifact.id}
-            readOnly
           />
         );
       }

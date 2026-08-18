@@ -4,7 +4,6 @@ import { describe, expect, it, vi } from 'vitest';
 import type { Message as MessageType } from '@/types/chat';
 
 vi.mock('@/context/ImagePreviewContext', () => ({ useImagePreview: () => ({ openPreview: vi.fn() }) }));
-vi.mock('@/analytics', () => ({ track: vi.fn() }));
 
 import Message from './Message';
 
@@ -22,21 +21,6 @@ function userMsg(
 }
 
 describe('Message — user bubble spacing', () => {
-  it('keeps background task notifications hidden from the chat flow', () => {
-    const { container } = render(
-      <Message
-        message={userMsg(
-          '<task-notification>{"taskId":"bg-1","status":"completed","description":"Audit repo","summary":"Long completion summary that should stay out of chat."}</task-notification>',
-          { id: 'task-notification-bg-1' },
-        )}
-      />
-    );
-
-    expect(container.firstChild).toBeNull();
-    expect(container).not.toHaveTextContent('Long completion summary');
-    expect(container).not.toHaveTextContent('Audit repo');
-  });
-
   it('uses equal bubble padding and scopes Markdown paragraph margins', () => {
     const { container } = render(<Message message={userMsg('你可以帮我写个 v3')} />);
 

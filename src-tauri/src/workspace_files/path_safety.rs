@@ -120,7 +120,7 @@ pub fn resolve_inside_workspace(workspace_root: &Path, relative: &str) -> WfResu
 /// Validate that an arbitrary absolute path (e.g. a file the user dragged from
 /// Finder) is safe to read from. Used by `read_files_b64` and `copy_paths`.
 ///
-/// Cross-review 0.2.33 (Codex Critical): the lexical blacklist alone is
+/// Cross-review 0.2.33 (security review Critical): the lexical blacklist alone is
 /// defeated by an intermediate symlink component — `~/Downloads/lure/key`
 /// where `lure → ~/.ssh` doesn't start with any blacklisted prefix, but the
 /// read that follows traverses the link and exfiltrates credential bytes into
@@ -137,9 +137,8 @@ pub fn resolve_inside_workspace(workspace_root: &Path, relative: &str) -> WfResu
 /// A path that does NOT exist passes on the lexical check alone: the
 /// symlink-escape defense is only meaningful for paths that resolve (a
 /// non-existent path can't be read; `transfer`/`files_b64` stat it right
-/// after and fail their own way), and `slash.rs` depends on validating a
-/// brand-new workspace root that hasn't been created yet — failing here
-/// would break the launcher's slash-command scan for new workspaces.
+/// after and fail their own way). Keeping the lexical result also lets callers
+/// validate a destination before the leaf is materialized.
 pub fn validate_external_read_path(absolute_path: &str) -> WfResult<PathBuf> {
     let lexical = system_blacklist_check(absolute_path)?;
     if let Ok(canonical) = fs::canonicalize(&lexical) {
@@ -152,20 +151,15 @@ pub fn validate_external_read_path(absolute_path: &str) -> WfResult<PathBuf> {
 
 /// Stricter variant of `resolve_inside_workspace` for **read-side** commands:
 /// resolves any symlinks via `fs::canonicalize` and verifies the canonical
-/// path is still inside the canonical workspace root — OR inside a trusted
-/// MyAgents-managed directory (see `is_trusted_managed_target`). Blocks the
-/// "malicious `evil_link → /etc/passwd` checked into a repo" attack from
-/// leaking content out of the workspace, while still allowing the
-/// junctions / symlinks MyAgents projects from `~/.myagents/skills` etc.
-/// into `<workspace>/.claude/skills/` (see Node `syncProjectUserConfigFiles`).
+/// path is still inside the canonical workspace root. This blocks a malicious
+/// in-workspace symlink from exposing files elsewhere on the machine.
 ///
 /// Behavior:
 /// - If the resolved path doesn't exist, returns `Err("File not found")` (the
 ///   read command was going to error anyway — surfacing the same error here
 ///   makes the failure mode uniform regardless of whether the path is missing
 ///   or rejected for being a symlink escape).
-/// - If the path exists but resolves outside the workspace via symlink AND
-///   isn't under a trusted MyAgents-managed root, returns
+/// - If the path exists but resolves outside the workspace via symlink, returns
 ///   `Err("Path escapes workspace root via symlink")`.
 /// - If the workspace root itself isn't canonicalizable (rare — race with
 ///   directory deletion), returns `Err("Workspace root canonicalize failed")`
@@ -191,165 +185,11 @@ pub fn resolve_existing_inside_workspace(
     // either way, so collapse this branch into a uniform "not found".
     let canonical = fs::canonicalize(&lexical).map_err(|_| "File not found".to_string())?;
 
-    if !canonical.starts_with(&canonical_root)
-        && !is_trusted_managed_target(&canonical, &trusted_managed_roots())
-    {
+    if !canonical.starts_with(&canonical_root) {
         return Err("Path escapes workspace root via symlink".to_string());
     }
 
     Ok(canonical)
-}
-
-/// Canonicalized roots of MyAgents-managed directories that we sync into
-/// workspaces via junctions/symlinks. Targets under any of these roots are
-/// safe to follow from in-workspace links because MyAgents owns the source —
-/// users can edit them through the Settings UI but they're not attacker-
-/// controlled like an arbitrary file in a cloned repo.
-///
-/// Non-existent subdirs are skipped (some users won't have `agents/` etc.
-/// yet). Result is recomputed each call rather than cached so newly-created
-/// dirs become trusted without a sidecar restart; the work is three
-/// `fs::canonicalize` calls, dwarfed by the file read that follows.
-fn trusted_managed_roots() -> Vec<PathBuf> {
-    let Some(home) = dirs::home_dir() else {
-        return Vec::new();
-    };
-    let myagents = home.join(".myagents");
-    ["skills", "commands", "agents"]
-        .iter()
-        .filter_map(|sub| fs::canonicalize(myagents.join(sub)).ok())
-        .collect()
-}
-
-/// Returns `true` iff `canonical` is inside one of the trusted roots. Pure
-/// function so tests can inject their own root set via [`trusted_managed_roots`]
-/// or a literal `Vec<PathBuf>`.
-fn is_trusted_managed_target(canonical: &Path, roots: &[PathBuf]) -> bool {
-    roots.iter().any(|root| canonical.starts_with(root))
-}
-
-const MANAGED_GLOBAL_SKILL_READ_ONLY: &str =
-    "MANAGED_GLOBAL_SKILL_READ_ONLY: workspace Skill projections are read-only; edit the global Skill from Settings";
-
-/// Reject mutations whose target is a MyAgents-managed projection of
-/// `~/.myagents/skills`. Reads deliberately keep using the broader trusted
-/// resolver above; this guard is mutation-only so copy-out and previews remain
-/// available while workspace writes cannot flow through a junction into the
-/// single global source of truth.
-///
-/// The component walk matters for create destinations: the leaf may not exist,
-/// but its closest existing ancestor can itself be a managed junction. We also
-/// inspect the link payload lexically so a broken junction/symlink targeting a
-/// currently missing global Skill remains protected.
-pub fn reject_managed_global_skill_mutation(
-    workspace_root: &Path,
-    lexical_target: &Path,
-) -> WfResult<()> {
-    let Some(home) = dirs::home_dir() else {
-        return Ok(());
-    };
-    reject_managed_global_skill_mutation_with_root(
-        workspace_root,
-        lexical_target,
-        &home.join(".myagents").join("skills"),
-    )
-}
-
-fn reject_managed_global_skill_mutation_with_root(
-    workspace_root: &Path,
-    lexical_target: &Path,
-    global_skills_root: &Path,
-) -> WfResult<()> {
-    let canonical_global_root = fs::canonicalize(global_skills_root).ok();
-    if path_is_inside_managed_skill_root(
-        lexical_target,
-        global_skills_root,
-        canonical_global_root.as_deref(),
-    ) {
-        return Err(MANAGED_GLOBAL_SKILL_READ_ONLY.to_string());
-    }
-
-    let Ok(relative) = lexical_target.strip_prefix(workspace_root) else {
-        return Ok(());
-    };
-    let mut current = workspace_root.to_path_buf();
-    for component in relative.components() {
-        let Component::Normal(part) = component else {
-            continue;
-        };
-        current.push(part);
-        let metadata = match fs::symlink_metadata(&current) {
-            Ok(metadata) => metadata,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
-            Err(_) => break,
-        };
-
-        if metadata_is_link_like(&metadata) {
-            if let Ok(link_target) = fs::read_link(&current) {
-                let resolved_target = if link_target.is_absolute() {
-                    link_target
-                } else {
-                    current.parent().unwrap_or(workspace_root).join(link_target)
-                };
-                if path_is_inside_managed_skill_root(
-                    &resolved_target,
-                    global_skills_root,
-                    canonical_global_root.as_deref(),
-                ) {
-                    return Err(MANAGED_GLOBAL_SKILL_READ_ONLY.to_string());
-                }
-            }
-        }
-
-        if let Ok(canonical_current) = fs::canonicalize(&current) {
-            if path_is_inside_managed_skill_root(
-                &canonical_current,
-                global_skills_root,
-                canonical_global_root.as_deref(),
-            ) {
-                return Err(MANAGED_GLOBAL_SKILL_READ_ONLY.to_string());
-            }
-        }
-    }
-    Ok(())
-}
-
-fn path_is_inside_managed_skill_root(
-    candidate: &Path,
-    lexical_root: &Path,
-    canonical_root: Option<&Path>,
-) -> bool {
-    let candidate = crate::commands::normalize_lexical_security_path(candidate.to_path_buf());
-    let lexical_root = crate::commands::normalize_lexical_security_path(lexical_root.to_path_buf());
-    if crate::commands::path_starts_with_identity(&candidate, &lexical_root) {
-        return true;
-    }
-    let Some(canonical_root) = canonical_root else {
-        return false;
-    };
-    fs::canonicalize(&candidate)
-        .map(crate::commands::normalize_security_path)
-        .map(|canonical| {
-            crate::commands::path_starts_with_identity(
-                &canonical,
-                &crate::commands::normalize_security_path(canonical_root.to_path_buf()),
-            )
-        })
-        .unwrap_or(false)
-}
-
-fn metadata_is_link_like(metadata: &fs::Metadata) -> bool {
-    if metadata.file_type().is_symlink() {
-        return true;
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::MetadataExt;
-        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
-        return metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0;
-    }
-    #[cfg(not(windows))]
-    false
 }
 
 /// Reject filenames that would break on Windows or hide the file (`.`, `..`,
@@ -391,9 +231,7 @@ fn is_windows_reserved_name(name: &str) -> bool {
     // `CON`. Strip them before comparing the stem. (NUL bytes / control chars
     // in the stem are caught earlier by `validate_item_name`.)
     let stem_raw = name.split_once('.').map(|(s, _)| s).unwrap_or(name);
-    let stem = stem_raw
-        .trim_end_matches(|c: char| c == ' ' || c == '.')
-        .to_ascii_uppercase();
+    let stem = stem_raw.trim_end_matches([' ', '.']).to_ascii_uppercase();
     matches!(
         stem.as_str(),
         "CON"
@@ -463,7 +301,7 @@ fn atomic_write_file_inner(
 
     static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
     let n = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let tmp_name = format!(".{}.myagents-{}-{}.tmp", file_name, std::process::id(), n);
+    let tmp_name = format!(".{}.xiaojing-{}-{}.tmp", file_name, std::process::id(), n);
     let tmp_path = parent.join(&tmp_name);
 
     {
@@ -816,7 +654,7 @@ fn write_relative_file_no_follow_unix(root: &Path, relative: &Path, bytes: &[u8]
 
     for nonce in 0..100u32 {
         let temp_name = CString::new(format!(
-            ".{}.myagents-{}-{}.tmp",
+            ".{}.xiaojing-{}-{}.tmp",
             relative
                 .file_name()
                 .expect("leaf validated")
@@ -885,9 +723,7 @@ fn verify_opened_workspace_parent(root: &Path, relative: &Path, fd: libc::c_int)
             std::io::Error::last_os_error()
         ));
     }
-    if current_metadata.dev() != opened.st_dev as u64
-        || current_metadata.ino() != opened.st_ino as u64
-    {
+    if current_metadata.dev() != opened.st_dev as u64 || current_metadata.ino() != opened.st_ino {
         return Err("Destination parent changed while writing".to_string());
     }
     Ok(())
@@ -1499,7 +1335,7 @@ fn write_relative_file_no_follow_windows_impl<F: FnOnce()>(
 
     for nonce in 0..100u32 {
         let temp_name = format!(
-            ".{}.myagents-{}-{}.tmp",
+            ".{}.xiaojing-{}-{}.tmp",
             leaf.to_string_lossy(),
             std::process::id(),
             nonce
@@ -1563,7 +1399,7 @@ fn write_relative_file_no_follow_portable(
     for nonce in 0..100u32 {
         verify_portable_destination_parent(root, lexical_parent, &canonical_parent)?;
         let temp = canonical_parent.join(format!(
-            ".{}.myagents-{}-{}.tmp",
+            ".{}.xiaojing-{}-{}.tmp",
             target
                 .file_name()
                 .expect("leaf validated")
@@ -1613,9 +1449,10 @@ pub fn sanitize_filename(name: &str) -> String {
     trimmed
         .chars()
         .map(|c| {
-            if matches!(c, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*') {
-                '_'
-            } else if (c as u32) < 0x20 || c == '\x7f' {
+            if matches!(c, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*')
+                || (c as u32) < 0x20
+                || c == '\x7f'
+            {
                 '_'
             } else {
                 c
@@ -1755,9 +1592,8 @@ mod tests {
     }
 
     // validate_external_read_path: the canonical re-check only applies to
-    // paths that EXIST. A non-existent path passes lexically — slash.rs
-    // validates brand-new workspace roots before they're created (launcher
-    // slash-command scan), and read flows stat right after anyway. The
+    // paths that EXIST. A non-existent path passes lexically and read flows
+    // stat right after anyway. The
     // 0.2.33 symlink hardening must not break that contract (caught by
     // align-docs reading the slash.rs caller comment).
     #[test]
@@ -1773,7 +1609,7 @@ mod tests {
     }
 
     // …but an EXISTING path whose symlink chain lands in a blacklisted dir
-    // is rejected on the canonical form (cross-review 0.2.33, Codex
+    // is rejected on the canonical form (cross-review 0.2.33, security review
     // Critical — the per-command test lives in transfer.rs).
     #[cfg(unix)]
     #[test]
@@ -1846,7 +1682,7 @@ mod tests {
             .unwrap()
             .filter_map(|entry| entry.ok())
             .map(|entry| entry.file_name().to_string_lossy().to_string())
-            .filter(|name| name.contains(".myagents-"))
+            .filter(|name| name.contains(".xiaojing-"))
             .collect();
         assert!(leftovers.is_empty(), "tmp leftovers: {:?}", leftovers);
         let _ = fs::remove_dir_all(&ws);
@@ -1979,7 +1815,7 @@ mod tests {
         fs::create_dir_all(&outside).unwrap();
         let victim = outside.join("victim.txt");
         fs::write(&victim, "untouched").unwrap();
-        let predictable = ws.join(format!(".result.txt.myagents-{}-0.tmp", std::process::id()));
+        let predictable = ws.join(format!(".result.txt.xiaojing-{}-0.tmp", std::process::id()));
         symlink(&victim, predictable).unwrap();
 
         write_workspace_file_no_follow(&ws, "result.txt", b"safe").unwrap();
@@ -2121,142 +1957,5 @@ mod tests {
         let _ = junction::delete(&safe);
         let _ = fs::remove_dir_all(&ws);
         let _ = fs::remove_dir_all(&outside);
-    }
-
-    // ── is_trusted_managed_target — Phase E skill-junction whitelist ──
-
-    #[test]
-    fn trusted_target_matches_root() {
-        let root = std::env::temp_dir().join(format!("trusted_root_{}", std::process::id()));
-        fs::create_dir_all(&root).unwrap();
-        let canonical_root = fs::canonicalize(&root).unwrap();
-        let child = canonical_root.join("baoyu-imagine").join("SKILL.md");
-        assert!(is_trusted_managed_target(&child, &[canonical_root.clone()]));
-        // Sibling-of-prefix must NOT match — `starts_with` works on path
-        // components, so `/tmp/trusted` does not pretend to contain
-        // `/tmp/trusted_evil` even though the string starts the same.
-        let evil = canonical_root.parent().unwrap().join(format!(
-            "{}_evil",
-            canonical_root.file_name().unwrap().to_string_lossy()
-        ));
-        assert!(!is_trusted_managed_target(&evil, &[canonical_root]));
-        let _ = fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn trusted_target_empty_roots_rejects_everything() {
-        // Defence: if `trusted_managed_roots()` returns empty (no `.myagents`
-        // dir yet), the whitelist degrades closed — `is_trusted_managed_target`
-        // returns false for any path so the original symlink-escape rejection
-        // still fires.
-        let p = Path::new("/anywhere");
-        assert!(!is_trusted_managed_target(p, &[]));
-    }
-
-    #[test]
-    fn managed_skill_mutation_guard_allows_ordinary_workspace_paths() {
-        let ws = make_tmp_workspace();
-        let managed = make_test_workspace("mutation_guard_managed");
-        fs::create_dir_all(ws.join("ordinary")).unwrap();
-        fs::create_dir_all(&managed).unwrap();
-        assert!(reject_managed_global_skill_mutation_with_root(
-            &ws,
-            &ws.join("ordinary/new.md"),
-            &managed,
-        )
-        .is_ok());
-        assert!(reject_managed_global_skill_mutation_with_root(
-            &ws,
-            &managed.join("skill/SKILL.md"),
-            &managed,
-        )
-        .unwrap_err()
-        .starts_with("MANAGED_GLOBAL_SKILL_READ_ONLY"));
-        let _ = fs::remove_dir_all(&ws);
-        let _ = fs::remove_dir_all(&managed);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn managed_skill_mutation_guard_rejects_link_leaf_descendant_and_broken_link() {
-        use std::os::unix::fs::symlink;
-        let ws = make_tmp_workspace();
-        let managed = make_test_workspace("mutation_guard_link_managed");
-        let skill = managed.join("pdf");
-        fs::create_dir_all(&skill).unwrap();
-        fs::write(skill.join("SKILL.md"), "pdf").unwrap();
-        let links = ws.join(".claude/skills");
-        fs::create_dir_all(&links).unwrap();
-        let link = links.join("pdf");
-        symlink(&skill, &link).unwrap();
-
-        let existing_child = link.join("SKILL.md");
-        let missing_child = link.join("new.md");
-        for target in [&link, &existing_child, &missing_child] {
-            let error = reject_managed_global_skill_mutation_with_root(&ws, target, &managed)
-                .expect_err("managed Skill mutation must fail");
-            assert!(error.starts_with("MANAGED_GLOBAL_SKILL_READ_ONLY"));
-        }
-
-        let broken = links.join("missing");
-        symlink(managed.join("missing"), &broken).unwrap();
-        assert!(
-            reject_managed_global_skill_mutation_with_root(&ws, &broken, &managed)
-                .unwrap_err()
-                .starts_with("MANAGED_GLOBAL_SKILL_READ_ONLY")
-        );
-
-        let broken_relative = links.join("missing-relative");
-        let relative_target = PathBuf::from("../../..")
-            .join(managed.file_name().unwrap())
-            .join("missing-relative");
-        symlink(relative_target, &broken_relative).unwrap();
-        assert!(
-            reject_managed_global_skill_mutation_with_root(&ws, &broken_relative, &managed)
-                .unwrap_err()
-                .starts_with("MANAGED_GLOBAL_SKILL_READ_ONLY")
-        );
-
-        let _ = fs::remove_dir_all(&ws);
-        let _ = fs::remove_dir_all(&managed);
-    }
-
-    // Headline whitelist test: a junction-like symlink in the workspace
-    // pointing into a trusted root MUST resolve successfully even though the
-    // target is outside the canonical workspace. This unblocks Windows users
-    // hitting "文件预览失败" on user-level skill links synced by
-    // Node `syncProjectUserConfigFiles`.
-    #[cfg(unix)]
-    #[test]
-    fn resolve_existing_allows_symlink_into_trusted_root() {
-        use std::os::unix::fs::symlink;
-        let ws = make_tmp_workspace();
-        // Stand in for `~/.myagents/skills/`.
-        let managed = make_test_workspace("path_safety_managed");
-        let managed_skill = managed.join("baoyu-imagine");
-        fs::create_dir_all(&managed_skill).unwrap();
-        let real_md = managed_skill.join("SKILL.md");
-        fs::write(&real_md, "skill content").unwrap();
-
-        // Mirror the prod symlink shape: `<ws>/.claude/skills/baoyu-imagine`
-        // points at the managed skill dir.
-        let link_parent = ws.join(".claude").join("skills");
-        fs::create_dir_all(&link_parent).unwrap();
-        symlink(&managed_skill, link_parent.join("baoyu-imagine")).unwrap();
-
-        let canonical_managed = fs::canonicalize(&managed).unwrap();
-
-        // Direct: bypass `trusted_managed_roots()` (which reads real
-        // `~/.myagents/`) and inject our tmp root via the pure helper.
-        let lexical =
-            resolve_inside_workspace(&ws, ".claude/skills/baoyu-imagine/SKILL.md").unwrap();
-        let canonical = fs::canonicalize(&lexical).unwrap();
-        assert!(
-            is_trusted_managed_target(&canonical, &[canonical_managed]),
-            "skill target under managed root should be trusted: {:?}",
-            canonical
-        );
-        let _ = fs::remove_dir_all(&ws);
-        let _ = fs::remove_dir_all(&managed);
     }
 }

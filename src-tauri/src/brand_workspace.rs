@@ -7,12 +7,32 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+mod articles;
+mod brand_history;
+mod distribution_plans;
+mod geo_baselines;
+mod geo_dashboard;
+mod geo_operations;
 mod knowledge;
 mod materials;
+mod notifications;
+mod post_publish_monitoring;
+mod publish_scheduler;
 mod question_pools;
+mod topic_plans;
+pub use articles::*;
+pub use brand_history::*;
+pub use distribution_plans::*;
+pub use geo_baselines::*;
+pub use geo_dashboard::*;
+pub use geo_operations::*;
 pub use knowledge::*;
 pub use materials::*;
+pub use notifications::*;
+pub use post_publish_monitoring::*;
+pub use publish_scheduler::*;
 pub use question_pools::*;
+pub use topic_plans::*;
 
 const CATALOG_FILE: &str = "brands.json";
 const SESSION_DELETION_ADMISSION_STALE_SECONDS: i64 = 60;
@@ -95,14 +115,9 @@ pub struct BrandSession {
     pub created_at: String,
     pub last_active_at: String,
     pub archived_at: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct SessionDraft {
-    pub id: String,
-    pub workspace_id: String,
-    pub workspace_path: PathBuf,
+    /// Non-sensitive projection of the latest GEO work owned by this Session.
+    /// The underlying Operation remains authoritative in BrandWorkspace SQLite.
+    pub geo_status: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -130,6 +145,31 @@ pub struct SessionDeletionPreview {
     pub title: String,
     pub scope: SessionDeletionScope,
     pub retained: RetainedBrandDataScope,
+    pub confirmation_token: String,
+}
+
+/// 品牌删除是全量删除：会话记录与 transcript、品牌库内全部领域数据、
+/// 以及工作区目录本身都会消失，没有"保留"分支。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceDeletionScope {
+    pub sessions: u64,
+    pub chat_transcripts: u64,
+    pub knowledge_facts: u64,
+    pub operations: u64,
+    pub articles: u64,
+    pub materials: u64,
+    pub monitor_plans: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceDeletionPreview {
+    pub workspace_id: String,
+    pub name: String,
+    /// App 需要 Session 清单来计算可释放 Tab 与卸载范围。
+    pub session_ids: Vec<String>,
+    pub scope: WorkspaceDeletionScope,
     pub confirmation_token: String,
 }
 
@@ -224,15 +264,6 @@ impl BrandWorkspaceStore {
         Ok(workspace)
     }
 
-    pub fn new_session_draft(&self, workspace_id: &str) -> Result<SessionDraft, String> {
-        let workspace = self.workspace(workspace_id)?;
-        Ok(SessionDraft {
-            id: format!("pending-{}", Uuid::new_v4()),
-            workspace_id: workspace.id,
-            workspace_path: workspace.root_path,
-        })
-    }
-
     pub fn commit_session(
         &self,
         workspace_id: &str,
@@ -289,8 +320,14 @@ impl BrandWorkspaceStore {
         let rows = statement
             .query_map([], |row| session_from_row(row, workspace_id))
             .map_err(|error| format!("query brand sessions: {error}"))?;
-        rows.collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(|error| format!("read brand sessions: {error}"))
+        let mut sessions = rows
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|error| format!("read brand sessions: {error}"))?;
+        for session in &mut sessions {
+            session.geo_status =
+                notifications::project_session_geo_status(&connection, &session.id)?;
+        }
+        Ok(sessions)
     }
 
     pub fn rename_session(
@@ -522,13 +559,198 @@ impl BrandWorkspaceStore {
             .map_err(|error| format!("commit brand session deletion: {error}"))
     }
 
+    const WORKSPACE_DELETION_EXPIRY_SECONDS: i64 = 300;
+
+    /// 品牌删除 intent 存放在即将被删除的品牌库内：admission 只需活到
+    /// finalize 时刻，目录删除后 intent 随之消失，不产生跨品牌残留。
+    fn ensure_workspace_deletion_intents(connection: &Connection) -> Result<(), String> {
+        connection
+            .execute_batch(
+                "CREATE TABLE IF NOT EXISTS brand_deletion_intents (
+                token TEXT PRIMARY KEY,
+                workspace_id TEXT NOT NULL,
+                expires_at INTEGER NOT NULL,
+                admitted_at INTEGER
+             );",
+            )
+            .map_err(|error| format!("initialize brand deletion intents: {error}"))
+    }
+
+    pub fn workspace_session_ids(&self, workspace_id: &str) -> Result<Vec<String>, String> {
+        let workspace = self.workspace(workspace_id)?;
+        let connection = open_database(&workspace)?;
+        let mut statement = connection
+            .prepare("SELECT id FROM brand_sessions")
+            .map_err(|error| format!("list brand sessions for deletion: {error}"))?;
+        let ids = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(|error| format!("read brand sessions for deletion: {error}"))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| format!("collect brand sessions for deletion: {error}"))?;
+        Ok(ids)
+    }
+
+    pub fn preview_workspace_deletion(
+        &self,
+        workspace_id: &str,
+    ) -> Result<WorkspaceDeletionPreview, String> {
+        let workspace = self.workspace(workspace_id)?;
+        let mut connection = open_database(&workspace)?;
+        Self::ensure_workspace_deletion_intents(&connection)?;
+        let transaction = connection
+            .transaction()
+            .map_err(|error| format!("start brand deletion preview: {error}"))?;
+        let token = Uuid::new_v4().to_string();
+        let now = Utc::now().timestamp();
+        transaction
+            .execute(
+                "DELETE FROM brand_deletion_intents
+                 WHERE workspace_id = ?1 AND admitted_at IS NULL",
+                [workspace_id],
+            )
+            .map_err(|error| format!("replace brand deletion preview: {error}"))?;
+        transaction
+            .execute(
+                "INSERT INTO brand_deletion_intents (token, workspace_id, expires_at)
+                 VALUES (?1, ?2, ?3)",
+                params![
+                    token,
+                    workspace_id,
+                    now + Self::WORKSPACE_DELETION_EXPIRY_SECONDS
+                ],
+            )
+            .map_err(|error| format!("write brand deletion preview: {error}"))?;
+        let count = |transaction: &rusqlite::Transaction<'_>, sql: &str| -> Result<u64, String> {
+            let value: i64 = transaction
+                .query_row(sql, [], |row| row.get(0))
+                .map_err(|error| format!("count brand deletion scope: {error}"))?;
+            Ok(value.max(0) as u64)
+        };
+        let sessions = count(&transaction, "SELECT COUNT(*) FROM brand_sessions")?;
+        let scope = WorkspaceDeletionScope {
+            sessions,
+            chat_transcripts: sessions,
+            knowledge_facts: count(&transaction, "SELECT COUNT(*) FROM knowledge_facts")?,
+            operations: count(&transaction, "SELECT COUNT(*) FROM geo_operations")?,
+            articles: count(&transaction, "SELECT COUNT(*) FROM geo_articles")?,
+            materials: count(&transaction, "SELECT COUNT(*) FROM brand_materials")?,
+            monitor_plans: count(
+                &transaction,
+                "SELECT COUNT(*) FROM geo_post_publish_monitor_plans WHERE status = 'active'",
+            )?,
+        };
+        let session_ids = {
+            let mut statement = transaction
+                .prepare("SELECT id FROM brand_sessions")
+                .map_err(|error| format!("list brand sessions for preview: {error}"))?;
+            let ids = statement
+                .query_map([], |row| row.get::<_, String>(0))
+                .map_err(|error| format!("read brand sessions for preview: {error}"))?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| format!("collect brand sessions for preview: {error}"))?;
+            ids
+        };
+        transaction
+            .commit()
+            .map_err(|error| format!("commit brand deletion preview: {error}"))?;
+        Ok(WorkspaceDeletionPreview {
+            workspace_id: workspace.id,
+            name: workspace.name,
+            session_ids,
+            scope,
+            confirmation_token: token,
+        })
+    }
+
+    /// Persist a one-use brand deletion admission; execute must follow before
+    /// the token expires, mirroring the session deletion contract.
+    pub(crate) fn admit_workspace_deletion(
+        &self,
+        workspace_id: &str,
+        confirmation_token: &str,
+    ) -> Result<(), String> {
+        let workspace = self.workspace(workspace_id)?;
+        let connection = open_database(&workspace)?;
+        Self::ensure_workspace_deletion_intents(&connection)?;
+        let admitted = connection
+            .execute(
+                "UPDATE brand_deletion_intents
+                 SET admitted_at = ?3
+                 WHERE token = ?1 AND workspace_id = ?2 AND expires_at >= ?3
+                   AND admitted_at IS NULL",
+                params![confirmation_token, workspace_id, Utc::now().timestamp()],
+            )
+            .map_err(|error| format!("verify brand deletion confirmation: {error}"))?;
+        if admitted != 1 {
+            return Err("删除确认已失效，请重新确认删除范围".to_string());
+        }
+        Ok(())
+    }
+
+    pub(crate) fn cancel_workspace_deletion_admission(
+        &self,
+        workspace_id: &str,
+        confirmation_token: &str,
+    ) -> Result<(), String> {
+        let workspace = self.workspace(workspace_id)?;
+        let connection = open_database(&workspace)?;
+        Self::ensure_workspace_deletion_intents(&connection)?;
+        connection
+            .execute(
+                "DELETE FROM brand_deletion_intents
+                 WHERE token = ?1 AND workspace_id = ?2 AND admitted_at IS NOT NULL",
+                params![confirmation_token, workspace_id],
+            )
+            .map_err(|error| format!("cancel brand deletion admission: {error}"))?;
+        Ok(())
+    }
+
+    /// Remove the brand from the catalog, then delete the whole workspace
+    /// directory. Catalog-first keeps a failed directory removal recoverable:
+    /// the orphaned directory no longer matches any catalog entry.
+    pub(crate) fn finalize_workspace_deletion(
+        &self,
+        workspace_id: &str,
+        confirmation_token: &str,
+    ) -> Result<(), String> {
+        let _guard = catalog_lock().lock().map_err(|error| error.to_string())?;
+        let mut catalog = self.read_catalog_unlocked()?;
+        let index = catalog
+            .workspaces
+            .iter()
+            .position(|workspace| workspace.id == workspace_id)
+            .ok_or_else(|| "品牌工作区不存在".to_string())?;
+        let workspace = catalog.workspaces.remove(index);
+        {
+            let connection = open_database(&workspace)?;
+            Self::ensure_workspace_deletion_intents(&connection)?;
+            let admitted: i64 = connection
+                .query_row(
+                    "SELECT COUNT(*) FROM brand_deletion_intents
+                     WHERE token = ?1 AND workspace_id = ?2 AND admitted_at IS NOT NULL",
+                    params![confirmation_token, workspace_id],
+                    |row| row.get(0),
+                )
+                .map_err(|error| format!("verify brand deletion admission: {error}"))?;
+            if admitted != 1 {
+                return Err("删除确认已失效，请重新确认删除范围".to_string());
+            }
+        }
+        if catalog.current_workspace_id.as_deref() == Some(workspace_id) {
+            catalog.current_workspace_id = catalog.workspaces.first().map(|next| next.id.clone());
+        }
+        self.write_catalog_unlocked(&catalog)?;
+        fs::remove_dir_all(&workspace.root_path)
+            .map_err(|error| format!("delete brand workspace directory: {error}"))
+    }
+
     fn session(
         &self,
         workspace: &BrandWorkspace,
         session_id: &str,
     ) -> Result<Option<BrandSession>, String> {
         let connection = open_database(workspace)?;
-        connection
+        let mut session = connection
             .query_row(
                 "SELECT id, title, title_source, created_at, last_active_at, archived_at
                  FROM brand_sessions WHERE id = ?1",
@@ -536,7 +758,11 @@ impl BrandWorkspaceStore {
                 |row| session_from_row(row, &workspace.id),
             )
             .optional()
-            .map_err(|error| format!("read brand session: {error}"))
+            .map_err(|error| format!("read brand session: {error}"))?;
+        if let Some(value) = session.as_mut() {
+            value.geo_status = notifications::project_session_geo_status(&connection, &value.id)?;
+        }
+        Ok(session)
     }
 
     fn workspace(&self, workspace_id: &str) -> Result<BrandWorkspace, String> {
@@ -545,6 +771,43 @@ impl BrandWorkspaceStore {
             .into_iter()
             .find(|workspace| workspace.id == workspace_id)
             .ok_or_else(|| "品牌工作区不存在".to_string())
+    }
+
+    /// 方案 D（GD-11）：知识确认采纳「行业」事实后，把领域合并进品牌的
+    /// 产品线（只增不删、去重、跳过超长值）。目录是产品线的唯一权威，
+    /// 题库等下游闸门都读这里。
+    pub(super) fn merge_workspace_product_lines(
+        &self,
+        workspace_id: &str,
+        lines: Vec<String>,
+    ) -> Result<Vec<String>, String> {
+        let _guard = catalog_lock().lock().map_err(|error| error.to_string())?;
+        let mut catalog = self.read_catalog_unlocked()?;
+        let workspace = catalog
+            .workspaces
+            .iter_mut()
+            .find(|workspace| workspace.id == workspace_id)
+            .ok_or_else(|| "品牌工作区不存在".to_string())?;
+        let mut added = Vec::new();
+        for line in lines {
+            let line = line.trim().to_string();
+            if line.is_empty() || line.chars().count() > 80 {
+                continue;
+            }
+            if !workspace
+                .product_lines
+                .iter()
+                .any(|existing| existing == &line)
+            {
+                workspace.product_lines.push(line.clone());
+                added.push(line);
+            }
+        }
+        if !added.is_empty() {
+            workspace.updated_at = Utc::now().to_rfc3339();
+            self.write_catalog_unlocked(&catalog)?;
+        }
+        Ok(added)
     }
 
     fn read_catalog(&self) -> Result<BrandCatalog, String> {
@@ -688,6 +951,7 @@ fn initialize_database(workspace: &BrandWorkspace) -> Result<(), String> {
         "transcript_deleted_at",
         "INTEGER",
     )?;
+    geo_operations::ensure_schema(&connection)?;
     connection
         .execute(
             "INSERT OR REPLACE INTO brand_workspace
@@ -739,6 +1003,98 @@ fn column_exists(connection: &Connection, table: &str, column: &str) -> Result<b
     Ok(columns.iter().any(|candidate| candidate == column))
 }
 
+/// GEO 领域表的历史 schema 把 created_by_session_id / session_id /
+/// actor_session_id 写成指向 brand_sessions 的 NOT NULL 外键（无删除动作），
+/// 导致任何建过领域行的会话都在 finalize_session_deletion 报
+/// FOREIGN KEY constraint failed。provenance 是审计标签而非存活引用——
+/// 与 knowledge_decisions.actor_session_id 的既有形态对齐：去掉外键、
+/// 保留 NOT NULL 与历史值。SQLite 无法就地修改外键，沿用
+/// knowledge_decisions 的重建迁移（foreign_keys=OFF 包裹；索引随 DROP
+/// TABLE 消失，按 sqlite_master 原文重建）。
+fn drop_brand_sessions_foreign_keys(
+    connection: &Connection,
+    tables: &[&str],
+) -> Result<(), String> {
+    for table in tables {
+        let existing: Option<String> = connection
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                [table],
+                |row| row.get(0),
+            )
+            .map_err(|error| format!("inspect {table} schema: {error}"))?;
+        let Some(existing_sql) = existing else {
+            continue;
+        };
+        if !existing_sql.contains("REFERENCES brand_sessions") {
+            continue;
+        }
+
+        let mut index_ddls: Vec<String> = Vec::new();
+        {
+            let mut statement = connection
+                .prepare(
+                    "SELECT sql FROM sqlite_master
+                     WHERE type = 'index' AND tbl_name = ?1 AND sql IS NOT NULL",
+                )
+                .map_err(|error| format!("list {table} indexes: {error}"))?;
+            let mut rows = statement
+                .query([table])
+                .map_err(|error| format!("read {table} indexes: {error}"))?;
+            while let Some(row) = rows
+                .next()
+                .map_err(|error| format!("advance {table} index cursor: {error}"))?
+            {
+                index_ddls.push(
+                    row.get(0)
+                        .map_err(|error| format!("read {table} index ddl: {error}"))?,
+                );
+            }
+        }
+
+        let rebuilt_sql = existing_sql.replace(" REFERENCES brand_sessions(id)", "");
+        let renamed_sql =
+            rename_table_in_ddl(&rebuilt_sql, table, &format!("{table}__session_fk_dropped"))?;
+
+        connection
+            .execute_batch("PRAGMA foreign_keys = OFF;")
+            .map_err(|error| format!("unlock {table} session fk rebuild: {error}"))?;
+        let rebuild = connection.execute_batch(&format!(
+            "BEGIN IMMEDIATE;
+             {renamed_sql};
+             INSERT INTO {table}__session_fk_dropped SELECT * FROM {table};
+             DROP TABLE {table};
+             ALTER TABLE {table}__session_fk_dropped RENAME TO {table};
+             {}
+             COMMIT;",
+            index_ddls
+                .iter()
+                .map(|ddl| format!("{ddl};"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        ));
+        let restored = connection.execute_batch("PRAGMA foreign_keys = ON;");
+        match (rebuild, restored) {
+            (Ok(()), Ok(())) => Ok(()),
+            (rebuild, _) => {
+                let _ = connection.execute_batch("ROLLBACK;");
+                rebuild.map_err(|error| format!("rebuild {table} without session fk: {error}"))
+            }
+        }?;
+    }
+    Ok(())
+}
+
+/// sqlite_master 保存的表 DDL 以 `CREATE TABLE <name> ` 开头（IF NOT EXISTS
+/// 与引号均不保留），直接替换首个表名为重建期间的临时名。
+fn rename_table_in_ddl(ddl: &str, from: &str, to: &str) -> Result<String, String> {
+    let header = format!("CREATE TABLE {from}");
+    let rest = ddl
+        .strip_prefix(&header)
+        .ok_or_else(|| format!("unexpected {from} schema header"))?;
+    Ok(format!("CREATE TABLE {to}{rest}"))
+}
+
 fn open_database(workspace: &BrandWorkspace) -> Result<Connection, String> {
     let connection = Connection::open(workspace.root_path.join("project.sqlite"))
         .map_err(|error| format!("open brand database: {error}"))?;
@@ -748,9 +1104,16 @@ fn open_database(workspace: &BrandWorkspace) -> Result<Connection, String> {
     connection
         .execute_batch("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;")
         .map_err(|error| format!("configure brand database: {error}"))?;
+    geo_operations::ensure_schema(&connection)?;
     knowledge::ensure_schema(&connection)?;
     materials::ensure_schema(&connection)?;
     question_pools::ensure_schema(&connection)?;
+    geo_baselines::ensure_schema(&connection)?;
+    topic_plans::ensure_schema(&connection)?;
+    articles::ensure_schema(&connection)?;
+    distribution_plans::ensure_schema(&connection)?;
+    publish_scheduler::ensure_schema(&connection)?;
+    post_publish_monitoring::ensure_schema(&connection)?;
     let has_geo_artifacts: i64 = connection
         .query_row(
             "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='geo_artifacts'",
@@ -796,6 +1159,7 @@ fn session_from_row(row: &rusqlite::Row<'_>, workspace_id: &str) -> rusqlite::Re
         created_at: row.get(3)?,
         last_active_at: row.get(4)?,
         archived_at: row.get(5)?,
+        geo_status: None,
     })
 }
 
@@ -884,16 +1248,6 @@ pub async fn cmd_brand_workspace_switch(workspaceId: String) -> Result<BrandWork
 
 #[tauri::command]
 #[allow(non_snake_case)]
-pub async fn cmd_brand_session_draft(workspaceId: String) -> Result<SessionDraft, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        production_store()?.new_session_draft(&workspaceId)
-    })
-    .await
-    .map_err(|error| format!("brand session draft task failed: {error}"))?
-}
-
-#[tauri::command]
-#[allow(non_snake_case)]
 pub async fn cmd_brand_session_commit(
     workspaceId: String,
     sessionId: String,
@@ -968,6 +1322,18 @@ pub async fn cmd_brand_session_delete_preview(
     .map_err(|error| format!("brand session deletion preview task failed: {error}"))?
 }
 
+#[tauri::command]
+#[allow(non_snake_case)]
+pub async fn cmd_brand_workspace_delete_preview(
+    workspaceId: String,
+) -> Result<WorkspaceDeletionPreview, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        production_store()?.preview_workspace_deletion(&workspaceId)
+    })
+    .await
+    .map_err(|error| format!("brand workspace deletion preview task failed: {error}"))?
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1025,18 +1391,6 @@ mod tests {
             store.list_sessions(&first.id, false).unwrap()[0].title,
             "甲的会话"
         );
-    }
-
-    #[test]
-    fn empty_session_drafts_never_touch_durable_storage() {
-        let root = tempdir().unwrap();
-        let store = BrandWorkspaceStore::at(root.path().join("Xiaojing"));
-        let brand = store.create_workspace("品牌甲", vec![]).unwrap();
-
-        let draft = store.new_session_draft(&brand.id).unwrap();
-
-        assert!(draft.id.starts_with("pending-"));
-        assert!(store.list_sessions(&brand.id, false).unwrap().is_empty());
     }
 
     #[test]
@@ -1131,6 +1485,448 @@ mod tests {
 
         assert!(store.list_sessions(&brand.id, true).unwrap().is_empty());
         assert_eq!(shared_row_counts(&brand), [1, 1, 1, 1, 1]);
+    }
+
+    /// 回归：GEO 领域表的 session 引用列曾是指向 brand_sessions 的 NOT NULL
+    /// 外键（无删除动作），任何建过领域行的会话在 finalize_session_deletion
+    /// 报 FOREIGN KEY constraint failed 且重试永远失败。现在 provenance 是
+    /// 审计标签：会话删除成功，领域行与其 provenance 值原样保留。
+    #[test]
+    fn session_deletion_succeeds_with_geo_provenance_rows() {
+        let root = tempdir().unwrap();
+        let store = BrandWorkspaceStore::at(root.path().join("Xiaojing"));
+        let brand = store
+            .create_workspace("鲸跃", vec!["汽车音响".into()])
+            .unwrap();
+        store
+            .commit_session(
+                &brand.id,
+                SessionCommit {
+                    id: "session-a".into(),
+                    title: "建过领域行的会话".into(),
+                    title_source: SessionTitleSource::User,
+                },
+            )
+            .unwrap();
+        seed_geo_provenance_rows(&brand, "session-a");
+
+        let preview = store
+            .preview_session_deletion(&brand.id, "session-a")
+            .unwrap();
+        store
+            .delete_session(&brand.id, "session-a", &preview.confirmation_token)
+            .unwrap();
+
+        assert!(store.list_sessions(&brand.id, true).unwrap().is_empty());
+        let connection = open_database(&brand).unwrap();
+        let count = |sql: String| {
+            connection
+                .query_row(&sql, [], |row| row.get::<_, i64>(0))
+                .unwrap()
+        };
+        for (table, column) in [
+            ("geo_question_pools", "created_by_session_id"),
+            ("geo_question_pool_attempts", "session_id"),
+            ("geo_question_pool_decisions", "session_id"),
+            ("geo_topic_plans", "created_by_session_id"),
+            ("geo_topic_plan_mutations", "session_id"),
+            ("geo_topic_plan_decisions", "session_id"),
+            ("geo_article_operations", "created_by_session_id"),
+            ("geo_article_versions", "created_by_session_id"),
+            ("geo_distribution_plans", "created_by_session_id"),
+            ("geo_distribution_plan_audit", "actor_session_id"),
+            ("geo_publish_executions", "created_by_session_id"),
+            ("geo_baselines", "created_by_session_id"),
+            ("geo_post_publish_monitor_plans", "created_by_session_id"),
+        ] {
+            assert_eq!(
+                count(format!(
+                    "SELECT COUNT(*) FROM {table} WHERE {column} = 'session-a'"
+                )),
+                1,
+                "{table}.{column} provenance row must survive session deletion"
+            );
+        }
+        // geo_operations 仍是 SET NULL 语义：操作保留，会话引用置空。
+        assert_eq!(
+            count("SELECT COUNT(*) FROM geo_operations WHERE session_id IS NULL".to_string()),
+            5
+        );
+    }
+
+    /// 存量库迁移：带旧外键的表在下次打开时被重建为无 session 外键的形态，
+    /// 行与索引原样保留，随后会话删除可以通过。
+    #[test]
+    fn legacy_session_fk_schema_is_rebuilt_on_open() {
+        let root = tempdir().unwrap();
+        let store = BrandWorkspaceStore::at(root.path().join("Xiaojing"));
+        let brand = store.create_workspace("鲸跃", vec![]).unwrap();
+        store
+            .commit_session(
+                &brand.id,
+                SessionCommit {
+                    id: "session-a".into(),
+                    title: "旧库会话".into(),
+                    title_source: SessionTitleSource::User,
+                },
+            )
+            .unwrap();
+        seed_knowledge_chain(&brand);
+
+        let legacy = Connection::open(brand.root_path.join("project.sqlite")).unwrap();
+        legacy.execute_batch("PRAGMA foreign_keys = OFF;").unwrap();
+        legacy
+            .execute_batch(
+                "DROP TABLE geo_question_pools;
+                 CREATE TABLE geo_question_pools (
+                    id TEXT PRIMARY KEY,
+                    operation_id TEXT NOT NULL REFERENCES geo_operations(id),
+                    created_by_session_id TEXT NOT NULL REFERENCES brand_sessions(id),
+                    knowledge_version INTEGER NOT NULL REFERENCES knowledge_versions(version),
+                    product_line TEXT NOT NULL,
+                    target_region TEXT NOT NULL,
+                    generation_parameters_json TEXT NOT NULL,
+                    source_evidence_json TEXT NOT NULL DEFAULT '[]',
+                    keywords_json TEXT NOT NULL DEFAULT '[]',
+                    questions_json TEXT NOT NULL DEFAULT '[]',
+                    status TEXT NOT NULL CHECK(status IN ('generating','awaiting-selection','confirmed','failed','cancelled')),
+                    revision INTEGER NOT NULL DEFAULT 0,
+                    derived_from_pool_id TEXT REFERENCES geo_question_pools(id),
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                 );
+                 CREATE INDEX geo_question_pool_identity
+                    ON geo_question_pools(knowledge_version, product_line, target_region, updated_at DESC);
+                 INSERT INTO geo_question_pools
+                    (id, operation_id, created_by_session_id, knowledge_version, product_line,
+                     target_region, generation_parameters_json, status, created_at, updated_at)
+                 VALUES ('pool-legacy', 'operation-pool', 'session-a', 1, '汽车音响', '中国',
+                     '{}', 'confirmed', 'now', 'now');",
+            )
+            .unwrap();
+        drop(legacy);
+
+        // 任意一次数据库打开都会执行 ensure_schema 迁移。
+        store.list_sessions(&brand.id, false).unwrap();
+
+        let connection = open_database(&brand).unwrap();
+        let schema: String = connection
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'geo_question_pools'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(!schema.contains("REFERENCES brand_sessions"));
+        let indexes: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type = 'index' AND tbl_name = 'geo_question_pools' AND sql IS NOT NULL",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(indexes, 1, "identity index must survive the rebuild");
+        let provenance: String = connection
+            .query_row(
+                "SELECT created_by_session_id FROM geo_question_pools WHERE id = 'pool-legacy'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(provenance, "session-a");
+
+        let preview = store
+            .preview_session_deletion(&brand.id, "session-a")
+            .unwrap();
+        store
+            .delete_session(&brand.id, "session-a", &preview.confirmation_token)
+            .unwrap();
+        assert!(store.list_sessions(&brand.id, true).unwrap().is_empty());
+    }
+
+    #[test]
+    fn workspace_deletion_removes_catalog_entry_and_directory() {
+        let root = tempdir().unwrap();
+        let store = BrandWorkspaceStore::at(root.path().join("Xiaojing"));
+        let brand = store.create_workspace("品牌甲", vec![]).unwrap();
+        let other = store.create_workspace("品牌乙", vec![]).unwrap();
+        store
+            .commit_session(
+                &brand.id,
+                SessionCommit {
+                    id: "session-a".into(),
+                    title: "甲的会话".into(),
+                    title_source: SessionTitleSource::User,
+                },
+            )
+            .unwrap();
+        seed_shared_data(&brand, "session-a");
+
+        let preview = store.preview_workspace_deletion(&brand.id).unwrap();
+        assert_eq!(preview.workspace_id, brand.id);
+        assert_eq!(preview.name, "品牌甲");
+        assert_eq!(preview.session_ids, vec!["session-a".to_string()]);
+        assert_eq!(preview.scope.sessions, 1);
+        assert_eq!(preview.scope.chat_transcripts, 1);
+        assert_eq!(preview.scope.knowledge_facts, 1);
+
+        // 未 admission 的 token 不能 finalize，品牌保持原样。
+        assert!(store
+            .finalize_workspace_deletion(&brand.id, &preview.confirmation_token)
+            .is_err());
+        assert!(store
+            .admit_workspace_deletion(&brand.id, "wrong-token")
+            .is_err());
+        assert!(brand.root_path.exists());
+
+        store
+            .admit_workspace_deletion(&brand.id, &preview.confirmation_token)
+            .unwrap();
+        store
+            .finalize_workspace_deletion(&brand.id, &preview.confirmation_token)
+            .unwrap();
+
+        assert!(store
+            .list_workspaces()
+            .unwrap()
+            .iter()
+            .all(|workspace| { workspace.id != brand.id }));
+        assert!(!brand.root_path.exists(), "brand directory must be removed");
+        assert_eq!(store.current_workspace().unwrap().unwrap().id, other.id);
+        // admission 只能用一次：重复 finalize 找不到品牌。
+        assert!(store
+            .finalize_workspace_deletion(&brand.id, &preview.confirmation_token)
+            .is_err());
+    }
+
+    #[test]
+    fn deleting_the_last_brand_clears_current_workspace() {
+        let root = tempdir().unwrap();
+        let store = BrandWorkspaceStore::at(root.path().join("Xiaojing"));
+        let brand = store.create_workspace("仅存品牌", vec![]).unwrap();
+
+        let preview = store.preview_workspace_deletion(&brand.id).unwrap();
+        assert_eq!(preview.scope.sessions, 0);
+        store
+            .admit_workspace_deletion(&brand.id, &preview.confirmation_token)
+            .unwrap();
+        store
+            .finalize_workspace_deletion(&brand.id, &preview.confirmation_token)
+            .unwrap();
+
+        assert!(store.list_workspaces().unwrap().is_empty());
+        assert!(store.current_workspace().unwrap().is_none());
+        assert!(!brand.root_path.exists());
+    }
+
+    fn seed_knowledge_chain(brand: &BrandWorkspace) {
+        let connection = open_database(brand).unwrap();
+        let now = Utc::now().to_rfc3339();
+        connection
+            .execute(
+                "INSERT INTO knowledge_raw_inputs (id, session_id, input_text, origin, intent, created_at)
+                 VALUES ('raw-1', 'session-a', '汽车行业', 'user-stated', 'knowledge-update', ?1)",
+                [&now],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO knowledge_fact_candidates
+                    (id, raw_input_id, session_id, subject, predicate, scope_json, fact_key,
+                     value_json, normalized_value_json, excerpt, confidence, profile_provenance,
+                     origin, intent, status, base_version, proposed_at, resolved_at)
+                 VALUES ('candidate-1', 'raw-1', 'session-a', '鲸跃', 'enterprise-profile.industry',
+                     '{}', 'industry', '\"汽车\"', '\"汽车\"', '汽车', 1.0, 'asked', 'user-stated',
+                     'knowledge-update', 'adopted', 0, ?1, ?1)",
+                [&now],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO knowledge_decisions
+                    (id, candidate_id, decision, actor_id, actor_session_id, expected_version,
+                     before_json, after_json, reason, decided_at)
+                 VALUES ('decision-1', 'candidate-1', 'adopt-new', 'desktop-user', 'session-a', 0,
+                     NULL, '\"汽车\"', 'test fixture', ?1)",
+                [&now],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO knowledge_versions (version, decision_id, actor_session_id, snapshot_hash, created_at)
+                 VALUES (1, 'decision-1', 'session-a', 'hash-1', ?1)",
+                [&now],
+            )
+            .unwrap();
+    }
+
+    fn seed_geo_provenance_rows(brand: &BrandWorkspace, session_id: &str) {
+        seed_knowledge_chain(brand);
+        let connection = open_database(brand).unwrap();
+        let now = Utc::now().to_rfc3339();
+        for (id, state) in [
+            ("operation-pool", "question-pool-confirmed"),
+            ("operation-art", "article-completed"),
+            ("operation-dist", "distribution-confirmed"),
+            ("operation-pub", "publish-succeeded"),
+            ("operation-monitor", "monitor-active"),
+        ] {
+            connection
+                .execute(
+                    "INSERT INTO geo_operations (id, session_id, state, created_at)
+                     VALUES (?1, ?2, ?3, ?4)",
+                    params![id, session_id, state, now],
+                )
+                .unwrap();
+        }
+        connection
+            .execute(
+                "INSERT INTO geo_question_pools
+                    (id, operation_id, created_by_session_id, knowledge_version, product_line,
+                     target_region, generation_parameters_json, status, revision, created_at, updated_at)
+                 VALUES ('pool-1', 'operation-pool', ?1, 1, '汽车音响', '中国', '{}',
+                     'confirmed', 1, ?2, ?2)",
+                params![session_id, now],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO geo_question_pool_attempts
+                    (id, pool_id, session_id, idempotency_key, state, created_at, updated_at)
+                 VALUES ('attempt-1', 'pool-1', ?1, 'attempt-key-1', 'confirmed', ?2, ?2)",
+                params![session_id, now],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO geo_question_pool_decisions
+                    (id, pool_id, session_id, decision, expected_revision, revision,
+                     questions_json, selected_question_ids_json, actor_id, decided_at)
+                 VALUES ('pool-decision-1', 'pool-1', ?1, 'confirm-selection', 0, 1, '[]', '[]',
+                     'desktop-user', ?2)",
+                params![session_id, now],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO geo_topic_plans
+                    (id, operation_id, created_by_session_id, question_pool_id, question_pool_revision,
+                     knowledge_version, product_line, target_region, policy_version, status, revision,
+                     topics_json, items_json, model_audit_json, provider_snapshot_json,
+                     created_at, updated_at)
+                 VALUES ('topic-plan-1', 'operation-pool', ?1, 'pool-1', 1, 1, '汽车音响', '中国',
+                     'policy-1', 'confirmed', 1, '[]', '[]', '{}', '{}', ?2, ?2)",
+                params![session_id, now],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO geo_topic_plan_mutations
+                    (id, plan_id, session_id, kind, expected_revision, revision, items_json,
+                     target_item_ids_json, preserved_item_ids_json, actor_id, created_at)
+                 VALUES ('topic-mutation-1', 'topic-plan-1', ?1, 'user-edit', 0, 1, '[]', '[]',
+                     '[]', 'desktop-user', ?2)",
+                params![session_id, now],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO geo_topic_plan_decisions
+                    (id, plan_id, session_id, expected_revision, revision,
+                     selected_item_ids_json, actor_id, decided_at)
+                 VALUES ('topic-decision-1', 'topic-plan-1', ?1, 0, 1, '[]', 'desktop-user', ?2)",
+                params![session_id, now],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO geo_article_operations
+                    (operation_id, created_by_session_id, source_kind, topic_plan_id,
+                     topic_plan_revision, knowledge_version, product_line, target_region,
+                     policy_version, operation_spec_json, status, created_at, updated_at)
+                 VALUES ('operation-art', ?1, 'confirmed-topic-plan', 'topic-plan-1', 1, 1,
+                     '汽车音响', '中国', 'policy-1', '{}', 'completed', ?2, ?2)",
+                params![session_id, now],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO geo_articles
+                    (id, operation_id, knowledge_version, content_type, topic, requested_title,
+                     constraints, planned_facts_json, status, created_at, updated_at)
+                 VALUES ('article-1', 'operation-art', 1, 'guide', '汽车音响怎么选', '选购指南',
+                     '{}', '{}', 'draft_ready', ?1, ?1)",
+                params![now],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO geo_article_versions
+                    (article_id, revision, title, body_path, body_sha256, origin,
+                     model_audit_json, created_by_session_id, created_at)
+                 VALUES ('article-1', 1, '选购指南', 'articles/approved/article-1.md', 'hash',
+                     'generated', '{}', ?1, ?2)",
+                params![session_id, now],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO geo_distribution_plans
+                    (id, operation_id, created_by_session_id, article_operation_id,
+                     knowledge_version, policy_version, status, provider_snapshot_json,
+                     resource_snapshot_json, projection_json, created_at, updated_at)
+                 VALUES ('dist-plan-1', 'operation-dist', ?1, 'operation-art', 1, 'policy-1',
+                     'confirmed', '{}', '{}', '{}', ?2, ?2)",
+                params![session_id, now],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO geo_distribution_plan_audit
+                    (id, plan_id, revision, action, actor_session_id, detail_json, created_at)
+                 VALUES ('dist-audit-1', 'dist-plan-1', 1, 'prepared', ?1, '{}', ?2)",
+                params![session_id, now],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO geo_publish_executions
+                    (id, operation_id, created_by_session_id, distribution_plan_id,
+                     distribution_plan_revision, status, revision, budget_cny, estimated_spend_cny,
+                     publish_start_at, confirmation_digest, provider_snapshot_json,
+                     created_at, updated_at)
+                 VALUES ('publish-exec-1', 'operation-pub', ?1, 'dist-plan-1', 1, 'succeeded', 1,
+                     100.0, 90.0, ?2, 'digest', '{}', ?2, ?2)",
+                params![session_id, now],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO geo_baselines
+                    (id, operation_id, created_by_session_id, question_pool_id,
+                     question_pool_revision, knowledge_version, brand_names_json,
+                     provider_snapshots_json, policy_version, status, idempotency_key,
+                     created_at, updated_at)
+                 VALUES ('baseline-1', 'operation-pool', ?1, 'pool-1', 1, 1, '[]', '{}',
+                     'policy-1', 'succeeded', 'baseline-key-1', ?2, ?2)",
+                params![session_id, now],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO geo_post_publish_monitor_plans
+                    (id, operation_id, source_operation_id, created_by_session_id,
+                     publish_execution_id, baseline_id, baseline_policy_version,
+                     baseline_question_pool_id, baseline_question_pool_revision, engine_ids_json,
+                     interval_minutes, end_conditions_json, policy_version, revision, status,
+                     created_at, updated_at)
+                 VALUES ('monitor-plan-1', 'operation-monitor', 'operation-pub', ?1,
+                     'publish-exec-1', 'baseline-1', 'policy-1', 'pool-1', 1, '[\"engine-1\"]',
+                     60, '{}', 'policy-1', 1, 'active', ?2, ?2)",
+                params![session_id, now],
+            )
+            .unwrap();
     }
 
     fn seed_shared_data(brand: &BrandWorkspace, session_id: &str) {

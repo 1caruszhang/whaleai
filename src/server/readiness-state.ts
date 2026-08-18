@@ -3,7 +3,7 @@
  *
  * Splits the single "healthy" signal into three orthogonal probes:
  *  - /health/live      — process bound to TCP, route handler running
- *  - /health/ready     — deferred init (migrations / skill seed / SDK init / ...) done
+ *  - /health/ready     — deferred application and SDK initialization done
  *  - /health/functional — core feature can actually serve a request (sidecar mirrors live)
  *
  * Liveness is implicit (handler running). This module owns Readiness.

@@ -1,0 +1,136 @@
+{
+  "schemaVersion": 1,
+  "targetTriple": "x86_64-pc-windows-msvc",
+  "architecture": "x64",
+  "toolchain": {
+    "tauriCli": "2.11.4",
+    "tauriRust": "2.11.2",
+    "nsisTemplateTag": "tauri-v2.11.4"
+  },
+  "identity": {
+    "package": "xiaojing",
+    "crate": "xiaojing",
+    "binary": "xiaojing.exe",
+    "productName": "小鲸同学",
+    "identifier": "com.xiaojing.geo",
+    "protocol": "xiaojing",
+    "dataRoot": "%LOCALAPPDATA%\\Xiaojing"
+  },
+  "icons": {
+    "src-tauri/icons/32x32.png": "e21cea48e9f43e9042cf0f3b0c2b3e3a5e5515530d1d4943fc5f079a0aa85c50",
+    "src-tauri/icons/128x128.png": "6391412dd8c651c395560e44c7684f6f666669841b0ab10b97ff9ff2afc02ae3",
+    "src-tauri/icons/128x128@2x.png": "e7d575ff59bd523d71f1f299b41aa9dad1e870a2dbc0652b785eeeb881bfeedd",
+    "src-tauri/icons/icon.icns": "b43179726626604ba2c67009057224a43ba2408a0a5904092c485fc0977010db",
+    "src-tauri/icons/icon.ico": "365b7ef06796a9e1f90f92f315e4e6d07c957d8cbfe440be0b45e96f52dd31f0"
+  },
+  "sessionSidecar": {
+    "kind": "bundled-node-resource",
+    "entrypoint": "server-dist.js",
+    "nodeExecutable": "nodejs/node.exe",
+    "tauriExternalBin": [],
+    "targetTripleSuffix": null
+  },
+  "downloads": {
+    "node": {
+      "version": "24.14.0",
+      "url": "https://nodejs.org/dist/v24.14.0/node-v24.14.0-win-x64.zip",
+      "sha256": "313fa40c0d7b18575821de8cb17483031fe07d95de5994f6f435f3b345f85c66",
+      "cacheFile": "node-v24.14.0-win-x64.zip"
+    },
+    "portableGit": {
+      "version": "2.55.0.windows.4",
+      "url": "https://github.com/git-for-windows/git/releases/download/v2.55.0.windows.4/PortableGit-2.55.0.4-64-bit.7z.exe",
+      "sha256": "016e84230a3767f0c6b3788e79ba0c58a17377086801719d46700fca4f7b36b5",
+      "cacheFile": "PortableGit-2.55.0.4-64-bit.7z.exe"
+    },
+    "webview2": {
+      "version": "evergreen-bootstrapper-eb04ea38-2026-08-14",
+      "url": "https://msedge.sf.dl.delivery.mp.microsoft.com/filestreamingservice/files/eb04ea38-69c8-4b86-b65b-fd4c8469ae59/MicrosoftEdgeWebView2RuntimeInstallerX64.exe",
+      "sha256": "be695eb3732a94e181f008ab5cf6ee650f8644676e87f9e02b6ab0d02f2ea08e",
+      "cacheFile": "MicrosoftEdgeWebview2Setup-eb04ea38.exe"
+    }
+  },
+  "npmPackages": {
+    "claudeNative": {
+      "name": "@anthropic-ai/claude-agent-sdk-win32-x64",
+      "version": "0.3.220",
+      "url": "https://registry.npmjs.org/@anthropic-ai/claude-agent-sdk-win32-x64/-/claude-agent-sdk-win32-x64-0.3.220.tgz",
+      "cacheFile": "claude-agent-sdk-win32-x64-0.3.220.tgz",
+      "integrity": "sha512-MuOuXhbr66HlGaWXD2f3w0k2PsvmnbkwcUZ0dAe2poFLdl72GC2dapwwOBefxm9QmoNqk9+jmv/dSKGOVWyvLw==",
+      "binarySha256": "af5bf1f1b2aadffc768eccd787084c6fdf9ba81624cbe96c1c6d9ac1a1550231",
+      "stagePath": "claude-agent-sdk"
+    },
+    "sharp": {
+      "name": "sharp",
+      "version": "0.34.5",
+      "url": "https://registry.npmjs.org/sharp/-/sharp-0.34.5.tgz",
+      "cacheFile": "sharp-0.34.5.tgz",
+      "integrity": "sha512-Ou9I5Ft9WNcCbXrU9cMgPBcCK8LiwLqcbywW3t4oDV37n1pzpuNLsYiAV8eODnjbtQlSDwZ2cUEeQz4E54Hltg==",
+      "stagePath": "sharp-runtime/node_modules/sharp"
+    },
+    "sharpNative": {
+      "name": "@img/sharp-win32-x64",
+      "version": "0.34.5",
+      "url": "https://registry.npmjs.org/@img/sharp-win32-x64/-/sharp-win32-x64-0.34.5.tgz",
+      "cacheFile": "sharp-win32-x64-0.34.5.tgz",
+      "integrity": "sha512-+29YMsqY2/9eFEiW93eqWnuLcWcufowXewwSNIT6UwZdUUCrM3oFjMWH/Z6/TMmb4hlFenmfAVbpWeup2jryCw==",
+      "stagePath": "sharp-runtime/node_modules/@img/sharp-win32-x64"
+    },
+    "colour": {
+      "name": "@img/colour",
+      "version": "1.1.0",
+      "url": "https://registry.npmjs.org/@img/colour/-/colour-1.1.0.tgz",
+      "cacheFile": "colour-1.1.0.tgz",
+      "integrity": "sha512-Td76q7j57o/tLVdgS746cYARfSyxk8iEfRxewL9h4OMzYhbW4TAcppl0mT4eyqXddh6L/jwoM75mo7ixa/pCeQ==",
+      "stagePath": "sharp-runtime/node_modules/@img/colour"
+    },
+    "detectLibc": {
+      "name": "detect-libc",
+      "version": "2.1.2",
+      "url": "https://registry.npmjs.org/detect-libc/-/detect-libc-2.1.2.tgz",
+      "cacheFile": "detect-libc-2.1.2.tgz",
+      "integrity": "sha512-Btj2BOOO83o3WyH59e8MgXsxEQVcarkUOpEYrubB0urwnN10yQ364rsiByU11nZlqWYZm05i/of7io4mzihBtQ==",
+      "stagePath": "sharp-runtime/node_modules/detect-libc"
+    },
+    "semver": {
+      "name": "semver",
+      "version": "7.7.3",
+      "url": "https://registry.npmjs.org/semver/-/semver-7.7.3.tgz",
+      "cacheFile": "semver-7.7.3.tgz",
+      "integrity": "sha512-SdsKMrI9TdgjdweUSR9MweHA4EJ8YxHn8DFaDisvhVlUOe4BF1tLD7GAj0lIqWVl+dPb/rExr0Btby5loQm20Q==",
+      "stagePath": "sharp-runtime/node_modules/semver"
+    }
+  },
+  "vcRuntime": {
+    "strategy": "not-required-by-current-import-closure",
+    "forbiddenDynamicImports": [
+      "VCRUNTIME*.dll",
+      "MSVCP*.dll",
+      "CONCRT*.dll"
+    ],
+    "auditedFallback": {
+      "version": "14.50.35719.0-2026-08-01",
+      "url": "https://download.visualstudio.microsoft.com/download/pr/9d270333-8b7b-4f96-9458-6fcdb2ec0b25/CC0FF0EB1DC3F5188AE6300FAEF32BF5BEEBA4BDD6E8E445A9184072096B713B/VC_redist.x64.exe",
+      "sha256": "cc0ff0eb1dc3f5188ae6300faef32bf5beeba4bdd6e8e445a9184072096b713b",
+      "bundled": false
+    }
+  },
+  "requiredStagedPaths": [
+    "nodejs/node.exe",
+    "claude-agent-sdk/claude.exe",
+    "sharp-runtime/node_modules/sharp/package.json",
+    "sharp-runtime/node_modules/@img/sharp-win32-x64/package.json",
+    "portable-git/bin/bash.exe",
+    "portable-git/cmd/git.exe",
+    "portable-git/mingw64/bin/git.exe",
+    "windows-prerequisites/MicrosoftEdgeWebview2Setup.exe"
+  ],
+  "requiredPeX64Paths": [
+    "nodejs/node.exe",
+    "claude-agent-sdk/claude.exe",
+    "portable-git/bin/bash.exe",
+    "portable-git/cmd/git.exe",
+    "portable-git/mingw64/bin/git.exe",
+    "windows-prerequisites/MicrosoftEdgeWebview2Setup.exe"
+  ]
+}

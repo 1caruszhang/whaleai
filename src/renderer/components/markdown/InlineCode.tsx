@@ -7,8 +7,8 @@
  * Audio file paths get an inline play/stop button.
  */
 import { useFileAction, useFileTargetInfo } from '@/context/FileActionContext';
-import { useOpenWebLink } from '@/context/BrowserPanelContext';
 import { isAudioPath } from '@/utils/audioPlayer';
+import { openExternal } from '@/utils/openExternal';
 import { useAudioPlayer } from '@/hooks/useAudioPlayer';
 import { classifyInlineCodeTarget } from '@/utils/pathDetection';
 import { resolveAgainstWorkspace, resolveFileActionTarget } from '@/utils/workspaceFileLinks';
@@ -56,7 +56,6 @@ function AudioPlayButton({ filePath }: { filePath: string }) {
 export default function InlineCode({ children }: InlineCodeProps) {
     const { t } = useTranslation('app');
     const fileAction = useFileAction(); // null outside Chat
-    const openWebLink = useOpenWebLink();
     const text = extractText(children);
     const inlineTarget = classifyInlineCodeTarget(text);
     const actionTarget = fileAction && inlineTarget.kind === 'file'
@@ -69,7 +68,7 @@ export default function InlineCode({ children }: InlineCodeProps) {
             e.preventDefault();
             const selection = window.getSelection();
             if (selection?.toString()) return;
-            openWebLink(inlineTarget.url, { forceExternal: e.metaKey || e.ctrlKey });
+            void openExternal(inlineTarget.url);
         };
 
         return (
@@ -157,7 +156,7 @@ export default function InlineCode({ children }: InlineCodeProps) {
     if (isAudio) {
         // The audio player ultimately calls cmd_read_file_base64, which REQUIRES
         // an absolute path ("Path must be absolute" otherwise). The model writes
-        // workspace-relative paths (e.g. myagents_files/generated_audio/x.mp3),
+        // workspace-relative paths (e.g. xiaojing_files/generated_audio/x.mp3),
         // so resolve against the workspace root before playback — otherwise the
         // button silently no-ops (the original bug). Fallback to the raw text only
         // when there's no workspace (then it was likely already absolute).

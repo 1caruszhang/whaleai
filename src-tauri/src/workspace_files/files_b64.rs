@@ -14,16 +14,16 @@
 //! Concurrency: import uses O_CREAT|O_EXCL on Unix and the equivalent on
 //! Windows so two callers racing for the same target name can never silently
 //! overwrite — they both see a "file exists" error and bump the suffix
-//! independently. Mirrors `writeBase64FilesToAgentDir` in TS.
+//! independently. Mirrors `writeBase64FilesToWorkspacePath` in TS.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use serde::{Deserialize, Serialize};
 
 use super::path_safety::{
-    reject_managed_global_skill_mutation, resolve_inside_workspace, sanitize_filename,
-    validate_external_read_path, validate_workspace_root,
+    resolve_inside_workspace, sanitize_filename, validate_external_read_path,
+    validate_workspace_root,
 };
 
 /// Hard ceiling on collision retries — guards against pathological loops.
@@ -64,7 +64,7 @@ pub struct ImportResult {
 
 /// Import base64-encoded files into `<workspace>/<target_dir>/`.
 ///
-/// `target_dir` is workspace-relative (e.g. `"myagents_files"`). Empty string
+/// `target_dir` is workspace-relative (e.g. `"xiaojing_files"`). Empty string
 /// means workspace root itself. The directory is created if it does not exist.
 ///
 /// Tauri auto-converts the JS-side camelCase (`targetDir`) to the Rust-side
@@ -83,7 +83,6 @@ pub async fn cmd_workspace_import_files_b64(
     let workspace_root = validate_workspace_root(&workspace)?;
     let target_root =
         resolve_inside_workspace(&workspace_root, target_dir.as_deref().unwrap_or(""))?;
-    reject_managed_global_skill_mutation(&workspace_root, &target_root)?;
 
     tokio::fs::create_dir_all(&target_root)
         .await
@@ -254,7 +253,7 @@ fn mime_for_ext(ext: &str) -> String {
 /// collision. Returns the final path *relative to workspace_root* so the
 /// caller can build `@reference` strings without re-doing relativization.
 fn write_unique_file(
-    target_root: &PathBuf,
+    target_root: &Path,
     workspace_root: &PathBuf,
     safe_name: &str,
     bytes: &[u8],
@@ -322,13 +321,13 @@ mod tests {
         let res = cmd_workspace_import_files_b64(
             ws.to_string_lossy().to_string(),
             payload,
-            Some("myagents_files".to_string()),
+            Some("xiaojing_files".to_string()),
         )
         .await
         .unwrap();
-        assert_eq!(res.files, vec!["myagents_files/hello.txt".to_string()]);
+        assert_eq!(res.files, vec!["xiaojing_files/hello.txt".to_string()]);
         assert_eq!(
-            fs::read(ws.join("myagents_files").join("hello.txt")).unwrap(),
+            fs::read(ws.join("xiaojing_files").join("hello.txt")).unwrap(),
             b"hi"
         );
         let _ = fs::remove_dir_all(&ws);
@@ -442,7 +441,7 @@ mod tests {
         let _ = fs::remove_dir_all(&ws);
     }
 
-    // Cross-review (round 2 / Codex) caught: the previous "bounded read"
+    // Cross-review (round 2 / security review) caught: the previous "bounded read"
     // claim was fake — `read_cap` was computed but never applied to
     // `tokio::fs::read` (which is unbounded). The fix uses
     // `File::open + take(read_cap).read_to_end`. This regression guard

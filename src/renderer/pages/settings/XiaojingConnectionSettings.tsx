@@ -94,6 +94,12 @@ const STATE_LABELS: Record<GeoProviderCapabilityState, string> = {
   failed: "失败",
 };
 
+/** 只显示配置来源这一纯文字标签；任何密钥内容都不回显。 */
+const SOURCE_LABELS: Partial<Record<GeoProviderCapabilityStatus["source"], string>> = {
+  "development-env": "来源：.env / 启动环境",
+  "windows-credential-manager": "来源：Windows 凭据管理器",
+};
+
 function stateIcon(state: GeoProviderCapabilityState) {
   if (state === "verifying")
     return <Loader2 className="h-4 w-4 animate-spin" />;
@@ -289,6 +295,14 @@ export default function XiaojingConnectionSettings() {
                         {spec.provider}
                         {spec.model ? ` · ${spec.model}` : ""}
                       </div>
+                      {SOURCE_LABELS[status.source] && (
+                        <div
+                          className="mt-1 text-xs text-[var(--ink-muted)]"
+                          data-testid={`capability-${spec.slot}-source`}
+                        >
+                          {SOURCE_LABELS[status.source]}
+                        </div>
+                      )}
                     </div>
                     <span
                       className="flex items-center gap-1.5 text-xs"

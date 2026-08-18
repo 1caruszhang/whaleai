@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { isExternalUrl, isFilePath, toLocalFilePath } from './openExternal';
+import { isExternalUrl, toLocalFilePath } from './openExternal';
 
 describe('toLocalFilePath', () => {
     describe('file:// URLs', () => {
@@ -81,20 +81,5 @@ describe('isExternalUrl', () => {
         expect(isExternalUrl('/foo/bar')).toBe(false);
         expect(isExternalUrl('about:blank')).toBe(false);
         expect(isExternalUrl('')).toBe(false);
-    });
-});
-
-describe('isFilePath', () => {
-    it('matches Unix absolute, Windows backslash, and home-prefixed paths', () => {
-        expect(isFilePath('/foo/bar')).toBe(true);
-        expect(isFilePath('C:\\foo')).toBe(true);
-        expect(isFilePath('~/foo')).toBe(true);
-    });
-
-    it('rejects relative paths and URLs', () => {
-        expect(isFilePath('foo/bar')).toBe(false);
-        expect(isFilePath('./foo')).toBe(false);
-        expect(isFilePath('https://example.com')).toBe(false);
-        expect(isFilePath('')).toBe(false);
     });
 });

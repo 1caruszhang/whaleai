@@ -4,9 +4,7 @@
 //! `src/server/utils/file-lock.ts`. The lock primitive is atomic
 //! `create_dir`; an `owner` file inside the lockdir holds the 3-tuple
 //! `<runtime>:<pid>:<startMs>` (`rust:<pid>:<startMs>` here, `node:<pid>:<startMs>`
-//! from Node) for compatibility and exact release fencing. The 2-tuple
-//! `<runtime>:<pid>` shape is still understood for backwards compatibility
-//! with locks written by older binaries. We delegate the actual blocking work
+//! from Node) for exact release fencing. We delegate the actual blocking work
 //! to `tokio::task::spawn_blocking` so the async runtime worker stays free.
 //!
 //! Rust stale-recovery rules:
@@ -134,13 +132,13 @@ fn is_pid_alive(_pid: i32) -> Option<bool> {
 }
 
 /// Best-effort: return the start time (epoch ms) of `pid`, or None if we
-/// can't determine it on this platform. This value is retained only to write
-/// the compatible v1 owner token; peers do not use it to evict a live pid.
+/// can't determine it on this platform. Peers use this value only for exact
+/// owner-token comparison; they do not use it to evict a live pid.
 ///
 /// - macOS:  `ps -p <pid> -o lstart=` (string date), parse as system time.
 /// - Linux:  `/proc/<pid>/stat` field 22 (starttime in clock ticks) +
-///           `/proc/uptime` to convert to absolute ms (assume HZ=100, the
-///           same approximation the Node helper uses).
+///   `/proc/uptime` to convert to absolute ms (assume HZ=100, the
+///   same approximation the Node helper uses).
 /// - Windows: `GetProcessTimes` via a limited-information process handle.
 /// - Other platforms: unsupported; a valid process owner remains protected
 ///   when its start time cannot be verified.
@@ -312,16 +310,16 @@ fn parse_lstart_to_epoch_ms(s: &str) -> Option<u64> {
     Some(secs_since_epoch as u64 * 1000)
 }
 
-/// Our own start time, computed once on first call. Retained in the v1
-/// 3-tuple owner file `rust:<pid>:<startMs>` for compatibility and exact
-/// release fencing; it is not authoritative process-incarnation evidence.
+/// Our own start time, computed once on first call. Written to the 3-tuple
+/// owner file `rust:<pid>:<startMs>` for exact release fencing; it is not
+/// authoritative process-incarnation evidence.
 fn our_start_time_ms() -> u64 {
     use std::sync::OnceLock;
     static OUR_START: OnceLock<u64> = OnceLock::new();
     *OUR_START.get_or_init(|| {
         get_pid_start_time_ms(std::process::id() as i32).unwrap_or_else(|| {
-            // Fall back to "now" so the compatibility token still has a
-            // stable per-process value for exact release comparison.
+            // Fall back to "now" so the token still has a stable per-process
+            // value for exact release comparison.
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .map(|d| d.as_millis() as u64)
@@ -344,7 +342,7 @@ fn break_lock_safely(lock_path: &Path) -> bool {
             .duration_since(UNIX_EPOCH)
             .map(|d| d.subsec_nanos())
             .unwrap_or(0);
-        now_ns ^ (std::process::id() as u32)
+        now_ns ^ std::process::id()
     };
     let now_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -378,11 +376,11 @@ fn has_confirmed_dead_pid_owner(liveness: Option<bool>) -> bool {
     liveness == Some(false)
 }
 
-/// Parse exactly the shared legacy/current process-owner protocol:
-/// `<runtime>:<pid>` or `<runtime>:<pid>:<startMs>`, where runtime is Node or
-/// Rust. Any missing, non-numeric, or extra field is an unknown owner and must
+/// Parse exactly the shared process-owner protocol:
+/// `<runtime>:<pid>:<startMs>`, where runtime is Node or Rust. Any missing,
+/// non-numeric, or extra field is an unknown owner and must
 /// use the age grace period rather than process-owner recovery.
-fn parse_process_owner(owner: &str) -> Option<(i32, Option<u64>)> {
+fn parse_process_owner(owner: &str) -> Option<(i32, u64)> {
     let rest = owner
         .strip_prefix("node:")
         .or_else(|| owner.strip_prefix("rust:"))?;
@@ -396,19 +394,14 @@ fn parse_process_owner(owner: &str) -> Option<(i32, Option<u64>)> {
         return None;
     }
     let pid = pid_value as i32;
-    let declared_start = match fields.next() {
-        Some(raw) => {
-            if raw.is_empty() || !raw.bytes().all(|byte| byte.is_ascii_digit()) {
-                return None;
-            }
-            let value = raw.parse::<u64>().ok()?;
-            if value > MAX_JS_SAFE_INTEGER {
-                return None;
-            }
-            Some(value)
-        }
-        None => None,
-    };
+    let raw_start = fields.next()?;
+    if raw_start.is_empty() || !raw_start.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let declared_start = raw_start.parse::<u64>().ok()?;
+    if declared_start > MAX_JS_SAFE_INTEGER {
+        return None;
+    }
     if fields.next().is_some() {
         return None;
     }
@@ -444,10 +437,8 @@ fn try_break_stale_lock(lock_path: &Path, stale: Duration) -> bool {
         .to_string();
 
     // Owner shapes:
-    //   node:<pid>           (legacy 2-tuple)
-    //   node:<pid>:<startMs> (current 3-tuple, written by Node fix #4)
-    //   rust:<pid>           (legacy)
-    //   rust:<pid>:<startMs> (current — Rust now also writes this)
+    //   node:<pid>:<startMs>
+    //   rust:<pid>:<startMs>
     //   renderer:<ts>        (no observable pid; falls through to age-only break)
     //
     // For node:/rust: owners we probe pid liveness. The v1 start_time remains
@@ -577,10 +568,10 @@ where
     tokio::task::spawn_blocking(move || with_file_lock_blocking(&lock_path, opts, mutator))
         .await
         .map_err(|join_err| {
-            FileLockError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("file-lock join error: {}", join_err),
-            ))
+            FileLockError::Io(std::io::Error::other(format!(
+                "file-lock join error: {}",
+                join_err
+            )))
         })?
 }
 
@@ -608,11 +599,11 @@ mod tests {
     }
 
     #[test]
-    fn process_owner_parser_requires_exact_legacy_or_current_shape() {
+    fn process_owner_parser_requires_exact_current_shape() {
         assert_eq!(parse_process_owner(""), None);
-        assert_eq!(parse_process_owner("node:42"), Some((42, None)));
-        assert_eq!(parse_process_owner("node:42:0"), Some((42, Some(0))));
-        assert_eq!(parse_process_owner("rust:42:1234"), Some((42, Some(1234))));
+        assert_eq!(parse_process_owner("node:42"), None);
+        assert_eq!(parse_process_owner("node:42:0"), Some((42, 0)));
+        assert_eq!(parse_process_owner("rust:42:1234"), Some((42, 1234)));
         assert_eq!(parse_process_owner("node:"), None);
         assert_eq!(parse_process_owner("node:nope"), None);
         assert_eq!(parse_process_owner("node:-1"), None);
@@ -628,7 +619,7 @@ mod tests {
         assert_eq!(parse_process_owner("rust:42:9007199254740992"), None);
         assert_eq!(
             parse_process_owner("rust:42:9007199254740991"),
-            Some((42, Some(9_007_199_254_740_991)))
+            Some((42, 9_007_199_254_740_991))
         );
         assert_eq!(parse_process_owner("renderer:42"), None);
         assert_eq!(parse_process_owner("other:42"), None);
@@ -660,14 +651,12 @@ mod tests {
             .expect("wall clock after unix epoch")
             .as_nanos();
         let scratch = std::env::temp_dir().join(format!(
-            "myagents-file-lock-dead-owner-{}-{nonce}",
+            "xiaojing-file-lock-dead-owner-{}-{nonce}",
             std::process::id()
         ));
         for (label, owner) in [
-            ("legacy-node", format!("node:{dead_pid}")),
-            ("current-node", format!("node:{dead_pid}:0")),
-            ("legacy-rust", format!("rust:{dead_pid}")),
-            ("current-rust", format!("rust:{dead_pid}:0")),
+            ("node", format!("node:{dead_pid}:0")),
+            ("rust", format!("rust:{dead_pid}:0")),
         ] {
             let lock_path = scratch.join(format!("{label}.lock"));
             fs::create_dir_all(&lock_path).expect("create fresh lockdir");
@@ -688,7 +677,7 @@ mod tests {
             .expect("wall clock after unix epoch")
             .as_nanos();
         let scratch = std::env::temp_dir().join(format!(
-            "myagents-file-lock-malformed-owner-{}-{nonce}",
+            "xiaojing-file-lock-malformed-owner-{}-{nonce}",
             std::process::id()
         ));
         for (label, owner) in [
@@ -731,7 +720,7 @@ mod tests {
             .expect("wall clock after unix epoch")
             .as_nanos();
         let scratch = std::env::temp_dir().join(format!(
-            "myagents-file-lock-mismatched-start-owner-{}-{nonce}",
+            "xiaojing-file-lock-mismatched-start-owner-{}-{nonce}",
             std::process::id()
         ));
         let lock_path = scratch.join("fresh.lock");

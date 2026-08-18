@@ -1,37 +1,9 @@
-//! "Open in Finder/Explorer" + "Open with default app".
+//! Safe OS handoff for workspace and attachment paths.
 //!
-//! Four commands:
-//! - `cmd_workspace_open_in_finder` — workspace-relative path, reveals in OS
-//!   file manager (`open -R` / `explorer /select,` / `xdg-open <parent>`).
-//! - `cmd_workspace_open_with_default` — workspace-relative path, hands off
-//!   to the OS default-app dispatcher.
-//! - `cmd_open_path_external` (Phase D.5) — absolute path, used by the
-//!   Skill/Command detail panels to reveal `~/.myagents/skills/...` files
-//!   that live OUTSIDE any chat workspace. Validated against `home_dir` /
-//!   `tmp_dir` prefix (mirrors sidecar `/agent/open-path`) so a malicious
-//!   absolute path can't escape into `/etc` or similar.
-//! - `cmd_open_path_with_default` (issue #125) — absolute path, opens with
-//!   the OS default app. Used by BrowserPanel's "open in external browser"
-//!   button when previewing a local HTML file. Same safety surface as
-//!   `cmd_open_path_external` (canonicalize + home/tmp prefix + credential
-//!   blacklist) — only the spawn target differs (`open <path>` vs `open -R`).
-//!   The renderer's `openExternal()` helper detects `file://` URLs and
-//!   absolute paths and routes through this command, because Tauri's
-//!   `shell:allow-open` scope regex `^((mailto:\w+)|(tel:\w+)|(https?://\w+)).+`
-//!   rejects both. v0.2.7 had a partial fix that extracted the bare path
-//!   from `file://` and called `shell.open(<path>)` — that also failed the
-//!   regex (and produced `/C:/...` paths on Windows).
-//!
-//! Issue #125 follow-up: both `cmd_open_path_external` and
-//! `cmd_open_path_with_default` accept an optional `workspace` argument.
-//! When the caller is operating inside a chat workspace (BrowserPanel
-//! previewing a workspace HTML file, SkillDetailPanel revealing a
-//! project-scoped skill at `<project>/.claude/skills/<name>/`, etc.), the
-//! workspace root is canonicalized and added as a third trusted prefix
-//! alongside home/tmp. Otherwise Windows users with workspaces on `D:\`
-//! (or any non-system drive / mapped drive) hit `Path not allowed` because
-//! `D:\workspace\foo.html` doesn't start with `USERPROFILE` (typically
-//! `C:\Users\...`) nor with `%TEMP%`.
+//! Workspace-relative calls resolve through the no-follow workspace owner.
+//! Absolute-path calls are restricted to home, temporary storage, or an
+//! explicitly validated workspace root. Both variants reject credential and
+//! system paths before revealing a file or handing it to the default app.
 //!
 //! The home-anchored credential blacklist (`<home>/.ssh`, `<home>/.aws`,
 //! `Library/Keychains`, …) still applies. It does NOT cover credential
@@ -55,11 +27,8 @@ use super::path_safety::{resolve_existing_inside_workspace, validate_workspace_r
 use crate::process_cmd;
 
 /// Optional workspace context passed by the renderer to widen the
-/// trusted-roots whitelist beyond home/tmp. `None` for callers that
-/// have no workspace concept (e.g. a global skill at
-/// `~/.myagents/skills/<name>/`); `Some(path)` for callers that know the
-/// path being opened belongs to a specific chat workspace (BrowserPanel
-/// preview, project-scope SkillDetailPanel / CommandDetailPanel).
+/// trusted-roots whitelist beyond home/tmp. `Some(path)` means the target is
+/// expected to belong to the active chat workspace.
 type WorkspaceArg = Option<String>;
 
 #[derive(Debug, Serialize)]
@@ -102,13 +71,11 @@ pub async fn cmd_workspace_open_with_default(
     Ok(SystemOpenResult { success: true })
 }
 
-/// Reveal an **absolute** path in the OS file manager. Used by the
-/// Skill/Command detail panels to open `~/.myagents/skills/<name>/SKILL.md`
-/// (which lives outside any chat workspace).
+/// Reveal an **absolute** path in the OS file manager.
 ///
 /// Security model: the path must canonicalize to somewhere under the user's
-/// home directory or the system tmp directory. This mirrors sidecar
-/// `/agent/open-path` and rejects paths under `/etc`, `/System`, etc. Symlink
+/// home directory or the system tmp directory and rejects paths under
+/// `/etc`, `/System`, etc. Symlink
 /// escape is closed by canonicalizing both ends (the path AND the home dir)
 /// before the prefix check.
 #[tauri::command]
@@ -126,10 +93,8 @@ pub async fn cmd_open_path_external(
 }
 
 /// Open an **absolute** path with the OS default application (i.e. hand off
-/// like `open <path>` / Windows `Start-Process` / `xdg-open <path>`). Used
-/// by `BrowserPanel`'s "open in external browser" button when the embedded
-/// preview is a local HTML file (issue #125). Also covers any future
-/// `openExternal(file:// | absolute path)` call — the renderer helper
+/// like `open <path>` / Windows `Start-Process` / `xdg-open <path>`). This
+/// covers `openExternal(file:// | absolute path)` calls: the renderer helper
 /// auto-routes file targets through this command because Tauri's
 /// `shell:allow-open` scope regex rejects file targets entirely.
 ///
@@ -161,8 +126,7 @@ pub async fn cmd_open_path_with_default(
 ///
 /// Workspace whitelist (issue #125 follow-up): on Windows, workspaces
 /// frequently live on non-system drives (`D:\`, mapped drives), so the
-/// home/tmp predicate alone rejects every legitimate "open in external
-/// browser" / "reveal project skill" click. Trusting a caller-provided
+/// home/tmp predicate alone rejects legitimate workspace file handoff. Trusting a caller-provided
 /// workspace closes that gap, but the workspace arg itself MUST be hardened:
 ///
 /// 1. `validate_workspace_root` rejects blacklisted roots (`/etc`,
@@ -185,12 +149,10 @@ pub async fn cmd_open_path_with_default(
 /// blacklist gains workspace-relative rules, this command inherits them
 /// for free.
 ///
-/// Cross-review round 2 (Codex MED-1): the home/tmp prefix check alone is
+/// Cross-review round 2 (security review MED-1): the home/tmp prefix check alone is
 /// insufficient — `~/.ssh/id_rsa` lives under home and would slip through.
 /// Additionally calling `validate_file_path` (the project-wide credential
-/// blacklist used by templates / sidecar) closes that gap. The sidecar
-/// `/agent/open-path` did NOT have this guard; this is a deliberate
-/// hardening over the original behavior.
+/// blacklist used by workspace IO closes that gap.
 pub(super) fn validate_external_open_path(
     full_path: &str,
     workspace: Option<&str>,
@@ -218,7 +180,7 @@ pub(super) fn validate_external_open_path(
     // caller can't pass `workspace = "/"` and turn `canonical.starts_with`
     // into a tautology — which on macOS would expose `/etc/hosts` etc.
     // because the blacklist matches `/etc` but canonicalize resolves to
-    // `/private/etc` (Codex cross-review HIGH-1, issue #125 follow-up).
+    // `/private/etc` (security review cross-review HIGH-1, issue #125 follow-up).
     let canonical_workspace: Option<PathBuf> = match workspace {
         Some(w) if !w.trim().is_empty() => {
             let resolved = validate_workspace_root(w.trim())?;
@@ -265,9 +227,8 @@ pub(super) fn validate_external_open_path(
     // Skip this lexical blacklist for tmp-trusted paths. On macOS the system
     // temp dir canonicalizes under `/private/var/folders/...`, and
     // `validate_file_path`'s (correctly stricter) `/private/var` entry would
-    // otherwise reject every `$TMPDIR` file — breaking reveal/open for
-    // SkillDetailPanel / CommandDetailPanel / GlobalPluginsPanel /
-    // useWorkspaceFileService (B1, cross-review). A path already proven under
+    // otherwise reject every `$TMPDIR` file — breaking reveal/open through
+    // useWorkspaceFileService. A path already proven under
     // the canonical tmp root is trusted (symlink chains were resolved before
     // the prefix match) and tmp never holds the credential dirs this blacklist
     // guards. home paths still run it (they need the ~/.ssh etc. credential
@@ -289,7 +250,7 @@ pub(super) fn validate_external_open_path(
     // could open `/etc/hosts` because the canonical target lives under
     // both the canonical workspace and the post-canonicalize form of
     // `/etc`. Keeping this check inside the open-path command keeps the
-    // shared `validate_file_path` surface untouched (Codex re-review
+    // shared `validate_file_path` surface untouched (security review re-review
     // HIGH-1, #125 follow-up).
     //
     // Only applied when the path got through the prefix check **purely**
@@ -623,7 +584,7 @@ mod tests {
         if !ssh_dir.is_dir() {
             return; // Skip on systems without ~/.ssh.
         }
-        let stub = ssh_dir.join(format!("myagents_ws_bypass_test_{}", std::process::id()));
+        let stub = ssh_dir.join(format!("xiaojing_ws_bypass_test_{}", std::process::id()));
         if std::fs::write(&stub, b"x").is_err() {
             return;
         }
@@ -695,7 +656,7 @@ mod tests {
 
     // Pure unit tests for `match_trusted_prefix` — exercise the workspace
     // branch directly with synthetic paths so the test doesn't depend on
-    // the host's home/tmp layout. Codex re-review MED-2: the original
+    // the host's home/tmp layout. security review re-review MED-2: the original
     // workspace test passed via the tmp fallback under macOS, so the
     // workspace branch wasn't being verified.
     #[test]
@@ -776,7 +737,7 @@ mod tests {
         }
     }
 
-    // Codex re-review: the macOS `/etc → /private/etc` gap also reaches
+    // security review re-review: the macOS `/etc → /private/etc` gap also reaches
     // `/private` and `/private/etc` as workspace args. `/etc/hosts`
     // canonicalizes to `/private/etc/hosts`, which under the lexical
     // blacklist `/etc` does NOT match. The canonicalized-blacklist
@@ -846,7 +807,7 @@ mod tests {
         let _ = fs::remove_file(&p);
     }
 
-    // Cross-review round 2 (Codex MED-1): `~/.ssh/id_rsa` passes the
+    // Cross-review round 2 (security review MED-1): `~/.ssh/id_rsa` passes the
     // home-prefix check but MUST be blocked by the credential blacklist.
     // Reveal-in-finder would otherwise let a malicious AI tool / skill emit
     // a button that opens Finder on a private key — left-clicking it could
@@ -860,7 +821,7 @@ mod tests {
         let home = std::env::var_os("HOME").map(PathBuf::from);
         let Some(home) = home else { return };
         let ssh_dir = home.join(".ssh");
-        let stub = ssh_dir.join(format!("myagents_test_stub_{}", std::process::id()));
+        let stub = ssh_dir.join(format!("xiaojing_test_stub_{}", std::process::id()));
         // Skip if we can't create (no .ssh dir, permission, etc.) — rather
         // than trying to mkdir which would touch real config.
         if !ssh_dir.is_dir() {
@@ -906,7 +867,7 @@ mod tests {
     // ── workspace-relative open: cmd_workspace_open_in_finder /
     // cmd_workspace_open_with_default ──
     //
-    // Regression for codex adversarial review (2026-05-07): the workspace-
+    // Regression for the adversarial security review (2026-05-07): the workspace-
     // relative open commands previously used lexical `resolve_inside_workspace`,
     // which doesn't follow symlinks during validation but `spawn_reveal` /
     // `spawn_default_open` then ask the OS to open the path — the OS follows
@@ -931,7 +892,7 @@ mod tests {
         // /var/folders/... which trips the `/var` system blacklist before
         // we even get to canonicalize-and-prefix-check).
         let Some(home) = home_dir() else { return };
-        let ws_root = home.join(format!(".myagents-test-ws-sym-out-{}", std::process::id()));
+        let ws_root = home.join(format!(".xiaojing-test-ws-sym-out-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&ws_root);
         std::fs::create_dir_all(&ws_root).unwrap();
         let lure = ws_root.join("leak");
@@ -967,7 +928,7 @@ mod tests {
         use std::os::unix::fs::symlink;
 
         let Some(home) = home_dir() else { return };
-        let ws_root = home.join(format!(".myagents-test-ws-sym-in-{}", std::process::id()));
+        let ws_root = home.join(format!(".xiaojing-test-ws-sym-in-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&ws_root);
         std::fs::create_dir_all(ws_root.join("versions/v1")).unwrap();
         std::fs::write(ws_root.join("versions/v1/file.txt"), "hi").unwrap();

@@ -1,8 +1,7 @@
-// Workspace file service hook — Phase C of PRD 0.2.7.
+// Focused workspace file service for chat attachments and previews.
 //
 // One stable callable surface that wraps the Rust `cmd_workspace_*` invokes.
-// Both SimpleChatInput (launcher + chat-tab modes) and DirectoryPanel (Phase D
-// follow-up) call into this so the rest of the renderer never reaches into
+// Chat input and workspace file surfaces call into this so the rest of the renderer never reaches into
 // `@tauri-apps/api/core` directly.
 //
 // Design constraints:
@@ -30,31 +29,6 @@ interface CopiedFile {
   renamed: boolean;
 }
 
-// Phase D additions — DirectoryPanel calls these for tree / preview / CRUD.
-// Shapes mirror the sidecar JSON these commands replace, so the React tree
-// model and preview modal don't need parallel branches.
-
-interface DirectoryTreeNode {
-  id: string;
-  name: string;
-  path: string;
-  type: 'file' | 'dir';
-  children?: DirectoryTreeNode[];
-  loaded?: boolean;
-}
-
-interface DirectoryTreeResult {
-  root: string;
-  summary: { totalFiles: number; totalDirs: number };
-  tree: DirectoryTreeNode;
-  truncated: boolean;
-}
-
-interface ExpandDirectoryResult {
-  children: DirectoryTreeNode[];
-  loaded: boolean;
-}
-
 interface PreviewResult {
   content: string;
   name: string;
@@ -67,29 +41,9 @@ interface DownloadResult {
   data: string;
 }
 
-interface CreatePathResult {
-  success: boolean;
-  path: string;
-}
-
 interface RenameResult {
   success: boolean;
   newPath: string;
-}
-
-interface MovedFile {
-  oldPath: string;
-  newPath: string;
-}
-
-interface MoveResult {
-  success: boolean;
-  movedFiles: MovedFile[];
-  errors: string[];
-}
-
-interface GitBranchResult {
-  branch: string | null;
 }
 
 interface ImportResult {
@@ -102,27 +56,8 @@ interface CopyResult {
   copiedFiles: CopiedFile[];
   /** Per-file failures (blacklist reject, fs error) — the batch keeps going,
    *  but callers must surface these: an all-rejected drop otherwise looks
-   *  like a silent no-op refresh (cross-review 0.2.33, Codex W3). */
+   *  like a silent no-op refresh. */
   errors: string[];
-}
-
-interface InternalCopyResult {
-  success: boolean;
-  copiedFiles: CopiedFile[];
-  errors: string[];
-}
-
-interface ReadAsBase64Item {
-  path: string;
-  name: string;
-  mimeType: string;
-  data: string;
-  error?: string | null;
-}
-
-interface ReadAsBase64Response {
-  success: boolean;
-  files: ReadAsBase64Item[];
 }
 
 interface PreparedUserImageAttachment {
@@ -146,29 +81,6 @@ interface PrepareUserImageAttachmentsResponse {
   errors: PrepareUserImageAttachmentError[];
 }
 
-interface FileSearchResult {
-  path: string;
-  name: string;
-  type: 'file' | 'dir';
-}
-
-interface SlashCommand {
-  name: string;
-  description: string;
-  source: 'builtin' | 'custom' | 'skill';
-  scope?: 'user' | 'project';
-  path?: string;
-  folderName?: string;
-  fileName?: string;
-}
-
-interface SlashCommandsResponse {
-  success: boolean;
-  commands: SlashCommand[];
-  globalSkillFolderNames: string[];
-}
-
-// Phase D.5 — batch existence check for inline-code paths in AI output.
 interface PathInfo {
   exists: boolean;
   type: 'file' | 'dir';
@@ -178,23 +90,12 @@ interface CheckPathsResult {
   results: Record<string, PathInfo>;
 }
 
-interface ReadClaudeMdResult {
-  exists: boolean;
-  path: string;
-  content: string;
-}
-
-// Phase D.5 — token-based watcher handle. The renderer holds `token` for the
+// Token-based watcher handle. The renderer holds `token` for the
 // lifetime of the watch, then passes it to `watchStop`. `eventKey` is the
 // suffix to subscribe to via Tauri `listen()`.
 interface WatchHandle {
   token: string;
   eventKey: string;
-}
-
-interface DeleteResult {
-  success: boolean;
-  deleted: boolean;
 }
 
 interface GitignoreResult {
@@ -209,22 +110,18 @@ interface GitignoreResult {
  *
  * # Methods that REQUIRE a workspace (throw "请先选择工作区" if `workspacePath`
  * is null):
- * `importBase64Files`, `copyPaths`, `addGitignore`, `searchFiles`,
- * `deleteFile`, `listSlashCommands`, `dirTree`, `dirExpand`, `readPreview`,
- * `downloadFile`, `newFile`, `newFolder`, `rename`, `movePaths`,
- * `openInFinder`, `openWithDefault`, `readFileAsBlobUrl`, `gitBranch`,
+ * `importBase64Files`, `copyPaths`, `addGitignore`, `readPreview`,
+ * `downloadFile`, `rename`, `openInFinder`, `openWithDefault`, `readFileAsBlobUrl`,
  * `watchStart`, `checkPaths`.
  *
  * # Methods that DO NOT require a workspace (callable with `useWorkspaceFileService(null)`):
  * `openPathExternal`, `openPathWithDefault`, `checkLocalPaths`,
  * `readLocalPreview`, `downloadLocalFile`, `downloadLocalFileBytes`,
- * `readLocalFileAsBlobUrl` (all take absolute paths), `readPathsAsBase64`
- * (legacy absolute image path → base64), `prepareUserImageAttachments`
+ * (all take absolute paths), `prepareUserImageAttachments`
  * (absolute image path → app-owned attachment ref), `watchStop` (takes opaque token).
  *
- * Cross-review round 2 (Codex HIGH-3): consumers like SkillDetailPanel /
- * CommandDetailPanel pass `null` because they only need workspace-free
- * methods. Adding a workspace-required method to those panels would throw
+ * Consumers may pass `null` when they only need workspace-free methods.
+ * Adding a workspace-required call to those consumers would throw
  * at runtime — the JSDoc above is the source-of-truth for which methods
  * are safe to call when the hook was instantiated with `null`.
  */
@@ -240,15 +137,7 @@ export interface WorkspaceFileService {
     targetDir: string;
     autoRename?: boolean;
   }): Promise<CopyResult>;
-  /** [requires workspace] Copy WORKSPACE-RELATIVE paths to another dir inside
-   *  the same workspace (tree copy/paste). Collisions auto-rename. */
-  copyInternal(args: {
-    sourcePaths: string[];
-    targetDir: string;
-  }): Promise<InternalCopyResult>;
-  /** [workspace-free] Read absolute image paths and return base64 (for Tauri image drops). */
-  readPathsAsBase64(args: { paths: string[] }): Promise<ReadAsBase64Response>;
-  /** [workspace-free] Copy absolute image paths into `~/.myagents/attachments/<sessionId>/`
+  /** [workspace-free] Copy absolute image paths into Xiaojing's local-data attachment store
    *  and return ref metadata. This is the primary path for chat image drops. */
   prepareUserImageAttachments(args: {
     sessionId: string;
@@ -256,20 +145,6 @@ export interface WorkspaceFileService {
   }): Promise<PrepareUserImageAttachmentsResponse>;
   /** [requires workspace] Append a pattern to `<workspace>/.gitignore` if not already present. */
   addGitignore(args: { pattern: string }): Promise<GitignoreResult>;
-  /** [requires workspace] Fuzzy file-name search for the @ mention picker. */
-  searchFiles(args: { query: string }): Promise<FileSearchResult[]>;
-  /** [requires workspace] Delete a workspace-relative path (file / dir /
-   *  broken symlink). Default goes to the OS trash; `permanent: true` keeps
-   *  unlink semantics for scratch-file cleanup (don't pollute the trash with
-   *  files the user never saw). */
-  deleteFile(args: { path: string; permanent?: boolean }): Promise<DeleteResult>;
-  /** [requires workspace] List slash-command picker entries — global + project skills + builtins. */
-  listSlashCommands(): Promise<SlashCommandsResponse>;
-  // ─── Phase D: DirectoryPanel ops ───
-  /** [requires workspace] Initial directory tree walk (depth + entry capped on the Rust side). */
-  dirTree(): Promise<DirectoryTreeResult>;
-  /** [requires workspace] Lazy-expand a single directory marked `loaded:false` in the tree. */
-  dirExpand(args: { path: string }): Promise<ExpandDirectoryResult>;
   /** [requires workspace] Read a previewable text file for the preview modal (≤2MB). */
   readPreview(args: { path: string }): Promise<PreviewResult>;
   /** [requires workspace] Read a binary file (image, etc.) as base64 for blob reconstruction. */
@@ -280,26 +155,13 @@ export interface WorkspaceFileService {
    *  parser. ≤50MB. */
   downloadFileBytes(args: { path: string }): Promise<ArrayBuffer>;
   /** [requires workspace] */
-  newFile(args: { parentDir: string; name: string }): Promise<CreatePathResult>;
-  /** [requires workspace] */
-  newFolder(args: { parentDir: string; name: string }): Promise<CreatePathResult>;
-  /** [requires workspace] */
   rename(args: { oldPath: string; newName: string }): Promise<RenameResult>;
-  /** [requires workspace] */
-  movePaths(args: { sourcePaths: string[]; targetDir: string }): Promise<MoveResult>;
   /** [requires workspace] */
   openInFinder(args: { path: string }): Promise<void>;
   /** [requires workspace] */
   openWithDefault(args: { path: string }): Promise<void>;
-  /** [workspace-free] Reveal an absolute path (NOT workspace-relative) in the
-   *  OS file manager. Used by Skill/Command detail panels for
-   *  `~/.myagents/skills/...`. The Rust side validates the path canonicalizes
-   *  to under home_dir or tmp AND passes the credential blacklist.
-   *
-   *  Optional `workspace` widens the trusted-prefix list for project-scope
-   *  callers whose path may live under `<project>/.claude/skills/...` on a
-   *  non-system drive (issue #125 follow-up — Windows workspaces on `D:\`).
-   *  Credential blacklist still applies. */
+  /** [workspace-free] Reveal an absolute attachment or preview path in the OS
+   *  file manager. Rust validates the trusted prefix and credential blacklist. */
   openPathExternal(args: { fullPath: string; workspace?: string | null }): Promise<void>;
   /** [workspace-free] Open an absolute path with the OS default app (hand off like
    *  `open <path>`). Same safety surface as `openPathExternal` (home/tmp prefix +
@@ -320,20 +182,10 @@ export interface WorkspaceFileService {
    *  name, revoke }`. Caller MUST call `revoke()` on cleanup to free the
    *  object URL. */
   readFileAsBlobUrl(args: { path: string }): Promise<BlobUrlHandle>;
-  /** [workspace-free] Read an absolute local file as a Blob URL (for image preview). */
-  readLocalFileAsBlobUrl(args: { fullPath: string; workspace?: string | null }): Promise<BlobUrlHandle>;
   /** [requires workspace] Save edited content back to a workspace file.
    *  The file MUST already exist (no create-on-save). 2MB content cap.
    *  Atomic via tmp + rename. Resolves on success; rejects on failure. */
   saveFile(args: { path: string; content: string; expectedContent?: string }): Promise<void>;
-  /** [requires workspace] Read `<workspace>/CLAUDE.md`. `exists:false` is
-   *  not an error — Settings UI shows an empty editor in that case. */
-  readClaudeMd(): Promise<ReadClaudeMdResult>;
-  /** [requires workspace] Write `<workspace>/CLAUDE.md`. Creates if missing.
-   *  Resolves on success; rejects on failure. */
-  writeClaudeMd(args: { content: string }): Promise<void>;
-  /** [requires workspace] */
-  gitBranch(): Promise<GitBranchResult>;
   /** [requires workspace] Start the per-workspace fs watcher (ref-counted
    *  process-wide). Returns `{ token, eventKey }`: the renderer holds `token`
    *  for the lifetime of the watch and passes it to `watchStop`; `eventKey`
@@ -403,26 +255,6 @@ export function useWorkspaceFileService(workspacePath: string | null): Workspace
     [requireWorkspace, invokeIfTauri],
   );
 
-  const copyInternal: WorkspaceFileService['copyInternal'] = useCallback(
-    async ({ sourcePaths, targetDir }) => {
-      const ws = requireWorkspace();
-      return invokeIfTauri<InternalCopyResult>('cmd_workspace_copy_internal', {
-        workspace: ws,
-        sourcePaths,
-        targetDir,
-      });
-    },
-    [requireWorkspace, invokeIfTauri],
-  );
-
-  const readPathsAsBase64: WorkspaceFileService['readPathsAsBase64'] = useCallback(
-    async ({ paths }) => {
-      // Doesn't need a workspace — paths are absolute.
-      return invokeIfTauri<ReadAsBase64Response>('cmd_workspace_read_files_b64', { paths });
-    },
-    [invokeIfTauri],
-  );
-
   const prepareUserImageAttachments: WorkspaceFileService['prepareUserImageAttachments'] = useCallback(
     async ({ sessionId, paths }) => {
       // Doesn't need a workspace — paths are absolute and destination is app-owned.
@@ -440,55 +272,6 @@ export function useWorkspaceFileService(workspacePath: string | null): Workspace
       return invokeIfTauri<GitignoreResult>('cmd_workspace_add_gitignore', {
         workspace: ws,
         pattern,
-      });
-    },
-    [requireWorkspace, invokeIfTauri],
-  );
-
-  const searchFiles: WorkspaceFileService['searchFiles'] = useCallback(
-    async ({ query }) => {
-      const ws = requireWorkspace();
-      return invokeIfTauri<FileSearchResult[]>('cmd_workspace_search_files_fuzzy', {
-        workspace: ws,
-        query,
-      });
-    },
-    [requireWorkspace, invokeIfTauri],
-  );
-
-  const deleteFile: WorkspaceFileService['deleteFile'] = useCallback(
-    async ({ path, permanent }) => {
-      const ws = requireWorkspace();
-      return invokeIfTauri<DeleteResult>('cmd_workspace_delete', {
-        workspace: ws,
-        path,
-        permanent,
-      });
-    },
-    [requireWorkspace, invokeIfTauri],
-  );
-
-  const listSlashCommands: WorkspaceFileService['listSlashCommands'] = useCallback(
-    async () => {
-      const ws = requireWorkspace();
-      return invokeIfTauri<SlashCommandsResponse>('cmd_list_slash_commands', {
-        workspace: ws,
-      });
-    },
-    [requireWorkspace, invokeIfTauri],
-  );
-
-  const dirTree: WorkspaceFileService['dirTree'] = useCallback(async () => {
-    const ws = requireWorkspace();
-    return invokeIfTauri<DirectoryTreeResult>('cmd_workspace_dir_tree', { workspace: ws });
-  }, [requireWorkspace, invokeIfTauri]);
-
-  const dirExpand: WorkspaceFileService['dirExpand'] = useCallback(
-    async ({ path }) => {
-      const ws = requireWorkspace();
-      return invokeIfTauri<ExpandDirectoryResult>('cmd_workspace_dir_expand', {
-        workspace: ws,
-        path,
       });
     },
     [requireWorkspace, invokeIfTauri],
@@ -528,30 +311,6 @@ export function useWorkspaceFileService(workspacePath: string | null): Workspace
     [requireWorkspace, invokeIfTauri],
   );
 
-  const newFile: WorkspaceFileService['newFile'] = useCallback(
-    async ({ parentDir, name }) => {
-      const ws = requireWorkspace();
-      return invokeIfTauri<CreatePathResult>('cmd_workspace_new_file', {
-        workspace: ws,
-        parentDir,
-        name,
-      });
-    },
-    [requireWorkspace, invokeIfTauri],
-  );
-
-  const newFolder: WorkspaceFileService['newFolder'] = useCallback(
-    async ({ parentDir, name }) => {
-      const ws = requireWorkspace();
-      return invokeIfTauri<CreatePathResult>('cmd_workspace_new_folder', {
-        workspace: ws,
-        parentDir,
-        name,
-      });
-    },
-    [requireWorkspace, invokeIfTauri],
-  );
-
   const rename: WorkspaceFileService['rename'] = useCallback(
     async ({ oldPath, newName }) => {
       const ws = requireWorkspace();
@@ -559,18 +318,6 @@ export function useWorkspaceFileService(workspacePath: string | null): Workspace
         workspace: ws,
         oldPath,
         newName,
-      });
-    },
-    [requireWorkspace, invokeIfTauri],
-  );
-
-  const movePaths: WorkspaceFileService['movePaths'] = useCallback(
-    async ({ sourcePaths, targetDir }) => {
-      const ws = requireWorkspace();
-      return invokeIfTauri<MoveResult>('cmd_workspace_move', {
-        workspace: ws,
-        sourcePaths,
-        targetDir,
       });
     },
     [requireWorkspace, invokeIfTauri],
@@ -601,8 +348,7 @@ export function useWorkspaceFileService(workspacePath: string | null): Workspace
   const openPathExternal: WorkspaceFileService['openPathExternal'] = useCallback(
     async ({ fullPath, workspace }) => {
       // No workspace required — this command takes an absolute path.
-      // `workspace` is optional: when present (project-scope skill/command
-      // on a non-system drive), Rust adds it to the trusted-prefix list.
+      // `workspace` is optional: when present, Rust adds it to the trusted-prefix list.
       await invokeIfTauri<void>('cmd_open_path_external', {
         fullPath,
         workspace: workspace?.trim() || null,
@@ -700,25 +446,6 @@ export function useWorkspaceFileService(workspacePath: string | null): Workspace
     [requireWorkspace, invokeIfTauri],
   );
 
-  const readLocalFileAsBlobUrl: WorkspaceFileService['readLocalFileAsBlobUrl'] = useCallback(
-    async ({ fullPath, workspace }) => {
-      const result = await downloadLocalFile({ fullPath, workspace });
-      const binary = atob(result.data);
-      const bytes = new Uint8Array(binary.length);
-      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-      const blob = new Blob([bytes], { type: result.mimeType || 'application/octet-stream' });
-      const blobUrl = URL.createObjectURL(blob);
-      let revoked = false;
-      const revoke = () => {
-        if (revoked) return;
-        revoked = true;
-        URL.revokeObjectURL(blobUrl);
-      };
-      return { blobUrl, mimeType: result.mimeType, name: result.name, revoke };
-    },
-    [downloadLocalFile],
-  );
-
   const saveFile: WorkspaceFileService['saveFile'] = useCallback(
     async ({ path, content, expectedContent }) => {
       const ws = requireWorkspace();
@@ -731,32 +458,6 @@ export function useWorkspaceFileService(workspacePath: string | null): Workspace
     },
     [requireWorkspace, invokeIfTauri],
   );
-
-  const readClaudeMd: WorkspaceFileService['readClaudeMd'] = useCallback(
-    async () => {
-      const ws = requireWorkspace();
-      return invokeIfTauri<ReadClaudeMdResult>('cmd_workspace_read_claude_md', {
-        workspace: ws,
-      });
-    },
-    [requireWorkspace, invokeIfTauri],
-  );
-
-  const writeClaudeMd: WorkspaceFileService['writeClaudeMd'] = useCallback(
-    async ({ content }) => {
-      const ws = requireWorkspace();
-      await invokeIfTauri<void>('cmd_workspace_write_claude_md', {
-        workspace: ws,
-        content,
-      });
-    },
-    [requireWorkspace, invokeIfTauri],
-  );
-
-  const gitBranch: WorkspaceFileService['gitBranch'] = useCallback(async () => {
-    const ws = requireWorkspace();
-    return invokeIfTauri<GitBranchResult>('cmd_workspace_git_branch', { workspace: ws });
-  }, [requireWorkspace, invokeIfTauri]);
 
   const watchStart: WorkspaceFileService['watchStart'] = useCallback(async () => {
     const ws = requireWorkspace();
@@ -771,33 +472,18 @@ export function useWorkspaceFileService(workspacePath: string | null): Workspace
     [invokeIfTauri],
   );
 
-  // Wrap the returned object in useMemo so consumers that put `fileService`
-  // in `useCallback` deps (e.g. SimpleChatInput's processDroppedFiles,
-  // searchFiles, fetchCommands — ~10 sites) don't rebuild on every keystroke.
-  // Pre-PRD-0.2.7 the legacy `apiPost`/`apiGet` came from a stable Tab context;
-  // this useMemo restores that render-loop stability.
+  // Keep a stable facade so consumers can use it safely in callback dependencies.
   const isAvailable = tauri && workspacePath != null;
   return useMemo(
     () => ({
       importBase64Files,
       copyPaths,
-      copyInternal,
-      readPathsAsBase64,
       prepareUserImageAttachments,
       addGitignore,
-      searchFiles,
-      deleteFile,
-      listSlashCommands,
-      // Phase D
-      dirTree,
-      dirExpand,
       readPreview,
       downloadFile,
       downloadFileBytes,
-      newFile,
-      newFolder,
       rename,
-      movePaths,
       openInFinder,
       openWithDefault,
       openPathExternal,
@@ -808,11 +494,7 @@ export function useWorkspaceFileService(workspacePath: string | null): Workspace
       downloadLocalFileBytes,
       checkPaths,
       readFileAsBlobUrl,
-      readLocalFileAsBlobUrl,
       saveFile,
-      readClaudeMd,
-      writeClaudeMd,
-      gitBranch,
       watchStart,
       watchStop,
       isAvailable,
@@ -821,22 +503,12 @@ export function useWorkspaceFileService(workspacePath: string | null): Workspace
     [
       importBase64Files,
       copyPaths,
-      copyInternal,
-      readPathsAsBase64,
       prepareUserImageAttachments,
       addGitignore,
-      searchFiles,
-      deleteFile,
-      listSlashCommands,
-      dirTree,
-      dirExpand,
       readPreview,
       downloadFile,
       downloadFileBytes,
-      newFile,
-      newFolder,
       rename,
-      movePaths,
       openInFinder,
       openWithDefault,
       openPathExternal,
@@ -847,11 +519,7 @@ export function useWorkspaceFileService(workspacePath: string | null): Workspace
       downloadLocalFileBytes,
       checkPaths,
       readFileAsBlobUrl,
-      readLocalFileAsBlobUrl,
       saveFile,
-      readClaudeMd,
-      writeClaudeMd,
-      gitBranch,
       watchStart,
       watchStop,
       isAvailable,

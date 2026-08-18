@@ -3,9 +3,13 @@ import { describe, expect, it } from 'vitest';
 import { toClientSessionMetadata } from './session-metadata-wire';
 
 describe('toClientSessionMetadata', () => {
-  it('projects the legacy disk count as turnCount without mutating storage metadata', () => {
+  it('projects the safe wire shape, omits unknown storage fields and preserves storage metadata', () => {
     const metadata = {
       id: 'session-1',
+      workspacePath: '/brand/acme',
+      title: 'Acme GEO',
+      createdAt: '2026-08-16T00:00:00.000Z',
+      lastActiveAt: '2026-08-16T00:01:00.000Z',
       providerEnvJson: '{"API_KEY":"secret"}',
       stats: {
         messageCount: 3,
@@ -18,7 +22,10 @@ describe('toClientSessionMetadata', () => {
 
     expect(result).toEqual({
       id: 'session-1',
-      providerEnvJson: '[redacted]',
+      workspacePath: '/brand/acme',
+      title: 'Acme GEO',
+      createdAt: '2026-08-16T00:00:00.000Z',
+      lastActiveAt: '2026-08-16T00:01:00.000Z',
       stats: {
         turnCount: 3,
         totalInputTokens: 10,
@@ -29,5 +36,6 @@ describe('toClientSessionMetadata', () => {
     });
     expect(metadata.stats).toHaveProperty('messageCount', 3);
     expect(metadata.providerEnvJson).toContain('secret');
+    expect(result).not.toHaveProperty('providerEnvJson');
   });
 });

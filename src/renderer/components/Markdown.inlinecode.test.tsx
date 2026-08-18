@@ -11,14 +11,9 @@ const mocks = vi.hoisted(() => ({
   openInFinder: vi.fn(),
   readPreview: vi.fn(),
   readLocalPreview: vi.fn(),
-  onInsertReference: vi.fn(),
-  onOpenMyAgentsPreview: vi.fn(),
-  onFilePreviewExternal: vi.fn(),
-  onRevealInTree: vi.fn(),
   writeText: vi.fn(),
   toastError: vi.fn(),
   toastInfo: vi.fn(),
-  openUrl: vi.fn(),
   openExternal: vi.fn(),
 }));
 
@@ -40,6 +35,12 @@ vi.mock('@/context/ImagePreviewContext', () => ({
   useImagePreview: () => ({ openPreview: mocks.openImagePreview }),
 }));
 
+vi.mock('@/components/FilePreviewModal', () => ({
+  default: ({ path, content }: { path: string; content: string }) => (
+    <output data-testid="fullscreen-file-preview">{JSON.stringify({ path, content })}</output>
+  ),
+}));
+
 vi.mock('@/hooks/useWorkspaceFileService', () => ({
   useWorkspaceFileService: () => ({
     isAvailable: true,
@@ -59,11 +60,10 @@ vi.mock('@/hooks/useWorkspaceFileService', () => ({
 }));
 
 import { FileActionProvider } from '@/context/FileActionContext';
-import { BrowserPanelContext } from '@/context/BrowserPanelContext';
 
 import Markdown from './Markdown';
 
-const WORKSPACE = '/Users/zhihu/Documents/project/mino';
+const WORKSPACE = '/Users/zhihu/Documents/project/xiaojing-brand';
 const REL = '.claude/rules/04-MEMORY.md';
 const ABS = `${WORKSPACE}/${REL}`;
 
@@ -75,26 +75,8 @@ function deferred<T>() {
 
 function renderMarkdown(markdown: string) {
   render(
-    <BrowserPanelContext.Provider value={{ openUrl: mocks.openUrl }}>
-      <FileActionProvider
-        workspacePath={WORKSPACE}
-        onInsertReference={mocks.onInsertReference}
-        onFilePreviewExternal={mocks.onFilePreviewExternal}
-        onRevealInTree={mocks.onRevealInTree}
-      >
-        <Markdown>{markdown}</Markdown>
-      </FileActionProvider>
-    </BrowserPanelContext.Provider>,
-  );
-}
-
-function renderFloatingMarkdown(markdown: string) {
-  render(
     <FileActionProvider
       workspacePath={WORKSPACE}
-      onInsertReference={mocks.onInsertReference}
-      menuProfile="floatingBall"
-      onOpenMyAgentsPreview={mocks.onOpenMyAgentsPreview}
     >
       <Markdown>{markdown}</Markdown>
     </FileActionProvider>,
@@ -132,10 +114,9 @@ describe('Markdown inline-code file paths', () => {
     });
     expect(mocks.checkPaths).toHaveBeenCalledWith({ paths: [REL] });
     fireEvent.click(chip);
-    await waitFor(() => expect(mocks.onFilePreviewExternal).toHaveBeenCalledWith(expect.objectContaining({
-      path: REL,
-      content: '# memory',
-    })));
+    await waitFor(() => expect(screen.getByTestId('fullscreen-file-preview')).toHaveTextContent(
+      JSON.stringify({ path: REL, content: '# memory' }),
+    ));
     expect(screen.queryByText('预览')).not.toBeInTheDocument();
   });
 
@@ -220,30 +201,14 @@ describe('Markdown inline-code file paths', () => {
 
     // 复制 sits directly after 预览 in the menu.
     const labels = screen.getAllByRole('button').map((b) => b.textContent);
-    expect(labels).toEqual(['预览', '复制', '引用', '打开', '打开所在文件夹', '在文件目录中展示']);
+    expect(labels).toEqual(['预览', '复制', '打开', '打开所在文件夹']);
 
     fireEvent.click(screen.getByText('复制'));
     // Copies exactly the shown text (relative here, as the model wrote it).
     expect(mocks.writeText).toHaveBeenCalledWith(REL);
   });
 
-  it('uses the floating-ball four-action menu profile', async () => {
-    mocks.checkPaths.mockResolvedValue({ results: { [REL]: { exists: true, type: 'file' } } });
-    renderFloatingMarkdown(`v4 已存到 \`${REL}\` 。`);
-
-    const chip = await waitFor(() => {
-      const el = screen.getByText(REL);
-      expect(el).toHaveClass('cursor-pointer');
-      return el;
-    });
-    fireEvent.click(chip);
-    await waitFor(() => expect(mocks.onOpenMyAgentsPreview).toHaveBeenCalledWith(
-      REL,
-      expect.objectContaining({ displayPath: REL }),
-    ));
-  });
-
-  it('reveals a directory on primary click and keeps the menu on right-click', async () => {
+  it('opens a directory on primary click and keeps the menu on right-click', async () => {
     const dir = '.claude/rules';
     mocks.checkPaths.mockResolvedValue({ results: { [dir]: { exists: true, type: 'dir' } } });
     renderMarkdown(`见 \`${dir}\`。`);
@@ -254,7 +219,7 @@ describe('Markdown inline-code file paths', () => {
       return el;
     });
     fireEvent.click(chip);
-    await waitFor(() => expect(mocks.onRevealInTree).toHaveBeenCalledWith(dir));
+    await waitFor(() => expect(mocks.openWithDefault).toHaveBeenCalledWith({ path: dir }));
     expect(screen.queryByText('打开所在文件夹')).not.toBeInTheDocument();
 
     fireEvent.contextMenu(chip);
@@ -273,7 +238,7 @@ describe('Markdown inline-code file paths', () => {
     fireEvent.click(chip, { metaKey: true });
 
     await waitFor(() => expect(mocks.openWithDefault).toHaveBeenCalledWith({ path: REL }));
-    expect(mocks.onFilePreviewExternal).not.toHaveBeenCalled();
+    expect(mocks.readPreview).not.toHaveBeenCalled();
   });
 
   it('exposes verified file code as a keyboard link without hijacking text selection', async () => {
@@ -283,12 +248,12 @@ describe('Markdown inline-code file paths', () => {
     expect(chip).toHaveAttribute('tabindex', '0');
 
     fireEvent.keyDown(chip, { key: 'Enter' });
-    await waitFor(() => expect(mocks.onFilePreviewExternal).toHaveBeenCalled());
+    await waitFor(() => expect(mocks.readPreview).toHaveBeenCalledWith({ path: REL }));
 
-    mocks.onFilePreviewExternal.mockClear();
+    mocks.readPreview.mockClear();
     vi.spyOn(window, 'getSelection').mockReturnValue({ toString: () => REL } as Selection);
     fireEvent.click(chip);
-    expect(mocks.onFilePreviewExternal).not.toHaveBeenCalled();
+    expect(mocks.readPreview).not.toHaveBeenCalled();
   });
 
   it('rechecks before primary click and revokes a stale affordance', async () => {
@@ -305,7 +270,7 @@ describe('Markdown inline-code file paths', () => {
 
     await waitFor(() => expect(mocks.toastError).toHaveBeenCalledWith('文件不存在或无法访问'));
     expect(screen.getByText(REL)).not.toHaveClass('cursor-pointer');
-    expect(mocks.onFilePreviewExternal).not.toHaveBeenCalled();
+    expect(mocks.readPreview).not.toHaveBeenCalled();
   });
 
   it('rechecks before right-click and never opens a stale file menu', async () => {
@@ -347,7 +312,7 @@ describe('Markdown inline-code file paths', () => {
     await older.promise;
 
     expect(screen.getByText(REL)).not.toHaveClass('cursor-pointer');
-    expect(mocks.onFilePreviewExternal).not.toHaveBeenCalled();
+    expect(mocks.readPreview).not.toHaveBeenCalled();
   });
 
   it('promotes a valid backtick HTTP(S) URL without sending it to file checks', () => {
@@ -356,11 +321,11 @@ describe('Markdown inline-code file paths', () => {
 
     const link = screen.getByRole('link', { name: url });
     fireEvent.click(link);
-    expect(mocks.openUrl).toHaveBeenCalledWith(url);
-    expect(mocks.openExternal).not.toHaveBeenCalled();
+    expect(mocks.openExternal).toHaveBeenCalledWith(url);
     expect(mocks.checkPaths).not.toHaveBeenCalled();
     expect(mocks.checkLocalPaths).not.toHaveBeenCalled();
 
+    mocks.openExternal.mockClear();
     fireEvent.click(link, { ctrlKey: true });
     expect(mocks.openExternal).toHaveBeenCalledWith(url);
   });

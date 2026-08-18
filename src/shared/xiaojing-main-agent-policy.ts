@@ -8,7 +8,9 @@ export const XIAOJING_MAIN_AGENT = {
   providerId: 'deepseek',
   model: 'deepseek-v4-pro',
   reasoningEffort: 'high',
-  permissionMode: 'auto',
+  // 'default' 保证每个工具调用都咨询 canUseTool 终审闸门；'auto' 把部分
+  // 裁决交给 CLI 自动裁量，可能绕过闸门，不得用于本产品。
+  permissionMode: 'default',
   credentialEnv: 'XIAOJING_DEEPSEEK_API_KEY',
   inferenceOrigin: 'https://api.deepseek.com',
   anthropicBaseUrl: 'https://api.deepseek.com/anthropic',

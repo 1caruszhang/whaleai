@@ -94,8 +94,8 @@ export function tryClaimSessionResourceTransition(
  * A Session row is a projection over both persisted history and any mounted
  * Tabs. Storage deletion must therefore happen only after App has unmounted
  * every matching Chat surface and Rust has observed every Tab owner release.
- * Persistent Task/Goal/Agent/background owners remain authoritative in Rust
- * and are never released as a side effect of deleting history.
+ * A Rust-owned background completion remains authoritative and is never
+ * released as a side effect of deleting history.
  */
 export async function deleteSessionThroughAppOwner({
     sessionId,

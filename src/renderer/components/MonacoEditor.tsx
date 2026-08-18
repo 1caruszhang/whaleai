@@ -9,9 +9,8 @@
  * - Local bundle (no CDN) for Tauri CSP compatibility
  */
 import Editor, { loader, type Monaco } from '@monaco-editor/react';
-import { ClipboardPaste, Copy, Loader2, Quote, Scissors, Search, TextSelect } from 'lucide-react';
+import { ClipboardPaste, Copy, Loader2, Scissors, Search, TextSelect } from 'lucide-react';
 import * as monaco from 'monaco-editor';
-import { retainFocusOnMouseDown } from '@/utils/focusRetention';
 import {
     closestMonacoFindButton,
     computeMonacoFindTooltipPosition,
@@ -61,15 +60,6 @@ function safeMonacoThemeSegment(value: string): string {
 // Re-export language utilities from shared module for backward compatibility
 export { getMonacoLanguage, shouldShowLineNumbers } from '@/utils/languageUtils';
 
-/** Selection payload emitted by `onQuote`. Lines are already trimmed of leading/trailing
- *  blank-only lines and `endLine` is decremented when the selection ends at column 1
- *  (i.e. user dragged to the start of the next line but didn't include any text from it). */
-export interface MonacoQuoteSelection {
-    text: string;
-    startLine: number;
-    endLine: number;
-}
-
 interface MonacoEditorProps {
     value: string;
     onChange: (value: string) => void;
@@ -85,10 +75,6 @@ interface MonacoEditorProps {
     /** Search/file-link navigation target. Unlike initialLineNumber this is an event:
      *  a new requestId must re-center even when the line number did not change. */
     focusTarget?: FilePreviewFocusTarget;
-    /** When provided, a floating「引用」button appears above any non-empty selection.
-     *  Clicking it calls back with the selection's text + 1-based line range, then clears
-     *  the selection. When omitted, no quote affordance is rendered (Monaco-side default). */
-    onQuote?: (selection: MonacoQuoteSelection) => void;
     /** Soft-wrap mode. Default `'on'`. Pass `'off'` for files with pathologically
      *  long lines (data / minified JSON): Monaco's `wrappingStrategy: 'advanced'`
      *  font-measured wrap of a 30k+ char line is the dominant load cost, and such
@@ -107,7 +93,6 @@ export default function MonacoEditor({
     onSave,
     initialLineNumber,
     focusTarget,
-    onQuote,
     wordWrap = 'on',
 }: MonacoEditorProps) {
     const { t } = useTranslation('app');
@@ -118,7 +103,7 @@ export default function MonacoEditor({
     const resolvedTheme = useResolvedTheme();
     const monacoTheme = resolvedTheme.adapters.monaco;
     const activeTheme = useMemo(
-        () => `myagents-${safeMonacoThemeSegment(resolvedTheme.themeId)}-${safeMonacoThemeSegment(monacoTheme.name)}`,
+        () => `xiaojing-${safeMonacoThemeSegment(resolvedTheme.themeId)}-${safeMonacoThemeSegment(monacoTheme.name)}`,
         [monacoTheme.name, resolvedTheme.themeId],
     );
 
@@ -138,16 +123,7 @@ export default function MonacoEditor({
     const onSaveRef = useRef(onSave);
     useEffect(() => { onSaveRef.current = onSave; }, [onSave]);
 
-    // Stable ref for onQuote — listener is registered once at mount but caller's callback
-    // identity may change across renders (e.g. when path/onQuoteSelection change in parent).
-    const onQuoteRef = useRef(onQuote);
-    useEffect(() => { onQuoteRef.current = onQuote; }, [onQuote]);
-
-    // Selection-quote menu state (ignored when onQuote is undefined). Editor instance held
-    // in a ref because we need to query selection at click time outside React effects.
     const editorRef = useRef<monaco.editor.IStandaloneCodeEditor | null>(null);
-    const [quoteMenu, setQuoteMenu] = useState<{ x: number; y: number; above: boolean } | null>(null);
-    const quoteRafRef = useRef<number | null>(null);
     const focusDecorationIdsRef = useRef<string[]>([]);
     const focusClearTimerRef = useRef<number | null>(null);
     const focusMountTimerRef = useRef<number | null>(null);
@@ -234,7 +210,7 @@ export default function MonacoEditor({
                 range: new monaco.Range(lineNumber, 1, lineNumber, 1),
                 options: {
                     isWholeLine: true,
-                    className: 'myagents-monaco-search-focus-line',
+                    className: 'xiaojing-monaco-search-focus-line',
                 },
             },
         ]);
@@ -245,101 +221,6 @@ export default function MonacoEditor({
         }, 1800);
         return true;
     }, [clearFocusDecoration]);
-
-    /** Compute viewport coords for the quote menu given a current non-empty selection.
-     *  Mirrors SelectionCommentMenu's positioning: anchor at start of selection, prefer
-     *  above; fall back below when too close to viewport top. Returns null when the
-     *  selection is empty / off-screen / editor is unmounted. */
-    const computeQuoteMenuPosition = useCallback((editor: monaco.editor.IStandaloneCodeEditor) => {
-        const sel = editor.getSelection();
-        if (!sel || sel.isEmpty()) return null;
-        const editorEl = editor.getDomNode();
-        if (!editorEl) return null;
-        const local = editor.getScrolledVisiblePosition({
-            lineNumber: sel.startLineNumber,
-            column: sel.startColumn,
-        });
-        if (!local) return null;
-        const editorRect = editorEl.getBoundingClientRect();
-        const viewportX = editorRect.left + local.left;
-        const viewportY = editorRect.top + local.top;
-        const MENU_WIDTH = 96; // single-button menu, ~80–96px
-        const MENU_HEIGHT = 36;
-        const x = Math.max(8, Math.min(viewportX, window.innerWidth - MENU_WIDTH - 8));
-        const showAbove = viewportY >= MENU_HEIGHT + 8;
-        const y = showAbove ? viewportY : viewportY + (local.height ?? 18) + 6;
-        // Clamp inside editor's vertical bounds so the menu doesn't float above the
-        // toolbar / below the editor when selection is partially scrolled out of view.
-        if (y < editorRect.top - MENU_HEIGHT || y > editorRect.bottom + MENU_HEIGHT) return null;
-        return { x, y, above: showAbove };
-    }, []);
-
-    /** Schedule a menu update on next animation frame. RAF coalesces the storm of
-     *  selection-change events emitted during a mouse drag (Monaco fires per pixel) into
-     *  a single position recompute, and naturally handles keyboard selection (shift+arrow)
-     *  the same way without an extra mouseup hook. Bails early when the parent didn't opt
-     *  into quoting so non-chat callers (settings panels etc.) pay zero per-selection cost. */
-    const scheduleQuoteMenuUpdate = useCallback(() => {
-        if (!onQuoteRef.current) return;
-        if (quoteRafRef.current !== null) return;
-        quoteRafRef.current = requestAnimationFrame(() => {
-            quoteRafRef.current = null;
-            const editor = editorRef.current;
-            if (!editor || !onQuoteRef.current) {
-                setQuoteMenu(null);
-                return;
-            }
-            setQuoteMenu(computeQuoteMenuPosition(editor));
-        });
-    }, [computeQuoteMenuPosition]);
-
-    /** Handle a click on the floating「引用」button: pull current selection from Monaco,
-     *  trim leading/trailing blank-only lines (recompute startLine/endLine to match), drop
-     *  trailing line when selection ends at column 1, then deliver to caller and clear. */
-    const handleQuoteClick = useCallback(() => {
-        const editor = editorRef.current;
-        const onQuoteFn = onQuoteRef.current;
-        if (!editor || !onQuoteFn) return;
-        const sel = editor.getSelection();
-        const model = editor.getModel();
-        if (!sel || sel.isEmpty() || !model) return;
-
-        // If user dragged to the start of next line, the included content stops at the
-        // previous line — clamp endLine accordingly so emitted range matches what they see.
-        let effEndLine = sel.endLineNumber;
-        let effEndColumn = sel.endColumn;
-        if (sel.endColumn === 1 && sel.endLineNumber > sel.startLineNumber) {
-            effEndLine = sel.endLineNumber - 1;
-            effEndColumn = model.getLineMaxColumn(effEndLine);
-        }
-
-        const text = model.getValueInRange({
-            startLineNumber: sel.startLineNumber,
-            startColumn: sel.startColumn,
-            endLineNumber: effEndLine,
-            endColumn: effEndColumn,
-        });
-
-        // Trim head/tail blank-only lines & shift line range.
-        const lines = text.split('\n');
-        let headSkip = 0;
-        while (headSkip < lines.length && lines[headSkip].trim() === '') headSkip++;
-        let tailSkip = 0;
-        while (tailSkip < lines.length - headSkip && lines[lines.length - 1 - tailSkip].trim() === '') tailSkip++;
-        const trimmedText = lines.slice(headSkip, lines.length - tailSkip).join('\n');
-        const startLine = sel.startLineNumber + headSkip;
-        const endLine = effEndLine - tailSkip;
-
-        if (!trimmedText.trim() || endLine < startLine) {
-            // All blank — bail out without emitting; clear selection so the menu hides.
-            editor.setSelection({ startLineNumber: sel.startLineNumber, startColumn: sel.startColumn, endLineNumber: sel.startLineNumber, endColumn: sel.startColumn });
-            return;
-        }
-
-        onQuoteFn({ text: trimmedText, startLine, endLine });
-        // Clear selection so the menu auto-hides.
-        editor.setSelection({ startLineNumber: sel.startLineNumber, startColumn: sel.startColumn, endLineNumber: sel.startLineNumber, endColumn: sel.startColumn });
-    }, []);
 
     // Force apply theme after mount to ensure it takes effect
     // This handles the case where beforeMount's defineTheme might not sync immediately
@@ -354,14 +235,7 @@ export default function MonacoEditor({
             () => { onSaveRef.current?.(); }
         );
 
-        // Quote-menu wiring: register once. `onQuote` is read via ref so the listener
-        // doesn't need re-registration when the callback identity changes upstream.
         const disposables: monaco.IDisposable[] = [];
-        disposables.push(editor.onDidChangeCursorSelection(() => { scheduleQuoteMenuUpdate(); }));
-        // Reposition menu while user scrolls the editor — selection stays put, but its
-        // viewport coordinates move. Without this the menu would visually detach from the
-        // selection during scroll.
-        disposables.push(editor.onDidScrollChange(() => { scheduleQuoteMenuUpdate(); }));
         const editorDom = editor.getDomNode();
         if (editorDom) {
             const stayedInsideButton = (button: HTMLElement, relatedTarget: EventTarget | null) => {
@@ -410,9 +284,6 @@ export default function MonacoEditor({
                 },
             });
         }
-        // When the editor loses focus to a click outside (e.g. the menu button itself
-        // intercepts mousedown to preserve selection), Monaco still keeps the selection.
-        // No extra blur handling needed — selection-change covers clearing.
         editor.onDidDispose(() => {
             for (const d of disposables) d.dispose();
             clearFocusDecoration(editor);
@@ -453,7 +324,6 @@ export default function MonacoEditor({
         hideFindTooltip,
         initialLineNumber,
         scheduleFindTooltip,
-        scheduleQuoteMenuUpdate,
         showFindTooltipForButton,
     ]);
 
@@ -465,20 +335,11 @@ export default function MonacoEditor({
         }
     }, [applyFocusTarget, clearPendingFocusTimer, focusTarget]);
 
-    // Cancel any pending RAF on unmount to avoid setState-after-unmount warning.
     useEffect(() => () => {
-        if (quoteRafRef.current !== null) cancelAnimationFrame(quoteRafRef.current);
         clearFindTooltipTimer();
         clearPendingFocusTimer();
         clearFocusDecoration();
     }, [clearFindTooltipTimer, clearFocusDecoration, clearPendingFocusTimer]);
-
-    // Defense for `onQuote` flipping defined → undefined mid-session: the JSX render-side
-    // guard `{onQuote && quoteMenu && ...}` already hides the stale menu visually, and the
-    // next `onDidChangeCursorSelection` (which fires the moment user touches the editor
-    // again) overwrites `quoteMenu` with a fresh position when `onQuote` becomes defined
-    // again. So no `useEffect`-based clear is needed — that would also trip the
-    // `react-hooks/set-state-in-effect` rule by writing state from an effect.
 
     // Right-click context menu. Monaco's own menu is disabled (`contextmenu: false`
     // below) — it ships English labels and Monaco's own theme, and on macOS its
@@ -668,34 +529,6 @@ export default function MonacoEditor({
                     </div>
                 }
             />
-            {/* Floating「引用」menu — only mounted when caller opted in via `onQuote`.
-                Visual mirrors SelectionCommentMenu (`z-[300]`, same panel + button classes)
-                so reading flow between assistant-message quote and file-selection quote
-                stays identical. `retainFocusOnMouseDown` on both the panel and the button
-                keeps Monaco's selection alive while the click registers — otherwise the
-                editor steals focus on mousedown and clears the selection before
-                `handleQuoteClick` can read `editor.getSelection()`. */}
-            {onQuote && quoteMenu && (
-                <div
-                    className="fixed z-[300] flex items-center gap-0.5 rounded-lg border border-[var(--line-strong)] bg-[var(--paper-elevated)] px-1 py-0.5 shadow-md"
-                    style={{
-                        left: quoteMenu.x,
-                        top: quoteMenu.y,
-                        transform: quoteMenu.above ? 'translateY(calc(-100% - 6px))' : undefined,
-                    }}
-                    onMouseDown={retainFocusOnMouseDown}
-                >
-                    <button
-                        type="button"
-                        className="flex items-center gap-1 rounded-md px-2 py-1 text-sm font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
-                        onClick={handleQuoteClick}
-                        onMouseDown={retainFocusOnMouseDown}
-                    >
-                        <Quote className="h-3 w-3" />
-                        {t('monacoEditor.quote')}
-                    </button>
-                </div>
-            )}
             {/* Portaled to <body> so the host's `overflow-hidden` (and any transformed
                 modal ancestor) can never clip the floating menu — same reason
                 FilePreviewModal portals itself. x/y are viewport coords, which is what
@@ -706,16 +539,14 @@ export default function MonacoEditor({
                     y={ctxMenu.y}
                     items={buildContextMenuItems()}
                     onClose={() => setCtxMenu(null)}
-                    // Above FilePreviewModal (z-[210]) and the quote menu (z-[300]) —
-                    // the editor is most often mounted inside that modal, where the
-                    // default z-50 would render the menu behind the backdrop.
+                    // Above FilePreviewModal (z-[210]) so the menu is not hidden by the backdrop.
                     zIndex={320}
                 />,
                 document.body,
             )}
             {findTooltip && createPortal(
                 <div
-                    className="myagents-monaco-find-tooltip"
+                    className="xiaojing-monaco-find-tooltip"
                     style={{ left: findTooltip.x, top: findTooltip.top }}
                 >
                     {findTooltip.label}

@@ -5,7 +5,6 @@ import { createPortal } from 'react-dom';
 import ContextMenu, { type ContextMenuItem } from './ContextMenu';
 import { useToast } from './Toast';
 import { isExternalUrl, openExternal } from '@/utils/openExternal';
-import { CUSTOM_EVENTS } from '../../shared/constants';
 import { copyPlainText } from '@/utils/clipboard';
 
 // Global delegated right-click handler for external `<a href="…">` links.
@@ -20,11 +19,7 @@ import { copyPlainText } from '@/utils/clipboard';
 // Behavior: this provider attaches a single capture-phase `contextmenu`
 // listener on `document`. When the event target is inside `a[href]` and the
 // href is an external URL (http/https/mailto), it suppresses the native menu
-// and renders a custom one with three actions:
-//   - 预览（内置浏览器）：dispatch CUSTOM_EVENTS.OPEN_IN_BROWSER_PANEL.
-//     Active Chat tab listens; if its split BrowserPanel is available, it
-//     calls preventDefault() to claim the action. Otherwise we fall back to
-//     openExternal so the action always feels responsive.
+// and renders a custom one with copy and system-browser actions.
 //   - 拷贝链接：cross-WebView clipboard helper + toast feedback.
 //   - 在系统浏览器中打开：openExternal (existing routing).
 // Non-external anchors (in-page #anchors, file paths) keep their default
@@ -67,22 +62,6 @@ export default function LinkContextMenuProvider({ children }: { children: React.
 
     const items: ContextMenuItem[] = menu
         ? [
-              ...(/^https?:\/\//i.test(menu.href) ? [{
-                  label: t('linkContext.previewInternal'),
-                  onClick: () => {
-                      const url = menu.href;
-                      const event = new CustomEvent(CUSTOM_EVENTS.OPEN_IN_BROWSER_PANEL, {
-                          detail: { url },
-                          cancelable: true,
-                      });
-                      window.dispatchEvent(event);
-                      // No active Chat tab claimed the action — fall back to
-                      // system browser so the click never feels dead.
-                      if (!event.defaultPrevented) {
-                          void openExternal(url);
-                      }
-                  },
-              } satisfies ContextMenuItem] : []),
               {
                   label: t('linkContext.copyLink'),
                   onClick: () => {

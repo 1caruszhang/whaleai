@@ -1,2 +1,0 @@
-export const SEARCH_REFRESH_DELAY_MS = 250;
-export const REVEAL_NODE_WAIT_FRAMES = 180;

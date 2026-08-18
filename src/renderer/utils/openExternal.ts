@@ -14,7 +14,7 @@
 // on non-system drives (`D:\`, mapped drives) hit `Path not allowed`
 // because the workspace path doesn't start with `USERPROFILE` or `%TEMP%`.
 // Callers that know the path lives inside a chat workspace pass
-// `{ workspace: agentDir }` so Rust can add that root to the trusted-prefix
+// `{ workspace: workspacePath }` so Rust can add that root to the trusted-prefix
 // list. The home-anchored credential blacklist (`<home>/.ssh`,
 // `Library/Keychains`, etc.) still applies, but it does NOT cover
 // workspace-relative credential dirs — that's consistent with the rest
@@ -34,12 +34,8 @@ import { isTauriEnvironment } from './browserMock';
 
 export interface OpenExternalOptions {
     /**
-     * Workspace root the file target belongs to, for callers operating
-     * inside a chat workspace (BrowserPanel previewing a workspace HTML
-     * file, project-scope SkillDetailPanel / CommandDetailPanel). When
-     * provided, Rust adds the canonical workspace root to the trusted
-     * prefix list, fixing the "workspace on D:\ → Path not allowed" bug
-     * (issue #125 follow-up). No-op for web URLs.
+     * Workspace root the attachment or preview target belongs to. Rust adds
+     * the canonical workspace root to the trusted prefix list. No-op for web URLs.
      */
     workspace?: string | null;
 }
@@ -153,17 +149,4 @@ export function toLocalFilePath(target: string): string | null {
     if (target.startsWith('/')) return target;
     if (/^[A-Za-z]:[\\/]/.test(target)) return target;
     return null;
-}
-
-/**
- * Check if a string looks like a file path (Unix/Windows/home).
- * Kept exported for legacy callers; new code should use `openExternal`
- * directly (it handles routing).
- */
-export function isFilePath(str: string): boolean {
-    if (!str) return false;
-    if (str.startsWith('/')) return true;
-    if (/^[a-zA-Z]:\\/.test(str)) return true;
-    if (str.startsWith('~/')) return true;
-    return false;
 }

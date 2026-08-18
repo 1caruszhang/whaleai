@@ -4,6 +4,10 @@ import {
   createGeoProviderCapabilities,
   type GeoProviderCapabilities,
 } from "./provider-capabilities";
+import {
+  configureGeoProviderAdmission,
+  wrapGeoProviderCapabilities,
+} from "./provider-admission";
 
 // Capture once at module birth. `xiaojing-geo-tool` imports this module while
 // the Session Sidecar is composing, before any generic subprocess can inherit
@@ -14,6 +18,15 @@ runtimeSecrets.deepseekApiKey = resolveXiaojingDeepseekSecret();
 let capabilities: GeoProviderCapabilities | undefined;
 
 export function getXiaojingGeoProviderCapabilities(): GeoProviderCapabilities {
-  capabilities ??= createGeoProviderCapabilities(runtimeSecrets);
+  capabilities ??= wrapGeoProviderCapabilities(
+    createGeoProviderCapabilities(runtimeSecrets),
+  );
   return capabilities;
+}
+
+export function configureXiaojingGeoProviderAdmission(input: {
+  workspacePath?: string;
+  sessionId: string;
+}): void {
+  configureGeoProviderAdmission(input);
 }

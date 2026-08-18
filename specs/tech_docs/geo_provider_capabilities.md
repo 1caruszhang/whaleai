@@ -21,7 +21,7 @@
 | `main-agent`     | DeepSeek `deepseek-v4-pro`，官方 Anthropic endpoint                 | high reasoning；沿 Ticket 04 Agent loop                                                              |
 | `extraction`     | DeepSeek `deepseek-chat`，Chat Completions                          | 非推理抽取，避免多字段 JSON 被长思考饿死                                                             |
 | `keyword-search` | ARK paygo `/api/v3/chat/completions`，`doubao-seed-2-0-lite-260428` | body `enable_search:true`；Agent Plan endpoint 不得替代                                              |
-| `generation`     | ARK paygo `/api/v3/chat/completions`，`doubao-seed-2-0-pro-260215`  | 正文与标题统一使用质量关键 pro 路由                                                                  |
+| `generation`     | ARK paygo `/api/v3/chat/completions`                                | 默认 `doubao-seed-2-0-pro-260215`；标题规划 purpose 固定 `doubao-seed-2-0-mini-260428`，不增加第九槽位 |
 | `reflection`     | DeepSeek `deepseek-v4-pro`，Chat Completions                        | 高推理审校；纯规则风控仍先执行                                                                       |
 | `embedding`      | ARK `/api/v3/embeddings/multimodal`，用户接入点 ID                  | `input:[{type:'text',text}]`；一次一段文本、单融合向量、2048 维、并发 2、额外重试 2 次（500/1000ms） |
 | `object-storage` | 阿里云 OSS virtual-hosted URL                                       | HTML `PUT`，OSS V1 HMAC-SHA1；正文不进入 Agent prompt                                                |
@@ -30,6 +30,14 @@
 `extraction` 槽位的首个业务消费者是 `src/server/geo/material-import.ts::MaterialImportService`。它只接收 Rust 已保存并按 material ID 返回的有界内容；抽取响应经过 Profile 字段/provenance/scope 校验后统一进入 `KnowledgeAuthority`。该步骤不得自行读取本机路径、写 authority 或记录 prompt/response。完整边界见 `material_import.md`。
 
 豆包 Responses `doubao_app` 与独立 `open.feedcoopapi.com` 搜索仍是 js_ai 已验证的后续召回语义，但不与当前“关键词搜索”槽位混写：当前槽位严格对应关键词挖掘的 paygo Chat + `enable_search`。后续实现被动召回时，应在同一 typed search port 下扩展显式操作，而不是建立通用 Provider 市场。
+
+Ticket 09 已在同一个 `keyword-search` typed port 上增加显式 `probeQuestion` 操作：固定使用 ARK Responses `/responses` 与 `doubao_app.ai_search`，逐个已确认问题保存回答和结构化引用。该操作与关键词挖掘的 Chat + `enable_search` wire shape 分开，仍共享同一 ARK 应用级凭据 owner；其非 secret model/mode/endpoint-family snapshot 由 baseline 持久化，密钥和 Authorization 永不进入 snapshot 或品牌库。
+
+Ticket 10 的标题规划继续使用 `generation` port，但通过显式 `purpose: title-planning` 选择 js_ai `dev` 固定的 mini 模型；聚类与类型推荐仍使用 generation 默认 pro 模型。Topic plan 同时保存这两个非 secret model snapshot 与逐阶段 attempt。任何模型不可用、响应解析失败、标题约束不足或 Embedding 去重失败都显式失败，不能调用 js_ai 的 `generateMockTitles` 或模板 fallback 生成生产计划。
+
+Ticket 11 的正文使用 `generation` 默认 pro 模型并显式保留 js_ai 参数 `max_tokens=8192 / temperature=0.85 / top_p=0.9`；审校使用 `reflection` DeepSeek pro。Provider 响应不直接拥有批准权：确定性事实、广告法、占位符和可引用结构检查先执行，再与严格 reflection JSON 合并。任一 Provider 缺失、解析失败或硬门失败均显式阻断，不能返回模板、mock 或随机正文。正文和 review response 不记录到 Provider 状态、日志或 Session transcript。
+
+Ticket 12 的渠道发现只使用 `distribution` port 分页读取媒体与自媒体资源。Node 按 kind 保存 30 分钟非 secret snapshot cache，并合并同 kind 并发读取；Sidecar generation 替换后不复用旧缓存。资源目录不可用时只保存明确 unavailable 状态和空候选，不回退到 demo、随机或 LLM 伪造资源。候选的 name/price/rate/status 均以 typed resource snapshot 为准；本阶段没有超级媒介下单调用，credentialed smoke 也不得提交订单。
 
 ## 配置与状态
 

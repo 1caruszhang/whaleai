@@ -47,7 +47,7 @@ const GLOBAL_RESTRICTED_SYNTAX = [
   {
     // CLAUDE.md red-line: `<expr>.toISOString().split('T')[0]` returns the
     // UTC date. The unified log filename is built from the *local* date
-    // (`~/.myagents/logs/unified-{YYYY-MM-DD}.log`), so using the UTC date
+    // (the Xiaojing local-data log directory), so using the UTC date
     // here means writes land in the wrong file for ~1/3 of every day in
     // UTC+8. The bug manifests as missing log entries when a user grep's
     // "today's" log around midnight CN time.
@@ -65,21 +65,6 @@ const GLOBAL_RESTRICTED_SYNTAX = [
     selector: "JSXOpeningElement[name.name='select']",
     message:
       'Native <select> renders the OS dropdown — looks alien on every platform, cannot be themed, breaks DESIGN.md visual consistency. Use <CustomSelect> from @/components/CustomSelect. CLAUDE.md red-line.'
-  },
-  {
-    // CLAUDE.md red-line: `shouldAbortSession = true` is the persistent-
-    // session abort flag. Setting it directly skips the surrounding cleanup
-    // (rescue pending items, notify IM bus subscribers, wake blocked
-    // generator) and leaves the SDK in an inconsistent state — pending
-    // requests never get an error reply and IM subscribers hang. The ONLY
-    // legitimate setter is inside `abortPersistentSession()` in
-    // agent-session.ts, which performs the full teardown sequence.
-    // Re-setting it to `false` (lifecycle reset at session boundaries) is
-    // fine — that's why we only ban `= true`.
-    selector:
-      "AssignmentExpression[operator='='][left.name='shouldAbortSession'][right.type='Literal'][right.value=true]",
-    message:
-      'Direct `shouldAbortSession = true` skips the abort cleanup chain (pending request rescue, IM bus notification, generator wake) — pending IM replies hang forever. Call abortPersistentSession() instead. CLAUDE.md red-line.'
   },
   // PRD 0.2.34 Part 3: tiers `text-2xs`(10) / `text-2sm`(12) / `text-md`(14)
   // were DELETED (merged into text-xs=12 / text-sm=14). No @theme token →
@@ -122,22 +107,18 @@ const SIDECAR_RESTRICTED_SYNTAX = [
   }
 ];
 
-// Tools + plugin-bridge restrictions. Includes everything in SIDECAR plus
-// the bare-fetch ban — these code paths run inside SDK turns / IM bridge
-// processing, where a stuck fetch holds the turn / message indefinitely.
-const TOOLS_BRIDGE_RESTRICTED_SYNTAX = [
+// GEO tool restrictions. A stuck fetch would hold the active SDK turn.
+const GEO_TOOL_RESTRICTED_SYNTAX = [
   ...SIDECAR_RESTRICTED_SYNTAX,
   {
-    // CLAUDE.md red-line: bare fetch() inside tool / bridge code has no
-    // AbortSignal, so when the upstream hangs (Feishu API timeout, network
-    // pause, server slow-loris) the tool turn / IM message processing
-    // hangs forever. The whole user-visible session appears frozen until
-    // the OS TCP timeout (minutes). cancellableFetch() wires a 30s default
+    // Bare fetch() inside the GEO tool has no default AbortSignal, so when
+    // the upstream hangs the active turn appears frozen until OS timeout.
+    // cancellableFetch() wires a 30s default
     // timeout AND parent-signal propagation so caller cancellation
     // (turn abort, session cancel, …) actually tears down the request.
     selector: "CallExpression[callee.type='Identifier'][callee.name='fetch']",
     message:
-      'Bare fetch() in tools/bridge has no AbortSignal — upstream hang freezes the SDK turn / IM message until OS TCP timeout (minutes). Use cancellableFetch from @/server/utils/cancellation, which wires a default 30s timeout and propagates parent abort signals. CLAUDE.md red-line.'
+      'Bare fetch() in the GEO tool has no AbortSignal — an upstream hang freezes the active turn until OS TCP timeout. Use cancellableFetch from @/server/utils/cancellation, which wires a default timeout and propagates cancellation.'
   },
   {
     // Same hazard via the namespaced form: `globalThis.fetch(...)` /
@@ -157,7 +138,7 @@ export default defineConfig(
   includeIgnoreFile(gitignorePath),
   {
     // Additional ignore patterns for build output and bundled resources
-    ignores: ['**/out/**', '**/dist/**', '**/.vite/**', '**/coverage/**', '**/.eslintcache', 'bundled-skills/**', '**/sdk-shim/**']
+    ignores: ['**/out/**', '**/dist/**', '**/.vite/**', '**/coverage/**', '**/.eslintcache', 'bundled-skills/**']
   },
   js.configs.recommended,
   ...ts.configs.recommended,
@@ -182,16 +163,14 @@ export default defineConfig(
   // `@/utils/tauriListen` encapsulates the correct teardown pattern (pre-await
   // abort, handler-time abort, post-await unlisten, auto-cleanup on signal).
   // Files that legitimately need bare `listen` (`SseConnection.ts`, the helper
-  // itself, the helper test, and `TerminalPanel.tsx` whose listener lifecycle
-  // is intentionally decoupled from the React effect) are exempted via
-  // `ignores`. `import type { UnlistenFn }` is fine — type-only imports erase.
+  // itself, and the helper test) are exempted via `ignores`.
+  // `import type { UnlistenFn }` is fine — type-only imports erase.
   {
     files: ['src/renderer/**/*.{ts,tsx}'],
     ignores: [
       'src/renderer/utils/tauriListen.ts',
       'src/renderer/utils/tauriListen.test.ts',
       'src/renderer/api/SseConnection.ts',
-      'src/renderer/components/TerminalPanel.tsx',
     ],
     rules: {
       'no-restricted-imports': 'off',
@@ -214,7 +193,7 @@ export default defineConfig(
       // work — Flat Config's later-block-wins semantics meant the renderer
       // block's `no-restricted-syntax` wiped out anything we set here, so a
       // dynamic `import('@tauri-apps/api/event').then(({ listen }) => …)`
-      // slipped through the guard. (Codex review of this migration caught
+      // slipped through the guard. (security review review of this migration caught
       // exactly this — 4 such callsites had been quietly bypassed.)
     },
   },
@@ -260,7 +239,7 @@ export default defineConfig(
         // rule only sees named imports in `ImportDeclaration` nodes. The
         // dynamic-import form ALSO needs to be locked down to seal the
         // pit-of-success: 4 such callsites bypassed the migration before
-        // this selector was added. (Codex review CRIT-1 of the migration.)
+        // this selector was added. (security review review CRIT-1 of the migration.)
         // Note: this matches ALL dynamic imports of the package, including
         // `emit`-only access. Migrate any legitimate `emit` callsite to a
         // static `import { emit } from '@tauri-apps/api/event'` (no leak
@@ -329,34 +308,6 @@ export default defineConfig(
           selector: 'TemplateElement[value.raw=/\\btext-\\[[0-9]+(?:\\.[0-9]+)?px\\]/]',
           message: '任意 px 字号 `text-[Npx]` 被禁止（PRD 0.2.34）：绕过 Type Scale 会重新长出幽灵字阶，正是"字号大小不一"投诉的根因。改用七档梯子：text-xs(12 meta/描述)/text-sm(14 UI/表格)/text-base(16 正文)/text-lg(18 弹窗标题)/text-xl(20 H2)/text-2xl(22 H1)/text-3xl(28 大数字)。xs/sm/base/lg/xl 与 Tailwind 官方值一致，唯 text-2xl=22px（官方 24）与 text-3xl=28px（官方 30）。确需离阶值的展示型场景（如品牌字）先在 DESIGN.md 立档，再对单行 eslint-disable 并注明出处。',
         },
-        ...[
-          '/api/files/import-base64',
-          '/api/files/copy',
-          '/api/files/read-as-base64',
-          '/api/files/add-gitignore',
-          '/api/commands',
-          '/api/git/branch',
-          '/api/claude-md',
-          '/agent/dir',
-          '/agent/dir/expand',
-          '/agent/file',
-          '/agent/download',
-          '/agent/import',
-          '/agent/new-file',
-          '/agent/new-folder',
-          '/agent/rename',
-          '/agent/delete',
-          '/agent/move',
-          '/agent/open-in-finder',
-          '/agent/open-with-default',
-          '/agent/open-path',
-          '/agent/search-files',
-          '/agent/check-paths',
-          '/agent/save-file'
-        ].map((endpoint) => ({
-          selector: `Literal[value=${JSON.stringify(endpoint)}]`,
-          message: `Phase E (PRD 0.2.7): sidecar HTTP endpoint '${endpoint}' was deleted. Workspace file IO must go through Rust cmd_workspace_* invokes via useWorkspaceFileService. See CLAUDE.md red-line.`
-        }))
       ]
     }
   },
@@ -376,15 +327,15 @@ export default defineConfig(
       ],
       // Prevent disabling no-explicit-any via inline comments — it hides real
       // type bugs behind `any`. Ban list extends below for ESM-targeted files
-      // (which is everything except `src/cli/**`).
+      // across the ESM application source.
       'eslint-comments/no-restricted-disable': ['error', '@typescript-eslint/no-explicit-any']
     }
   },
-  // ESM-targeted files (everything except the CJS-bundled CLI): forbid
+  // ESM-targeted files forbid
   // `// eslint-disable-next-line @typescript-eslint/no-require-imports`.
   //
   // Why: bare `require()` in an ESM file throws `ReferenceError: require is
-  // not defined` at runtime. The Bun→Node v0.2.0 migration accumulated 6+
+  // not defined` at runtime. The Node migration accumulated 6+
   // sites where developers reached for `require()` (probably copy-paste from
   // legacy CJS code) and silenced the lint with a disable comment. Each one
   // was a latent crash waiting for the right code path. The MCP playwright
@@ -393,25 +344,12 @@ export default defineConfig(
   // `await import()` — never `require()`.
   {
     files: ['**/*.{ts,tsx,js,jsx,mjs,cjs}'],
-    ignores: ['src/cli/**'],
     rules: {
       'eslint-comments/no-restricted-disable': [
         'error',
         '@typescript-eslint/no-explicit-any',
         '@typescript-eslint/no-require-imports'
       ]
-    }
-  },
-  // CLI is bundled by esbuild with `--format=cjs` (see package.json:build:cli),
-  // so `require()` runs in a real CJS context after bundling. Disable the rule
-  // entirely for CLI files — relying on disable-next-line comments would force
-  // every `require()` call site to carry boilerplate, and (per Codex review)
-  // doesn't actually constitute a true exemption since the underlying rule
-  // would still fire if a contributor forgot the comment.
-  {
-    files: ['src/cli/**/*.{ts,tsx}'],
-    rules: {
-      '@typescript-eslint/no-require-imports': 'off'
     }
   },
   // Structural guard: builtin MCP tool files MUST NOT eager-import the SDK
@@ -461,33 +399,31 @@ export default defineConfig(
   // resolves into a non-existent source tree).
   //
   // SIDECAR_RESTRICTED_SYNTAX is the full set: GLOBAL + __dirname.
-  // The next block (tools/plugin-bridge) is more specific (later in the
+  // The next block (GEO tools) is more specific (later in the
   // file) and adds the fetch ban on top — Flat Config's later-block-wins
   // semantics mean the more specific block must respread the full set,
-  // which TOOLS_BRIDGE_RESTRICTED_SYNTAX does.
+  // which GEO_TOOL_RESTRICTED_SYNTAX does.
   {
     files: ['src/server/**/*.ts'],
     rules: {
       'no-restricted-syntax': ['error', ...SIDECAR_RESTRICTED_SYNTAX]
     }
   },
-  // Tools + plugin-bridge: bare fetch() ban on top of all sidecar rules.
-  // These code paths run inside SDK turns (tools/) or IM message processing
-  // (plugin-bridge/), where a stuck upstream freezes the user-visible
-  // session. cancellableFetch() from @/server/utils/cancellation provides
+  // GEO tool: bare fetch() ban on top of all sidecar rules. A stuck upstream
+  // freezes the user-visible turn. cancellableFetch() provides
   // a default 30s timeout and propagates parent abort signals.
   //
   // Tests (`__tests__/`) and the cancellation helper itself are exempt —
   // the helper IS the wrapper around raw fetch.
   {
-    files: ['src/server/tools/**/*.ts', 'src/server/plugin-bridge/**/*.ts'],
+    files: ['src/server/tools/**/*.ts'],
     ignores: [
       'src/server/utils/cancellation.ts', // the wrapper itself
       'src/server/**/__tests__/**',
       'src/server/**/*.test.ts'
     ],
     rules: {
-      'no-restricted-syntax': ['error', ...TOOLS_BRIDGE_RESTRICTED_SYNTAX]
+      'no-restricted-syntax': ['error', ...GEO_TOOL_RESTRICTED_SYNTAX]
     }
   },
   // Other-files catchall: shared / cli / scripts that didn't match any

@@ -479,7 +479,7 @@ fn measure_remaining_debt(paths: &[PathBuf]) -> Option<u64> {
             return Ok(false);
         };
 
-        let (target, companion) = if let Some(id) = name.strip_suffix(".meta.json.part") {
+        let (target, paired_file) = if let Some(id) = name.strip_suffix(".meta.json.part") {
             if !is_ref_id(id) {
                 return Ok(false);
             }
@@ -493,7 +493,7 @@ fn measure_remaining_debt(paths: &[PathBuf]) -> Option<u64> {
             return Ok(false);
         };
 
-        if !path_exists(&target)? || !path_exists(&companion)? {
+        if !path_exists(&target)? || !path_exists(&paired_file)? {
             return Ok(false);
         }
         same_file::is_same_file(path, target)

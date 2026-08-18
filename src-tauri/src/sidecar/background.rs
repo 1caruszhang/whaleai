@@ -36,7 +36,6 @@ impl BackgroundCompletionResult {
 #[serde(rename_all = "camelCase")]
 struct SidecarSessionSnapshot {
     session_state: String,
-    #[serde(default)]
     is_busy: bool,
     #[serde(default)]
     completion_terminal: Option<crate::notification::SessionCompletionTerminal>,
@@ -44,7 +43,7 @@ struct SidecarSessionSnapshot {
 
 impl SidecarSessionSnapshot {
     fn is_busy(&self) -> bool {
-        self.is_busy || matches!(self.session_state.as_str(), "running" | "starting")
+        self.is_busy
     }
 }
 
@@ -177,66 +176,6 @@ pub fn start_background_completion<R: Runtime>(
     let session_id_clone = session_id.to_string();
     let app_handle_clone = app_handle.clone();
 
-    thread::spawn(move || {
-        poll_background_completion(
-            &app_handle_clone,
-            &manager_clone,
-            &session_id_clone,
-            poll_generation,
-        );
-    });
-
-    Ok(BackgroundCompletionResult::new(session_id, true))
-}
-
-/// Start a BackgroundCompletion owner for a headless message/event delivery.
-///
-/// Unlike `start_background_completion`, this intentionally does not require
-/// `/api/session-state` to already report `running`/`starting`: the caller has
-/// just delivered a user/event message and needs an owner to cover the small
-/// window before the sidecar flips from idle to running. The shared poller will
-/// release the owner on the first idle/error check if no turn actually starts.
-pub fn start_headless_background_completion<R: Runtime>(
-    app_handle: &AppHandle<R>,
-    manager: &ManagedSidecarManager,
-    session_id: &str,
-) -> Result<BackgroundCompletionResult, String> {
-    let poll_generation = {
-        let mut manager_guard = manager.lock().map_err(|e| e.to_string())?;
-        let bg_owner = SidecarOwner::BackgroundCompletion(session_id.to_string());
-        let Some(attach) =
-            manager_guard.attach_background_owner_to_logical_session(session_id, bg_owner)
-        else {
-            ulog_debug!(
-                "[bg-completion] No running sidecar for headless session {}",
-                session_id
-            );
-            return Ok(BackgroundCompletionResult::new(session_id, false));
-        };
-        match attach {
-            BackgroundOwnerAttach::Attached(binding) => Some(binding.generation),
-            BackgroundOwnerAttach::Recovering => None,
-            BackgroundOwnerAttach::AlreadyOwned => {
-                ulog_info!(
-                    "[bg-completion] Session {} already has a BackgroundCompletion owner",
-                    session_id
-                );
-                return Ok(BackgroundCompletionResult::new(session_id, true));
-            }
-            BackgroundOwnerAttach::Stale => {
-                return Ok(BackgroundCompletionResult::new(session_id, false));
-            }
-        }
-    };
-    ulog_info!(
-        "[bg-completion] Added headless BackgroundCompletion owner to logical session {} (observed generation {:?})",
-        session_id,
-        poll_generation
-    );
-
-    let manager_clone = Arc::clone(manager);
-    let session_id_clone = session_id.to_string();
-    let app_handle_clone = app_handle.clone();
     thread::spawn(move || {
         poll_background_completion(
             &app_handle_clone,
@@ -504,7 +443,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     #[test]
-    fn busy_snapshot_includes_accepted_queue_work_and_legacy_active_states() {
+    fn busy_snapshot_requires_the_current_explicit_busy_field() {
         let queued: SidecarSessionSnapshot = serde_json::from_value(serde_json::json!({
             "sessionState": "idle",
             "isBusy": true
@@ -512,14 +451,16 @@ mod tests {
         .unwrap();
         assert!(queued.is_busy());
 
-        let legacy_running: SidecarSessionSnapshot = serde_json::from_value(serde_json::json!({
-            "sessionState": "running"
-        }))
-        .unwrap();
-        assert!(legacy_running.is_busy());
+        assert!(
+            serde_json::from_value::<SidecarSessionSnapshot>(serde_json::json!({
+                "sessionState": "running"
+            }))
+            .is_err()
+        );
 
         let idle: SidecarSessionSnapshot = serde_json::from_value(serde_json::json!({
-            "sessionState": "idle"
+            "sessionState": "idle",
+            "isBusy": false
         }))
         .unwrap();
         assert!(!idle.is_busy());

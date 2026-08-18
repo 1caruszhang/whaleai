@@ -1,14 +1,14 @@
-// Custom `myagents://` URI scheme for binary attachment delivery.
+// Custom `xiaojing://` URI scheme for binary attachment delivery.
 //
 // Regular user attachments are served directly from the app data directory.
 // Tool attachments are proxied to the session sidecar because the sidecar owns
 // the external-attachment registry and path validation logic.
 //
 // URL forms:
-//   macOS / Linux: myagents://attachment/<sessionId>/<filename.ext>
-//   Windows:       http://myagents.localhost/attachment/<sessionId>/<filename.ext>
-//   macOS / Linux: myagents://tool-attachment/<sessionId>/<turnId>/<filename.ext>
-//   Windows:       http://myagents.localhost/tool-attachment/<sessionId>/<turnId>/<filename.ext>
+//   macOS / Linux: xiaojing://attachment/<sessionId>/<filename.ext>
+//   Windows:       http://xiaojing.localhost/attachment/<sessionId>/<filename.ext>
+//   macOS / Linux: xiaojing://tool-attachment/<sessionId>/<turnId>/<filename.ext>
+//   Windows:       http://xiaojing.localhost/tool-attachment/<sessionId>/<turnId>/<filename.ext>
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -16,11 +16,11 @@ use std::time::Duration;
 use tauri::http::{Request, Response, StatusCode};
 use tauri::{Manager, Runtime, UriSchemeContext, UriSchemeResponder};
 
-use crate::app_dirs::myagents_data_dir;
+use crate::app_dirs::xiaojing_data_dir;
 use crate::sidecar::ManagedSidecarManager;
 
 fn attachments_root() -> Option<PathBuf> {
-    myagents_data_dir().map(|d| d.join("attachments"))
+    xiaojing_data_dir().map(|d| d.join("attachments"))
 }
 
 fn mime_from_ext(path: &Path) -> &'static str {
@@ -275,19 +275,19 @@ mod tests {
 
     #[test]
     fn extract_macos_form() {
-        let r = extract_relative_path("myagents://attachment/abc/file.png").unwrap();
+        let r = extract_relative_path("xiaojing://attachment/abc/file.png").unwrap();
         assert_eq!(r, "abc/file.png");
     }
 
     #[test]
     fn extract_windows_form() {
-        let r = extract_relative_path("http://myagents.localhost/attachment/abc/file.png").unwrap();
+        let r = extract_relative_path("http://xiaojing.localhost/attachment/abc/file.png").unwrap();
         assert_eq!(r, "abc/file.png");
     }
 
     #[test]
     fn strips_query_string() {
-        let r = extract_relative_path("myagents://attachment/abc/file.png?v=1").unwrap();
+        let r = extract_relative_path("xiaojing://attachment/abc/file.png?v=1").unwrap();
         assert_eq!(r, "abc/file.png");
     }
 
@@ -298,18 +298,18 @@ mod tests {
 
     #[test]
     fn rejects_non_attachment_uri() {
-        assert!(extract_relative_path("myagents://other/foo").is_none());
+        assert!(extract_relative_path("xiaojing://other/foo").is_none());
     }
 
     #[test]
     fn regular_attachment_rejects_tool_attachment_uri() {
-        assert!(extract_relative_path("myagents://tool-attachment/s/t/file.png").is_none());
+        assert!(extract_relative_path("xiaojing://tool-attachment/s/t/file.png").is_none());
     }
 
     #[test]
     fn extracts_tool_macos_form() {
         let r =
-            extract_tool_attachment_segments("myagents://tool-attachment/s/t/file.png").unwrap();
+            extract_tool_attachment_segments("xiaojing://tool-attachment/s/t/file.png").unwrap();
         assert_eq!(
             r,
             ("s".to_string(), "t".to_string(), "file.png".to_string())
@@ -319,7 +319,7 @@ mod tests {
     #[test]
     fn extracts_tool_windows_form() {
         let r = extract_tool_attachment_segments(
-            "http://myagents.localhost/tool-attachment/s/t/file.png",
+            "http://xiaojing.localhost/tool-attachment/s/t/file.png",
         )
         .unwrap();
         assert_eq!(
@@ -331,11 +331,11 @@ mod tests {
     #[test]
     fn tool_attachment_rejects_unsafe_segment() {
         assert!(
-            extract_tool_attachment_segments("myagents://tool-attachment/s/%2e%2e/file.png",)
+            extract_tool_attachment_segments("xiaojing://tool-attachment/s/%2e%2e/file.png",)
                 .is_none()
         );
         assert!(
-            extract_tool_attachment_segments("myagents://tool-attachment/s/t/bad%5Cname.png",)
+            extract_tool_attachment_segments("xiaojing://tool-attachment/s/t/bad%5Cname.png",)
                 .is_none()
         );
     }

@@ -7,10 +7,9 @@
  * (and AI agents) as cryptic "Unexpected token 'F'" errors.
  *
  * This helper reads the body once as text, then dispatches based on
- * `resp.ok` + `Content-Type`. The four call sites it replaces (admin-api's
- * `managementApi` + `sidecarSelf`, im-cron-tool, im-media-tool,
- * im-bridge-tools) all want the same behaviour: return parsed JSON on
- * success, surface the actual server text on failure, never throw.
+ * `resp.ok` + `Content-Type`. GEO services use it for the Rust management
+ * hop: return parsed JSON on success, surface the actual server text on
+ * failure, never throw.
  */
 
 // Plain Record-shaped envelope so callers that already type their downstream
@@ -27,8 +26,7 @@ const MALFORMED_JSON_TRUNCATE = 300;
  * Read and interpret a `fetch` response from a local loopback API.
  *
  * @param resp - the awaited Response
- * @param label - short tag for the API surface (e.g. "Management API",
- *   "Sidecar self-call", "Bridge /mcp/tools"); appears in error messages
+ * @param label - short tag for the API surface; appears in error messages
  *   so the reader can tell which hop in the chain returned non-JSON.
  *
  * Returns either the parsed JSON object or `{ ok: false, error }` describing

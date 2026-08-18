@@ -6,9 +6,9 @@
 // so the filtering + dedup + validation invariants are unit-testable in the
 // fast pool (see tabPersistence.test.ts).
 //
-// Design (PRD 0.2.25, codex-reviewed):
-//  - Only chat tabs with a REAL sessionId survive. Launcher tabs, pending-
-//    sessions, and non-chat views are dropped — restoring them is meaningless.
+// Design:
+//  - Only chat tabs with a real sessionId survive. Welcome, pending Sessions,
+//    and non-chat views are dropped because they have no durable conversation.
 //  - De-duped by sessionId: a session can only live in one tab (singleton
 //    invariant the session-open planner relies on).
 //  - persist-on-mutation: callers write synchronously on every structural
@@ -20,7 +20,7 @@
 import { MAX_TABS, type Tab } from '@/types/tab';
 import { isPendingSessionId } from '../../shared/constants';
 
-const PERSIST_KEY = 'myagents.openTabs.v1';
+const PERSIST_KEY = 'xiaojing.openTabs.v1';
 const PERSIST_VERSION = 1 as const;
 
 /** The whitelisted, persisted shape of a restorable chat tab. Intentionally a
@@ -28,7 +28,7 @@ const PERSIST_VERSION = 1 as const;
  *  sidecarConfigDisposition / initialMessage) are never stored. */
 export interface PersistedTab {
     id: string;
-    agentDir: string; // non-null (launcher tabs filtered out)
+    workspacePath: string; // BrandWorkspace path; welcome tabs are filtered out
     sessionId: string; // real UUID (pending- filtered out)
     title: string;
 }
@@ -42,11 +42,11 @@ export interface PersistedTabState {
 /** A tab is restorable iff it is a chat tab pointing at a real Session identity
  *  in a real workspace. Existence-on-disk is validated when the user accepts
  *  the restore pill; here we only enforce the persisted shape. */
-function isRestorable(tab: Tab): tab is Tab & { agentDir: string; sessionId: string } {
+function isRestorable(tab: Tab): tab is Tab & { workspacePath: string; sessionId: string } {
     return (
         tab.view === 'chat' &&
-        typeof tab.agentDir === 'string' &&
-        tab.agentDir.length > 0 &&
+        typeof tab.workspacePath === 'string' &&
+        tab.workspacePath.length > 0 &&
         typeof tab.sessionId === 'string' &&
         tab.sessionId.length > 0 &&
         !isPendingSessionId(tab.sessionId)
@@ -80,7 +80,7 @@ export function serializeTabs(tabs: Tab[], activeTabId: string | null): Persiste
         seenIds.add(tab.id);
         persisted.push({
             id: tab.id,
-            agentDir: tab.agentDir,
+            workspacePath: tab.workspacePath,
             sessionId: tab.sessionId,
             title: tab.title,
         });
@@ -101,7 +101,7 @@ function isValidPersistedTab(value: unknown): value is PersistedTab {
     const t = value as Record<string, unknown>;
     return (
         typeof t.id === 'string' && t.id.length > 0 &&
-        typeof t.agentDir === 'string' && t.agentDir.length > 0 &&
+        typeof t.workspacePath === 'string' && t.workspacePath.length > 0 &&
         typeof t.sessionId === 'string' && t.sessionId.length > 0 &&
         !isPendingSessionId(t.sessionId) &&
         typeof t.title === 'string'
@@ -111,7 +111,7 @@ function isValidPersistedTab(value: unknown): value is PersistedTab {
 /**
  * Parse a raw localStorage string back into a validated PersistedTabState.
  * Returns null on ANY problem (bad JSON, version mismatch, no valid tabs) so
- * the caller cleanly falls back to a fresh launcher tab — never throws.
+ * the caller cleanly falls back to the welcome surface — never throws.
  *
  * Re-applies dedup + cap defensively in case the stored payload was written by
  * an older/buggy build or hand-edited.
@@ -139,7 +139,7 @@ export function deserializeTabs(raw: string | null): PersistedTabState | null {
         seenIds.add(candidate.id);
         tabs.push({
             id: candidate.id,
-            agentDir: candidate.agentDir,
+            workspacePath: candidate.workspacePath,
             sessionId: candidate.sessionId,
             title: candidate.title,
         });
@@ -172,7 +172,7 @@ export function saveOpenTabs(tabs: Tab[], activeTabId: string | null): void {
 }
 
 /** Read + validate the persisted state. Returns null when nothing restorable
- *  is stored (caller falls back to a fresh launcher tab). */
+ *  is stored (caller falls back to the welcome surface). */
 export function loadPersistedTabs(): PersistedTabState | null {
     try {
         return deserializeTabs(window.localStorage.getItem(PERSIST_KEY));
@@ -188,27 +188,24 @@ export function loadPersistedTabs(): PersistedTabState | null {
 export function hydratePersistedState(state: PersistedTabState): { tabs: Tab[]; activeTabId: string | null } {
     const tabs: Tab[] = state.tabs.map((t) => ({
         id: t.id,
-        agentDir: t.agentDir,
+        workspacePath: t.workspacePath,
         sessionId: t.sessionId,
         view: 'chat',
         title: t.title,
-        // App commits this live Chat before ensure, matching normal persisted-
-        // session navigation. The exact ensure result resolves push|adopt.
-        sidecarConfigDisposition: 'pending',
     }));
     return { tabs, activeTabId: state.activeTabId };
 }
 
 /** Read + hydrate the localStorage-persisted tabs. Returns null when there's
- *  nothing to restore (caller falls back to a fresh launcher tab). */
+ *  nothing to restore (caller falls back to the welcome surface). */
 export function buildRestoredTabs(): { tabs: Tab[]; activeTabId: string | null } | null {
     const state = loadPersistedTabs();
     if (!state) return null;
     return hydratePersistedState(state);
 }
 
-/** Decide whether the durable-handoff snapshot (fsync'd to disk right before an
- *  abrupt update-restart — see tabPersistenceDurable) should override the
+/** Decide whether the durable-handoff snapshot (fsync'd before an
+ *  abrupt process termination) should override the
  *  synchronous localStorage boot read.
  *
  *  localStorage is written on every structural change AND flushed on a clean
@@ -226,7 +223,7 @@ export function pickDurableOverride(
     return durable;
 }
 
-/** Parse the Rust-written clean-exit marker (`~/.myagents/last-exit.json`).
+/** Parse the Rust-written clean-exit marker in Xiaojing's local-data root.
  *  Returns true ONLY for a well-formed `{ "clean": true }`; anything else
  *  (absent → null, malformed, `clean:false`) is treated as NOT a clean quit so
  *  the boot offers to restore. See `lastExitMarker.ts`. */
@@ -242,7 +239,7 @@ export function parseCleanMarker(raw: string | null): boolean {
 
 /** Decide whether to surface the "restore last session" pill on boot (Issue
  *  #309). We offer restore ONLY when the last exit was NOT a deliberate user
- *  quit (i.e. a crash or an update-restart) AND there is a non-empty restorable
+ *  quit (for example, a crash) AND there is a non-empty restorable
  *  snapshot. A clean quit means the user chose to end their session → boot
  *  fresh, no nag. Pure + unit-tested; the title-bar pill and the App boot
  *  effect share this single predicate. */
@@ -251,7 +248,7 @@ export function shouldOfferRestore(lastExitWasClean: boolean, restorableTabCount
 }
 
 /** Plan how clicking the "恢复对话" pill (Issue #309) merges the previous
- *  session into the currently-open tabs. Replaces a still-pristine lone launcher
+ *  session into the currently-open tabs. Replaces a still-pristine lone welcome
  *  (the boot default); otherwise APPENDS the candidate tabs — de-duped by
  *  sessionId against what's already open and capped at MAX_TABS — so it never
  *  disturbs work the user already started.
@@ -269,9 +266,9 @@ export function planRestoreTabs(
     maxTabs: number = MAX_TABS,
 ): { tabs: Tab[]; activeTabId: string } | null {
     if (candidate.tabs.length === 0) return null;
-    const onlyPristineLauncher =
-        prev.length === 1 && prev[0]?.view === 'launcher' && !prev[0]?.sessionId;
-    const base = onlyPristineLauncher ? [] : prev;
+    const onlyPristineWelcome =
+        prev.length === 1 && prev[0]?.view === 'welcome' && !prev[0]?.sessionId;
+    const base = onlyPristineWelcome ? [] : prev;
     const openSessions = new Set(base.map((t) => t.sessionId).filter(Boolean));
     const toAdd = candidate.tabs.filter((t) => t.sessionId && !openSessions.has(t.sessionId));
     if (toAdd.length === 0) return null; // everything is already open — nothing to bring back

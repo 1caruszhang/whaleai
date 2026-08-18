@@ -1,6 +1,6 @@
 // focusRetention — the one-line "don't steal focus on click" primitive.
 //
-// Problem (v0.1.69 UX round):
+// Problem:
 // On macOS WebKit / WKWebView, a touchpad tap synthesises the entire
 // `pointerdown → mousedown → focus → mouseup → click` sequence inside a
 // single frame (sub-16 ms). If an onClick handler then schedules a
@@ -41,7 +41,7 @@
  * Example:
  * ```tsx
  * <button
- *   onClick={() => setMode('thought')}
+ *   onClick={() => setMode('preview')}
  *   onMouseDown={retainFocusOnMouseDown}
  * >
  *   想法
@@ -52,7 +52,7 @@ export function retainFocusOnMouseDown(e: React.MouseEvent): void {
   // Primary button only. Focus retention is a left-click concern; calling
   // preventDefault on a right-/middle-button mousedown is pointless and risks
   // interfering with native right-click behaviour on buttons that also handle
-  // `onContextMenu` (e.g. AgentCapabilitiesPanel command/skill rows).
+  // `onContextMenu`.
   if (e.button !== 0) return;
   e.preventDefault();
 }

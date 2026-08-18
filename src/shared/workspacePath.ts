@@ -3,13 +3,9 @@
 // the Rust side is `src-tauri/src/workspace_path.rs`).
 //
 // Why this exists (#320): the persisted stores legitimately disagree on
-// separator style. `projects.json` keeps the raw path from the Windows native
-// file dialog (`C:\Users\…`, BACKSLASHES) while a cron/task `workspacePath` is
-// stored POSIX-style (`C:/Users/…`, forward slashes). Comparing them with `===`
-// made EVERY Windows legacy-cron upgrade fail with "找不到工作区", and the same
-// mismatch silently breaks every task/cron card that resolves its Project by
-// workspace path (the Rust upgrade copies the cron's forward-slash path straight
-// into the new Task, so the divergence propagates forward).
+// separator style. A Windows native file dialog returns backslashes while
+// persisted workspace/session identities may contain forward slashes. Raw
+// equality would make the same BrandWorkspace appear as two identities.
 //
 // Rust already treats the two forms as one workspace through
 // `normalize_workspace_path_identity`. This module is its TS counterpart, so
@@ -61,10 +57,8 @@ export function normalizeWorkspacePathIdentity(path: string): string {
 
 /**
  * True when two workspace paths denote the same workspace under the canonical
- * identity above. Use this — never raw `===` — whenever a `Project.path` is
- * compared against a path that may originate from a different store
- * (`CronTask.workspacePath`, `Task.workspacePath`, session `agentDir`, config
- * `defaultWorkspacePath`). See #320.
+ * identity above. Use this — never raw `===` — whenever a workspace path is
+ * compared with the Session `workspacePath` or another persisted representation.
  *
  * Accepts nullish on either side (many of these paths are optional config
  * fields) and treats it as the empty identity, mirroring how the previous raw
