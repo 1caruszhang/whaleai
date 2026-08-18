@@ -40,7 +40,7 @@ function pool(
     productLine: "旗舰产品",
     targetRegion: "成都",
     generationParameters: {
-      policyVersion: "js-ai-dev-pred-1-v1",
+      policyVersion: "xiaojing-content-prompt-v1",
       candidateLimit: 20,
       recentSelectionLimit: 20,
       priorityThresholds: { highAtSum: 150, mediumAtSum: 100 },
@@ -70,7 +70,7 @@ function pool(
           priorityTotal: 130,
           priority: "medium",
           formula: "traceable",
-          policyVersion: "js-ai-dev-pred-1-v1",
+          policyVersion: "xiaojing-content-prompt-v1",
         },
         evidence: [
           {
@@ -93,7 +93,7 @@ function pool(
           priorityTotal: 130,
           priority: "medium",
           formula: "traceable",
-          policyVersion: "js-ai-dev-pred-1-v1",
+          policyVersion: "xiaojing-content-prompt-v1",
         },
         evidence: [
           {
@@ -139,7 +139,7 @@ describe("XiaojingQuestionPoolPanel read-only projection", () => {
     mocks.latest.mockReset().mockResolvedValue(pool());
   });
 
-  it("loads the session's latest pool and renders it read-only", async () => {
+  it("loads the session's latest pool and renders only the confirmed selection", async () => {
     render(
       <XiaojingQuestionPoolPanel
         workspaceId={workspace.id}
@@ -154,10 +154,31 @@ describe("XiaojingQuestionPoolPanel read-only projection", () => {
     expect(within(region).getByText("已复用")).toBeInTheDocument();
     expect(within(region).getByText("知识 v7")).toBeInTheDocument();
     expect(within(region).getByText("成都汽车改装哪家好？")).toBeInTheDocument();
-    expect(within(region).getByText(/已选 1\/2/)).toBeInTheDocument();
+    // 只展示确认时选定的问题；未选问题不进入工作台。
     expect(
-      within(region).getByText(/keyword-search:completed#1/),
+      within(region).queryByText("锦江区汽车隔音推荐哪家？"),
+    ).not.toBeInTheDocument();
+    expect(within(region).getByText(/已选 1/)).toBeInTheDocument();
+    // checkpoint 是过程细节，只留在聊天进度卡。
+    expect(
+      within(region).queryByText(/keyword-search:completed#1/),
+    ).not.toBeInTheDocument();
+  });
+
+  it("defers unconfirmed pools to the chat gate card instead of dumping questions", async () => {
+    mocks.latest.mockResolvedValue(
+      pool({ status: "awaiting-selection" }),
+    );
+    render(
+      <XiaojingQuestionPoolPanel
+        workspaceId={workspace.id}
+      />,
+    );
+    expect(
+      await screen.findByText(/问题池尚未确认；请回到聊天中的确认卡片完成选题/),
     ).toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "问题池选择" })).not.toBeInTheDocument();
+    expect(screen.queryByText("成都汽车改装哪家好？")).not.toBeInTheDocument();
   });
 
   it("exposes no generation, selection, edit or confirm controls", async () => {
@@ -209,9 +230,9 @@ describe("XiaojingQuestionPoolPanel read-only projection", () => {
     expect(screen.queryByRole("button")).not.toBeInTheDocument();
   });
 
-  // GD-7 决策 A 回归：关键词挖掘融合进池生成，无独立确认门，
-  // 但挖掘出的搜索词必须随投影展示，供聊天卡片确认时一并审阅。
-  it("shows the mined search terms with category and heat alongside questions", async () => {
+  // GD-7 决策 A 回归：挖掘搜索词的确认期审阅由聊天卡片承载（卡片同
+  // aria-label），工作台确认视图不再重复倾倒这些过程输入。
+  it("keeps mined keywords on the chat gate card, out of the confirmed workbench view", async () => {
     mocks.latest.mockResolvedValue(
       pool({
         keywords: [
@@ -226,19 +247,14 @@ describe("XiaojingQuestionPoolPanel read-only projection", () => {
       />,
     );
     const region = await screen.findByRole("region", {
-      name: "关键词与问题池",
+      name: "问题池选择",
     });
-    const keywordBlock = await within(region).findByLabelText(
-      "本次挖掘的搜索词",
-    );
     expect(
-      within(keywordBlock).getByText(/成都汽车音响改装/),
-    ).toBeInTheDocument();
+      within(region).queryByLabelText("本次挖掘的搜索词"),
+    ).not.toBeInTheDocument();
     expect(
-      within(keywordBlock).getByText(/锦江区 汽车隔音 多少钱/),
-    ).toBeInTheDocument();
-    expect(within(keywordBlock).getByText(/核心词/)).toBeInTheDocument();
-    expect(within(keywordBlock).getByText(/长尾词/)).toBeInTheDocument();
-    expect(within(keywordBlock).getAllByText(/热度高|热度中/).length).toBe(2);
+      within(region).queryByText(/成都汽车音响改装/),
+    ).not.toBeInTheDocument();
+    expect(within(region).getByText("成都汽车改装哪家好？")).toBeInTheDocument();
   });
 });

@@ -48,7 +48,7 @@ GitHub Actions 在通用 unit gate 之前单独执行该入口，使 js_ai 行�
 
 文章主状态保持 `planned → drafting → draft_ready → reviewing → approved → published → assigning → scheduling → monitoring → done`；异常态为 `pending_confirmation`、`generation_failed`、`rejected`。`draft_ready → reviewing` 只消费草稿确认，不能重新生成刚确认的正文。
 
-基线探测差异注记（用户已拍板）：js_ai 把“优化前检测”嵌在主流程内；本产品主链（full-optimization，18 步）不内嵌基线探测，基线是品牌级「效果」入口的按需动作，`performance-inspection` 直接意图保留条件化补充探测。勿据此在主链恢复基线步骤。
+基线探测差异注记（用户已拍板）：js_ai 把“优化前检测”嵌在主流程内；本产品主链（full-optimization，含计划认可门共 19 步）不内嵌基线探测，基线是品牌级「效果」入口的按需动作，`performance-inspection` 直接意图保留条件化补充探测。勿据此在主链恢复基线步骤。
 
 五类内容的唯一集合是 `guide / showcase / ranking / news / news_light`。旧注释中的“四类”“六类”以及旧调研里的“每主题最多三类”均不是当前代码事实；`dev` 当前实现允许每主题 1–5 类，并对整批五类覆盖做下限补齐。
 

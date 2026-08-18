@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
 
 import {
+  KEYWORD_MINING_SYSTEM_PROMPT,
+  QUESTION_GENERATION_SYSTEM_PROMPT,
   QUESTION_POOL_POLICY_VERSION,
   buildKeywordMiningPrompt,
   buildQuestionGenerationPrompt,
@@ -8,6 +10,7 @@ import {
   parseMinedKeywords,
   parseQuestionCandidates,
   scoreQuestionPoolCandidate,
+  type LibraryKeywordTerm,
   type MinedKeyword,
   type QuestionPoolDecision,
   type QuestionPoolGenerationParameters,
@@ -15,6 +18,13 @@ import {
   type QuestionPoolQuestion,
   type QuestionPoolStage,
 } from "../../shared/geo/questionPool";
+import {
+  deriveServiceScope,
+  isValidCityName,
+  projectBrandProfile,
+  renderFullProfileBlock,
+  renderMiningProfileBlock,
+} from "../../shared/geo/profileInjection";
 import { anySignal } from "../utils/cancellation";
 import { managementApi } from "../utils/management-api-client";
 import type {
@@ -39,6 +49,8 @@ export interface QuestionPoolKnowledgeContext {
   productLines: string[];
   facts: QuestionPoolKnowledgeFact[];
   recentSelectedQuestions: string[];
+  /** 品牌词库（用户确认过的词，跨池复用；ADR-0006 修正三）。 */
+  keywordLibrary: LibraryKeywordTerm[];
 }
 
 interface QuestionPoolAttempt {
@@ -458,23 +470,6 @@ function hash(value: unknown): string {
   return createHash("sha256").update(JSON.stringify(value)).digest("hex");
 }
 
-function parsedFactValue(fact: QuestionPoolKnowledgeFact): unknown {
-  try {
-    return JSON.parse(fact.normalizedValueJson);
-  } catch {
-    return fact.normalizedValueJson;
-  }
-}
-
-function strings(value: unknown): string[] {
-  if (typeof value === "string" && value.trim()) return [value.trim()];
-  if (!Array.isArray(value)) return [];
-  return value
-    .filter((item): item is string => typeof item === "string")
-    .map((item) => item.trim())
-    .filter(Boolean);
-}
-
 function deriveGenerationContext(
   context: QuestionPoolKnowledgeContext,
   productLine: string,
@@ -484,24 +479,21 @@ function deriveGenerationContext(
       fact.scopeJson.includes(productLine) ||
       !fact.scopeJson.includes("product-line"),
   );
-  const valuesFor = (suffix: string) =>
-    productFacts
-      .filter((fact) => fact.predicate.endsWith(suffix))
-      .flatMap((fact) => strings(parsedFactValue(fact)));
+  const profile = projectBrandProfile(productFacts);
   const brandNames = [
     ...new Set([
       context.brandName,
-      ...valuesFor(".fullName"),
-      ...valuesFor(".shortNames"),
+      ...(profile.fullName ?? []),
+      ...(profile.shortNames ?? []),
     ]),
-  ];
-  const industry = valuesFor(".industry")[0];
+  ].filter(Boolean);
+  const industry = profile.industry?.[0];
   if (!industry) throw new Error("question_pool_industry_required");
-  const knowledgeSummary = productFacts
-    .map((fact) => `${fact.predicate}=${JSON.stringify(parsedFactValue(fact))}`)
+  const profileAnchorText = Object.values(profile)
+    .flat()
     .join("；")
-    .slice(0, 12_000);
-  return { brandNames, industry, knowledgeSummary, productFacts };
+    .slice(0, 4000);
+  return { brandNames, industry, profile, profileAnchorText, productFacts };
 }
 
 function questionErrorCode(error: unknown): string {
@@ -621,12 +613,25 @@ export class QuestionPoolService {
       preparation.context,
       productLine,
     );
+    // 地域锚（ADR-0006 修正四）：用户声明的服务范围 = 锚 + 上限（粒度保留，
+    // 「新都区」不升格为成都市），地址只在声明不可用时兜底；全国/线上类声明
+    // → 无地缘模式，agent 传的纯地域名可兜底。
+    const scope =
+      deriveServiceScope(generationContext.profile) ??
+      (isValidCityName(targetRegion)
+        ? { primary: targetRegion.trim(), allowed: [targetRegion.trim()] }
+        : undefined);
+    const region = scope?.primary ?? "";
     const keywordPrompt = buildKeywordMiningPrompt({
-      region: targetRegion,
+      region,
+      ...(scope ? { allowedRegions: scope.allowed } : {}),
       industry: generationContext.industry,
       productLine,
       brandNames: generationContext.brandNames,
-      knowledgeSummary: generationContext.knowledgeSummary,
+      profileBlock: renderMiningProfileBlock(generationContext.profile),
+      ...(preparation.context.keywordLibrary.length > 0
+        ? { libraryKeywords: preparation.context.keywordLibrary }
+        : {}),
       ...(input.businessFocus ? { businessFocus: input.businessFocus } : {}),
     });
 
@@ -642,10 +647,16 @@ export class QuestionPoolService {
         async () => {
           const raw = await this.keywordSearch.search(keywordPrompt, {
             signal,
+            maxTokens: 4096,
+            system: KEYWORD_MINING_SYSTEM_PROMPT,
           });
           return {
             raw,
-            keywords: parseMinedKeywords(raw, generationContext.brandNames),
+            keywords: parseMinedKeywords(raw, generationContext.brandNames, {
+              existingTerms: preparation.context.keywordLibrary.map(
+                (keyword) => keyword.term,
+              ),
+            }),
           };
         },
       );
@@ -654,9 +665,12 @@ export class QuestionPoolService {
         throw new Error("question_pool_empty_keywords");
       }
       const questionPrompt = buildQuestionGenerationPrompt({
+        region,
+        industry: generationContext.industry,
         keywords,
         existingQuestions: preparation.context.recentSelectedQuestions,
         candidateLimit: parameters.candidateLimit,
+        profileBlock: renderFullProfileBlock(generationContext.profile),
       });
       const generationOutput = await this.runStep(
         attempt.id,
@@ -668,11 +682,11 @@ export class QuestionPoolService {
             [
               {
                 role: "system",
-                content: "只把真实搜索词转换为结构化自然问题；不要调用工具。",
+                content: QUESTION_GENERATION_SYSTEM_PROMPT,
               },
               { role: "user", content: questionPrompt },
             ],
-            { signal },
+            { signal, maxTokens: 4096 },
           );
           const candidates = parseQuestionCandidates(
             raw,
@@ -702,8 +716,8 @@ export class QuestionPoolService {
       const knowledgeAnchor = [
         generationContext.industry,
         productLine,
-        targetRegion,
-        generationContext.knowledgeSummary,
+        region,
+        generationContext.profileAnchorText,
       ].join(" ");
       const embeddingTexts = [
         knowledgeAnchor,

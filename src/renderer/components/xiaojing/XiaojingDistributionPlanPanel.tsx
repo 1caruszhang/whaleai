@@ -13,11 +13,12 @@ interface XiaojingDistributionPlanPanelProps {
 }
 
 const KIND_LABEL = { media: "媒体", "we-media": "自媒体" } as const;
+/** 召回路命中的展示词（与四路召回契约 passive/active/fallback/preference 一一对应，与聊天卡片同词表）。 */
 const PATH_LABEL = {
-  passive: "真实来源命中",
-  active: "行业与人群",
-  fallback: "GEO 兜底召回",
-  preference: "显式偏好",
+  passive: "被动召回",
+  active: "主动召回",
+  fallback: "保底召回",
+  preference: "偏好召回",
 } as const;
 
 function localDateTime(iso: string): string {
@@ -93,7 +94,14 @@ export default memo(function XiaojingDistributionPlanPanel({
           </p>
         )}
 
-        {plan && (
+        {plan && plan.status !== "confirmed" && (
+          <p className="rounded-lg bg-[var(--paper-inset)] p-2 leading-5 text-[var(--ink-muted)]">
+            分发计划尚未确认；渠道候选、映射与预算请在聊天中的确认卡片上
+            审阅，确认后这里展示计划内容。
+          </p>
+        )}
+
+        {plan && plan.status === "confirmed" && (
           <div className="space-y-3">
             <div className="flex items-center justify-between rounded-lg bg-[var(--hover-bg)] p-2">
               <span>
@@ -133,32 +141,28 @@ export default memo(function XiaojingDistributionPlanPanel({
                       ? "未知"
                       : `¥${candidate.estimatedPriceCny}`}
                   </span>
-                  <span>
-                    成功率：
-                    {candidate.publishedRate === 0 ||
-                    candidate.publishedRate === null
-                      ? "未知"
-                      : `${candidate.publishedRate}%`}
-                  </span>
                 </div>
                 <p className="mt-2">适配：{candidate.fitReasons.join("；")}</p>
                 <div className="mt-2">
+                  <p className="text-[var(--ink-muted)]">
+                    召回路命中：
+                    {candidate.pathHits
+                      .map(
+                        (path) =>
+                          `${PATH_LABEL[path] ?? path}（${
+                            candidate.evidence.find((item) => item.path === path)
+                              ?.label ?? ""
+                          }）`,
+                      )
+                      .join("；")}
+                  </p>
                   {candidate.evidence.map((evidence) => (
                     <p key={evidence.path} className="text-[var(--ink-muted)]">
-                      {PATH_LABEL[evidence.path]} +{evidence.weight.toFixed(1)}
-                      ：{evidence.reference}
+                      {PATH_LABEL[evidence.path]} +{evidence.weight.toFixed(1)}：
+                      {evidence.reference}
                     </p>
                   ))}
                 </div>
-                {(candidate.risks.length > 0 ||
-                  candidate.uncertainties.length > 0) && (
-                  <p className="mt-2 text-[var(--warning)]">
-                    风险：
-                    {[...candidate.risks, ...candidate.uncertainties].join(
-                      "；",
-                    )}
-                  </p>
-                )}
               </article>
             ))}
 
@@ -189,27 +193,10 @@ export default memo(function XiaojingDistributionPlanPanel({
               <span>预算（元）：{plan.budgetCny}</span>
               <span>发布时间：{localDateTime(plan.publishStartAt)}</span>
             </div>
-            {plan.blockingIssues.length > 0 && (
-              <div
-                role="alert"
-                className="rounded-lg border border-[var(--warning)]/30 bg-[var(--warning-bg)] p-2 text-[var(--warning)]"
-              >
-                <p className="font-semibold">确认已阻断</p>
-                {plan.blockingIssues.map((issue) => (
-                  <p key={issue}>· {issue}</p>
-                ))}
-              </div>
-            )}
-            {plan.status === "confirmed" ? (
-              <p className="flex items-center gap-2 rounded-lg bg-[var(--success-bg)] p-2 text-[var(--success)]">
-                <CheckCircle2 className="h-4 w-4" />
-                计划已确认；尚未扣费、下单或发布。
-              </p>
-            ) : (
-              <p className="leading-5 text-[var(--ink-muted)]">
-                计划待确认：请回到聊天中的确认卡片完成操作。
-              </p>
-            )}
+            <p className="flex items-center gap-2 rounded-lg bg-[var(--success-bg)] p-2 text-[var(--success)]">
+              <CheckCircle2 className="h-4 w-4" />
+              计划已确认；尚未扣费、下单或发布。
+            </p>
             <p className="text-[var(--ink-subtle)]">
               本步骤只确认推荐与分配计划。任何付费、下单或发布仍需后续独立确认。
             </p>

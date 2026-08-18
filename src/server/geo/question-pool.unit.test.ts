@@ -27,7 +27,7 @@ function basePool(
     productLine: "汽车音响",
     targetRegion: "成都",
     generationParameters: {
-      policyVersion: "js-ai-dev-pred-1-v1",
+      policyVersion: "xiaojing-content-prompt-v1",
       candidateLimit: 20,
       recentSelectionLimit: 20,
       priorityThresholds: { highAtSum: 150, mediumAtSum: 100 },
@@ -61,6 +61,17 @@ class FakePersistence implements QuestionPoolPersistencePort {
   persistCalls = 0;
   cancelCalls = 0;
   reuse: QuestionPoolProjection | null = null;
+
+  constructor(
+    private readonly extraFacts: Array<{
+      factKey: string;
+      subject: string;
+      predicate: string;
+      scopeJson: string;
+      normalizedValueJson: string;
+      sources: Array<{ materialId: string }>;
+    }> = [],
+  ) {}
 
   async latest(
     productLine?: string,
@@ -98,6 +109,7 @@ class FakePersistence implements QuestionPoolPersistencePort {
       brandName: "鲸跃",
       productLines: ["汽车音响"],
       facts: [
+        ...this.extraFacts,
         {
           factKey: "industry",
           subject: "鲸跃",
@@ -116,6 +128,7 @@ class FakePersistence implements QuestionPoolPersistencePort {
         },
       ],
       recentSelectedQuestions: ["上一轮问题"],
+      keywordLibrary: [],
     };
   }
 
@@ -295,7 +308,8 @@ describe("QuestionPoolService", () => {
       targetRegion: "成都",
       status: "awaiting-selection",
     });
-    expect(pool.keywords.map((keyword) => keyword.term)).not.toContain(
+    // 品牌词政策（ADR-0006 修正三）：唯一的品牌相关词被保留（上限一条）。
+    expect(pool.keywords.map((keyword) => keyword.term)).toContain(
       "鲸跃汽车音响",
     );
     expect(pool.questions[0]).toMatchObject({
@@ -319,6 +333,36 @@ describe("QuestionPoolService", () => {
       ]),
     );
     expect(persistence.persistCalls).toBe(1);
+  });
+
+  it("anchors mining on the declared service scope over store addresses", async () => {
+    // ADR-0006 修正四：声明「新都区」不升格为成都市，地址只作兜底。
+    const persistence = new FakePersistence([
+      {
+        factKey: "addresses",
+        subject: "鲸跃",
+        predicate: "enterprise-profile.addresses",
+        scopeJson: '{"entityScope":"brand"}',
+        normalizedValueJson: '["四川省成都市新都区工业大道88号"]',
+        sources: [],
+      },
+      {
+        factKey: "serviceArea",
+        subject: "鲸跃",
+        predicate: "enterprise-profile.serviceArea",
+        scopeJson: '{"entityScope":"brand"}',
+        normalizedValueJson: '"新都区"',
+        sources: [],
+      },
+    ]);
+    const { service: subject, provider } = service(persistence);
+    await subject.generate(input);
+
+    const prompt = provider.keywordSearch.search.mock.calls[0]?.[0] as string;
+    expect(prompt).toContain("我在【新都区】经营");
+    expect(prompt).toContain("【地域白名单（用户声明的服务范围）】新都区");
+    expect(prompt).toContain("区县级服务范围不再向下裂变");
+    expect(prompt).not.toContain("我在【成都】经营");
   });
 
   it("fails explicitly when generation returns only ungrounded questions", async () => {

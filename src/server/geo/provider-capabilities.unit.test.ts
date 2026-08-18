@@ -17,6 +17,7 @@ describe("GEO typed provider capabilities", () => {
   it("captures and erases every Rust secret transport variable", () => {
     const env: NodeJS.ProcessEnv = {
       XIAOJING_ARK_API_KEY: "ark-secret",
+      XIAOJING_DOUBAO_SEARCH_API_KEY: "doubao-search-secret",
       XIAOJING_ARK_EMBEDDING_API_KEY: "embedding-secret",
       XIAOJING_ARK_EMBEDDING_ENDPOINT_ID: "ep-test",
       XIAOJING_OSS_ACCESS_KEY_SECRET: "oss-secret",
@@ -24,6 +25,7 @@ describe("GEO typed provider capabilities", () => {
     };
     expect(captureGeoProviderRuntimeSecrets(env)).toMatchObject({
       arkApiKey: "ark-secret",
+      doubaoSearchApiKey: "doubao-search-secret",
       embeddingApiKey: "embedding-secret",
       embeddingEndpointId: "ep-test",
       ossAccessKeySecret: "oss-secret",
@@ -77,6 +79,53 @@ describe("GEO typed provider capabilities", () => {
       "https://ark.cn-beijing.volces.com/api/v3/chat/completions",
     );
     expect(calls[4].body.enable_search).toBe(true);
+  });
+
+  it("routes searchSources to the doubao search API and maps structured results", async () => {
+    const calls: Array<{ url: string; body: Record<string, unknown>; auth?: string }> = [];
+    const fakeFetch = vi.fn(
+      async (input: string | URL | Request, init?: RequestInit) => {
+        calls.push({
+          url: String(input),
+          body: JSON.parse(String(init?.body)),
+          auth: (init?.headers as Record<string, string>)?.Authorization,
+        });
+        return jsonResponse({
+          Result: {
+            WebResults: [
+              { Title: "新都医美排行", Url: "https://rank.example/1", Summary: "本地同行讨论" },
+              { Url: "https://rank.example/1", Summary: "同 URL 重复条目" },
+              { SiteName: "口碑站", Url: "https://word.example/2", Snippet: "哪家好" },
+            ],
+          },
+        });
+      },
+    );
+    const capabilities = createGeoProviderCapabilities(
+      // 解析链：专用豆包搜索 key 优先于 ARK key。
+      { arkApiKey: "ark-test", doubaoSearchApiKey: "doubao-search-test" },
+      { fetch: fakeFetch as typeof fetch },
+    );
+
+    const sources = await capabilities.keywordSearch.searchSources!(
+      "成都新都 医美 排行榜",
+      { count: 20 },
+    );
+
+    expect(calls[0].url).toBe(
+      "https://open.feedcoopapi.com/search_api/web_search",
+    );
+    expect(calls[0].body).toEqual({
+      Query: "成都新都 医美 排行榜",
+      Count: 20,
+      SearchType: "web",
+      NeedSummary: true,
+    });
+    expect(calls[0].auth).toBe("Bearer doubao-search-test");
+    expect(sources).toEqual([
+      { title: "新都医美排行", url: "https://rank.example/1", summary: "本地同行讨论" },
+      { title: "口碑站", url: "https://word.example/2", summary: "哪家好" },
+    ]);
   });
 
   it("exposes honest baseline availability and uses the real ARK doubao_app route", async () => {

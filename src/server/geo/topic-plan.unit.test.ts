@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
 
 import {
@@ -307,6 +309,43 @@ function service(
   );
 }
 
+/** 首轮标题候选全灭（如缺行业核心词），corrective 重试必须救回整批。 */
+class RetryOnceGeneration extends DeterministicGeneration {
+  private poisoned = new Set<string>();
+
+  async complete(
+    messages: Parameters<GeoTextCapability["complete"]>[0],
+    options?: Parameters<GeoTextCapability["complete"]>[1],
+  ): Promise<string> {
+    const prompt = messages.at(-1)?.content ?? "";
+    const itemId = prompt.match(/itemId：(item-[^\n]+)/)?.[1];
+    if (
+      itemId &&
+      options?.purpose === "title-planning" &&
+      !prompt.includes("上一次候选未通过确定性校验") &&
+      !this.poisoned.has(itemId)
+    ) {
+      this.poisoned.add(itemId);
+      return JSON.stringify({
+        itemId,
+        candidates: [
+          "成都贴膜哪家快",
+          "成都洗车须知",
+          "成都打蜡避坑",
+        ],
+        rationale: {
+          questionCoverage: "跑题",
+          searchIntent: "跑题",
+          differentiation: "跑题",
+          brandFit: "跑题",
+          chinaMarketExpression: "跑题",
+        },
+      });
+    }
+    return super.complete(messages, options);
+  }
+}
+
 describe("TopicPlanService", () => {
   it("uses embeddings and LLMs for named topics, five types, factual titles and semantic dedup", async () => {
     const persistence = new FakePersistence();
@@ -315,7 +354,6 @@ describe("TopicPlanService", () => {
       ...identity,
       questionPoolId: "pool-08",
     });
-
     expect(plan.topics).toHaveLength(2);
     expect(new Set(plan.items.map((item) => item.contentType))).toEqual(
       new Set(["guide", "showcase", "ranking", "news", "news_light"]),
@@ -368,6 +406,25 @@ describe("TopicPlanService", () => {
     ).rejects.toThrow("topic_plan_provider_unavailable:model unavailable");
     expect(persistence.createInputs).toHaveLength(0);
     expect(persistence.plan).toBeNull();
+  });
+
+  it("recovers a fully-rejected title batch with one corrective retry", async () => {
+    const persistence = new FakePersistence();
+    const generation = new RetryOnceGeneration();
+    const plan = await service(persistence, generation).generate({
+      ...identity,
+      questionPoolId: "pool-08",
+    });
+    // 首轮候选跑题全灭（industry=3），corrective 重试后整批恢复，计划照常产出。
+    expect(plan.items.length).toBeGreaterThan(0);
+    expect(
+      plan.items.every((item) => item.title.includes("成都")),
+    ).toBe(true);
+    const retried = generation.calls.filter((call) =>
+      call.prompt.includes("上一次候选未通过确定性校验"),
+    );
+    expect(retried.length).toBeGreaterThan(0);
+    expect(retried.every((call) => call.purpose === "title-planning")).toBe(true);
   });
 
   it("uses exact plan/revision CAS and preserves edited or approved targets during partial regeneration", async () => {
@@ -488,5 +545,18 @@ describe("TopicPlanService", () => {
         items: persistence.plan.items,
       }),
     ).rejects.toThrow("topic_plan_confirmed_immutable");
+  });
+});
+
+describe("topic plan policy version contract with BrandWorkspace", () => {
+  it("accepts the Sidecar's policy version (create_topic_plan rejects mismatches with topic_plan_policy_version_invalid)", () => {
+    const rust = readFileSync(
+      fileURLToPath(
+        new URL("../../../src-tauri/src/brand_workspace/topic_plans.rs", import.meta.url),
+      ),
+      "utf8",
+    );
+    const declared = rust.match(/const POLICY_VERSION: &str = "([^"]+)";/);
+    expect(declared?.[1]).toBe(TOPIC_PLAN_POLICY_VERSION);
   });
 });

@@ -2,8 +2,8 @@ import { basename, resolve } from 'node:path';
 
 import {
   buildKnowledgeCandidatesCardData,
-  toKnowledgeCardCandidate,
   KNOWLEDGE_CARD_MAX_CANDIDATES,
+  toKnowledgeCardCandidate,
 } from '../../shared/geo/knowledgeCard';
 import { MATERIAL_ERROR_CODES } from '../../shared/geo/materials';
 import {
@@ -266,7 +266,7 @@ export async function handleXiaojingKnowledgeRoute(
         }, 403);
       }
       if (!Array.isArray(payload.candidateIds) || payload.candidateIds.length === 0
-        || payload.candidateIds.length > 100
+        || payload.candidateIds.length > KNOWLEDGE_CARD_MAX_CANDIDATES
         || payload.candidateIds.some((id) => typeof id !== 'string')) {
         return jsonResponse({ success: false, error: 'knowledge_candidate_ids_invalid' }, 400);
       }
@@ -434,8 +434,10 @@ export async function handleXiaojingKnowledgeRoute(
         const terminal = item.material.status === 'awaiting-confirmation'
           || item.material.status === 'processed';
         if (terminal && item.candidateIds.length > 0) {
+          // 不做前置截断：配额分配与溢出归因统一由 buildKnowledgeCandidatesCardData
+          // 完成，否则第 51 条之后的候选永远不会出现在任何卡上（重建死胡同）。
           const candidates = await Promise.all(
-            item.candidateIds.slice(0, KNOWLEDGE_CARD_MAX_CANDIDATES).map(async (candidateId) => {
+            item.candidateIds.map(async (candidateId) => {
               try {
                 return toKnowledgeCardCandidate(await authority.candidate(candidateId));
               } catch {

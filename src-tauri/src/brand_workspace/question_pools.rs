@@ -42,12 +42,22 @@ pub struct QuestionPoolKnowledgeFact {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
+pub struct QuestionPoolLibraryKeyword {
+    pub term: String,
+    pub category: String,
+    pub heat: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct QuestionPoolKnowledgeContext {
     pub knowledge_version: i64,
     pub brand_name: String,
     pub product_lines: Vec<String>,
     pub facts: Vec<QuestionPoolKnowledgeFact>,
     pub recent_selected_questions: Vec<String>,
+    /// 品牌词库（用户确认过的词，跨池复用；ADR-0006 修正三）。
+    pub keyword_library: Vec<QuestionPoolLibraryKeyword>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -273,7 +283,19 @@ pub(super) fn ensure_schema(connection: &Connection) -> Result<(), String> {
                 actor_id TEXT NOT NULL,
                 reason TEXT NOT NULL,
                 revised_at TEXT NOT NULL
-             );",
+             );
+             CREATE TABLE IF NOT EXISTS brand_keyword_library (
+                id TEXT PRIMARY KEY,
+                workspace_id TEXT NOT NULL,
+                term TEXT NOT NULL,
+                category TEXT NOT NULL CHECK(category IN ('core','scene','longtail')),
+                heat TEXT NOT NULL CHECK(heat IN ('high','medium','low')),
+                source_pool_id TEXT REFERENCES geo_question_pools(id),
+                created_at TEXT NOT NULL,
+                UNIQUE(workspace_id, term)
+             );
+             CREATE INDEX IF NOT EXISTS brand_keyword_library_terms
+                ON brand_keyword_library(workspace_id, created_at);",
         )
         .map_err(|error| format!("initialize question pool schema: {error}"))?;
     super::drop_brand_sessions_foreign_keys(
@@ -875,15 +897,16 @@ impl BrandWorkspaceStore {
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|error| format!("start question pool decision: {error}"))?;
-        let (revision, status, operation_id, knowledge_version, created_by_session_id): (
+        let (revision, status, operation_id, knowledge_version, created_by_session_id, keywords_json): (
             i64,
             String,
             String,
             i64,
+            String,
             String,
         ) = transaction
             .query_row(
-                "SELECT revision, status, operation_id, knowledge_version, created_by_session_id
+                "SELECT revision, status, operation_id, knowledge_version, created_by_session_id, keywords_json
                  FROM geo_question_pools WHERE id=?1",
                 [&request.pool_id],
                 |row| {
@@ -893,6 +916,7 @@ impl BrandWorkspaceStore {
                         row.get(2)?,
                         row.get(3)?,
                         row.get(4)?,
+                        row.get(5)?,
                     ))
                 },
             )
@@ -951,6 +975,13 @@ impl BrandWorkspaceStore {
                 [operation_id],
             )
             .map_err(|error| format!("confirm question pool operation: {error}"))?;
+        persist_keywords_to_library(
+            &transaction,
+            &workspace.id,
+            &request.pool_id,
+            &keywords_json,
+            &now,
+        )?;
         transaction
             .commit()
             .map_err(|error| format!("commit question pool decision: {error}"))?;
@@ -1216,13 +1247,88 @@ fn read_question_pool_context(
     }
     let recent_selected_questions =
         read_recent_selected_questions(connection, product_line.trim(), target_region.trim())?;
+    let keyword_library = read_keyword_library(connection, &workspace.id)?;
     Ok(QuestionPoolKnowledgeContext {
         knowledge_version: version,
         brand_name: workspace.name.clone(),
         product_lines: workspace.product_lines.clone(),
         facts,
         recent_selected_questions,
+        keyword_library,
     })
+}
+
+fn read_keyword_library(
+    connection: &Connection,
+    workspace_id: &str,
+) -> Result<Vec<QuestionPoolLibraryKeyword>, String> {
+    let mut statement = connection
+        .prepare(
+            "SELECT term, category, heat FROM brand_keyword_library
+             WHERE workspace_id=?1 ORDER BY created_at, term",
+        )
+        .map_err(|error| format!("prepare keyword library read: {error}"))?;
+    let library = statement
+        .query_map([workspace_id], |row| {
+            Ok(QuestionPoolLibraryKeyword {
+                term: row.get(0)?,
+                category: row.get(1)?,
+                heat: row.get(2)?,
+            })
+        })
+        .map_err(|error| format!("query keyword library: {error}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("read keyword library: {error}"))?;
+    Ok(library)
+}
+
+/// 池确认时把本批词沉淀进品牌词库（池型合并只增不清；ADR-0006 修正三：
+/// 用户闸门确认后才复用——未裁决的词不是品牌资产）。
+fn persist_keywords_to_library(
+    transaction: &Connection,
+    workspace_id: &str,
+    pool_id: &str,
+    keywords_json: &str,
+    now: &str,
+) -> Result<(), String> {
+    let keywords: Value = serde_json::from_str(keywords_json)
+        .map_err(|error| format!("parse pool keywords for library: {error}"))?;
+    let Some(entries) = keywords.as_array() else {
+        return Ok(());
+    };
+    for entry in entries {
+        let (term, category, heat) = (
+            entry.get("term").and_then(Value::as_str),
+            entry.get("category").and_then(Value::as_str),
+            entry.get("heat").and_then(Value::as_str),
+        );
+        let (Some(term), Some(category), Some(heat)) = (term, category, heat) else {
+            continue;
+        };
+        if !matches!(category, "core" | "scene" | "longtail")
+            || !matches!(heat, "high" | "medium" | "low")
+            || term.trim().is_empty()
+        {
+            continue;
+        }
+        transaction
+            .execute(
+                "INSERT OR IGNORE INTO brand_keyword_library
+                    (id, workspace_id, term, category, heat, source_pool_id, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    Uuid::new_v4().to_string(),
+                    workspace_id,
+                    term.trim(),
+                    category,
+                    heat,
+                    pool_id,
+                    now
+                ],
+            )
+            .map_err(|error| format!("persist keyword to library: {error}"))?;
+    }
+    Ok(())
 }
 
 fn read_recent_selected_questions(
@@ -1766,6 +1872,60 @@ mod tests {
                 .unwrap_err(),
             "question_pool_confirmed_immutable"
         );
+    }
+
+    #[test]
+    fn confirmed_keywords_persist_to_brand_library_and_return_in_context() {
+        let (store, workspace) = setup();
+        let prepared = prepare(&store, &workspace, "library-08");
+        let attempt_id = prepared.attempt.unwrap().id;
+        for stage in ["keyword-search", "question-generation", "embedding"] {
+            complete_step(&store, &workspace, &attempt_id, stage);
+        }
+        let pending = store
+            .persist_question_pool(
+                &workspace.id,
+                "session-08",
+                QuestionPoolPersistRequest {
+                    attempt_id,
+                    keywords: serde_json::json!([
+                        {"id":"kw-1","term":"成都汽车改装","category":"core","heat":"high","platform":"doubao"},
+                        {"id":"kw-2","term":"成都汽车隔音","category":"scene","heat":"medium","platform":"doubao"},
+                        {"id":"kw-3","term":"废词","category":"unknown","heat":"high","platform":"doubao"}
+                    ]),
+                    questions: serde_json::json!([
+                        {"id":"q-1","text":"成都汽车改装哪家好？","selected":true}
+                    ]),
+                    source_evidence: serde_json::json!([]),
+                },
+            )
+            .unwrap();
+
+        // 确认前：词库为空——未裁决的词不是品牌资产（ADR-0006 修正三）。
+        let before = prepare(&store, &workspace, "library-before");
+        assert!(before.context.keyword_library.is_empty());
+
+        store
+            .decide_question_pool(QuestionPoolDecisionRequest {
+                workspace_id: workspace.id.clone(),
+                session_id: "session-08".to_string(),
+                pool_id: pending.id.clone(),
+                expected_revision: pending.revision,
+                questions: pending.questions.clone(),
+                selected_question_ids: vec!["q-1".to_string()],
+                actor_id: "desktop-user".to_string(),
+            })
+            .unwrap();
+
+        // 确认后：合法词入库（非法 category 被跳过）；重挖 prepare 返回词库。
+        let after = prepare(&store, &workspace, "library-after");
+        let terms: Vec<&str> = after
+            .context
+            .keyword_library
+            .iter()
+            .map(|keyword| keyword.term.as_str())
+            .collect();
+        assert_eq!(terms, vec!["成都汽车改装", "成都汽车隔音"]);
     }
 
     #[test]

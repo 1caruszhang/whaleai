@@ -53,14 +53,30 @@ function resource(
   return normalized;
 }
 
-function candidateResult(resources: ReturnType<typeof resource>[]) {
+function candidateResult(
+  resources: ReturnType<typeof resource>[],
+  overrides: Partial<
+    Parameters<typeof buildDistributionCandidates>[0]
+  > = {},
+) {
   return buildDistributionCandidates({
     industry: "汽车改装",
     targetAudience: "新能源车主 门店经营者",
     questionSources: sources,
-    preferredResourceIds: [2],
+    activeSources: [
+      {
+        title: "汽车垂直媒体",
+        url: "https://autovertical.example.org/auto",
+        articleIds: ["article-news"],
+      },
+    ],
+    preferenceChannels: [
+      { name: "新能源车主观察", exact: true },
+      { name: "盐城网", exact: true },
+    ],
     articles,
     resources,
+    ...overrides,
   });
 }
 
@@ -116,21 +132,55 @@ describe("Ticket 12 distribution plan contract", () => {
     const first = result.candidates.find(
       (candidate) => candidate.resourceId === 1,
     )!;
-    expect(first.pathHits).toEqual(["passive", "active", "fallback"]);
+    // 被动=探测引用域名对齐；主动=全局召回渠道对齐（本资源未命中）；
+    // 保底=结构化类目/人群规则路（合并后单路）；偏好=名单精确名命中。
+    expect(first.pathHits).toEqual(["passive", "fallback"]);
     expect(first.recommendationWeight).toBeCloseTo(
       GEO_PORT_CONTRACT.channelRecall.paths.passive.weight +
-        GEO_PORT_CONTRACT.channelRecall.paths.active.weight +
         GEO_PORT_CONTRACT.channelRecall.paths.fallback.weight,
       10,
     );
     const preferred = result.candidates.find(
       (candidate) => candidate.resourceId === 2,
     )!;
-    expect(preferred.pathHits).toEqual(["active", "preference"]);
+    expect(preferred.pathHits).toEqual(["fallback", "preference"]);
+    expect(preferred.recommendationWeight).toBeCloseTo(
+      GEO_PORT_CONTRACT.channelRecall.paths.fallback.weight +
+        GEO_PORT_CONTRACT.channelRecall.paths.preference.weight,
+      10,
+    );
     expect(preferred.resourceSnapshot.name).toBe(preferred.name);
     expect(preferred.resourceSnapshot.price).toBe("66");
     expect(preferred.resourceSnapshot.publishedRate).toBe(85);
     expect(preferred.availability.providerStatus).toBe(2);
+  });
+
+  it("aligns global-recall channels on the active path with domain-first matching", () => {
+    const result = candidateResult(
+      [
+        resource("media", {
+          id: 9,
+          name: "汽车垂直媒体",
+          status: 2,
+          price: "30",
+          published_rate: 0,
+          entrance_link: "https://autovertical.example.org/auto",
+          channel_type: 1,
+          remark: "普通资讯",
+        }),
+      ],
+      {
+        // 类目与人群都不命中、不在偏好名单——只剩主动路证据可命中。
+        industry: "医疗整形",
+        targetAudience: "求美人群",
+        preferenceChannels: [],
+      },
+    );
+    const active = result.candidates.find(
+      (candidate) => candidate.resourceId === 9,
+    )!;
+    expect(active.pathHits).toEqual(["active"]);
+    expect(active.evidence[0].articleIds).toEqual(["article-news"]);
   });
 
   it("hard-filters unavailable, known low-rate, and high-price resources before alignment", () => {
@@ -173,18 +223,21 @@ describe("Ticket 12 distribution plan contract", () => {
       }),
     ]);
 
-    expect(result.candidates.map((candidate) => candidate.resourceId)).toEqual([
-      4,
-    ]);
+    // 发布率不参与决策（用户裁决 2026-08-18）：低成功率渠道保留为候选，
+    // 唯一被质量过滤掉的是价格 >=150 的渠道。
+    expect(
+      result.candidates
+        .map((candidate) => candidate.resourceId)
+        .sort((left, right) => left - right),
+    ).toEqual([2, 4]);
     expect(result.summary).toMatchObject({
       filteredUnavailable: 1,
-      filteredLowPublishedRate: 1,
       filteredHighPrice: 1,
-      approvedResources: 1,
+      approvedResources: 2,
     });
   });
 
-  it("retains zero-rate and empty-price as explicit uncertainty but blocks confirmation", () => {
+  it("retains zero-rate and empty-price channels; only unknown price blocks confirmation", () => {
     const result = candidateResult([
       resource("media", {
         id: 1,
@@ -201,7 +254,6 @@ describe("Ticket 12 distribution plan contract", () => {
     expect(result.candidates[0].publishedRate).toBe(0);
     expect(result.candidates[0].uncertainties).toEqual([
       "价格未知，不能进入已确认分发计划",
-      "发布成功率未知，不能进入已确认分发计划",
     ]);
     const issues = distributionPlanBlockingIssues({
       providerState: "available",
@@ -220,7 +272,7 @@ describe("Ticket 12 distribution plan contract", () => {
       budgetCny: 100,
     });
     expect(issues).toContain("selected-channel-price-unknown");
-    expect(issues).toContain("selected-channel-published-rate-unknown");
+    expect(issues).not.toContain("selected-channel-published-rate-unknown");
   });
 
   it("returns an empty candidate set instead of random or fabricated fallback", () => {

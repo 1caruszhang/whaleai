@@ -1,4 +1,4 @@
-import { CheckCircle2, Eye, FilePenLine, Loader2 } from "lucide-react";
+import { Eye, FilePenLine, Loader2 } from "lucide-react";
 import { memo, useCallback, useEffect, useMemo, useState } from "react";
 
 import {
@@ -34,8 +34,8 @@ const STATUS_LABELS: Record<ArticleProjection["status"], string> = {
 
 /**
  * 票 29：文章阶段面板是纯只读投影。生成、编辑、重试与批准只出现在
- * 聊天里的卡片（ArticleApprovalGateCard）上；这里保留的唯一控件是
- * 打开批准稿正文的只读查看。
+ * 聊天里的卡片（ArticleApprovalGateCard）上；这里只展示用户已批准的
+ * 文章与批准稿正文，未确认的过程产物留在聊天卡片。
  */
 export default memo(function XiaojingArticleGenerationPanel({
   workspaceId,
@@ -101,6 +101,12 @@ export default memo(function XiaojingArticleGenerationPanel({
     [apiPost, identity],
   );
 
+  const approvedArticles =
+    operation?.articles.filter((article) => article.approvedRevision) ?? [];
+  const pendingCount = operation
+    ? operation.articles.length - approvedArticles.length
+    : 0;
+
   return (
     <section
       aria-label="文章生成与审核"
@@ -111,7 +117,7 @@ export default memo(function XiaojingArticleGenerationPanel({
         <div>
           <h3 className="text-sm font-medium">文章生成、审校与批准</h3>
           <p className="mt-1 text-xs leading-4 text-[var(--ink-muted)]">
-            生成与批准在聊天卡片上完成；这里展示当前权威结果与批准稿正文。
+            生成与批准在聊天卡片上完成；这里只展示已批准的文章与批准稿正文。
           </p>
         </div>
       </div>
@@ -134,7 +140,13 @@ export default memo(function XiaojingArticleGenerationPanel({
         </p>
       )}
 
-      {operation && (
+      {operation && approvedArticles.length === 0 && (
+        <p className="mt-3 rounded-lg bg-[var(--paper-inset)] px-3 py-2 text-xs leading-5 text-[var(--ink-muted)]">
+          尚无已批准文章；草稿的审阅与批准请回到聊天中的确认卡片完成，批准后这里展示。
+        </p>
+      )}
+
+      {operation && approvedArticles.length > 0 && (
         <div className="mt-3">
           <div className="flex flex-wrap gap-1 text-xs text-[var(--ink-muted)]">
             <span className="rounded-full bg-[var(--paper-inset)] px-2 py-0.5">
@@ -144,12 +156,11 @@ export default memo(function XiaojingArticleGenerationPanel({
               {operation.sourceKind === "direct" ? "直达任务" : "已确认计划"}
             </span>
             <span className="rounded-full bg-[var(--paper-inset)] px-2 py-0.5">
-              {operation.articles.length} 篇
+              已批准 {approvedArticles.length} 篇
             </span>
           </div>
           <div className="mt-2 space-y-2">
-            {operation.articles.map((article) => {
-              const review = article.currentVersion?.review;
+            {approvedArticles.map((article) => {
               const rowBusy = busyArticleId === article.id;
               return (
                 <article
@@ -174,20 +185,6 @@ export default memo(function XiaojingArticleGenerationPanel({
                       <Loader2 className="h-3.5 w-3.5 animate-spin text-[var(--accent)]" />
                     )}
                   </div>
-                  {article.failureReason && (
-                    <p className="mt-1 break-words text-xs text-[var(--error)]">
-                      {article.failureReason}
-                    </p>
-                  )}
-                  {review && !review.passed && (
-                    <ul className="mt-1 list-disc pl-4 text-xs text-[var(--error)]">
-                      {review.issues.map((issue, index) => (
-                        <li key={`${issue.category}-${index}`}>
-                          {issue.message}
-                        </li>
-                      ))}
-                    </ul>
-                  )}
                   <div className="mt-2 flex flex-wrap gap-1.5">
                     {article.approvedRevision && (
                       <button
@@ -205,6 +202,12 @@ export default memo(function XiaojingArticleGenerationPanel({
               );
             })}
           </div>
+          {pendingCount > 0 && (
+            <p className="mt-2 text-xs leading-4 text-[var(--ink-subtle)]">
+              另有 {pendingCount}{" "}
+              篇生成或审阅中的文章，过程与结果请在聊天卡片查看。
+            </p>
+          )}
         </div>
       )}
 
@@ -217,15 +220,6 @@ export default memo(function XiaojingArticleGenerationPanel({
             {opened.body}
           </pre>
         </div>
-      )}
-
-      {operation?.articles.some(
-        (article) => article.status === "draft_ready",
-      ) && (
-        <p className="mt-2 flex items-center gap-1 text-xs leading-4 text-[var(--ink-subtle)]">
-          <CheckCircle2 className="h-3 w-3" />
-          草稿的审阅与批准请回到聊天中的确认卡片完成。
-        </p>
       )}
     </section>
   );

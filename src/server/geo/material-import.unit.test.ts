@@ -163,6 +163,11 @@ function service(port: FakeMaterialPort, overrides: {
   propose?: (input: KnowledgeProposalInput) => Promise<KnowledgeCandidate>;
   inspect?: (key: { subject: string; predicate: string }) => Promise<KnowledgeCurrentFact | null>;
   search?: (prompt: string) => Promise<string>;
+  /** 豆包搜索结构化召回（js_ai doubaoSearchProbe 形态）。 */
+  searchSources?: (
+    query: string,
+    options?: { signal?: AbortSignal; count?: number },
+  ) => Promise<Array<{ title: string; url: string; summary?: string }>>;
   /** 缩短抽取硬上限，验证 provider 挂起会落回 failed 终态。 */
   extractionTimeoutMs?: number;
 } = {}) {
@@ -180,19 +185,29 @@ function service(port: FakeMaterialPort, overrides: {
     candidate(input.key.predicate)
   )));
   const inspect = vi.fn(overrides.inspect ?? (async () => null));
-  const search = overrides.search ? vi.fn(overrides.search) : undefined;
+  const searchSources = overrides.searchSources ? vi.fn(overrides.searchSources) : undefined;
+  // 结构化召回可用性测试需要断言「生成语料未被调用」，兜底 spy 同时暴露到返回对象。
+  const search = overrides.search
+    ? vi.fn(overrides.search)
+    : searchSources
+      ? vi.fn(async () => { throw new Error('generated search unavailable'); })
+      : undefined;
+  const capability = search || searchSources
+    ? { search: search!, ...(searchSources ? { searchSources } : {}) }
+    : undefined;
   return {
     complete,
     propose,
     inspect,
     search,
+    searchSources,
     value: new MaterialImportService(
       { workspaceId: 'brand-07', sessionId: 'session-07' },
       port,
       { slot: 'extraction', complete },
       { propose, inspect },
       overrides.fetch ? { fetch: overrides.fetch, dispatcherFor: async () => undefined } : {},
-      search ? { search } : undefined,
+      capability,
       overrides.extractionTimeoutMs,
     ),
   };
@@ -511,14 +526,14 @@ describe('competitor enrichment (js_ai enrich real competitors)', () => {
     expect(port.trace.at(-1)).toMatch(/finish:text-1:awaiting-confirmation/);
   });
 
-  it('does not search when five confirmed competitors already exist', async () => {
+  it('does not search when eight confirmed competitors already exist', async () => {
     const port = new FakeMaterialPort();
     const current = service(port, {
       inspect: async (key) => {
         if (key.predicate !== 'enterprise-profile.competitors') return null;
         return {
           key: { subject: '鲸跃科技', predicate: key.predicate, scopeJson: '{}', identity: 'brand|competitors|{}||' },
-          normalizedValueJson: JSON.stringify(['甲品牌', '乙品牌', '丙品牌', '丁品牌', '戊品牌']),
+          normalizedValueJson: JSON.stringify(['甲品牌', '乙品牌', '丙品牌', '丁品牌', '戊品牌', '己品牌', '庚品牌', '辛品牌']),
           unit: null,
           version: 3,
           confirmedBy: 'desktop-user',
@@ -543,6 +558,178 @@ describe('competitor enrichment (js_ai enrich real competitors)', () => {
     expect(result).toMatchObject({ ok: true });
     expect(current.propose).toHaveBeenCalledTimes(2);
     expect(current.inspect).not.toHaveBeenCalled();
+  });
+
+  it('uses complementary area+industry queries and tolerates per-query failure', async () => {
+    const port = new FakeMaterialPort();
+    const withArea = JSON.stringify({ facts: [
+      { field: 'industry', value: '医美', provenance: 'extracted', sourceExcerpt: '行业：医美' },
+      { field: 'serviceArea', value: '成都新都', provenance: 'extracted', sourceExcerpt: '服务成都新都' },
+    ] });
+    let call = 0;
+    const current = service(port, {
+      completeResponses: [withArea, enrichmentResponse],
+      search: async () => {
+        call += 1;
+        if (call === 2) throw new Error('search hiccup');
+        return call === 1 ? '云帆信息是本地同行' : '星河智能口碑不错';
+      },
+    });
+    const result = await current.value.importPastedText('公司资料');
+
+    expect(result.ok).toBe(true);
+    // js_ai 三互补 query：排行榜形、口碑形、品牌点名形；榜单语料的国际大牌
+    // 由富化提示词的画像锚定与榜单警示过滤。
+    expect(current.search!.mock.calls.map(([query]) => query)).toEqual([
+      '成都新都 医美 排行榜 十大品牌 对比',
+      '成都新都 医美 哪家好 推荐 口碑',
+      '鲸跃科技 主要竞争对手 同行',
+    ]);
+    const competitorsCall = current.propose.mock.calls.find(
+      ([input]) => input.key.predicate === 'enterprise-profile.competitors',
+    );
+    expect(competitorsCall?.[0].value).toEqual(['云帆信息', '星河智能']);
+  });
+
+  it('prefers structured doubao-search sources and dedupes across queries by url', async () => {
+    const port = new FakeMaterialPort();
+    const withArea = JSON.stringify({ facts: [
+      { field: 'industry', value: '医美', provenance: 'extracted', sourceExcerpt: '行业：医美' },
+      { field: 'serviceArea', value: '成都新都', provenance: 'extracted', sourceExcerpt: '服务成都新都' },
+    ] });
+    const current = service(port, {
+      completeResponses: [withArea, enrichmentResponse],
+      searchSources: async (query) => {
+        if (query.includes('排行榜')) {
+          return [
+            { title: '医美十大品牌榜', url: 'https://rank.example/1', summary: '国际设备品牌与连锁榜单' },
+            { title: '新都医美哪家好', url: 'https://local.example/1', summary: '云帆信息是本地同行' },
+          ];
+        }
+        return [
+          // 跨 query 的同一 URL 只进语料一次。
+          { title: '新都医美哪家好', url: 'https://local.example/1', summary: '云帆信息是本地同行' },
+          { title: '本地口碑讨论', url: 'https://local.example/2', summary: '星河智能口碑不错' },
+        ];
+      },
+    });
+    const result = await current.value.importPastedText('公司资料');
+
+    expect(result.ok).toBe(true);
+    // 结构化召回可用时不走 enable_search 生成语料。
+    expect(current.search).not.toHaveBeenCalled();
+    expect(current.searchSources).toHaveBeenCalledTimes(3);
+    const promptOf = (index: number) =>
+      (current.complete.mock.calls[index] as unknown as [
+        readonly { role: string; content: string }[],
+      ])[0][1].content;
+    const enrichmentPrompt = promptOf(current.complete.mock.calls.length - 1);
+    // 语料 = 标题 + 摘要逐条拼接（无 LLM 改写），URL 去重后 3 条。
+    expect(enrichmentPrompt).toContain('医美十大品牌榜');
+    expect(enrichmentPrompt).toContain('云帆信息是本地同行');
+    expect(enrichmentPrompt).toContain('星河智能口碑不错');
+    const corpus = enrichmentPrompt.split('## 检索结果')[1] ?? '';
+    expect(corpus.match(/医美十大品牌榜/g)).toHaveLength(1);
+    expect(corpus.match(/新都医美哪家好/g)).toHaveLength(1);
+    const competitorsCall = current.propose.mock.calls.find(
+      ([input]) => input.key.predicate === 'enterprise-profile.competitors',
+    );
+    expect(competitorsCall?.[0].value).toEqual(['云帆信息', '星河智能']);
+  });
+
+  it('falls back to the generated corpus when structured search fails entirely', async () => {
+    const port = new FakeMaterialPort();
+    const current = service(port, {
+      completeResponses: [extractionResponse(), enrichmentResponse],
+      searchSources: async () => { throw new Error('doubao-search unavailable'); },
+      search: async () => searchText,
+    });
+    const result = await current.value.importPastedText('公司资料');
+
+    expect(result.ok).toBe(true);
+    // 结构化全军覆没 → 回落 enable_search 生成语料，反虚构过滤照常生效。
+    expect(current.searchSources).toHaveBeenCalledTimes(1);
+    expect(current.search).toHaveBeenCalledTimes(1);
+    const competitorsCall = current.propose.mock.calls.find(
+      ([input]) => input.key.predicate === 'enterprise-profile.competitors',
+    );
+    expect(competitorsCall?.[0].value).toEqual(['云帆信息', '星河智能', '华创精密']);
+  });
+
+  it('hydrates the enrichment profile from confirmed authority facts when the material lacks them', async () => {
+    const port = new FakeMaterialPort();
+    const current = service(port, {
+      completeResponses: [extractionResponse(), enrichmentResponse],
+      search: async () => searchText,
+      inspect: async (key) => {
+        if (key.predicate === 'enterprise-profile.products') {
+          return {
+            key: { subject: '鲸跃科技', predicate: key.predicate, scopeJson: '{}', identity: 'brand|products|{}||' },
+            normalizedValueJson: JSON.stringify(['汽车音响改装', '隔音升级']),
+            unit: null,
+            version: 2,
+            confirmedBy: 'desktop-user',
+            confirmedAt: '2026-08-15T00:00:00Z',
+            sources: [],
+          };
+        }
+        if (key.predicate === 'enterprise-profile.servicearea') {
+          return {
+            key: { subject: '鲸跃科技', predicate: key.predicate, scopeJson: '{}', identity: 'brand|servicearea|{}||' },
+            normalizedValueJson: '"成都新都"',
+            unit: null,
+            version: 1,
+            confirmedBy: 'desktop-user',
+            confirmedAt: '2026-08-15T00:00:00Z',
+            sources: [],
+          };
+        }
+        return null;
+      },
+    });
+    const result = await current.value.importPastedText('公司资料');
+
+    expect(result.ok).toBe(true);
+    const promptOf = (index: number) =>
+      (current.complete.mock.calls[index] as unknown as [
+        readonly { role: string; content: string }[],
+      ])[0][1].content;
+    const enrichmentPrompt = promptOf(current.complete.mock.calls.length - 1);
+    // 四条件判别的画像输入由已确认权威值补齐：产品进画像块、区域驱动 query 形态。
+    expect(enrichmentPrompt).toContain('核心产品/服务：汽车音响改装、隔音升级');
+    expect(enrichmentPrompt).toContain('服务区域：成都新都');
+    expect(current.search!.mock.calls[0][0]).toContain('成都新都');
+  });
+
+  it('embeds per-field definitions and competitor tier discipline in the extraction prompt', async () => {
+    const port = new FakeMaterialPort();
+    const current = service(port, { search: async () => searchText });
+    await current.value.importPastedText('公司资料');
+
+    // vi.fn 的 fallback 无参签名让 mock.calls 元组退化为 []，这里按消息形状取回。
+    const promptOf = (index: number) =>
+      (current.complete.mock.calls[index] as unknown as [
+        readonly { role: string; content: string }[],
+      ])[0][1].content;
+    const prompt = promptOf(0);
+    // 逐字段显式定义（事实类/判断类），不再是单行字段名列表。
+    expect(prompt).toContain('fullName（标量）：品牌完整的注册全称');
+    expect(prompt).toContain('relatedBrands（数组）');
+    expect(prompt).toContain('不是直接竞品】的其他品牌');
+    expect(prompt).toContain('其全称/简称/别名不得进入 relatedBrands');
+    // 竞品纪律：层级原则（含行业例子）、二选一信号、前东家最高优先级排除、
+    // 来源只有材料与后续检索（禁止凭模型记忆推断）。
+    expect(prompt).toContain('同体量层级');
+    expect(prompt).toContain('二选一');
+    expect(prompt).toContain('前东家');
+    expect(prompt).toContain('音响设备');
+    expect(prompt).toContain('禁止凭模型记忆推断或编造');
+    const enrichmentPrompt = promptOf(current.complete.mock.calls.length - 1);
+    // 富化提示词：画像锚定 + 四条件同时满足 + 榜单语料警示。
+    expect(enrichmentPrompt).toContain('同体量层级');
+    expect(enrichmentPrompt).toContain('四个条件必须同时满足');
+    expect(enrichmentPrompt).toContain('榜单语料警示');
+    expect(enrichmentPrompt).toContain('看具体产品/服务，不看行业大类');
   });
 });
 
@@ -611,6 +798,85 @@ describe('profile and document compatibility', () => {
       expect.objectContaining({ field: 'industry', provenance: 'inferred', scope: { kind: 'brand' } }),
       expect.objectContaining({ field: 'coreAdvantages', value: ['快'], provenance: 'inferred', scope: { kind: 'brand' } }),
     ]);
+  });
+
+  it('splits composite list strings in array fields back into atomic items', () => {
+    const facts = parseProfileFacts(JSON.stringify({ facts: [
+      {
+        field: 'competitors',
+        value: '旭日酷车汽车音响、元音改汽车音响，美声汽车音响；声海汽车音响',
+        provenance: 'extracted',
+        sourceExcerpt: '竞品列表',
+      },
+      { field: 'customerCases', value: '服务200+客户，好评率98%', provenance: 'extracted', sourceExcerpt: '案例' },
+    ] }), context);
+    expect(facts.find((fact) => fact.field === 'competitors')?.value).toEqual([
+      '旭日酷车汽车音响', '元音改汽车音响', '美声汽车音响', '声海汽车音响',
+    ]);
+    // customerCases 是散文式描述，句内逗号不是列表分隔，不拆。
+    expect(facts.find((fact) => fact.field === 'customerCases')?.value)
+      .toEqual(['服务200+客户，好评率98%']);
+  });
+
+  it('drops the brand itself (exact and bidirectional substring) from relatedBrands and competitors', () => {
+    const facts = parseProfileFacts(JSON.stringify({ facts: [
+      { field: 'fullName', value: '鲸跃科技有限公司', provenance: 'extracted', sourceExcerpt: '公司全称' },
+      { field: 'shortNames', value: ['小鲸'], provenance: 'extracted', sourceExcerpt: '简称' },
+      { field: 'relatedBrands', value: ['鲸跃科技有限公司', '成都鲸跃科技', '真伙伴品牌'], provenance: 'extracted', sourceExcerpt: '关联品牌' },
+      { field: 'competitors', value: ['小鲸', '云帆信息'], provenance: 'extracted', sourceExcerpt: '竞品' },
+    ] }), context);
+    expect(facts.find((fact) => fact.field === 'relatedBrands')?.value).toEqual(['真伙伴品牌']);
+    expect(facts.find((fact) => fact.field === 'competitors')?.value).toEqual(['云帆信息']);
+    // 只剩自名的数组字段整条丢弃，不产出空数组候选。
+    const dropped = parseProfileFacts(JSON.stringify({ facts: [
+      { field: 'relatedBrands', value: ['鲸跃科技'], provenance: 'inferred' },
+    ] }), context);
+    expect(dropped).toHaveLength(0);
+  });
+
+  // 回归：模型对同一 (field, scope) 重复输出多条事实（如多门店电话各一条）时，
+  // 必须合并为一条候选；放行会造成同一 fact key 多条候选，整卡确认时第二条
+  // 必然触发 knowledge_version_conflict（expected 0, actual 1）。
+  it('merges duplicate same-field same-scope facts into one candidate (contactInfo array)', () => {
+    const facts = parseProfileFacts(JSON.stringify({ facts: [
+      { field: 'contactInfo', value: '18111265132', provenance: 'extracted', sourceExcerpt: '龙泉店：181 1126 5132' },
+      { field: 'contactInfo', value: '17828430692', provenance: 'extracted', sourceExcerpt: '犀浦店：178 2843 0692' },
+    ] }), context);
+    expect(facts).toHaveLength(1);
+    expect(facts[0]).toEqual(expect.objectContaining({
+      field: 'contactInfo',
+      value: ['18111265132', '17828430692'],
+      provenance: 'extracted',
+      sourceExcerpt: '龙泉店：181 1126 5132',
+    }));
+  });
+
+  it('keeps the strongest scalar fact and downgrades merged arrays containing inferred items', () => {
+    const facts = parseProfileFacts(JSON.stringify({ facts: [
+      { field: 'industry', value: '汽车音响改装', provenance: 'extracted', sourceExcerpt: '行业' },
+      { field: 'industry', value: '汽车美容', provenance: 'inferred' },
+      { field: 'products', value: ['音响改装'], provenance: 'extracted', sourceExcerpt: '产品' },
+      { field: 'products', value: ['隔音降噪'], provenance: 'inferred' },
+    ] }), context);
+    expect(facts.find((fact) => fact.field === 'industry')).toEqual(expect.objectContaining({
+      value: '汽车音响改装',
+      provenance: 'extracted',
+    }));
+    expect(facts.find((fact) => fact.field === 'products')).toEqual(expect.objectContaining({
+      value: ['音响改装', '隔音降噪'],
+      provenance: 'inferred',
+      sourceExcerpt: '产品',
+    }));
+  });
+
+  it('does not merge same-field facts across different scopes', () => {
+    const facts = parseProfileFacts(JSON.stringify({ facts: [
+      { field: 'coreAdvantages', value: ['品牌级优势'], provenance: 'extracted', sourceExcerpt: '品牌' },
+      { field: 'coreAdvantages', value: ['产品线优势'], provenance: 'extracted', sourceExcerpt: '产品线', scope: { kind: 'product-line', productLine: '旗舰产品' } },
+    ] }), context);
+    expect(facts).toHaveLength(2);
+    expect(facts.filter((fact) => fact.field === 'coreAdvantages').map((fact) => fact.scope))
+      .toEqual([{ kind: 'brand' }, { kind: 'product-line', productLine: '旗舰产品' }]);
   });
 
   it('parses existing OOXML and XLSX capabilities from Rust-provided bytes', async () => {

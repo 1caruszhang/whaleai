@@ -10,6 +10,7 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock('@/context/TabContext', () => ({
+  useTabApi: () => ({ apiPost: vi.fn() }),
   useTabState: () => ({
     workspacePath: '/brands/brand-19',
     sessionId: 'session-26',

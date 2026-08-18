@@ -187,7 +187,7 @@ export function buildDistributionPlanDecisionReminder(input: DistributionPlanDec
 export function buildGeoOperationEventReminder(input: GeoOperationEventReminderInput): string {
   return envelope(
     'XIAOJING_GEO_OPERATION_EVENT',
-    'A structured GEO workbench action committed. Re-read the operation before continuing.',
+    'A structured GEO workbench action committed. Re-read the operation, then immediately execute the next planned step — no re-planning, no recap of finished steps; stop only at the next confirmation gate.',
     [
       '<operation-event>',
       `<workspace-id>${escape(input.workspaceId)}</workspace-id>`,

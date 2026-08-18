@@ -321,8 +321,8 @@ export const GEO_PORT_CONTRACT = {
       rank: ["weighted-path-score-desc", "hit-count-desc", "name-asc"],
     },
     quality: {
-      minimumKnownPublishedRate: 70,
-      unknownPublishedRate: 0,
+      // 发布率不是决策输入（用户裁决 2026-08-18）：无最低发布率门槛，
+      // 发布率未知也不过滤、不阻断确认；唯一质量硬约束是价格上限。
       maximumPriceExclusive: 150,
       priceParsedNumerically: true,
       appliedBeforeAlignmentAndQuota: true,
@@ -628,19 +628,13 @@ export function scoreGeoHybridKnowledge(input: {
   );
 }
 
-/** Mirrors the pre-alignment channel hard filter, including zero-as-unknown. */
+/** Mirrors the pre-alignment channel hard filter. Published rate is not a
+ * decision input anywhere (user ruling 2026-08-18); the only quality bound is
+ * the numeric price ceiling. */
 export function isGeoChannelQualityEligible(input: {
-  publishedRate?: number | null;
   price?: string | null;
 }): boolean {
   const quality = GEO_PORT_CONTRACT.channelRecall.quality;
-  if (
-    typeof input.publishedRate === "number" &&
-    input.publishedRate > quality.unknownPublishedRate &&
-    input.publishedRate < quality.minimumKnownPublishedRate
-  ) {
-    return false;
-  }
   if (input.price != null && input.price !== "") {
     const numericPrice = Number(input.price);
     if (

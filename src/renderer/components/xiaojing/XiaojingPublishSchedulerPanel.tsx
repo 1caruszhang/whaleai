@@ -11,6 +11,11 @@ import type {
   PublishExecutionProjection,
   PublishItemProjection,
 } from "../../../shared/geo/publishScheduler";
+import {
+  orderStage,
+  ossStage,
+  PUBLISH_STAGE_TONE_CLASS,
+} from "./publishStageStatus";
 
 interface XiaojingPublishSchedulerPanelProps {
   workspaceId: string;
@@ -132,6 +137,16 @@ export default memo(function XiaojingPublishSchedulerPanel({
                 <div className="flex items-start justify-between gap-2">
                   <strong>{item.article.title}</strong>
                   <span className="shrink-0 text-[var(--ink-muted)]">{ITEM_STATUS_LABEL[item.status]}</span>
+                </div>
+                <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                  {[ossStage(item), orderStage(item)].map((badge, index) => (
+                    <span
+                      key={index}
+                      className={`rounded-full px-2 py-0.5 text-xs leading-4 ${PUBLISH_STAGE_TONE_CLASS[badge.tone]}`}
+                    >
+                      {badge.label}
+                    </span>
+                  ))}
                 </div>
                 <p className="mt-1 text-[var(--ink-muted)]">
                   批准 revision {item.article.approvedRevision} · SHA-256 {item.article.approvedBodySha256.slice(0, 12)}… · {item.article.bodyBytes} bytes

@@ -6,7 +6,10 @@
  */
 
 import { unwrapToolResultText } from '../toolResult';
-import { ENTERPRISE_PROFILE_FIELDS, isEnterpriseProfileField } from './enterpriseProfile';
+import {
+  canonicalEnterpriseProfileField,
+  ENTERPRISE_PROFILE_FIELDS,
+} from './enterpriseProfile';
 
 export type KnowledgeCardDecision =
   | 'keep-current'
@@ -40,7 +43,6 @@ export interface KnowledgeCardCandidate {
     effectiveFrom?: string | null;
     effectiveTo?: string | null;
   };
-  valueJson: string;
   normalizedValueJson: string;
   unit?: string | null;
   status:
@@ -70,8 +72,14 @@ export interface KnowledgeCandidatesCardData {
   overflowByField?: Partial<Record<string, number>>;
 }
 
-/** 卡片内携带的候选上限：约束 tool 结果与转录体积，避免刷屏。 */
-export const KNOWLEDGE_CARD_MAX_CANDIDATES = 50;
+/** 卡片内携带的候选总量上限：约束 tool 结果与转录体积。真实批次典型 15–30 条，
+ * 500 是宽余量，溢出机制只作极端兜底。各字段候选数按材料自然分布（全称 1 条、
+ * 产品/地址多条），不设单字段上限。 */
+export const KNOWLEDGE_CARD_MAX_CANDIDATES = 500;
+
+/** 卡片投影的单条摘录上限：卡片 JSON 是工具结果正文、随转录进 Agent 上下文，
+ * 只携带复核所需的引用片段；完整摘录留在 KnowledgeAuthority 候选与审计里。 */
+export const KNOWLEDGE_CARD_EXCERPT_MAX_CHARS = 300;
 
 export function parseKnowledgeCandidatesCard(
   raw: string,
@@ -147,6 +155,14 @@ export interface KnowledgeCardCandidateSource {
   } | null;
 }
 
+/** 卡片投影摘录：复核引用片段 + 截断省略号；原始值（valueJson）与完整摘录
+ * 不进卡片载荷，避免与 normalized 值重复、把工具结果正文撑大。 */
+function projectExcerpt(excerpt: string): string {
+  return excerpt.length > KNOWLEDGE_CARD_EXCERPT_MAX_CHARS
+    ? `${excerpt.slice(0, KNOWLEDGE_CARD_EXCERPT_MAX_CHARS)}…`
+    : excerpt;
+}
+
 export function toKnowledgeCardCandidate(
   candidate: KnowledgeCardCandidateSource,
 ): KnowledgeCardCandidate {
@@ -161,7 +177,6 @@ export function toKnowledgeCardCandidate(
       effectiveFrom: candidate.key.effectiveFrom ?? null,
       effectiveTo: candidate.key.effectiveTo ?? null,
     },
-    valueJson: candidate.valueJson,
     normalizedValueJson: candidate.normalizedValueJson,
     unit: candidate.unit ?? null,
     status: candidate.status,
@@ -169,7 +184,7 @@ export function toKnowledgeCardCandidate(
     origin: candidate.origin,
     source: {
       materialId: candidate.source.materialId ?? null,
-      excerpt: candidate.source.excerpt,
+      excerpt: projectExcerpt(candidate.source.excerpt),
       confidence: candidate.source.confidence,
       profileProvenance:
         candidate.source.profileProvenance === "extracted"
@@ -194,37 +209,67 @@ export function toKnowledgeCardCandidate(
   };
 }
 
-/** 构造批量确认卡数据；无候选返回 null（调用方回落到原始结果渲染）。 */
+/** 构造批量确认卡数据；无候选返回 null（调用方回落到原始结果渲染）。
+ * 候选按材料自然分布进卡，不设单字段配额；仅当总量超过上限时，先保底
+ * 每个出现的字段 1 条（防大容量字段把其他类整类挤掉），再按 payload 自然
+ * 顺序填充至总量上限；未进卡的候选按字段归因进 overflowByField。 */
 export function buildKnowledgeCandidatesCardData(
   material: { id: string; displayName: string } | null,
   candidates: KnowledgeCardCandidate[],
 ): KnowledgeCandidatesCardData | null {
   if (candidates.length === 0) return null;
-  const overflowCount = Math.max(
-    0,
-    candidates.length - KNOWLEDGE_CARD_MAX_CANDIDATES,
-  );
-  const overflowByField: Record<string, number> = {};
-  for (const candidate of candidates.slice(KNOWLEDGE_CARD_MAX_CANDIDATES)) {
-    const field = knowledgeFieldKeyOfPredicate(candidate.key.predicate);
-    overflowByField[field] = (overflowByField[field] ?? 0) + 1;
+  if (candidates.length <= KNOWLEDGE_CARD_MAX_CANDIDATES) {
+    return {
+      kind: 'knowledge-candidates-card',
+      requiresUserDecision: true,
+      material,
+      candidates,
+    };
   }
+  const byField = new Map<string, KnowledgeCardCandidate[]>();
+  for (const candidate of candidates) {
+    const field = knowledgeFieldKeyOfPredicate(candidate.key.predicate);
+    const group = byField.get(field);
+    if (group) group.push(candidate);
+    else byField.set(field, [candidate]);
+  }
+  const selected = new Set<KnowledgeCardCandidate>();
+  for (const group of byField.values()) {
+    if (selected.size >= KNOWLEDGE_CARD_MAX_CANDIDATES) break;
+    selected.add(group[0]);
+  }
+  for (const candidate of candidates) {
+    if (selected.size >= KNOWLEDGE_CARD_MAX_CANDIDATES) break;
+    selected.add(candidate);
+  }
+  const overflowByField: Record<string, number> = {};
+  for (const [field, group] of byField) {
+    const taken = group.reduce((count, candidate) => count + (selected.has(candidate) ? 1 : 0), 0);
+    const overflow = group.length - taken;
+    if (overflow > 0) overflowByField[field] = overflow;
+  }
+  const overflowCount = candidates.length - selected.size;
   return {
-    kind: "knowledge-candidates-card",
+    kind: 'knowledge-candidates-card',
     requiresUserDecision: true,
     material,
-    candidates: candidates.slice(0, KNOWLEDGE_CARD_MAX_CANDIDATES),
-    ...(overflowCount > 0 ? { overflowCount, overflowByField } : {}),
+    candidates: candidates.filter((candidate) => selected.has(candidate)),
+    overflowCount,
+    overflowByField,
   };
 }
 
 const PROFILE_PREDICATE_PREFIX = 'enterprise-profile.';
 
-/** predicate → 字段行分组键：已知 Profile 字段归一为字段 token，其余保持 predicate 原文。 */
+/** predicate → 字段行分组键：已知 Profile 字段归一为规范字段 token，其余保持 predicate 原文。 */
 export function knowledgeFieldKeyOfPredicate(predicate: string): string {
   if (predicate.startsWith(PROFILE_PREDICATE_PREFIX)) {
-    const field = predicate.slice(PROFILE_PREDICATE_PREFIX.length);
-    if (isEnterpriseProfileField(field)) return field;
+    // 入库 predicate 已被小写化（identity 归一化契约），必须大小写不敏感匹配，
+    // 否则 `enterprise-profile.servicearea` 与 `addresses` 会被当成两个不相干字段。
+    const canonical = canonicalEnterpriseProfileField(
+      predicate.slice(PROFILE_PREDICATE_PREFIX.length),
+    );
+    if (canonical) return canonical;
   }
   return predicate;
 }

@@ -63,7 +63,7 @@ describe('XiaojingBrandKnowledgePanel', () => {
     expect(mocks.load).not.toHaveBeenCalled();
 
     fireEvent.click(screen.getByRole('button', { name: /品牌知识/ }));
-    expect(await screen.findByText('鲸跃科技 / enterprise-profile.fullName')).toBeInTheDocument();
+    expect(await screen.findByText('鲸跃科技 / 品牌全称')).toBeInTheDocument();
     expect(screen.getByText('鲸跃科技有限公司')).toBeInTheDocument();
     expect(screen.getByText('技术领先、交付快')).toBeInTheDocument();
     expect(screen.getByText(/知识版本 v6/)).toBeInTheDocument();
@@ -71,6 +71,44 @@ describe('XiaojingBrandKnowledgePanel', () => {
     expect(screen.queryByText('旧名称')).not.toBeInTheDocument();
     expect(screen.getByText(/2 条事实/)).toBeInTheDocument();
     expect(screen.getByText(/1 份依据/)).toBeInTheDocument();
+  });
+
+  // 回归：入库 predicate 被小写化（servicearea），面板必须经规范字段映射
+  // 显示中文标签，而不是裸露 `enterprise-profile.servicearea`。
+  it('maps profile predicates (any case) onto readable field labels', async () => {
+    mocks.load.mockResolvedValue({
+      workspaceId: 'brand-17',
+      knowledgeVersions: [
+        {
+          version: 2,
+          actorSessionId: 'session-b',
+          createdAt: '2026-08-16T00:00:00Z',
+          facts: [
+            {
+              factKey: factKey('鲸跃科技', 'enterprise-profile.servicearea'),
+              factVersion: 1,
+              normalizedValueJson: '"新都区"',
+              sources: [],
+            },
+            {
+              factKey: factKey('鲸跃科技', 'crm.seatCount'),
+              factVersion: 1,
+              normalizedValueJson: '120',
+              sources: [],
+            },
+          ],
+          usedBy: [],
+        },
+      ],
+      artifacts: [],
+    });
+
+    render(<XiaojingBrandKnowledgePanel workspaceId="brand-17" />);
+    fireEvent.click(screen.getByRole('button', { name: /品牌知识/ }));
+    expect(await screen.findByText('鲸跃科技 / 服务区域')).toBeInTheDocument();
+    // 非 Profile 字段保持 predicate 原文。
+    expect(screen.getByText('鲸跃科技 / crm.seatCount')).toBeInTheDocument();
+    expect(screen.queryByText(/enterprise-profile\./)).not.toBeInTheDocument();
   });
 
   it('refreshes when a confirmation card commits decisions', async () => {

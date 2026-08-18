@@ -125,15 +125,79 @@ describe('KnowledgeBatchCard（字段行复核卡）', () => {
 
     // 默认展开：字段行直接可见，固定字段序 fullName → products → coreAdvantages。
     expect(rowFields(container)).toEqual(['fullName', 'products', 'coreAdvantages']);
-    // 值在行内直接可扫读；同字段多值合并展示。
+    // 值以胶囊直接可扫读；同字段多值合并进同一行、各占一枚胶囊。
     expect(screen.getByText('鲸跃科技')).toBeInTheDocument();
-    expect(screen.getByText('电动车；充电桩')).toBeInTheDocument();
+    expect(screen.getByText('电动车')).toBeInTheDocument();
+    expect(screen.getByText('充电桩')).toBeInTheDocument();
+    // 全部为材料原文：头部按类计数给「全部已就绪」，不再呈现候选条数总数。
+    expect(screen.getByText(/共 3 类信息 · 全部已就绪/)).toBeInTheDocument();
+    expect(screen.queryByText(/条候选/)).not.toBeInTheDocument();
+    // 整卡确认常驻卡片头部，不藏在长列表底部。
+    expect(container.querySelector('[data-knowledge-confirm-cta]')).toHaveTextContent('确认（采纳全部 4 条）');
+    // 候选正文限高内滚：卡片落在不参与聊天滚动的容器（输入区导入面板）里时，
+    // 超长批次靠卡片自身滚轴浏览，不会推出窗口底边。
+    expect(container.querySelector('[data-knowledge-grid]')).toHaveClass('overflow-y-auto', 'max-h-[60vh]');
 
     // 不再出现逐条勾选与批量采用交互，也没有高/低置信分组。
     expect(screen.queryByRole('checkbox')).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: '全部采用' })).not.toBeInTheDocument();
     expect(screen.queryByText(/高置信/)).not.toBeInTheDocument();
     expect(screen.queryByText(/超出卡片上限/)).not.toBeInTheDocument();
+  });
+
+  // 按类分格（GD 反馈演进）：同一字段内已就绪与待确认并存，含待确认内容的类排网格前部。
+  it('keeps ready and pending candidates in one per-field cell, ordering cells with pending content first', () => {
+    const { container } = render(<KnowledgeBatchCard data={cardData([
+      candidateSource({ id: 'c-fullname', predicate: 'enterprise-profile.fullName', valueJson: '"鲸跃科技"', normalizedValueJson: '"鲸跃科技"' }),
+      // 同一字段（目标客户）兼有材料原文与 AI 联想（如「电车用户」）两类候选。
+      candidateSource({
+        id: 'c-target-extracted',
+        predicate: 'enterprise-profile.targetCustomers',
+        valueJson: '["汽车后市场门店"]',
+        normalizedValueJson: '["汽车后市场门店"]',
+      }),
+      candidateSource({
+        id: 'c-target-inferred',
+        predicate: 'enterprise-profile.targetCustomers',
+        valueJson: '["电车用户"]',
+        normalizedValueJson: '["电车用户"]',
+        source: { materialId: 'material-1', excerpt: '推断目标客户', confidence: 0.4, profileProvenance: 'inferred' },
+      }),
+      candidateSource({
+        id: 'c-advantage',
+        source: { materialId: 'material-1', excerpt: '推断优势', confidence: 0.4, profileProvenance: 'inferred' },
+      }),
+    ])} />);
+
+    // 待确认类（目标客户、核心优势）排在仅就绪类（品牌全称）之前，组内保持固定字段序。
+    expect(rowFields(container)).toEqual(['targetCustomers', 'coreAdvantages', 'fullName']);
+    expect(screen.getByText(/共 3 类信息 · 2 类待确认/)).toBeInTheDocument();
+    const targetRow = container.querySelector('[data-field-row="targetCustomers"]') as HTMLElement;
+    // 同一格内：材料原文绿「已就绪」与推断黄「待确认」并存，行头摘要同口径。
+    expect(within(targetRow).getByText('已就绪')).toBeInTheDocument();
+    expect(within(targetRow).getByText('待确认')).toBeInTheDocument();
+    expect(within(targetRow).getByText('已就绪 1')).toBeInTheDocument();
+    expect(within(targetRow).getByText('待确认 1')).toBeInTheDocument();
+    expect(within(targetRow).getByRole('button', { name: '确认目标客户' })).toBeInTheDocument();
+    const fullNameRow = container.querySelector('[data-field-row="fullName"]') as HTMLElement;
+    expect(within(fullNameRow).queryByRole('button', { name: '确认品牌全称' })).not.toBeInTheDocument();
+  });
+
+  it('renders one pill per value for array candidates instead of a joined string', () => {
+    render(<KnowledgeBatchCard data={cardData([
+      candidateSource({
+        id: 'c-competitors',
+        predicate: 'enterprise-profile.competitors',
+        valueJson: '["旭日酷车汽车音响","元音改汽车音响","美声汽车音响"]',
+        normalizedValueJson: '["旭日酷车汽车音响","元音改汽车音响","美声汽车音响"]',
+      }),
+    ])} />);
+
+    // 多值候选逐值陈列胶囊，不再把数组用顿号拼成一整条长串。
+    expect(screen.getByText('旭日酷车汽车音响')).toBeInTheDocument();
+    expect(screen.getByText('元音改汽车音响')).toBeInTheDocument();
+    expect(screen.getByText('美声汽车音响')).toBeInTheDocument();
+    expect(screen.queryByText('旭日酷车汽车音响、元音改汽车音响、美声汽车音响')).not.toBeInTheDocument();
   });
 
   it('材料原文行零控件、徽章已就绪；整卡全原文零冲突也必须点一次确认才提交', async () => {
@@ -347,7 +411,7 @@ describe('KnowledgeBatchCard（字段行复核卡）', () => {
     ];
     const { container } = render(<KnowledgeBatchCard data={cardData(sources)} />);
 
-    expect(screen.getByText(/共 50 条候选/)).toBeInTheDocument();
+    expect(screen.getByText(/共 2 类信息 · 全部已就绪/)).toBeInTheDocument();
     expect(screen.queryByText(/超出卡片上限/)).not.toBeInTheDocument();
     const productsRow = container.querySelector('[data-field-row="products"]');
     expect(within(productsRow as HTMLElement).getByText('该字段另有 7 条未展示')).toBeInTheDocument();
@@ -523,8 +587,10 @@ describe('KnowledgeBatchCard（行内「更改」暂存与轮询存活）', () =
     expect(row).toHaveAttribute('data-row-tier', 'user-edited');
     expect(screen.getByText('用户补充 · 已就绪')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: '确认核心优势' })).not.toBeInTheDocument();
-    // 行摘要立即显示编辑后的值。
-    expect(screen.getByText('技术领先、响应快、本地服务')).toBeInTheDocument();
+    // 行摘要按一值一胶囊陈列编辑后的原子项。
+    expect(screen.getByText('技术领先')).toBeInTheDocument();
+    expect(screen.getByText('响应快')).toBeInTheDocument();
+    expect(screen.getByText('本地服务')).toBeInTheDocument();
     // 更改只暂存：保存后没有任何 decide-batch 请求。
     expect(mocks.apiPost.mock.calls.every(([path]) => path !== '/api/xiaojing/knowledge/decide-batch')).toBe(true);
   });

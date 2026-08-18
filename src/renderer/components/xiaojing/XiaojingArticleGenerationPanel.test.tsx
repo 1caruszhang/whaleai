@@ -76,7 +76,7 @@ function operation(overrides: Partial<ArticleOperationProjection> = {}): Article
     topicPlanId: null,
     topicPlanRevision: null,
     knowledgeVersion: 7,
-    policyVersion: "js-ai-dev-direct-article-generation-v1",
+    policyVersion: "xiaojing-content-prompt-v2",
     status: "running",
     articles: [article()],
     createdAt: "2026-08-15T00:00:00Z",
@@ -107,15 +107,28 @@ describe("XiaojingArticleGenerationPanel read-only projection", () => {
     expect(mocks.latest).not.toHaveBeenCalled();
   });
 
-  it("renders article status read-only and directs draft review back to the chat card", async () => {
+  it("renders only approved articles and directs pending drafts back to the chat card", async () => {
+    mocks.latest.mockResolvedValue(
+      operation({
+        articles: [
+          article({ status: "approved", approvedRevision: 2, id: "article-approved" }),
+          article({ status: "draft_ready" }),
+          article({ status: "generation_failed", id: "article-failed", failureReason: "生成超时" }),
+        ],
+      }),
+    );
     render(<XiaojingArticleGenerationPanel workspaceId="brand-11" />);
     const panel = await screen.findByRole("region", { name: "文章生成与审核" });
 
     expect(within(panel).getByText("企业知识库怎么选")).toBeInTheDocument();
-    expect(within(panel).getByText(/草稿待审核/)).toBeInTheDocument();
+    expect(within(panel).getByText(/已批准 1 篇/)).toBeInTheDocument();
     expect(
-      within(panel).getByText(/审阅与批准请回到聊天中的确认卡片/),
+      within(panel).getByText(/另有 2 篇生成或审阅中的文章/),
     ).toBeInTheDocument();
+    expect(within(panel).getByRole("button", { name: "查看批准稿" })).toBeInTheDocument();
+    // 未确认的过程产物（失败原因等）留在聊天卡片，不进工作台。
+    expect(within(panel).queryByText(/草稿待审核/)).not.toBeInTheDocument();
+    expect(within(panel).queryByText(/生成超时/)).not.toBeInTheDocument();
     expect(
       within(panel).queryByRole("button", { name: "审校并批准" }),
     ).not.toBeInTheDocument();
@@ -123,6 +136,19 @@ describe("XiaojingArticleGenerationPanel read-only projection", () => {
       within(panel).queryByRole("button", { name: "重新生成此篇" }),
     ).not.toBeInTheDocument();
     expect(within(panel).queryByLabelText("文章主题")).not.toBeInTheDocument();
+  });
+
+  it("shows a chat-card pointer when no article has been approved yet", async () => {
+    render(<XiaojingArticleGenerationPanel workspaceId="brand-11" />);
+    const panel = await screen.findByRole("region", { name: "文章生成与审核" });
+
+    expect(
+      within(panel).getByText(/尚无已批准文章；草稿的审阅与批准请回到聊天中的确认卡片完成/),
+    ).toBeInTheDocument();
+    expect(within(panel).queryByText("企业知识库怎么选")).not.toBeInTheDocument();
+    expect(
+      within(panel).queryByRole("button", { name: "查看批准稿" }),
+    ).not.toBeInTheDocument();
   });
 
   it("keeps the approved body viewable without offering draft edits", async () => {
@@ -143,7 +169,10 @@ describe("XiaojingArticleGenerationPanel read-only projection", () => {
     render(<XiaojingArticleGenerationPanel workspaceId="brand-11" />);
     const panel = await screen.findByRole("region", { name: "文章生成与审核" });
 
-    fireEvent.click(within(panel).getByRole("button", { name: "查看批准稿" }));
+    // 投影经异步到达：用 findBy 等待按钮出现，避免高负载下的取数竞态。
+    fireEvent.click(
+      await within(panel).findByRole("button", { name: "查看批准稿" }),
+    );
     expect(await within(panel).findByText(/批准稿正文/)).toBeInTheDocument();
     await waitFor(() =>
       expect(mocks.body).toHaveBeenCalledWith(

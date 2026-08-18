@@ -33,6 +33,7 @@ describe("GeoOperation intent policy", () => {
     });
 
     expect(plan.steps.map((step) => step.id)).toEqual([
+      "acknowledge-plan",
       "generate-articles",
       "confirm-articles",
     ]);
@@ -46,6 +47,41 @@ describe("GeoOperation intent policy", () => {
     );
   });
 
+  it("parks every decided plan at the plan acknowledgement gate before any stage", () => {
+    for (const intent of [
+      "knowledge-update",
+      "question-opportunities",
+      "article-generation",
+      "performance-inspection",
+      "distribution-planning",
+      "publishing",
+      "monitoring",
+      "full-optimization",
+    ] as const) {
+      const plan = planGeoOperation({ intent, goal: "一轮完整的 GEO 优化" });
+      expect(plan.steps[0]).toMatchObject({
+        id: "acknowledge-plan",
+        status: "awaiting-confirmation",
+        requiresConfirmation: true,
+      });
+      expect(plan.status).toBe("awaiting-confirmation");
+      expect(plan.pendingConfirmation).toMatchObject({
+        kind: "plan-ack",
+        authority: "geo-operation",
+      });
+    }
+
+    // 下一轮的「是否更新知识」分支决策不是计划放行门；决定后的计划
+    // 同样从认可门开始。
+    const decided = planGeoOperation({
+      intent: "next-round-optimization",
+      goal: "下一轮优化",
+      updateKnowledge: true,
+    });
+    expect(decided.steps[0]?.id).toBe("acknowledge-plan");
+    expect(decided.steps[1]?.id).toBe("collect-materials");
+  });
+
   it("adds channel planning to publishing only when no confirmed plan is referenced", () => {
     const fromArticles = planGeoOperation({
       intent: "publishing",
@@ -53,6 +89,7 @@ describe("GeoOperation intent policy", () => {
       inputRefs: [{ kind: "article", id: "approved-article-16", revision: 3 }],
     });
     expect(fromArticles.steps.map((step) => step.id)).toEqual([
+      "acknowledge-plan",
       "plan-distribution",
       "confirm-distribution",
       "prepare-publish",
@@ -68,6 +105,7 @@ describe("GeoOperation intent policy", () => {
       ],
     });
     expect(fromConfirmedPlan.steps.map((step) => step.id)).toEqual([
+      "acknowledge-plan",
       "prepare-publish",
       "confirm-publish",
       "observe-publish",
@@ -103,7 +141,7 @@ describe("GeoOperation intent policy", () => {
     });
   });
 
-  it("keeps baseline probing out of the composed main chain (18 steps)", () => {
+  it("keeps baseline probing out of the composed main chain (19 steps)", () => {
     for (const updateKnowledge of [undefined, true]) {
       const plan = planGeoOperation({
         intent: updateKnowledge === undefined ? "full-optimization" : "next-round-optimization",
@@ -111,13 +149,13 @@ describe("GeoOperation intent policy", () => {
         ...(updateKnowledge === undefined ? {} : { updateKnowledge }),
       });
 
-      expect(plan.steps).toHaveLength(18);
+      expect(plan.steps).toHaveLength(19);
       expect(plan.steps.some((step) => step.capability === "geo-observation")).toBe(
         false,
       );
       expect(
         plan.steps.filter((step) => step.requiresConfirmation).length,
-      ).toBe(7);
+      ).toBe(8);
     }
 
     const withoutKnowledge = planGeoOperation({
@@ -125,7 +163,7 @@ describe("GeoOperation intent policy", () => {
       goal: "下一轮优化",
       updateKnowledge: false,
     });
-    expect(withoutKnowledge.steps).toHaveLength(14);
+    expect(withoutKnowledge.steps).toHaveLength(15);
     expect(
       withoutKnowledge.steps.some((step) => step.capability === "geo-observation"),
     ).toBe(false);
@@ -142,6 +180,7 @@ describe("GeoOperation intent policy", () => {
     expect(gates.every((step) => step.confirmation !== null)).toBe(true);
     expect(gates.map((step) => step.confirmation?.kind)).toEqual(
       expect.arrayContaining([
+        "plan-ack",
         "knowledge-change",
         "question-selection",
         "topic-plan",
@@ -181,7 +220,7 @@ describe("GeoOperation intent policy", () => {
       goal: "下一轮优化",
       updateKnowledge: false,
     });
-    expect(withoutKnowledge.steps[0]?.id).toBe("select-next-question-pool");
+    expect(withoutKnowledge.steps[1]?.id).toBe("select-next-question-pool");
     expect(
       withoutKnowledge.steps.some((step) => step.id === "collect-materials"),
     ).toBe(false);
@@ -191,7 +230,7 @@ describe("GeoOperation intent policy", () => {
       goal: "下一轮优化",
       updateKnowledge: true,
     });
-    expect(withKnowledge.steps[0]?.id).toBe("collect-materials");
+    expect(withKnowledge.steps[1]?.id).toBe("collect-materials");
   });
 
   it("makes missing performance probes conditional instead of treating reports as an execution owner", () => {
@@ -201,16 +240,17 @@ describe("GeoOperation intent policy", () => {
     });
 
     expect(plan.steps.map((step) => step.id)).toEqual([
+      "acknowledge-plan",
       "load-real-evidence",
       "confirm-missing-evidence-probe",
       "probe-missing-evidence",
       "report-performance",
     ]);
-    expect(plan.steps[1]).toMatchObject({
+    expect(plan.steps[2]).toMatchObject({
       condition: "if-evidence-insufficient",
       requiresConfirmation: true,
     });
-    expect(plan.steps[2]).toMatchObject({
+    expect(plan.steps[3]).toMatchObject({
       condition: "if-evidence-insufficient",
       retryUnit: "probe",
     });
@@ -234,7 +274,7 @@ describe("GeoOperation intent policy", () => {
 });
 
 describe("GeoOperation phase grouping", () => {
-  it("splits the full-optimization 18 steps into the six spoken stages", () => {
+  it("splits the full-optimization 19 steps into the six spoken stages", () => {
     const plan = planGeoOperation({
       intent: "full-optimization",
       goal: "完整 GEO 优化",
@@ -257,11 +297,16 @@ describe("GeoOperation phase grouping", () => {
       "发布",
       "监测",
     ]);
+    // 认可门借用首个工作步骤的 capability，落进开头阶段而不是「其他」。
     expect(groups.map((group) => group.steps.length)).toEqual([
-      3, 2, 4, 2, 3, 4,
+      4, 2, 4, 2, 3, 4,
     ]);
-    // 阶段分组覆盖全部步骤：18 步都必须落在某个阶段里。
-    expect(groups.flatMap((group) => group.steps)).toHaveLength(18);
+    expect(groups[0].steps[0]).toMatchObject({
+      id: "acknowledge-plan",
+      status: "awaiting-confirmation",
+    });
+    // 阶段分组覆盖全部步骤：19 步都必须落在某个阶段里。
+    expect(groups.flatMap((group) => group.steps)).toHaveLength(19);
   });
 
   it("keeps unmatched steps visible in a trailing group instead of dropping them", () => {

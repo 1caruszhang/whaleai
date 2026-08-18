@@ -1,4 +1,11 @@
 import { GEO_PORT_CONTRACT, type GeoContentType } from "./portContract";
+import {
+  fuzzyMatchScore,
+  preferenceEntryMatches,
+  registeredDomain,
+  type PreferenceChannelEntry,
+  type RecallSource,
+} from "./channelRecall";
 
 export const DISTRIBUTION_PLAN_POLICY_VERSION =
   "js-ai-dev-four-path-distribution-v1";
@@ -47,12 +54,22 @@ export interface DistributionArticleSnapshot {
   contentType: GeoContentType;
 }
 
+/** 已确认问题池里待探测的问题（被动路现场探测输入）。 */
+export interface DistributionContextQuestion {
+  id: string;
+  question: string;
+  articleIds: string[];
+}
+
 export interface DistributionPlanningContext {
   articleOperationId: string;
   knowledgeVersion: number;
   industry: string;
   articles: DistributionArticleSnapshot[];
-  questionSources: DistributionQuestionSource[];
+  /** 已确认问题池的选中问题（被动路探测输入）。 */
+  questions: DistributionContextQuestion[];
+  /** 品牌衍生关键词（主动路全局召回输入）。 */
+  derivedKeywords: string[];
 }
 
 export interface DistributionResourceSnapshot {
@@ -124,7 +141,6 @@ export interface DistributionDiscoverySummary {
   inputResources: number;
   approvedResources: number;
   filteredUnavailable: number;
-  filteredLowPublishedRate: number;
   filteredHighPrice: number;
   alignedResources: number;
   recommendedResources: number;
@@ -318,14 +334,6 @@ const CONTENT_KIND_FIT: Readonly<
   news_light: { media: 1, "we-media": 0.3 },
 };
 
-const COMMON_TWO_LEVEL_SUFFIXES = new Set([
-  "com.cn",
-  "net.cn",
-  "org.cn",
-  "gov.cn",
-  "edu.cn",
-]);
-
 function normalizedText(value: string, max: number, code: string): string {
   const normalized = value.trim().replace(/\s+/g, " ");
   if (!normalized || Array.from(normalized).length > max) throw new Error(code);
@@ -348,25 +356,6 @@ function validHttpUrl(value: string): string {
     return url.toString();
   } catch {
     throw new Error("distribution_plan_question_source_url_invalid");
-  }
-}
-
-function registeredDomain(value: string | null | undefined): string | null {
-  if (!value) return null;
-  try {
-    const hostname = new URL(
-      value.includes("://") ? value : `https://${value}`,
-    ).hostname
-      .toLocaleLowerCase("en-US")
-      .replace(/^www\./, "");
-    const labels = hostname.split(".").filter(Boolean);
-    if (labels.length < 2) return null;
-    const suffix = labels.slice(-2).join(".");
-    return COMMON_TWO_LEVEL_SUFFIXES.has(suffix) && labels.length >= 3
-      ? labels.slice(-3).join(".")
-      : suffix;
-  } catch {
-    return null;
   }
 }
 
@@ -569,7 +558,10 @@ export function buildDistributionCandidates(input: {
   industry: string;
   targetAudience: string;
   questionSources: DistributionQuestionSource[];
-  preferredResourceIds: number[];
+  /** 主动路（全局单次召回）渠道来源；主题编号已在服务端解析成 articleIds。 */
+  activeSources: RecallSource[];
+  /** 偏好路生效清单（内置名单+用户 overlay 合成；js_ai preferenceChannels 契约）。 */
+  preferenceChannels: PreferenceChannelEntry[];
   articles: DistributionArticleSnapshot[];
   resources: DistributionResourceSnapshot[];
 }): {
@@ -587,9 +579,7 @@ export function buildDistributionCandidates(input: {
   const contentTypes = [
     ...new Set(input.articles.map((article) => article.contentType)),
   ];
-  const preferred = new Set(input.preferredResourceIds);
   let filteredUnavailable = 0;
-  let filteredLowPublishedRate = 0;
   let filteredHighPrice = 0;
   const approved: DistributionResourceSnapshot[] = [];
   for (const resource of resources) {
@@ -597,15 +587,8 @@ export function buildDistributionCandidates(input: {
       filteredUnavailable += 1;
       continue;
     }
-    if (
-      resource.publishedRate !== null &&
-      resource.publishedRate > 0 &&
-      resource.publishedRate <
-        GEO_PORT_CONTRACT.channelRecall.quality.minimumKnownPublishedRate
-    ) {
-      filteredLowPublishedRate += 1;
-      continue;
-    }
+    // 发布率不参与任何决策（用户裁决 2026-08-18）：既不过滤也不阻断，
+    // 质量硬约束只剩数值价格上限。
     const price = parsePrice(resource.price);
     if (
       price !== null &&
@@ -643,13 +626,34 @@ export function buildDistributionCandidates(input: {
           ? mediaCode !== null && resource.channelType === mediaCode
           : weMediaCode !== null && resource.industryCategory === weMediaCode;
       const audienceMatch = audienceOverlap(input.targetAudience, resource);
+      // 主动路（ADR-0031 全局召回）：LLM 联网推荐的渠道，域名优先、名称模糊回落。
+      for (const source of input.activeSources) {
+        const sourceDomain = registeredDomain(source.url);
+        const domainHit = resourceDomain !== null && sourceDomain === resourceDomain;
+        if (domainHit || fuzzyMatchScore(source, resource.name) >= 0.4) {
+          evidence.push(
+            pathEvidence(
+              "active",
+              `全局召回推荐渠道「${source.title}」与本资源对齐`,
+              `recall:${source.title}`,
+              source.url ?? resource.entranceLink,
+              source.articleIds ?? [],
+            ),
+          );
+        }
+      }
+      // 保底路（js_ai path 3 语义）：结构化类目/人群是规则匹配，合并为一路；
+      // GEO 收录信号是同一规则路的加强说明，不再单列一路。
       if (industryMatch || audienceMatch) {
+        const signals = [
+          industryMatch ? `超级媒介结构化类目匹配行业「${input.industry}」` : null,
+          audienceMatch ? `渠道名称或备注匹配目标人群「${input.targetAudience}」` : null,
+          geoIncluded(resource) ? "资源名称/备注含真实 GEO 收录信号" : null,
+        ].filter((signal): signal is string => signal !== null);
         evidence.push(
           pathEvidence(
-            "active",
-            industryMatch
-              ? `超级媒介结构化类目匹配行业「${input.industry}」`
-              : `渠道名称或备注匹配目标人群「${input.targetAudience}」`,
+            "fallback",
+            signals.join("；"),
             industryMatch
               ? `industry:${input.industry}`
               : `audience:${input.targetAudience}`,
@@ -658,23 +662,19 @@ export function buildDistributionCandidates(input: {
           ),
         );
       }
-      if (industryMatch && geoIncluded(resource)) {
-        evidence.push(
-          pathEvidence(
-            "fallback",
-            "行业类目命中且资源名称/备注含真实 GEO 收录信号",
-            `resource:${resource.kind}:${resource.resourceId}`,
-            resource.entranceLink,
-            [],
-          ),
-        );
-      }
-      if (preferred.has(resource.resourceId)) {
+      // 偏好路（js_ai preferenceChannels 契约）：内置 exact 名单 + 用户 overlay。
+      const preferenceHit = input.preferenceChannels.find((entry) =>
+        preferenceEntryMatches(entry, {
+          name: resource.name,
+          entranceLink: resource.entranceLink,
+        }),
+      );
+      if (preferenceHit) {
         evidence.push(
           pathEvidence(
             "preference",
-            "用户明确偏好且资源仍存在于已批准超级媒介池",
-            `preferred-resource:${resource.resourceId}`,
+            `偏好名单命中「${preferenceHit.name}」`,
+            `preference:${preferenceHit.name}`,
             resource.entranceLink,
             [],
           ),
@@ -693,7 +693,11 @@ export function buildDistributionCandidates(input: {
             ...new Set([...existing.articleIds, ...item.articleIds]),
           ];
           if (item.path === "passive") {
-            existing.label = `${existing.label}；${item.label}`;
+            // 被动标签逐来源拼接会随命中数线性膨胀（工具结果进 Agent 上下文），
+            // 超出预算即截断；完整证据仍由来源引用可溯。
+            const merged = `${existing.label}；${item.label}`;
+            existing.label =
+              merged.length > 200 ? `${merged.slice(0, 200)}…` : merged;
             existing.reference = `${existing.reference},${item.reference}`;
           }
         }
@@ -730,9 +734,6 @@ export function buildDistributionCandidates(input: {
       const risks: string[] = [];
       if (price === null)
         uncertainties.push("价格未知，不能进入已确认分发计划");
-      if (resource.publishedRate === null || resource.publishedRate === 0) {
-        uncertainties.push("发布成功率未知，不能进入已确认分发计划");
-      }
       if (!byPath.has("passive"))
         risks.push("没有与真实问题来源直接对齐的被动召回证据");
       if (!industryMatch) risks.push("行业结构化类目未命中");
@@ -803,7 +804,6 @@ export function buildDistributionCandidates(input: {
       inputResources: resources.length,
       approvedResources: approved.length,
       filteredUnavailable,
-      filteredLowPublishedRate,
       filteredHighPrice,
       alignedResources: candidates.length,
       recommendedResources: recommended.length,
@@ -903,8 +903,8 @@ export function distributionPlanBlockingIssues(
   const issues: string[] = [];
   if (plan.providerState !== "available")
     issues.push("distribution-provider-unavailable");
-  if (plan.questionSources.length === 0)
-    issues.push("question-source-evidence-missing");
+  // 被动证据为空不再是阻断（用户裁决 2026-08-18，对齐 js_ai）：探测失败只降级，
+  // 计划照常进入候选与确认链路。
   if (plan.candidates.length === 0)
     issues.push("channel-candidate-unavailable");
   const selected = new Set(plan.selectedResourceIds);
@@ -929,9 +929,6 @@ export function distributionPlanBlockingIssues(
     if (candidate.estimatedPriceCny === null)
       issues.push("selected-channel-price-unknown");
     else estimatedTotal += candidate.estimatedPriceCny;
-    if (candidate.publishedRate === null || candidate.publishedRate === 0) {
-      issues.push("selected-channel-published-rate-unknown");
-    }
     if (candidate.evidence.length === 0)
       issues.push("selected-channel-evidence-missing");
   }

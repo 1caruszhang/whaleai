@@ -77,6 +77,23 @@ export async function loadArticleBody(
   return response.body;
 }
 
+export function editArticle(
+  apiPost: ArticleApiPost,
+  identity: { workspaceId: string; sessionId: string },
+  input: {
+    operationId: string;
+    articleId: string;
+    expectedRevision: number;
+    title: string;
+    body: string;
+  },
+): Promise<ArticleProjection> {
+  return apiPost<ArticleResponse>(
+    "/api/xiaojing/articles/edit",
+    { ...identity, ...input },
+  ).then(requireArticle);
+}
+
 export function approveArticle(
   apiPost: ArticleApiPost,
   identity: { workspaceId: string; sessionId: string },

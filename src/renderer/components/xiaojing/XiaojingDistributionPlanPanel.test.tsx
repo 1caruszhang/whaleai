@@ -113,7 +113,6 @@ function projection(
         risks: ["报价未提供"],
         uncertainties: [
           "价格未知，不能进入已确认分发计划",
-          "发布成功率未知，不能进入已确认分发计划",
         ],
         resourceSnapshot: snapshot,
       },
@@ -133,14 +132,12 @@ function projection(
       inputResources: 1,
       approvedResources: 1,
       filteredUnavailable: 0,
-      filteredLowPublishedRate: 0,
       filteredHighPrice: 0,
       alignedResources: 1,
       recommendedResources: 1,
     },
     blockingIssues: [
       "selected-channel-price-unknown",
-      "selected-channel-published-rate-unknown",
     ],
     createdAt: "2026-08-15T00:00:00Z",
     updatedAt: "2026-08-15T00:01:00Z",
@@ -158,46 +155,7 @@ describe("XiaojingDistributionPlanPanel read-only projection", () => {
     mocks.latest.mockReset().mockResolvedValue(null);
   });
 
-  it("shows real snapshot evidence, uncertainty and the blocking issues", async () => {
-    mocks.latest.mockResolvedValue(projection());
-    render(<XiaojingDistributionPlanPanel workspaceId="brand-12" />);
-    const panel = await screen.findByRole("region", {
-      name: "渠道发现与分发计划",
-    });
-
-    expect(
-      await within(panel).findByText(/汽车产业观察（已选）/),
-    ).toBeInTheDocument();
-    expect(within(panel).getByText(/Provider 状态 2（可发）/)).toBeInTheDocument();
-    expect(within(panel).getByText(/报价：未知/)).toBeInTheDocument();
-    expect(within(panel).getByText(/成功率：未知/)).toBeInTheDocument();
-    expect(within(panel).getByText(/真实来源命中 \+0.4/)).toBeInTheDocument();
-    expect(
-      within(panel).getByText(/价格未知，不能进入已确认分发计划/),
-    ).toBeInTheDocument();
-    expect(within(panel).getByText(/确认已阻断/)).toBeInTheDocument();
-    expect(within(panel).getByText(/新能源车主选音响/)).toBeInTheDocument();
-    expect(
-      within(panel).getByText(/任何付费、下单或发布仍需后续独立确认/),
-    ).toBeInTheDocument();
-  });
-
-  it("exposes no discovery, selection, mapping or confirm controls", async () => {
-    mocks.latest.mockResolvedValue(projection());
-    render(<XiaojingDistributionPlanPanel workspaceId="brand-12" />);
-    const panel = await screen.findByRole("region", {
-      name: "渠道发现与分发计划",
-    });
-    await within(panel).findByText(/计划待确认/);
-
-    expect(within(panel).queryByRole("button")).not.toBeInTheDocument();
-    expect(within(panel).queryByRole("checkbox")).not.toBeInTheDocument();
-    expect(within(panel).queryByRole("combobox")).not.toBeInTheDocument();
-    expect(within(panel).queryByLabelText("目标人群")).not.toBeInTheDocument();
-    expect(within(panel).queryByLabelText("编辑预算（元）")).not.toBeInTheDocument();
-  });
-
-  it("renders confirmed plans as immutable and directs pending ones to the chat card", async () => {
+  it("shows confirmed snapshot evidence and recall-path hits only after confirmation", async () => {
     mocks.latest.mockResolvedValue(
       projection({
         status: "confirmed",
@@ -209,15 +167,87 @@ describe("XiaojingDistributionPlanPanel read-only projection", () => {
     const panel = await screen.findByRole("region", {
       name: "渠道发现与分发计划",
     });
+
     expect(
-      await within(panel).findByText(/计划已确认；尚未扣费/),
+      await within(panel).findByText(/汽车产业观察（已选）/),
+    ).toBeInTheDocument();
+    expect(within(panel).getByText(/Provider 状态 2（可发）/)).toBeInTheDocument();
+    expect(within(panel).getByText(/报价：未知/)).toBeInTheDocument();
+    // 发布率不参与决策也不展示（用户裁决 2026-08-18）。
+    expect(within(panel).queryByText(/成功率/)).not.toBeInTheDocument();
+    // 推荐行展示召回路命中（被动/主动/保底/偏好），不再展示风险文案。
+    expect(within(panel).getByText(/召回路命中：/)).toBeInTheDocument();
+    expect(within(panel).getByText(/被动召回（真实问题来源域名命中）/)).toBeInTheDocument();
+    expect(within(panel).getByText(/被动召回 \+0.4/)).toBeInTheDocument();
+    expect(within(panel).queryByText(/风险：/)).not.toBeInTheDocument();
+    expect(
+      within(panel).queryByText(/价格未知，不能进入已确认分发计划/),
+    ).not.toBeInTheDocument();
+    expect(within(panel).getByText(/新能源车主选音响/)).toBeInTheDocument();
+    expect(
+      within(panel).getByText(/任何付费、下单或发布仍需后续独立确认/),
+    ).toBeInTheDocument();
+  });
+
+  it("exposes no discovery, selection, mapping or confirm controls", async () => {
+    mocks.latest.mockResolvedValue(
+      projection({
+        status: "confirmed",
+        confirmedAt: "2026-08-15T00:02:00Z",
+        blockingIssues: [],
+      }),
+    );
+    render(<XiaojingDistributionPlanPanel workspaceId="brand-12" />);
+    const panel = await screen.findByRole("region", {
+      name: "渠道发现与分发计划",
+    });
+    await within(panel).findByText(/汽车产业观察（已选）/);
+
+    expect(within(panel).queryByRole("button")).not.toBeInTheDocument();
+    expect(within(panel).queryByRole("checkbox")).not.toBeInTheDocument();
+    expect(within(panel).queryByRole("combobox")).not.toBeInTheDocument();
+    expect(within(panel).queryByLabelText("目标人群")).not.toBeInTheDocument();
+    expect(within(panel).queryByLabelText("编辑预算（元）")).not.toBeInTheDocument();
+  });
+
+  it("renders confirmed plans as immutable and directs pending ones to the chat card", async () => {
+    mocks.latest.mockResolvedValue(projection());
+    const { unmount } = render(
+      <XiaojingDistributionPlanPanel workspaceId="brand-12" />,
+    );
+    const panel = await screen.findByRole("region", {
+      name: "渠道发现与分发计划",
+    });
+    // 未确认计划不倾倒候选/映射/预算，只保留指向聊天确认卡片的引导。
+    expect(
+      await within(panel).findByText(/分发计划尚未确认/),
+    ).toBeInTheDocument();
+    expect(within(panel).queryByText(/汽车产业观察（已选）/)).not.toBeInTheDocument();
+    expect(within(panel).queryByText(/新能源车主选音响/)).not.toBeInTheDocument();
+    expect(within(panel).queryByText(/确认已阻断/)).not.toBeInTheDocument();
+    unmount();
+
+    mocks.latest.mockResolvedValue(
+      projection({
+        status: "confirmed",
+        confirmedAt: "2026-08-15T00:02:00Z",
+        blockingIssues: [],
+      }),
+    );
+    render(<XiaojingDistributionPlanPanel workspaceId="brand-12" />);
+    const confirmedPanel = await screen.findByRole("region", {
+      name: "渠道发现与分发计划",
+    });
+    expect(
+      await within(confirmedPanel).findByText(/计划已确认；尚未扣费/),
     ).toBeInTheDocument();
   });
 
   it("does not invent candidates when the provider is unavailable", async () => {
     mocks.latest.mockResolvedValue(
       projection({
-        status: "unavailable",
+        status: "confirmed",
+        confirmedAt: "2026-08-15T00:02:00Z",
         providerState: "unavailable",
         resourceSnapshot: [],
         candidates: [],
@@ -230,10 +260,7 @@ describe("XiaojingDistributionPlanPanel read-only projection", () => {
             scheduledAt: "2026-08-20T02:00:00Z",
           },
         ],
-        blockingIssues: [
-          "distribution-provider-unavailable",
-          "channel-candidate-unavailable",
-        ],
+        blockingIssues: [],
       }),
     );
     render(<XiaojingDistributionPlanPanel workspaceId="brand-12" />);

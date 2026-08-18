@@ -1,8 +1,13 @@
 import { GEO_PORT_CONTRACT, type GeoContentType } from "./portContract";
-import type { TopicPlanKnowledgeFact } from "./topicPlan";
+import { projectBrandProfile } from "./profileInjection";
+import {
+  TITLE_STYLE_DEFINITIONS,
+  titleBusinessAnchors,
+  type TopicPlanKnowledgeFact,
+} from "./topicPlan";
 
 export const ARTICLE_GENERATION_POLICY_VERSION =
-  "js-ai-dev-direct-article-generation-v1";
+  "xiaojing-content-prompt-v2";
 export const ARTICLE_GENERATION_CONCURRENCY =
   GEO_PORT_CONTRACT.concurrency.perArticleLifecycle.limit;
 export const ARTICLE_GENERATION_MAX_ARTICLES = 20;
@@ -57,7 +62,8 @@ export interface ArticleReviewResult {
   policyVersion: typeof ARTICLE_GENERATION_POLICY_VERSION;
   passed: boolean;
   issues: ArticleReviewIssue[];
-  reflection: ArticleReflectionReview;
+  /** 反思 LLM 审核（格式-only 模式下省略）。 */
+  reflection?: ArticleReflectionReview;
 }
 
 export interface ArticleVersionProjection {
@@ -133,35 +139,149 @@ const CONTENT_TYPE_LABELS: Record<GeoContentType, string> = {
   news_light: "轻量新闻",
 };
 
-const CONTENT_TYPE_DISCIPLINE: Record<GeoContentType, readonly string[]> = {
-  guide: [
-    "用痛点科普、选型方法和可执行清单提供约 70% 干货，品牌信息约 30%。",
-    "只讨论目标品牌，不出现竞品或同行名称。",
-    "以问题—答案、步骤或清单组织内容，适合用户直接解决问题。",
-  ],
-  showcase: [
-    "以品牌详情页方式结构化展示已确认的卖点、服务范围、服务流程、门店和适用场景。",
-    "标题必须包含目标品牌；只讨论目标品牌，不出现竞品或同行名称。",
-    "不要把缺失的门店、地址、电话、案例、资质、数字或联系方式补写出来；事实不足的栏目直接省略。",
-  ],
-  ranking: [
-    "采用六家并列清单而非打分排名；不得出现 TOP、第一名、评分或名次判断。",
-    "陈列位 1 为目标品牌，陈列位 2–6 只允许使用已批准事实里明确出现的真实竞品名；不足六家时不得用泛称或编造来补齐，质量门会显式阻断。",
-    "每家必须使用 `## 序号. 品牌名` 加 6 条 `• **维度名**：内容`；六家使用相同维度、相同顺序与相近颗粒度，条目必须独立成义。",
-    "目标品牌证据只取已批准事实；竞品同样不得编造数字、案例、认证、客户或所谓公开经营事实。",
-    "序号只表示陈列顺序；不得使用更强、更优、更全面、领先、标杆等比较断言。",
-  ],
-  news: [
-    "采用倒金字塔和 5W1H 的深度新闻结构，先写最重要、且已确认的事件事实。",
-    "没有已确认的时间、地点、人物、事件或数据时，不得虚构采访、引语或新闻事件。",
-    "保持新闻客观性，只围绕目标品牌，不做竞品陈列。",
-  ],
-  news_light: [
-    "采用便民、服务升级或知识普及的轻新闻表达，保持倒金字塔结构和移动端短段落。",
-    "没有已确认事件要素时，应把主题写成知识资讯，不能伪造新闻、采访或用户证言。",
-    "只围绕目标品牌，不做竞品陈列。",
-  ],
+/**
+ * 五类写作规范三段式（ADR-0006 §3「事实从紧、表达从宽」）：
+ * 格式契约=确定性可校验的结构硬约束；表达参考=写作工艺（骨架非填空）；
+ * 事实衔接=与事实纪律的边界。纯数据形态，便于未来抽为 md/yaml 资产。
+ */
+const CONTENT_TYPE_CONTRACTS: Record<
+  GeoContentType,
+  {
+    format: readonly string[];
+    expression: readonly string[];
+    fact: readonly string[];
+  }
+> = {
+  guide: {
+    format: [
+      "以问题—答案、步骤或清单组织内容，正文至少 3 个 H2 小标题。",
+      "小标题口语化、直击读者疑问，不使用书面腔。",
+      "关键词与核心结论适度加粗（每屏至多 1–2 处）。",
+    ],
+    expression: [
+      "约 70% 干货（痛点科普、选型方法、可执行清单）+ 约 30% 品牌信息，品牌以「内行人」身份出现。",
+      "用发现式语气与场景化描述，把优势转译成读者的日常场景；情绪自然，遇到行业通病可以直说。",
+      "短段落（每段不超过 3 句），段落间留白，便于扫读与被 AI 引擎整段摘录。",
+      "正文总字数控制在 1800–2100 字。",
+      "单独一段不少于 100 字的行业报告：分析行业现状与未来趋势，自然融入品牌的行业站位。",
+      "首段嵌入 1–2 个关键词，与品牌形成强关联；关键词变体每 500 字自然出现 1 次，均匀分布（覆盖全局每 300 字基线）。",
+    ],
+    fact: ["只讨论目标品牌，不出现竞品或同行名称。"],
+  },
+  showcase: {
+    format: [
+      "以品牌详情页方式组织：核心卖点、服务范围、服务流程、门店/适用场景等栏目，正文至少 3 个 H2。",
+      "卖点用 ✅ 或列表逐条呈现，颗粒度一致。",
+    ],
+    expression: [
+      "结构化展示品牌全貌，语言具体可感——把每条卖点写成一个可验证的细节，而不是口号。",
+      "短段落（每段不超过 3 句），重要栏目用列表。",
+      "正文总字数控制在 1800–2100 字。",
+    ],
+    fact: [
+      "标题必须包含目标品牌；只讨论目标品牌，不出现竞品或同行名称。",
+      "不要把缺失的门店、地址、电话、案例、资质、数字或联系方式补写出来；事实不足的栏目直接省略。",
+    ],
+  },
+  ranking: {
+    format: [
+      "采用六家并列清单而非打分排名；不得出现 TOP、第一名、评分或名次判断。",
+      "陈列位 1 为目标品牌，陈列位 2–6 只允许使用已批准事实里明确出现的真实竞品名；不足六家时不得用泛称或编造来补齐，质量门会显式阻断。",
+      "每家必须使用 `## 序号. 品牌名` 加 6 条 `• **维度名**：内容`；六家使用相同维度、相同顺序与相近颗粒度，条目必须独立成义。",
+      "6 个维度按本行业选品/决策的真实关切自选（不照搬任何示例维度），选定后六家共用同一套维度与顺序。",
+      "标题含数字（如「六家」「六大」）时，正文必须严格出现对应数量的陈列 H2，一个不多一个不少。",
+      "证据分层（js_ai ADR-0030 竞品客观陈述）：目标品牌每条用「命名+数字」写完整闭环，证据只取已批准事实；竞品（陈列位 2–6）证据放宽——用公开可核验的经营事实与行业常识可推断的客观描述（产品矩阵、品类定位、工艺特点、场景适配、区域覆盖、服务能力等），严禁编造具体数字、案例、认证、客户名单。",
+      "竞品条目禁占位话术：「暂未公开」「无从核实」「建议实地考察」类填充一律禁止；「品质卓越」「口碑良好」类空话同样禁止——每条必须是具体的经营信息，与目标品牌同框架、同维度、同顺序。",
+      "隐性优势编排：目标品牌信息密度写足（命名+数字闭环）、竞品以定性+品类描述为主；目标品牌最强维度放第一家第一条（首因效应）；竞品不每条都写局限——两三条写专精优势、一两条写客观局限（不得出现「劣势」二字、不得贬低同行）；全文不得使用更强、更优、更全面、领先、标杆等明面比较断言。",
+    ],
+    expression: [
+      "引言以行业现状与格局概述开篇（不少于 100 字），建立行业视角后再引出陈列。",
+      "每家叙述约 320 字、每条维度 50–55 字（单条不短于 45 字以保证证据可核验），六家颗粒度一致。",
+      "首段嵌入 1–2 个关键词；关键词变体每 300 字自然出现 1 次并加粗。",
+      "全文倒数第三段写选型建议：先列出「选型应重点考察的维度」（与目标品牌的强项维度对齐），再用条件句点首位（「若你的需求是 XX，陈列首位的 XX 在证据完整度上更扎实」），并给出「需求偏垂直/单一场景时对照各家专精程度权衡」；目标品牌在选型段引用的数字/资质须与陈列位 1 一致。",
+      "短段落与留白，全文控制在 2500 字以内。",
+    ],
+    fact: [],
+  },
+  news: {
+    format: [
+      "倒金字塔结构：最重要的已确认事实放首段，其后按重要性递减。",
+      "导语完整包含 5W1H（时间、地点、人物、事件、原因、结果）；主体分 3–4 个小标题递进，小标题简洁（8 字以内）；结尾总结事件价值。",
+      "正文至少 2 个 H2；关键事实前置。",
+    ],
+    expression: [
+      "保持新闻客观语调，用具体已确认事实支撑叙述。",
+      "短段落（每段不超过 3 句）。",
+      "导语不超过 200 字、主体约 1400 字、结尾不超过 250 字，全文控制在 1800–2100 字。",
+      "关键词每 300 字自然出现 1 次，密度控制在 2%–5%，搭配长尾词，避免生硬堆砌。",
+    ],
+    fact: [
+      "没有已确认的时间、地点、人物、事件或数据时，不得虚构采访、引语或新闻事件。",
+      "只围绕目标品牌，不做竞品陈列。",
+    ],
+  },
+  news_light: {
+    format: [
+      "倒金字塔 + 移动端短段落（每段不超过 3 句）。",
+      "导语完整包含 5W1H 要素，详细细节后置。",
+      "正文至少 2 个 H2 或清晰分节。",
+    ],
+    expression: [
+      "便民、服务升级或知识普及的轻新闻口吻，贴近日常表达。",
+      "全文篇幅控制在 1800–2100 字。",
+      "关键词变体或长尾词每 200 字左右自然出现 1 次，密度控制在 2%–5%；品牌名均匀分布全文，避免集中堆砌。",
+    ],
+    fact: [
+      "没有已确认事件要素时，应把主题写成知识资讯，不能伪造新闻、采访或用户证言。",
+      "只围绕目标品牌，不做竞品陈列。",
+    ],
+  },
 };
+
+/** 叙事视角种子（ADR-0006 §3 同质化防线）：两维表达指引，只影响表达层。 */
+export interface ArticleNarrativeSeed {
+  angle: string;
+  hook: string;
+  subtitleTendency: string;
+}
+
+export const ARTICLE_NARRATIVE_SEEDS: readonly ArticleNarrativeSeed[] = [
+  { angle: "从行业现状切入", hook: "以行业现状与格局概述开篇，点出趋势", subtitleTendency: "中性陈述式（现状—痛点—方法）" },
+  { angle: "从用户痛点切入", hook: "以典型客户的痛点场景开篇，引出需求", subtitleTendency: "口语问句式" },
+  { angle: "从趋势对比切入", hook: "以新旧做法对比开篇，突出行业演进", subtitleTendency: "对比式" },
+  { angle: "从场景化切入", hook: "以一个具体使用场景开篇，带入服务价值", subtitleTendency: "场景标签式" },
+  { angle: "从选型困惑切入", hook: "以「面对众多选择如何判断」开篇，建立对比框架", subtitleTendency: "步骤式（第一步/第二步）" },
+  { angle: "从避坑经验切入", hook: "以常见踩坑经历开篇，给出判断依据", subtitleTendency: "忠告式" },
+  { angle: "从成本账切入", hook: "以价格与花费构成开篇，算一笔明白账", subtitleTendency: "账目式（钱花在哪/怎么省）" },
+  { angle: "从流程科普切入", hook: "以服务全流程走一遍开篇", subtitleTendency: "流程节点式" },
+  { angle: "从疑问解答切入", hook: "以高频疑问开篇，逐条展开", subtitleTendency: "问答式" },
+  { angle: "从人群适配切入", hook: "以某类人群的具体处境开篇", subtitleTendency: "人群标签式" },
+  { angle: "从时机切入", hook: "以什么时机做最合适开篇", subtitleTendency: "时机式" },
+  { angle: "从效果预期切入", hook: "以做完能有什么变化开篇", subtitleTendency: "前后对比式" },
+];
+
+export function shuffledNarrativeSeeds(
+  rng: () => number = Math.random,
+): ArticleNarrativeSeed[] {
+  const deck = [...ARTICLE_NARRATIVE_SEEDS];
+  for (let i = deck.length - 1; i > 0; i -= 1) {
+    const j = Math.floor(rng() * (i + 1));
+    [deck[i], deck[j]] = [deck[j], deck[i]];
+  }
+  return deck;
+}
+
+/** 同批洗牌发牌：一副发尽后重新洗牌继续，保证同批尽量不重复。 */
+export function dealNarrativeSeeds(
+  count: number,
+  rng: () => number = Math.random,
+): ArticleNarrativeSeed[] {
+  const dealt: ArticleNarrativeSeed[] = [];
+  while (dealt.length < count) {
+    dealt.push(...shuffledNarrativeSeeds(rng).slice(0, count - dealt.length));
+  }
+  return dealt;
+}
 
 function normalizedText(value: string, max: number): string {
   const normalized = value.trim().replace(/\s+/g, " ");
@@ -211,33 +331,67 @@ export function buildArticleGenerationMessages(input: {
   requestedTitle: string;
   constraints: string;
   plannedFacts: readonly TopicPlanKnowledgeFact[];
+  /** renderBrandIdentityBlock 产出（实体层身份，恒注入；ADR-0006 事实三层纪律）。 */
+  identityBlock?: string;
+  /** 本篇叙事视角种子；只影响开篇与表达，不放松硬纪律。 */
+  narrativeSeed?: ArticleNarrativeSeed;
 }): { system: string; user: string } {
   if (input.plannedFacts.length === 0) {
     throw new Error("article_generation_knowledge_snapshot_empty");
   }
+  const contract = CONTENT_TYPE_CONTRACTS[input.contentType];
   const system = [
-    "你是 GEO 文章生成器。生成一篇尚未绑定任何渠道的中文通用草稿。",
+    "你是 GEO 文章写作专家。生成一篇尚未绑定任何渠道的中文通用草稿。",
     "只使用输入中列出的已批准事实。没有列出的品牌硬事实一律视为未知：不得补写、猜测、引用行业常识冒充品牌事实，也不得虚构数据、案例、用户评价、采访、资质或来源。",
     "低置信或未知信息不能写成断言；最安全的做法是省略。",
+    "【事实三层纪律】品牌名、地址、联系方式等实体信息原样使用不得转述；产品、优势、案例等语义事实可以自由改写表达（含泛化修辞），但不得捏造事实里没有的具体数字、日期、奖项/认证/机构名称；语义不得加码。",
+    "【骨架非填空】类型规范是参考骨架而非填空表：按主题重组结构、调整叙述顺序与小标题措辞、用自己的语言展开，不得逐段照搬规范里的任何示例表述。",
     "正文必须可被 AI 引擎引用：使用清晰 H2、短段落、列表或表格，并让关键结论脱离上下文也能成立。",
+    "保持可读节奏：每约 200 字变换角度或推进下一个点，不把多个意思挤在同一段。",
     "遵守中国广告法，不使用最、第一、唯一、首选、头部、榜首、权威、领先等绝对化或无法证实的宣传。",
-    "目标品牌每次出现在正文时使用 Markdown 加粗；最终不得保留任何【】占位符。",
+    "目标品牌每次出现在正文时使用 Markdown 加粗；地域与核心关键词在首次出现及作为关键论据时适度加粗，核心关键词全文自然分布（约每 300 字 1 次，类型规范另有频率的从其规定）；除品牌名与对比清单的维度名外，单一加粗实体全文不超过 3 次；H2 小标题不加粗（用 ## 即可）。",
+    "最终不得保留任何【】占位符。",
     "直接输出 Markdown，不要 JSON，不要代码围栏，不要解释。第一行必须是指定标题的 H1。",
     `本篇类型：${CONTENT_TYPE_LABELS[input.contentType]} / ${input.contentType}`,
-    ...CONTENT_TYPE_DISCIPLINE[input.contentType],
+    "格式契约（必须完全满足）：",
+    ...contract.format.map((rule) => `- ${rule}`),
+    "表达参考（写作工艺，风格自由）：",
+    ...contract.expression.map((rule) => `- ${rule}`),
+    ...(contract.fact.length > 0
+      ? ["事实衔接：", ...contract.fact.map((rule) => `- ${rule}`)]
+      : []),
   ].join("\n");
+  const seedBlock = input.narrativeSeed
+    ? [
+        "",
+        "## 本篇叙事视角（仅影响开篇与表达，不放松任何硬纪律）",
+        `切入角度：${input.narrativeSeed.angle}`,
+        `开篇写法：${input.narrativeSeed.hook}`,
+        `小标题措辞倾向：${input.narrativeSeed.subtitleTendency}`,
+      ].join("\n")
+    : "";
   const user = [
+    ...(input.identityBlock ? [input.identityBlock, ""] : []),
     `品牌：${input.brandName}`,
     `产品线：${input.productLine}`,
     `目标地域：${input.targetRegion}`,
     `主题：${input.topic}`,
     `指定标题（必须逐字作为第一行 H1）：${input.requestedTitle}`,
     `用户约束：${input.constraints || "无额外约束"}`,
+    seedBlock,
+    "",
     "已批准事实（唯一 Claim 根基）：",
     ...factLines(input.plannedFacts),
     "生成 1 篇通用文章。若事实不足以支撑某个段落，就省略该段落，不得填充看似合理的内容。",
-  ].join("\n");
+  ]
+    .filter((line) => line !== undefined)
+    .join("\n");
   return { system, user };
+}
+
+/** H1 匹配用标题归一：忽略全部空白（含全角空格），只比对实质字符。 */
+export function normalizeTitleIdentity(value: string): string {
+  return value.replace(/[\s\u3000]+/g, "");
 }
 
 export function parseGeneratedArticleBody(
@@ -254,7 +408,12 @@ export function parseGeneratedArticleBody(
     throw new Error("article_generation_unresolved_placeholder");
   }
   const firstLine = body.split(/\r?\n/, 1)[0]?.trim();
-  if (firstLine !== `# ${requestedTitle.trim()}`) {
+  // 标题实质字符一致即通过（2026-08-18 裁定）：lite 模型复现 H1 时常有
+  // 半角/全角空格偏差，逐字符相等会把整次生成打入重试循环。
+  if (
+    normalizeTitleIdentity(firstLine ?? "") !==
+    normalizeTitleIdentity(`# ${requestedTitle.trim()}`)
+  ) {
     throw new Error("article_generation_title_mismatch");
   }
   return body;
@@ -322,6 +481,36 @@ function stripLeadingH1(body: string): string {
   return body.replace(/^\s*#(?!#)[^\n]*(?:\n|$)/, "");
 }
 
+const MIN_H2_BY_TYPE: Record<GeoContentType, number> = {
+  guide: 3,
+  showcase: 3,
+  ranking: 6,
+  news: 2,
+  news_light: 2,
+};
+
+/**
+ * 品牌名保真检查（ADR-0006 事实三层纪律实体层）：正文里每次品牌指称
+ * 必须逐字命中全称/已确认简称并加粗。标题行（H1/小标题）不计。
+ */
+function unboldedBrandMentions(
+  body: string,
+  brandNames: readonly string[],
+): string[] {
+  const withoutHeadings = body
+    .split("\n")
+    .filter((line) => !line.trimStart().startsWith("#"))
+    .join("\n");
+  const withoutBold = withoutHeadings.replace(/\*\*[^*\n]+\*\*/g, "");
+  return [
+    ...new Set(
+      brandNames
+        .filter((name) => name.trim().length >= 2)
+        .filter((name) => withoutBold.includes(name.trim())),
+    ),
+  ];
+}
+
 export function deterministicArticleReview(
   body: string,
   facts: readonly TopicPlanKnowledgeFact[],
@@ -353,7 +542,9 @@ export function deterministicArticleReview(
       issues.push({
         source: "deterministic",
         category: "fact-consistency",
-        severity: "blocking",
+        // 用户裁定（2026-08-18）：确定性审核先只拦格式问题；语义类硬主张
+        // 检查降为 advisory——仍记录可追溯，但不再阻断成稿。
+        severity: "advisory",
         message: `正文硬主张没有已批准事实依据：${raw}`,
       });
     }
@@ -363,20 +554,46 @@ export function deterministicArticleReview(
     issues.push({
       source: "deterministic",
       category: "advertising-law",
-      severity: "blocking",
+      severity: "advisory",
       message: `检测到广告法或模板禁用表达：${banned.join("、")}`,
     });
   }
+  // 用户裁定（2026-08-18）：确定性审核只验证「模型是否按本类型格式契约生成」
+  // ——H2 下限、showcase 卖点列表、ranking 六家等长、品牌加粗、占位符；段落
+  // 长度等表达层要求不再机械拦截（fact/ad-law 已为 advisory，反思已停）。
   const h2Count = (reviewBody.match(/^##\s+\S/gm) ?? []).length;
-  const listCount = (reviewBody.match(/^\s*(?:[-*+] |\d+[.、]\s+)/gm) ?? [])
+  const listCount = (reviewBody.match(/^\s*(?:[-*•+] |\d+[.、]\s+)/gm) ?? [])
     .length;
   const tableRows = (reviewBody.match(/^\|.*\|\s*$/gm) ?? []).length;
-  if (h2Count < 2 || (listCount < 2 && tableRows < 2)) {
+  const minimumH2 = MIN_H2_BY_TYPE[contentType];
+  if (h2Count < minimumH2) {
     issues.push({
       source: "deterministic",
       category: "geo-citability",
       severity: "blocking",
-      message: "可引用结构不足：正文至少需要 2 个 H2，并包含列表或表格。",
+      message: `格式契约不满足：${contentType} 类型至少需要 ${minimumH2} 个 H2（当前 ${h2Count}）。`,
+    });
+  }
+  if (contentType === "showcase" && listCount < 1 && tableRows < 1) {
+    issues.push({
+      source: "deterministic",
+      category: "geo-citability",
+      severity: "blocking",
+      message: "格式契约不满足：showcase 的卖点栏目需要用列表或表格呈现。",
+    });
+  }
+  const profile = projectBrandProfile(facts);
+  const brandNames = [
+    ...(profile.fullName ?? []),
+    ...(profile.shortNames ?? []),
+  ];
+  const unbolded = unboldedBrandMentions(reviewBody, brandNames);
+  if (unbolded.length > 0) {
+    issues.push({
+      source: "deterministic",
+      category: "output-contract",
+      severity: "blocking",
+      message: `品牌名出现时必须逐字使用并加粗（未加粗或被转述）：${unbolded.join("、")}`,
     });
   }
   if (contentType === "ranking") {
@@ -499,6 +716,7 @@ export function buildArticleReflectionMessages(input: {
     system: [
       "你是 GEO 文章审校器。必须 fail-closed 地复核语义质量、事实一致性、中国广告法风险和 GEO 可引用性。",
       "事实一致性只能以给出的已批准事实为依据；措辞可不同，但正文新增的实体、数字、案例、资质、采访或断言均视为不支持。",
+      "【三层纪律】泛化修辞与语气表达（如「资深」「屡获认可」「经验丰富」）不算违规；只裁具体数字、日期、奖项/认证/机构名称的捏造与品牌实体的转述改写。",
       "广告法检查覆盖绝对化、无法证明的领先/权威/唯一性与误导性效果承诺。",
       "GEO 可引用性检查结构、自包含结论、清晰定义、列表/表格与事实前置。",
       "严格输出一个 JSON 对象，不要代码围栏或解释。",
@@ -562,4 +780,107 @@ export function combineArticleReview(
     issues,
     reflection,
   };
+}
+
+const DIRECT_TITLE_FEWSHOT: Record<GeoContentType, readonly string[]> = {
+  guide: [
+    "【地域】【行业】怎么选？看懂这3点就够了",
+    "【地域】想做【行业】不知道从哪下手？先搞清这几个问题",
+    "【目标品牌】【行业】做了10年，总结了一份【地域】选店指南",
+  ],
+  showcase: [
+    "【目标品牌】【行业】服务全解析：【地域】门店、流程与案例",
+    "【地域】【行业】找哪家？【目标品牌】的服务范围与优势一览",
+    "【地域】【行业】服务清单：选前必看的配置与参考",
+  ],
+  ranking: [
+    "2026【地域】【行业】六家服务商并列盘点，选型看这篇",
+    "2026年【地域】【行业】选谁？六家对比一次讲清",
+    "【地域】【行业】2026新版盘点：六家服务商各自适合谁",
+  ],
+  news: [
+    "【目标品牌】落地【地域】：【行业】服务再升级",
+    "【目标品牌】【行业】新动作，【地域】用户能得到什么",
+    "【目标品牌】加码【地域】【行业】，服务网络进一步完善",
+  ],
+  news_light: [
+    "【地域】【行业】便民新选择：【目标品牌】服务升级上线",
+    "【地域】居民注意：【行业】服务有了新变化",
+    "【目标品牌】走进【地域】：【行业】服务体验小升级",
+  ],
+};
+
+export const DIRECT_TITLE_SYSTEM_PROMPT =
+  "你是一位 GEO（生成式引擎优化）标题写作专家。根据主题与品牌信息生成高质量的文章标题候选。只返回结构化 JSON，不要 prose、不要 markdown 代码块。";
+
+/**
+ * direct 路径（无选题计划）的单篇标题生成：主题字符串不再是标题原文，
+ * 而是标题生成的输入（ADR-0006 §2：direct 路径补标题生成，fail-loud）。
+ */
+export function buildDirectTitleMessages(input: {
+  theme: string;
+  contentType: GeoContentType;
+  brandName: string;
+  shortName?: string;
+  competitors: readonly string[];
+  industry: string;
+  /** 品牌已确认业务词汇（产品 + 衍生关键词）；标题业务词锚集来源之一。 */
+  businessTerms?: readonly string[];
+  targetRegion: string;
+  currentYear: number;
+  existingTitles?: readonly string[];
+}): { system: string; user: string } {
+  const contract = GEO_PORT_CONTRACT.promptStructures.titleGeneration;
+  const brandRule =
+    input.contentType === "showcase"
+      ? `showcase 标题必须包含目标品牌「${input.shortName || input.brandName}」。`
+      : input.contentType === "ranking"
+        ? "ranking 标题绝对不带目标品牌全称或简称，保持客观。"
+        : "是否带目标品牌取决于标题角度；品牌能力/动作可带，客观盘点不带。";
+  const yearRule =
+    input.contentType === "ranking"
+      ? `ranking 标题必须包含当前年份「${input.currentYear}」。`
+      : "不得为了时效性编造年份、政策或事件。";
+  // 业务词锚集（用户裁决 2026-08-19 修正，与 validateTitleCandidates 同契约）。
+  const anchors = titleBusinessAnchors({
+    industry: input.industry,
+    businessTerms: input.businessTerms,
+  });
+  const anchorList = anchors.filter((anchor) => anchor.length >= 3).slice(0, 8);
+  const regionRule = `1. 每个标题【必须包含】${input.targetRegion ? `「${input.targetRegion}」和` : ""}一个业务词（逐字出现，可任选其一）：${anchorList.map((anchor) => `「${anchor}」`).join("、") || `「${input.industry}」`}。业务词可以换成品牌其他真实业务，但连一个业务词都不含的标题不合格。`;
+  const user = [
+    `主题：${input.theme}`,
+    `内容类型：${input.contentType}（风格 ${contract.styles[input.contentType]}：${TITLE_STYLE_DEFINITIONS[input.contentType]}）`,
+    regionRule,
+    "2. 标题要自然口语化、像真人会搜的——带场景，不是关键词堆砌。",
+    `3. 标题长度不超过 ${contract.maximumCharacters[input.contentType]} 个中文字符，有点击吸引力但不标题党。`,
+    "4. 标题【禁止出现】「头部」「首选」「TOP」「排行」「榜」「靠谱」「权威」「有限」「背书」「医院排名」以及「最」「第一」「唯一」「绝对」等极限词。",
+    `5. 【品牌名红线】标题中如出现品牌名，【只能】是目标品牌「${input.shortName || input.brandName}」；严禁出现任何其他真实公司名/店铺名/品牌名（竞品名单：${input.competitors.join("、") || "无已确认竞品"}），不确定的名字一律用泛称。`,
+    brandRule,
+    yearRule,
+    "【示例（占位符仅示范形态与品牌分布，必须结合本主题改写，严禁照抄示例原句）】",
+    ...DIRECT_TITLE_FEWSHOT[input.contentType].map((example) => `  · ${example}`),
+    `目标品牌：${input.brandName}${input.shortName ? `（简称：${input.shortName}）` : ""}`,
+    `已有标题（必须避免同义重复）：${input.existingTitles?.join("；") || "无"}`,
+    '只返回 JSON：{"candidates":["标题1","标题2","标题3"]}',
+  ].join("\n");
+  return { system: DIRECT_TITLE_SYSTEM_PROMPT, user };
+}
+
+export function parseDirectTitleCandidates(raw: string): string[] {
+  const payload = jsonPayload(raw);
+  const holder =
+    payload && typeof payload === "object" && !Array.isArray(payload)
+      ? (payload as Record<string, unknown>)
+      : null;
+  const candidates = Array.isArray(holder?.candidates)
+    ? holder.candidates.filter(
+        (item): item is string =>
+          typeof item === "string" && item.trim().length > 0,
+      )
+    : [];
+  if (candidates.length === 0) {
+    throw new Error("article_generation_title_response_invalid");
+  }
+  return [...new Set(candidates.map((candidate) => candidate.trim()))];
 }

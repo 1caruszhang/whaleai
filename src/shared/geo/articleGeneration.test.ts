@@ -3,11 +3,14 @@ import { describe, expect, it } from "vitest";
 import {
   ARTICLE_GENERATION_CONCURRENCY,
   ARTICLE_GENERATION_POLICY_VERSION,
+  ARTICLE_NARRATIVE_SEEDS,
   buildArticleGenerationMessages,
   combineArticleReview,
+  dealNarrativeSeeds,
   deterministicArticleReview,
   parseArticleReflection,
   parseGeneratedArticleBody,
+  shuffledNarrativeSeeds,
   validateDirectArticleSource,
 } from "./articleGeneration";
 
@@ -64,6 +67,46 @@ describe("direct article generation contract", () => {
     expect(messages.user).toContain("不虚构新闻");
   });
 
+  // 回归（v2）：js_ai 模板已裁决的篇幅/关键词/编排纪律迁移后必须在场，
+  // 防止后续提示词重写再次静默丢失。
+  it("carries the js_ai word-count, keyword-frequency and ranking layout disciplines", () => {
+    const build = (contentType: "guide" | "showcase" | "ranking" | "news" | "news_light") =>
+      buildArticleGenerationMessages({
+        brandName: "小鲸",
+        productLine: "知识服务",
+        targetRegion: "中国",
+        contentType,
+        topic: "企业知识库指南",
+        requestedTitle: "企业知识库指南",
+        constraints: "",
+        plannedFacts: facts,
+      });
+    for (const contentType of ["guide", "showcase", "news", "news_light"] as const) {
+      expect(build(contentType).system).toContain("1800–2100 字");
+    }
+    const ranking = build("ranking").system;
+    expect(ranking).toContain("2500 字以内");
+    expect(ranking).toContain("单条不短于 45 字");
+    expect(ranking).toContain("选型应重点考察的维度");
+    expect(ranking).toContain("自选（不照搬任何示例维度）");
+    expect(ranking).toContain("标题含数字（如「六家」「六大」）时，正文必须严格出现对应数量");
+    const guide = build("guide").system;
+    expect(guide).toContain("不少于 100 字的行业报告");
+    expect(guide).toContain("每 500 字自然出现 1 次");
+    const news = build("news").system;
+    expect(news).toContain("5W1H");
+    expect(news).toContain("导语不超过 200 字、主体约 1400 字、结尾不超过 250 字");
+    expect(news).toContain("密度控制在 2%–5%");
+    const newsLight = build("news_light").system;
+    expect(newsLight).toContain("每 200 字左右自然出现 1 次");
+    // 全局层：节奏与加粗细则对所有类型生效。
+    const universal = build("guide").system;
+    expect(universal).toContain("每约 200 字变换角度");
+    expect(universal).toContain("约每 300 字 1 次");
+    expect(universal).toContain("单一加粗实体全文不超过 3 次");
+    expect(universal).toContain("H2 小标题不加粗");
+  });
+
   it("accepts plain markdown only when title and placeholders are valid", () => {
     expect(
       parseGeneratedArticleBody(
@@ -90,6 +133,9 @@ describe("article review gate", () => {
     "## 执行清单",
     "- 核对来源",
     "- 固定版本",
+    "",
+    "## 适用场景",
+    "- 团队协作",
   ].join("\n");
 
   it("blocks unsupported hard claims, advertising risks and weak citability", () => {
@@ -115,6 +161,8 @@ describe("article review gate", () => {
       "- 服务项目**：企业知识库**已经落地。",
       "## 发展历程",
       "- 成立10年，服务过大量客户。",
+      "## 口碑",
+      "- 客户认可。",
     ].join("\n");
     expect(deterministicArticleReview(prose, facts)).toEqual([]);
   });
@@ -180,5 +228,145 @@ describe("article review gate", () => {
         },
       }),
     ).toMatchObject({ passed: false });
+  });
+});
+
+describe("narrative seeds (ADR-0006 homogenization defense)", () => {
+  it("keeps the seed deck within the ADR 10–12 band", () => {
+    expect(ARTICLE_NARRATIVE_SEEDS.length).toBeGreaterThanOrEqual(10);
+    expect(ARTICLE_NARRATIVE_SEEDS.length).toBeLessThanOrEqual(12);
+  });
+
+  it("shuffles into a permutation of the full deck", () => {
+    let counter = 0;
+    const rng = () => ((counter += 1) * 7) % 10 / 10;
+    const shuffled = shuffledNarrativeSeeds(rng);
+    expect(shuffled).toHaveLength(ARTICLE_NARRATIVE_SEEDS.length);
+    expect(new Set(shuffled.map((seed) => seed.angle))).toEqual(
+      new Set(ARTICLE_NARRATIVE_SEEDS.map((seed) => seed.angle)),
+    );
+  });
+
+  it("deals without repetition until the deck is exhausted, then reshuffles", () => {
+    let counter = 0;
+    const rng = () => ((counter += 1) * 3) % 11 / 11;
+    const dealt = dealNarrativeSeeds(ARTICLE_NARRATIVE_SEEDS.length + 3, rng);
+    expect(dealt).toHaveLength(ARTICLE_NARRATIVE_SEEDS.length + 3);
+    const firstRound = dealt.slice(0, ARTICLE_NARRATIVE_SEEDS.length);
+    expect(new Set(firstRound.map((seed) => seed.angle)).size).toBe(
+      ARTICLE_NARRATIVE_SEEDS.length,
+    );
+  });
+});
+
+describe("buildArticleGenerationMessages style layer", () => {
+  const base = {
+    brandName: "锦江区鲸鱼汽车音响经营部",
+    productLine: "汽车音响改装",
+    targetRegion: "成都市锦江区",
+    contentType: "guide" as const,
+    topic: "成都汽车音响改装怎么选",
+    requestedTitle: "成都汽车音响改装怎么选",
+    constraints: "",
+    plannedFacts: [
+      {
+        factKey: "f1",
+        predicate: "brand.fullName",
+        normalizedValueJson: '"锦江区鲸鱼汽车音响经营部"',
+      },
+    ],
+  };
+
+  it("composes the three-part type contract, identity block and seed", () => {
+    const messages = buildArticleGenerationMessages({
+      ...base,
+      identityBlock: "## 品牌身份（实体信息，必须原样使用，不得转述或改写）",
+      narrativeSeed: ARTICLE_NARRATIVE_SEEDS[1],
+    });
+    expect(messages.system).toContain("【骨架非填空】");
+    expect(messages.system).toContain("格式契约（必须完全满足）：");
+    expect(messages.system).toContain("表达参考（写作工艺，风格自由）：");
+    expect(messages.system).toContain("【事实三层纪律】");
+    expect(messages.user).toContain("品牌身份（实体信息，必须原样使用");
+    expect(messages.user).toContain(
+      "本篇叙事视角（仅影响开篇与表达，不放松任何硬纪律）",
+    );
+    expect(messages.user).toContain(ARTICLE_NARRATIVE_SEEDS[1].angle);
+  });
+
+  it("keeps the prompt valid without optional blocks", () => {
+    const messages = buildArticleGenerationMessages(base);
+    expect(messages.user).not.toContain("本篇叙事视角");
+    expect(messages.user).not.toContain("品牌身份");
+  });
+});
+
+describe("deterministic format-contract additions", () => {
+  const identityFacts = [
+    {
+      factKey: "f1",
+      predicate: "brand.fullName",
+      normalizedValueJson: '"锦江区鲸鱼汽车音响经营部"',
+    },
+    {
+      factKey: "f2",
+      predicate: "brand.shortNames",
+      normalizedValueJson: '["鲸鱼音响"]',
+    },
+  ];
+  const cleanGuide = [
+    "# 成都汽车音响改装怎么选",
+    "",
+    "开篇段落。一句话。",
+    "",
+    "## 怎么判断门店专业度",
+    "",
+    "**鲸鱼音响** 师傅经验扎实。要点说明一。",
+    "",
+    "- 核对事实一",
+    "- 核对事实二",
+    "",
+    "## 价格构成",
+    "",
+    "**鲸鱼音响** 报价透明。要点说明二。",
+    "",
+    "## 售后与保障",
+    "",
+    "基础说明。要点说明三。",
+  ].join("\n");
+
+  it("accepts a guide body that satisfies the format contract", () => {
+    const issues = deterministicArticleReview(cleanGuide, identityFacts, "guide");
+    expect(issues.filter((issue) => issue.severity === "blocking")).toEqual([]);
+  });
+
+  it("blocks unbolded brand mentions outside headings", () => {
+    const body = cleanGuide.replace(
+      "**鲸鱼音响** 师傅经验扎实。",
+      "鲸鱼音响的师傅经验扎实。",
+    );
+    const issues = deterministicArticleReview(body, identityFacts, "guide");
+    expect(
+      issues.some((issue) => issue.message.includes("必须逐字使用并加粗")),
+    ).toBe(true);
+  });
+
+  it("does not mechanically block long paragraphs (format-only review, 2026-08-18 裁定)", () => {
+    const body = cleanGuide.replace(
+      "开篇段落。一句话。",
+      "第一句。第二句。第三句。第四句。",
+    );
+    const issues = deterministicArticleReview(body, identityFacts, "guide");
+    expect(issues.some((issue) => issue.severity === "blocking")).toBe(false);
+  });
+
+  it("enforces the per-type minimum H2 count", () => {
+    const twoH2 = cleanGuide.replace("## 售后与保障", "售后说明");
+    const issues = deterministicArticleReview(twoH2, identityFacts, "guide");
+    expect(
+      issues.some((issue) =>
+        issue.message.includes("guide 类型至少需要 3 个 H2"),
+      ),
+    ).toBe(true);
   });
 });

@@ -23,7 +23,17 @@ medium                = 100 <= priorityTotal < 150
 low                   = priorityTotal < 100
 ```
 
-当没有最近选中池时，nearest cosine 按 `0` 计，因此 `recentPoolSimilarity = 0` 且 `optimizationPotential = 50`。每题持久化三个原始分量、sum、阈值、formula 与 `policyVersion=js-ai-dev-pred-1-v1`，修改阈值必须升级 policy version。
+当没有最近选中池时，nearest cosine 按 `0` 计，因此 `recentPoolSimilarity = 0` 且 `optimizationPotential = 50`。每题持久化三个原始分量、sum、阈值、formula 与 `policyVersion=xiaojing-content-prompt-v1`，修改阈值必须升级 policy version。
+
+## 提示词形态（ADR-0006，修正四声明范围 = 锚 + 上限）
+
+- 挖词与问题生成两段 prompt 按 js_ai 不变量清单承载（第一人称陈述、三类递进、意图维度+反同质化、通顺最高原则、推荐尾巴禁令、每词至少 1 条、recommended 2–3 个）。清单唯一真源见 `content_prompt_invariants.md`。
+- 调用形态：两段都带 system persona（搜索词研究专家 / GEO 用户意图研究员）与 `maxTokens=4096`；`keywordSearch.search` 接口可选传 `system` 与 `maxTokens`。
+- 画像注入：挖词注入 `renderMiningProfileBlock`（products/coreAdvantages 主参考、customerCases 辅参考），问题生成注入 `renderFullProfileBlock`（全档案中文标签块），由 `projectBrandProfile` 从知识快照事实按 `brand.<field>` 谓词投影。
+- 地域锚（修正四）：`deriveServiceScope` 以**用户声明的服务范围为主锚与白名单上限**（粒度保留——声明「新都区」就是新都区，不升格为成都市；多段声明全入白名单、首段为主锚）；地址仅在声明不可用时兜底提取城市短名；「全国/线上/不限」类声明直接进无地缘模式（不落地址兜底）。有锚时挖词 prompt 写明地域白名单与越界禁令，城市级锚 scene 以城市为根裂变、区县级锚不向下裂变到街道乡镇；问题生成补地域不越界硬约束。上限 enforcement 只在提示词层（用户裁定），解析层不加地域门。解析防线：词内禁标点、长度 ≤30、与已入库词去重。
+- 品牌词（修正三）：品牌相关词至多 1 条、须联网验证有真实搜索量；解析层确定性截断，竞品名永禁。
+- 数量指引与配额：挖词 core 4–6 / scene 8–12 / longtail 12–18；问题生成在词多于配额时优先覆盖高热度与意图多样的词，不逐词平铺。
+- 词库沉淀（修正三）：`brand_keyword_library` 表（`UNIQUE(workspace_id, term)`、池型合并只增不清）；`prepare` 上下文返回词库并注入挖词 prompt 做增量挖新；`decide_question_pool` 确认事务内把本批合法词写入库。
 
 ## Checkpoint、取消与确认
 

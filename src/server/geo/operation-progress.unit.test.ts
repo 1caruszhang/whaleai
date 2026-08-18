@@ -7,18 +7,37 @@ import {
 import { planGeoOperation } from "../../shared/geo/operation";
 import type { GeoOperationProjection } from "../../shared/geo/operation";
 
-function fullOptimization(id: string): GeoOperationProjection {
+function fullOptimization(
+  id: string,
+  options: { planReleased?: boolean } = {},
+): GeoOperationProjection {
   const plan = planGeoOperation({
     intent: "full-optimization",
     goal: "完整链路测试",
   });
+  const released = options.planReleased !== false;
+  if (released) {
+    // 真实初始态：计划认可门已由用户放行，首个工作步骤就绪。
+    plan.steps[0].status = "succeeded";
+    plan.steps[1].status = "ready";
+    return projectionOf(id, plan, "ready", null);
+  }
+  return projectionOf(id, plan, plan.status, plan.pendingConfirmation);
+}
+
+function projectionOf(
+  id: string,
+  plan: ReturnType<typeof planGeoOperation>,
+  status: GeoOperationProjection["status"],
+  pendingConfirmation: GeoOperationProjection["pendingConfirmation"],
+): GeoOperationProjection {
   return {
     id,
     workspaceId: "brand-01",
     sessionId: "session-01",
     kind: plan.kind,
     goal: plan.goal,
-    status: plan.status,
+    status,
     revision: 1,
     executionGeneration: 0,
     executionSidecarGeneration: null,
@@ -29,7 +48,7 @@ function fullOptimization(id: string): GeoOperationProjection {
     inputRefs: plan.inputRefs,
     artifactRefs: [],
     checkpoint: null,
-    pendingConfirmation: plan.pendingConfirmation,
+    pendingConfirmation,
     error: null,
     sourceOperationId: null,
     createdAt: "2026-08-16T00:00:00Z",
@@ -166,5 +185,21 @@ describe("GeoOperationProgressRecorder", () => {
     expect(service.calls.map(([action, stepId]) => `${action}:${stepId}`)).toEqual([
       "confirm:confirm-question-selection",
     ]);
+  });
+
+  // 计划认可门未放行时，业务里程碑不能替用户推进任何步骤：
+  // begin/confirm 全部按状态机规则被拒并安全跳过。
+  it("keeps milestones inert while the plan acknowledgement gate is unreleased", async () => {
+    const service = new FakeService();
+    service.operations = [fullOptimization("op-1", { planReleased: false })];
+
+    await new GeoOperationProgressRecorder(service).record(identity, "knowledge-confirmed");
+
+    const operation = service.operations[0];
+    expect(operation.status).toBe("awaiting-confirmation");
+    expect(operation.steps.find((step) => step.id === "acknowledge-plan")?.status).toBe("awaiting-confirmation");
+    expect(operation.steps.find((step) => step.id === "collect-materials")?.status).toBe("pending");
+    expect(operation.steps.find((step) => step.id === "confirm-knowledge")?.status).toBe("pending");
+    expect(service.operations[0].revision).toBe(1);
   });
 });

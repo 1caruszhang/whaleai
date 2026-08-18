@@ -5,6 +5,7 @@ import { AskUserQuestionPrompt } from '@/components/AskUserQuestionPrompt';
 import ChatStarterSuggestions from '@/components/chat/ChatStarterSuggestions';
 import Message from '@/components/Message';
 import SimpleChatInput, { type ImageAttachment, type SessionFileRef } from '@/components/SimpleChatInput';
+import GeoOperationDockedStrip from '@/components/xiaojing/GeoOperationDockedStrip';
 import { useTabState } from '@/context/TabContext';
 import { FileActionProvider } from '@/context/FileActionContext';
 import { useWorkspaceChangeSignal } from '@/hooks/useWorkspaceChangeSignal';
@@ -96,6 +97,27 @@ export default function Chat({
     if (!text.trim() && (!images || images.length === 0) && (!files || files.length === 0)) return false;
     return sendMessage(text, images, files);
   }, [sendMessage]);
+
+  // 常驻闸门进度条点击定位：与通知深链同款滚动工具与「跟随底部」抑制；
+  // ref 取消上一次未完成的定位，避免重试循环叠加。依赖只取 ref，回调恒稳。
+  const dockLocateCancelRef = useRef<(() => void) | null>(null);
+  const locateOperationGate = useCallback((operationId: string) => {
+    const node = scrollRef.current;
+    if (!node) return;
+    dockLocateCancelRef.current?.();
+    gateLocationActiveRef.current = true;
+    dockLocateCancelRef.current = scrollContainerToGeoOperationGate(
+      node,
+      operationId,
+      {
+        onSettled: () => {
+          gateLocationActiveRef.current = false;
+          dockLocateCancelRef.current = null;
+        },
+      },
+    );
+  }, []);
+  useEffect(() => () => dockLocateCancelRef.current?.(), []);
 
   useEffect(() => {
     if (!initialMessage || consumedInitialRef.current === initialMessage) return;
@@ -215,6 +237,8 @@ export default function Chat({
           )}
         </div>
       </div>
+
+      <GeoOperationDockedStrip onLocate={locateOperationGate} />
 
       <SimpleChatInput
         onSend={handleSend}

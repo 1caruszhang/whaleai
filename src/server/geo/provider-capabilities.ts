@@ -14,6 +14,7 @@ import {
 export interface GeoProviderRuntimeSecrets {
   deepseekApiKey?: string;
   arkApiKey?: string;
+  doubaoSearchApiKey?: string;
   arkConfigurationFingerprint?: string;
   embeddingApiKey?: string;
   embeddingEndpointId?: string;
@@ -47,9 +48,33 @@ export interface GeoTextCapability {
   ): Promise<string>;
 }
 
+/** 豆包搜索结构化召回的单条结果（js_ai doubaoSearchProbe 契约的子集）。 */
+export interface GeoKeywordSearchSource {
+  title: string;
+  url: string;
+  summary?: string;
+}
+
 export interface GeoKeywordSearchCapability {
   readonly slot: "keyword-search";
-  search(prompt: string, options?: { signal?: AbortSignal }): Promise<string>;
+  search(
+    prompt: string,
+    options?: {
+      signal?: AbortSignal;
+      /** 挖词 system persona（ADR-0006 调用形态统一；缺省保持单 user 消息）。 */
+      system?: string;
+      maxTokens?: number;
+    },
+  ): Promise<string>;
+  /**
+   * 结构化检索（豆包搜索 API）：纯搜索引擎的逐条 Title/Summary/Url 召回，
+   * 不经 LLM 改写。供需要「搜索引擎真实召回语料」的消费方（竞品富化）；
+   * 未实现（旧能力注入）时调用方回落 search() 的 enable_search 生成语料。
+   */
+  searchSources?(
+    query: string,
+    options?: { signal?: AbortSignal; count?: number },
+  ): Promise<GeoKeywordSearchSource[]>;
   baselineEngines(): readonly GeoBaselineEngineAvailability[];
   probeQuestion(
     engineId: GeoBaselineEngineId,
@@ -119,6 +144,7 @@ export interface GeoProviderCapabilityDependencies {
 
 const secretTransportEnvNames = [
   "XIAOJING_ARK_API_KEY",
+  "XIAOJING_DOUBAO_SEARCH_API_KEY",
   "XIAOJING_ARK_EMBEDDING_API_KEY",
   "XIAOJING_OSS_ACCESS_KEY_ID",
   "XIAOJING_OSS_ACCESS_KEY_SECRET",
@@ -136,6 +162,7 @@ export function captureGeoProviderRuntimeSecrets(
   const read = (name: string) => env[name]?.trim() || undefined;
   const secrets: GeoProviderRuntimeSecrets = {
     arkApiKey: read("XIAOJING_ARK_API_KEY"),
+    doubaoSearchApiKey: read("XIAOJING_DOUBAO_SEARCH_API_KEY"),
     arkConfigurationFingerprint: read("XIAOJING_ARK_CONFIGURATION_FINGERPRINT"),
     embeddingApiKey: read("XIAOJING_ARK_EMBEDDING_API_KEY"),
     embeddingEndpointId: read("XIAOJING_ARK_EMBEDDING_ENDPOINT_ID"),
@@ -343,9 +370,17 @@ export function createGeoProviderCapabilities(
             },
             body: JSON.stringify({
               model: XIAOJING_GEO_PROVIDER_DEFAULTS.keywordSearchModel,
-              messages: [{ role: "user", content: prompt }],
+              messages: options?.system
+                ? [
+                    { role: "system", content: options.system },
+                    { role: "user", content: prompt },
+                  ]
+                : [{ role: "user", content: prompt }],
               stream: false,
               enable_search: true,
+              ...(options?.maxTokens !== undefined
+                ? { max_tokens: options.maxTokens }
+                : {}),
             }),
             signal: options?.signal,
           });
@@ -358,6 +393,69 @@ export function createGeoProviderCapabilities(
           if (typeof content !== "string")
             throw new Error("keyword-search 返回了无效响应");
           return content;
+        } catch (error) {
+          throw sanitizeGeoProviderError(error, secrets);
+        }
+      },
+      async searchSources(query, options) {
+        // 豆包搜索 HTTP API（js_ai doubaoSearchProbe 契约）：纯搜索引擎的
+        // 结构化 Title/Summary/Url 召回，不经 LLM 改写。Bearer 解析链：专用
+        // 豆包搜索 key（联网搜索控制台签发，月度免费额度）→ 复用 ARK key
+        // （volcengine 主 key / Agent Plan key 兼容豆包搜索计费面）；key 不被
+        // 接受时由调用方回落 search() 的 enable_search 生成语料。
+        try {
+          const response = await fetchImpl(
+            "https://open.feedcoopapi.com/search_api/web_search",
+            {
+              method: "POST",
+              headers: {
+                Authorization: `Bearer ${required(
+                  secrets.doubaoSearchApiKey ?? secrets.arkApiKey,
+                  "keyword-search",
+                )}`,
+                "Content-Type": "application/json",
+              },
+              body: JSON.stringify({
+                Query: query,
+                Count: options?.count ?? 20,
+                SearchType: "web",
+                NeedSummary: true,
+              }),
+              signal: options?.signal,
+            },
+          );
+          if (!response.ok)
+            throw safeUpstreamFailure("keyword-search", response.status);
+          const payload = (await response.json()) as {
+            Result?: {
+              WebResults?: Array<{
+                Title?: string;
+                SiteName?: string;
+                Url?: string;
+                Summary?: string;
+                Snippet?: string;
+              }>;
+            };
+            error?: { message?: string };
+          };
+          if (payload.error) throw new Error("keyword-search 返回了无效响应");
+          const seen = new Set<string>();
+          const sources: GeoKeywordSearchSource[] = [];
+          for (const result of payload.Result?.WebResults ?? []) {
+            const url = (result.Url ?? "").trim();
+            if (!url || seen.has(url)) continue;
+            seen.add(url);
+            const summary = (result.Summary ?? "").trim()
+              || (result.Snippet ?? "").trim();
+            sources.push({
+              title: (result.Title ?? "").trim()
+                || (result.SiteName ?? "").trim()
+                || url,
+              url,
+              ...(summary ? { summary } : {}),
+            });
+          }
+          return sources;
         } catch (error) {
           throw sanitizeGeoProviderError(error, secrets);
         }

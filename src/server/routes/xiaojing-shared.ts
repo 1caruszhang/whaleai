@@ -84,10 +84,12 @@ let distributionRuntime: { key: string; service: DistributionPlanningService } |
 function getXiaojingDistributionPlanService(identity: Identity): DistributionPlanningService {
   const key = identityKey(identity);
   if (distributionRuntime?.key === key) return distributionRuntime.service;
+  const capabilities = getXiaojingGeoProviderCapabilities();
   const service = new DistributionPlanningService(
     identity,
     createDistributionPlanPort(identity),
-    getXiaojingGeoProviderCapabilities().distribution,
+    capabilities.distribution,
+    capabilities.keywordSearch,
   );
   distributionRuntime = { key, service };
   return service;

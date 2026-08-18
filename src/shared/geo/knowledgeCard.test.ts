@@ -3,7 +3,9 @@ import { describe, expect, it } from 'vitest';
 import {
   buildKnowledgeCandidatesCardData,
   buildKnowledgeFieldRows,
+  KNOWLEDGE_CARD_EXCERPT_MAX_CHARS,
   KNOWLEDGE_CARD_MAX_CANDIDATES,
+  knowledgeFieldKeyOfPredicate,
   parseKnowledgeCandidatesCard,
   toKnowledgeCardCandidate,
   type KnowledgeCardCandidate,
@@ -107,7 +109,6 @@ describe('knowledge candidates card contract', () => {
         effectiveFrom: null,
         effectiveTo: null,
       },
-      valueJson: '"鲸跃科 技"',
       normalizedValueJson: '"鲸跃科 技"',
       unit: null,
       status: 'awaiting-confirmation',
@@ -125,13 +126,48 @@ describe('knowledge candidates card contract', () => {
     expect(projected).toEqual(expected);
   });
 
-  it('builds no card without candidates and caps large batches with an overflow count', () => {
+  it('builds no card without candidates and caps large batches at the total transport bound', () => {
     expect(buildKnowledgeCandidatesCardData(null, [])).toBeNull();
     const many = Array.from({ length: KNOWLEDGE_CARD_MAX_CANDIDATES + 7 }, (_, index) =>
       toKnowledgeCardCandidate(source({ id: `candidate-${index}` })));
     const card = buildKnowledgeCandidatesCardData({ id: 'material-1', displayName: '大材料' }, many);
     expect(card?.candidates).toHaveLength(KNOWLEDGE_CARD_MAX_CANDIDATES);
     expect(card?.overflowCount).toBe(7);
+    expect(card?.overflowByField).toEqual({ fullName: 7 });
+  });
+
+  it('keeps natural per-field distribution and only guarantees one slot per field over the bound', () => {
+    // 490 条 products + 其余 14 个已知字段各 1 条（共 504，超总量 4 条）：
+    // 不设单字段上限——products 按自然分布拿到 486 条，其余每类保住 1 个格子，
+    // 溢出只落在 products 上。
+    const otherFields = [
+      'fullName', 'shortNames', 'addresses', 'serviceArea', 'industry',
+      'relatedBrands', 'competitors', 'targetCustomers', 'coreAdvantages',
+      'trustEndorsements', 'customerPainPoints', 'customerCases', 'contactInfo', 'derivedKeywords',
+    ];
+    const candidates = [
+      ...Array.from({ length: 490 }, (_, index) =>
+        source({ id: `c-products-${index}`, predicate: 'enterprise-profile.products' })),
+      ...otherFields.map((field) =>
+        source({ id: `c-${field}`, predicate: `enterprise-profile.${field}` })),
+    ].map(toKnowledgeCardCandidate);
+    const card = buildKnowledgeCandidatesCardData({ id: 'material-1', displayName: '大材料' }, candidates);
+    const selectedFields = card!.candidates.map(
+      (candidate) => knowledgeFieldKeyOfPredicate(candidate.key.predicate));
+    expect(new Set(selectedFields).size).toBe(15);
+    expect(selectedFields.filter((field) => field === 'products').length).toBe(486);
+    expect(card?.overflowCount).toBe(4);
+    expect(card?.overflowByField).toEqual({ products: 4 });
+  });
+
+  it('trims the excerpt to a review-sized quote and omits the duplicated raw value', () => {
+    // 卡片 JSON 是工具结果正文、随转录进 Agent 上下文：摘录截为复核引用片段
+    // （完整摘录留库审计），原始 valueJson 与 normalized 值重复、不再进载荷。
+    const projected = toKnowledgeCardCandidate(source({
+      source: { materialId: 'material-1', excerpt: '依'.repeat(500), confidence: 0.9, profileProvenance: 'extracted' },
+    }));
+    expect(projected.source.excerpt).toBe(`${'依'.repeat(KNOWLEDGE_CARD_EXCERPT_MAX_CHARS)}…`);
+    expect('valueJson' in projected).toBe(false);
   });
 
   it('groups candidates into fixed-order field rows, merging same-field candidates', () => {
@@ -163,8 +199,27 @@ describe('knowledge candidates card contract', () => {
     expect(rows.every((row) => row.overflowCount === 0)).toBe(true);
   });
 
+  // 回归：knowledge identity 入库时 predicate 被统一小写化（serviceArea →
+  // servicearea），分组键必须大小写不敏感归一为规范字段 token；否则
+  // 「服务区域」会以 `enterprise-profile.servicearea` 裸 key 单独成行。
+  it('normalizes lowercased profile predicates onto the canonical field rows', () => {
+    const card = buildKnowledgeCandidatesCardData(
+      { id: 'material-1', displayName: '资料.md' },
+      [
+        source({ id: 'c-addresses', predicate: 'enterprise-profile.addresses' }),
+        source({ id: 'c-servicearea', predicate: 'enterprise-profile.servicearea' }),
+        source({ id: 'c-servicearea-camel', predicate: 'enterprise-profile.serviceArea' }),
+      ].map(toKnowledgeCardCandidate),
+    );
+    const rows = buildKnowledgeFieldRows(card!);
+    expect(rows.map((row) => row.field)).toEqual(['addresses', 'serviceArea']);
+    expect(rows[1].candidates.map((candidate) => candidate.id))
+      .toEqual(['c-servicearea', 'c-servicearea-camel']);
+  });
+
   it('attributes truncated overflow to the specific field rows instead of a card-level count', () => {
-    // 2 条 fullName + 55 条 products：截断只落在 products 上（2 + 48 展示，7 条溢出）。
+    // 2 条 fullName + 55 条 products（超总量 7 条）：products 按自然分布占满
+    // 剩余预算，fullName 不受影响；溢出全部归因到 products。
     const candidates = [
       ...Array.from({ length: 2 }, (_, index) =>
         source({ id: `c-fullname-${index}` })),

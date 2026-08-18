@@ -82,6 +82,7 @@ describe("GeoOperationService", () => {
     });
 
     expect(operation.steps.map((step) => step.id)).toEqual([
+      "acknowledge-plan",
       "generate-articles",
       "confirm-articles",
     ]);
@@ -129,6 +130,14 @@ describe("GeoOperationService", () => {
     expect(
       request.replacementSteps.some((step) => step.id === "collect-materials"),
     ).toBe(false);
+    // 用户显式回答分支问题即计划放行：替换计划剥离认可门，
+    // 直接从首个工作步骤开始，不再二次停靠。
+    expect(
+      request.replacementSteps.some(
+        (step) => step.confirmation?.kind === "plan-ack",
+      ),
+    ).toBe(false);
+    expect(request.replacementSteps[0]?.id).toBe("select-next-question-pool");
   });
 
   it("never lets the Node/Agent seam attest paid publishing or monitor activation", async () => {

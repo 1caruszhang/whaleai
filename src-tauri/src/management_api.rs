@@ -262,6 +262,14 @@ pub async fn start_management_api() -> Result<u16, String> {
             post(brand_distribution_plan_context_handler),
         )
         .route(
+            "/api/brand-distribution-plans/preferences/get",
+            post(brand_channel_preferences_get_handler),
+        )
+        .route(
+            "/api/brand-distribution-plans/preferences/set",
+            post(brand_channel_preferences_set_handler),
+        )
+        .route(
             "/api/brand-distribution-plans/latest",
             post(brand_distribution_plan_latest_handler),
         )
@@ -1677,6 +1685,50 @@ async fn brand_distribution_plan_latest_handler(
         request.payload,
     ) {
         Ok(plan) => Json(serde_json::json!({ "ok": true, "plan": plan })),
+        Err(error) => Json(serde_json::json!({ "ok": false, "error": error })),
+    }
+}
+
+async fn brand_channel_preferences_get_handler(
+    headers: HeaderMap,
+    Json(request): Json<
+        BrandKnowledgeEnvelope<crate::brand_workspace::ChannelPreferencesGetRequest>,
+    >,
+) -> Json<serde_json::Value> {
+    let store = match validate_brand_knowledge_request(&headers, &request) {
+        Ok(store) => store,
+        Err(error) => return Json(error),
+    };
+    match store.get_channel_preferences(
+        &request.workspace_id,
+        &request.session_id,
+        request.payload,
+    ) {
+        Ok(preferences) => {
+            Json(serde_json::json!({ "ok": true, "preferences": preferences }))
+        }
+        Err(error) => Json(serde_json::json!({ "ok": false, "error": error })),
+    }
+}
+
+async fn brand_channel_preferences_set_handler(
+    headers: HeaderMap,
+    Json(request): Json<
+        BrandKnowledgeEnvelope<crate::brand_workspace::ChannelPreferencesSetRequest>,
+    >,
+) -> Json<serde_json::Value> {
+    let store = match validate_brand_knowledge_request(&headers, &request) {
+        Ok(store) => store,
+        Err(error) => return Json(error),
+    };
+    match store.set_channel_preferences(
+        &request.workspace_id,
+        &request.session_id,
+        request.payload,
+    ) {
+        Ok(preferences) => {
+            Json(serde_json::json!({ "ok": true, "preferences": preferences }))
+        }
         Err(error) => Json(serde_json::json!({ "ok": false, "error": error })),
     }
 }

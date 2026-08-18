@@ -6,7 +6,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs::OpenOptions;
 use std::io::Write;
 
-const POLICY_VERSION: &str = "js-ai-dev-direct-article-generation-v1";
+const POLICY_VERSION: &str = "xiaojing-content-prompt-v2";
 const MAX_ARTICLES: usize = 20;
 const MAX_BODY_BYTES: usize = 256 * 1024;
 

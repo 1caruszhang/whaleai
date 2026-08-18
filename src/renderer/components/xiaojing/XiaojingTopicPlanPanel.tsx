@@ -70,7 +70,7 @@ export default memo(function XiaojingTopicPlanPanel({
         <div className="min-w-0">
           <h3 className="text-sm font-medium">主题、类型与标题计划</h3>
           <p className="mt-1 text-xs leading-4 text-[var(--ink-muted)]">
-            计划的编辑与确认在聊天卡片上完成；这里展示当前权威结果。
+            计划的编辑与确认在聊天卡片上完成；这里只展示已确认的计划。
           </p>
         </div>
       </div>
@@ -93,7 +93,13 @@ export default memo(function XiaojingTopicPlanPanel({
         </p>
       )}
 
-      {plan && (
+      {plan && !confirmed && (
+        <p className="mt-3 rounded-lg bg-[var(--paper-inset)] px-3 py-2 text-xs leading-5 text-[var(--ink-muted)]">
+          计划尚未确认；请回到聊天中的确认卡片完成批准，确认后这里展示计划内容。
+        </p>
+      )}
+
+      {plan && confirmed && (
         <div className="mt-3">
           <div className="flex flex-wrap items-center gap-1.5 text-xs text-[var(--ink-muted)]">
             <span className="rounded-full bg-[var(--paper-inset)] px-2 py-0.5">
@@ -105,11 +111,9 @@ export default memo(function XiaojingTopicPlanPanel({
             <span className="rounded-full bg-[var(--paper-inset)] px-2 py-0.5">
               {plan.reused ? "已复用" : "模型规划"}
             </span>
-            {confirmed && (
-              <span className="rounded-full bg-emerald-500/10 px-2 py-0.5 text-emerald-700">
-                已确认
-              </span>
-            )}
+            <span className="rounded-full bg-emerald-500/10 px-2 py-0.5 text-emerald-700">
+              已确认
+            </span>
           </div>
 
           <div className="mt-2 space-y-2">
@@ -137,12 +141,6 @@ export default memo(function XiaojingTopicPlanPanel({
               </article>
             ))}
           </div>
-
-          {!confirmed && (
-            <p className="mt-2 text-xs leading-4 text-[var(--ink-subtle)]">
-              计划待确认：请回到聊天中的确认卡片完成批准与确认。
-            </p>
-          )}
         </div>
       )}
     </section>

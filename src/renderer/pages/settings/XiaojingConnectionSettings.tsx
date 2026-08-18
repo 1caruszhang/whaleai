@@ -24,7 +24,7 @@ type VerifyResult = { success: boolean; error?: string };
 
 const EMPTY_DRAFTS: Drafts = {
   deepseek: { apiKey: "" },
-  ark: { apiKey: "" },
+  ark: { apiKey: "", doubaoSearchApiKey: "" },
   embedding: { apiKey: "", endpointId: "" },
   "object-storage": {
     accessKeyId: "",
@@ -54,7 +54,15 @@ const SERVICE_FIELDS: Record<
   }>
 > = {
   deepseek: [{ key: "apiKey", label: "API Key", secret: true }],
-  ark: [{ key: "apiKey", label: "Paygo API Key", secret: true }],
+  ark: [
+    { key: "apiKey", label: "Paygo API Key", secret: true },
+    {
+      key: "doubaoSearchApiKey",
+      label: "豆包搜索 API Key（可选）",
+      secret: true,
+      placeholder: "留空则复用 Paygo Key（联网搜索控制台签发，月度免费额度）",
+    },
+  ],
   embedding: [
     { key: "endpointId", label: "Embedding 接入点 ID", placeholder: "ep-…" },
     {

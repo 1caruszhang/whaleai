@@ -1,7 +1,11 @@
 import { CheckCircle2, Loader2 } from "lucide-react";
 import { useCallback, useMemo, useState } from "react";
 
-import { confirmTopicPlan, loadLatestTopicPlan } from "@/api/topicPlanClient";
+import {
+  confirmTopicPlan,
+  loadLatestTopicPlan,
+  saveTopicPlanItems,
+} from "@/api/topicPlanClient";
 import { useTabApi, useTabState } from "@/context/TabContext";
 import { isPendingSessionId } from "../../../shared/constants";
 import type {
@@ -13,8 +17,10 @@ import { useGateCardRefresh } from "./useGateCardRefresh";
 
 /**
  * 内容计划确认卡：内容由 plan_topics 的工具结果携带。用户在卡上
- * 勾选批准计划项并确认（走既有 /topic-plans/confirm，CAS revision）；
- * 确认后 reminder 通知 agent 继续。
+ * 勾选批准计划项并确认：确认点击先把勾选批准经 /topic-plans/items
+ * （user-edit mutation）落盘——confirm 只接受持久化 approved 的 selected
+ * IDs——再走既有 /topic-plans/confirm（CAS revision）；确认后 reminder
+ * 通知 agent 继续。
  *
  * 待决期间每 3s 轮询 /latest（票 38）：聊天修订的选题按服务端胜合并——
  * 内容被改/被删/新增的项采信服务端，未改项保留本地批准勾选。
@@ -154,12 +160,38 @@ export default function TopicPlanGateCard({
     setBusy(true);
     setError(null);
     try {
+      // 勾选只是本地暂存；服务端 confirm 校验持久化 approvalStatus，
+      // 因此先经 user-edit mutation 把勾选批准落盘，再用新 revision 确认。
+      let revision = plan.revision;
+      if (
+        plan.items.some(
+          (item) =>
+            approvedIds.has(item.id) && item.approvalStatus !== "approved",
+        )
+      ) {
+        const mutation = await saveTopicPlanItems(
+          apiPost,
+          { workspaceId: plan.workspaceId, sessionId },
+          {
+            planId: plan.id,
+            expectedRevision: plan.revision,
+            items: plan.items.map((item) => ({
+              ...item,
+              approvalStatus: approvedIds.has(item.id)
+                ? ("approved" as const)
+                : item.approvalStatus,
+            })),
+          },
+        );
+        revision = mutation.plan.revision;
+        setPlan(mutation.plan);
+      }
       await confirmTopicPlan(
         apiPost,
         { workspaceId: plan.workspaceId, sessionId },
         {
           planId: plan.id,
-          expectedRevision: plan.revision,
+          expectedRevision: revision,
           selectedItemIds: [...approvedIds],
         },
       );

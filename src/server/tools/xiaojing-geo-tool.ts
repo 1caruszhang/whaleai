@@ -295,10 +295,12 @@ function distributionService(): DistributionPlanningService {
   const identity = stageIdentity();
   const key = `${identity.workspaceId}:${identity.sessionId}`;
   if (distributionRuntime?.key === key) return distributionRuntime.service;
+  const capabilities = getXiaojingGeoProviderCapabilities();
   const service = new DistributionPlanningService(
     identity,
     createDistributionPlanPort(identity),
-    getXiaojingGeoProviderCapabilities().distribution,
+    capabilities.distribution,
+    capabilities.keywordSearch,
   );
   distributionRuntime = { key, service };
   return service;
@@ -657,7 +659,7 @@ export async function createXiaojingGeoServer() {
       ),
       tool(
         'request_brand_material',
-        "Surface the brand-material request card in chat where the user uploads materials (file picker, pasted text or official-site URL; PDF/Office are parsed there). Call it exactly when: (1) at planning time the brand has no confirmed knowledge, or the confirmed knowledge is clearly too thin for the goal; (2) the user explicitly asks to add brand material; (3) the user attached a binary file that read_session_file cannot parse and it is brand material. Never call it mid-operation just because a gate lacks material evidence — proceed with AI-completion rows and let the user adjudicate on that card. reason is one plain-language line shown on the card header. After calling it, tell the user to upload on the card and end your turn; the knowledge confirmation card follows the import automatically.",
+        "Surface the brand-material request card in chat where the user uploads materials (file picker, pasted text or official-site URL; PDF/Office are parsed there). Call it exactly when: (1) a released plan's material-collection step runs and the brand has no confirmed knowledge, or the confirmed knowledge is clearly too thin for the goal — judge sufficiency once at planning time, but never emit this card before the plan is released; (2) the user explicitly asks to add brand material; (3) the user attached a binary file that read_session_file cannot parse and it is brand material. Never call it mid-operation just because a gate lacks material evidence — proceed with AI-completion rows and let the user adjudicate on that card. reason is one plain-language line shown on the card header. After calling it, tell the user to upload on the card and end your turn; the knowledge confirmation card follows the import automatically.",
         { reason: z.string().min(1).max(300).describe('One plain-language line telling the user why material is needed now.') },
         async (input) => ({
           content: [
@@ -792,7 +794,7 @@ export async function createXiaojingGeoServer() {
       ),
       tool(
         'run_question_pool',
-        'Run the question-opportunity stage for one product line (domain-level, e.g. 汽车音响改装 — not a fine-grained service item): the service reuses the confirmed pool for the current knowledge version when valid, otherwise mines keywords online and generates candidate questions (real provider spend). Omit productLine to use the brand\'s first confirmed product line (synced from the industry fact at knowledge confirmation — if none exists, call request_brand_material so the user can import brand material and confirm knowledge first, then retry). When the user names a specific business within the domain (e.g. 汽车隔音), pass it as businessFocus instead of inventing a new product line. The result renders as the confirmation card where the user reviews the mined keywords and selects questions — never claim the pool is confirmed; the user confirms on the card. Derive targetRegion from brand context or the user goal instead of asking.',
+        'Run the question-opportunity stage for one product line (domain-level, e.g. 汽车音响改装 — not a fine-grained service item): the service reuses the confirmed pool for the current knowledge version when valid, otherwise mines keywords online and generates candidate questions (real provider spend). Omit productLine to use the brand\'s first confirmed product line (synced from the industry fact at knowledge confirmation — if none exists, call request_brand_material so the user can import brand material and confirm knowledge first, then retry). When the user names a specific business within the domain (e.g. 汽车隔音), pass it as businessFocus instead of inventing a new product line. The result renders as the confirmation card where the user reviews the mined keywords and selects questions — never claim the pool is confirmed; the user confirms on the card. Keyword geography is bounded by the user-declared service area (服务区域): the declared scope kept at its own granularity (e.g. 新都区 stays 新都区, not the whole 成都) is both the mining anchor and the ceiling — terms never reference regions beyond it, and store addresses only anchor when no usable scope is declared. For targetRegion pass the declared scope as a plain name (e.g. 新都区 or 成都); never prose like 成都本地，辐射西南地区 and never boundless values such as 全国 — nationwide/online service mines in geo-free mode.',
         {
           productLine: z.string().min(1).max(120).optional(),
           targetRegion: z.string().min(1).max(60),
@@ -923,7 +925,9 @@ export async function createXiaojingGeoServer() {
               articleIds: context.articles.map((article) => article.id),
               industry: context.industry,
               targetAudience: input.targetAudience,
-              questionSources: context.questionSources,
+              // 被动路证据由服务在现场探测问题池产出（js_ai 语义），工具不再
+              // 透传基线快照；偏好路由品牌 overlay 合成。
+              questionSources: [],
               preferredResourceIds: [],
               mappingMode: input.mappingMode ?? 'one-to-one',
               ratio: {
@@ -935,8 +939,40 @@ export async function createXiaojingGeoServer() {
                 input.publishStartAt ?? new Date(Date.now() + 3_600_000).toISOString(),
             },
           });
+          // 工具结果是聊天转录的一部分：只回「卡片初始渲染 + agent 复述」
+          // 所需的最小投影（id/状态/预算/选择/阻断 + 候选的名称·报价·路径·
+          // 适配·证据标签），把转录占用压到 ~1/7；卡片 3s 轮询 /latest 后即
+          // 切换为完整权威投影，编辑/确认请求不依赖这份瘦身数据（assignments
+          // 全量保留以防轮询前确认）。
+          const cardPlan = {
+            id: plan.id,
+            status: plan.status,
+            revision: plan.revision,
+            budgetCny: plan.budgetCny,
+            workspaceId: plan.workspaceId,
+            publishStartAt: plan.publishStartAt,
+            selectedResourceIds: plan.selectedResourceIds,
+            blockingIssues: plan.blockingIssues,
+            articles: plan.articles.map((article) => ({ id: article.id })),
+            assignments: plan.assignments,
+            candidates: plan.candidates.map((candidate) => ({
+              resourceId: candidate.resourceId,
+              kind: candidate.kind,
+              name: candidate.name,
+              estimatedPriceCny: candidate.estimatedPriceCny,
+              pathHits: candidate.pathHits,
+              fitReasons: candidate.fitReasons,
+              evidence: candidate.evidence.map((item) => ({
+                path: item.path,
+                label:
+                  item.label.length > 64
+                    ? `${item.label.slice(0, 64)}…`
+                    : item.label,
+              })),
+            })),
+          };
           return {
-            content: [{ type: 'text' as const, text: JSON.stringify({ kind: 'distribution-plan', plan }) }],
+            content: [{ type: 'text' as const, text: JSON.stringify({ kind: 'distribution-plan', plan: cardPlan }) }],
           };
         },
         { alwaysLoad: true },

@@ -96,6 +96,31 @@ const runningOperation = {
   },
 } as unknown as GeoOperationProjection;
 
+// 停靠计划认可门的完整优化计划：完整卡只在计划边界（认可门/终态）渲染。
+const parkedFullPlan = (() => {
+  const plan = planGeoOperation({
+    intent: "full-optimization",
+    goal: "完整 GEO 优化",
+  });
+  return {
+    ...operation,
+    id: "operation-full",
+    goal: "完整 GEO 优化",
+    steps: plan.steps,
+  } as unknown as GeoOperationProjection;
+})();
+
+// 放行后的 running 投影：认可门已过、首个工作步骤进行中。
+const releasedFullPlan = {
+  ...parkedFullPlan,
+  status: "running",
+  revision: 5,
+  steps: parkedFullPlan.steps.map((step, index) => ({
+    ...step,
+    status: index === 0 ? "succeeded" : index === 1 ? "running" : step.status,
+  })),
+} as unknown as GeoOperationProjection;
+
 const queueEvent = (
   permit: Record<string, unknown>,
   sessionId = "session-17",
@@ -134,39 +159,47 @@ describe("GeoOperationEventCard", () => {
   it("renders a structured internal event without a user-message role", () => {
     const { container } = render(
       <GeoOperationEventCard
-        data={{ kind: "geo-operation", operations: [operation] }}
+        data={{ kind: "geo-operation", operations: [parkedFullPlan] }}
       />,
     );
 
     expect(
       screen.getByRole("region", { name: "GEO 优化进度" }),
     ).toBeInTheDocument();
-    expect(screen.getByText("生成三篇文章")).toBeInTheDocument();
+    expect(screen.getByText("完整 GEO 优化")).toBeInTheDocument();
     expect(screen.getByText(/不是用户发送的消息/)).toBeInTheDocument();
+    // 页脚不带「上方/下方」方位指代：多卡共存时会指错对象。
+    expect(screen.queryByText(/上方卡片/)).toBeNull();
     expect(document.querySelector('[data-message-role="user"]')).toBeNull();
     expect(container.querySelectorAll("[data-geo-gate-stub]").length).toBe(1);
   });
 
-  // 计划播报：卡片必须展示权威步骤清单与当前停靠的确认门，
+  // 计划播报：完整卡必须展示权威步骤清单与当前停靠的认可门，
   // 不依赖模型在正文里复述计划。
   it("broadcasts the authoritative step plan and the gate it stops at", () => {
     render(
       <GeoOperationEventCard
-        data={{ kind: "geo-operation", operations: [operation] }}
+        data={{ kind: "geo-operation", operations: [parkedFullPlan] }}
       />,
     );
 
     expect(screen.getByRole("list", { name: "GEO 操作步骤计划" })).toBeInTheDocument();
-    expect(screen.getByText("生成文章")).toBeInTheDocument();
+    expect(screen.getByText("收集品牌材料")).toBeInTheDocument();
     expect(
-      screen.getByText(/审核并批准文章 — 停在待确认门/),
+      screen.getByText(/认可本轮计划 — 停在待确认门/),
     ).toBeInTheDocument();
-    expect(screen.getByText(/草稿、事实与双质量门结果必须由你审核/)).toBeInTheDocument();
+    expect(
+      screen.getByText(/查看上方阶段与步骤计划后放行/),
+    ).toBeInTheDocument();
+    // 后续各阶段闸门以普通步骤行可见，状态由各自的确认卡承载。
+    expect(screen.getByText("确认知识变更")).toBeInTheDocument();
+    expect(screen.getByText("确认付费外部发布")).toBeInTheDocument();
   });
 
-  // 18 步按阶段分组展示：阶段行给出每阶段的完成度与状态，
-  // 唯一待确认的门在阶段行和步骤行上都可见，不再淹没在全量清单里。
-  it("groups the full 18-step plan under the six spoken stages", () => {
+  // 计划认可门停靠时，认可面板是卡头主操作：渲染先于 19 步重播，
+  // 与知识确认卡「整卡确认常驻卡头、不藏在长列表底部」同一原则；
+  // 计划认可卡与知识确认卡同回合共存时，主操作不被长列表压底。
+  it("mounts the plan-ack panel above the step replay when parked at the gate", () => {
     const plan = planGeoOperation({
       intent: "full-optimization",
       goal: "完整 GEO 优化",
@@ -175,11 +208,36 @@ describe("GeoOperationEventCard", () => {
       ...operation,
       id: "operation-full",
       goal: "完整 GEO 优化",
-      steps: plan.steps.map((step) =>
-        step.id === "confirm-knowledge"
-          ? { ...step, status: "awaiting-confirmation" as const }
-          : step,
-      ),
+      steps: plan.steps,
+    } as unknown as GeoOperationProjection;
+
+    const { container } = render(
+      <GeoOperationEventCard
+        data={{ kind: "geo-operation", operations: [full] }}
+      />,
+    );
+
+    const panel = container.querySelector("[data-geo-gate-stub]");
+    const replay = screen.getByRole("list", { name: "GEO 操作步骤计划" });
+    expect(panel).not.toBeNull();
+    expect(
+      (panel as Element).compareDocumentPosition(replay) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+
+  // 19 步按阶段分组展示：阶段行给出每阶段的完成度与状态，
+  // 计划认可门借用首步 capability 落进开头阶段并在步骤行完整可见。
+  it("groups the full 19-step plan under the six spoken stages", () => {
+    const plan = planGeoOperation({
+      intent: "full-optimization",
+      goal: "完整 GEO 优化",
+    });
+    const full = {
+      ...operation,
+      id: "operation-full",
+      goal: "完整 GEO 优化",
+      steps: plan.steps,
     } as unknown as GeoOperationProjection;
 
     render(
@@ -190,7 +248,7 @@ describe("GeoOperationEventCard", () => {
 
     const list = screen.getByRole("list", { name: "GEO 操作步骤计划" });
     for (const header of [
-      "品牌知识 · 0/3",
+      "品牌知识 · 0/4",
       "问题机会 · 0/2",
       "内容生产 · 0/4",
       "渠道计划 · 0/2",
@@ -199,9 +257,8 @@ describe("GeoOperationEventCard", () => {
     ]) {
       expect(within(list).getByText(new RegExp(header))).toBeInTheDocument();
     }
-    expect(screen.getByText(/0\/18 步/)).toBeInTheDocument();
-    // 首个确认门在步骤行上仍然完整可见。
-    expect(screen.getByText(/确认品牌知识变更 — 停在待确认门/)).toBeInTheDocument();
+    expect(screen.getByText(/0\/19 步/)).toBeInTheDocument();
+    expect(screen.getByText(/认可本轮计划 — 停在待确认门/)).toBeInTheDocument();
   });
 
   // 回归：revision 是内部乐观锁版本号，属于工程术语，
@@ -283,7 +340,7 @@ describe("GeoOperationEventCard", () => {
     mocks.agentResponding = true;
     const { container } = render(
       <GeoOperationEventCard
-        data={{ kind: "geo-operation", operations: [operation] }}
+        data={{ kind: "geo-operation", operations: [parkedFullPlan] }}
       />,
     );
     expect(container.querySelectorAll("[data-geo-gate-stub]").length).toBe(0);
@@ -315,6 +372,122 @@ describe("GeoOperationEventCard", () => {
     );
 
     expect(screen.getByText("当前会话还没有 GEO 操作记录。")).toBeInTheDocument();
+  });
+
+  // 中间态快照（阀门确认后的 inspect 回合）不再重播完整计划：
+  // 只保留一条轻量进度条——状态、闸门进度、生命周期控制与阀门面板。
+  it("renders mid-run snapshots as a compact strip without the step plan replay", async () => {
+    mocks.loadGeoOperation.mockResolvedValue(runningOperation);
+    const { container } = render(
+      <GeoOperationEventCard
+        data={{ kind: "geo-operation", operations: [runningOperation] }}
+      />,
+    );
+
+    expect(container.querySelector("[data-geo-operation-strip]")).not.toBeNull();
+    expect(
+      screen.queryByRole("list", { name: "GEO 操作步骤计划" }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText("GEO 操作已更新")).toBeNull();
+    expect(container.querySelector("[data-geo-gate-progress]")).not.toBeNull();
+    expect(
+      screen.getByText(/进行中 · 0\/1 道闸门 · 当前：审核并批准文章/),
+    ).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "取消" })).toBeInTheDocument();
+    expect(container.querySelectorAll("[data-geo-gate-stub]").length).toBe(1);
+  });
+
+  // 完整卡只在计划边界渲染：中间门停靠（非计划认可门）的快照不再展开
+  // 19 步大卡——门本身由各阶段的确认卡承载，进度卡只以闸门进度条表达位置。
+  it("renders mid-gate parked snapshots as the gate strip instead of the full card", () => {
+    const { container } = render(
+      <GeoOperationEventCard
+        data={{ kind: "geo-operation", operations: [operation] }}
+      />,
+    );
+
+    expect(screen.queryByText("GEO 操作已更新")).toBeNull();
+    expect(
+      screen.queryByRole("list", { name: "GEO 操作步骤计划" }),
+    ).not.toBeInTheDocument();
+    expect(container.querySelector("[data-geo-operation-strip]")).not.toBeNull();
+    expect(container.querySelector("[data-geo-gate-progress]")).not.toBeNull();
+    expect(
+      screen.getByText(/待确认 · 0\/1 道闸门 · 当前：审核并批准文章/),
+    ).toBeInTheDocument();
+  });
+
+  // 用户诉求回归：「GEO 操作已更新」大卡在计划放行后就地收敛为闸门进度条，
+  // 历史消息里不再残留步骤计划重播。
+  it("collapses the released plan card into the gate progress strip", async () => {
+    mocks.loadGeoOperation.mockResolvedValue(releasedFullPlan);
+    const { container } = render(
+      <GeoOperationEventCard
+        data={{ kind: "geo-operation", operations: [parkedFullPlan] }}
+      />,
+    );
+
+    // 放行前：完整卡广播计划并停靠认可门，闸门进度条随计划卡一起出现，
+    // 「计划」段停在待确认（warning），不是放行后才冒出来的新元素。
+    expect(screen.getByText("GEO 操作已更新")).toBeInTheDocument();
+    expect(
+      screen.getByRole("list", { name: "GEO 操作步骤计划" }),
+    ).toBeInTheDocument();
+    const parkedBar = container.querySelector("[data-geo-gate-progress]");
+    expect(parkedBar).not.toBeNull();
+    expect(
+      within(parkedBar as HTMLElement).getByText("计划").className,
+    ).toContain("text-[var(--warning)]");
+
+    // 放行后（轮询拿到 running 投影）：大卡就地收敛，同一条进度条原地推进。
+    await waitFor(() =>
+      expect(screen.queryByText("GEO 操作已更新")).toBeNull(),
+    );
+    expect(
+      screen.queryByText(/不是用户发送的消息/),
+    ).not.toBeInTheDocument();
+    expect(container.querySelector("[data-geo-operation-steps]")).toBeNull();
+    const strip = container.querySelector("[data-geo-operation-strip]");
+    expect(strip).not.toBeNull();
+    expect(
+      within(strip as HTMLElement).getByText("计划").className,
+    ).toContain("text-[var(--accent)]");
+    expect(
+      screen.getByText(/进行中 · 1\/8 道闸门 · 当前：确认品牌知识变更/),
+    ).toBeInTheDocument();
+    // 段 = 确认门：8 段两字短名齐全，只按闸门显示。
+    for (const label of [
+      "计划",
+      "知识",
+      "选题",
+      "内容",
+      "文章",
+      "分发",
+      "发布",
+      "监测",
+    ]) {
+      expect(within(strip as HTMLElement).getByText(label)).toBeInTheDocument();
+    }
+  });
+
+  it("keeps at most one compact strip per operation; older snapshots render nothing", async () => {
+    mocks.loadGeoOperation.mockResolvedValue(runningOperation);
+    const first = render(
+      <GeoOperationEventCard
+        data={{ kind: "geo-operation", operations: [runningOperation] }}
+      />,
+    );
+    await screen.findByRole("button", { name: "取消" });
+
+    const second = render(
+      <GeoOperationEventCard
+        data={{ kind: "geo-operation-projection", operations: [runningOperation] }}
+      />,
+    );
+    // 最新信封承载轻量条；历史信封整条消失，不残留第二条进度条。
+    await within(second.container).getByRole("button", { name: "取消" });
+    expect(first.container.querySelector("button")).toBeNull();
+    expect(first.container.querySelector("[data-geo-gate-stub]")).toBeNull();
   });
 
   // 操作生命周期控制只生活在聊天进度卡上（ticket 25）：

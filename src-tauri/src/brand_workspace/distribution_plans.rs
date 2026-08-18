@@ -44,6 +44,17 @@ pub struct DistributionArticleSnapshot {
     pub content_type: String,
 }
 
+/// 已确认问题池里待探测的问题（被动路现场探测的输入，js_ai 语义：
+/// 证据来自对问题池的逐问题豆包探测，不依赖基线快照）。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct DistributionContextQuestion {
+    pub id: String,
+    pub question: String,
+    #[serde(default)]
+    pub article_ids: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct DistributionPlanningContext {
@@ -51,7 +62,10 @@ pub struct DistributionPlanningContext {
     pub knowledge_version: i64,
     pub industry: String,
     pub articles: Vec<DistributionArticleSnapshot>,
-    pub question_sources: Vec<DistributionQuestionSource>,
+    /// 已确认问题池的选中问题（被动路探测输入）。
+    pub questions: Vec<DistributionContextQuestion>,
+    /// 品牌衍生关键词（主动路全局召回输入）。
+    pub derived_keywords: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -118,6 +132,71 @@ pub struct DistributionPlanConfirmRequest {
     pub expected_revision: i64,
 }
 
+/// 偏好名单条目（js_ai preferenceChannels 设置形状）。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ChannelPreferenceEntryPayload {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub domain: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub exact: bool,
+}
+
+/// 偏好 overlay：增补名单 + 排除名单；内置名单由共享层合成，不落库。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ChannelPreferencesPayload {
+    pub additional_preference_channels: Vec<ChannelPreferenceEntryPayload>,
+    pub excluded_preference_channels: Vec<String>,
+}
+
+impl Default for ChannelPreferencesPayload {
+    fn default() -> Self {
+        Self {
+            additional_preference_channels: Vec::new(),
+            excluded_preference_channels: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChannelPreferencesGetRequest {}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChannelPreferencesSetRequest {
+    pub preferences: ChannelPreferencesPayload,
+}
+
+fn validate_channel_preferences(payload: &ChannelPreferencesPayload) -> Result<(), String> {
+    if payload.additional_preference_channels.len() > 100
+        || payload.excluded_preference_channels.len() > 100
+    {
+        return Err("channel_preferences_limit_exceeded".to_string());
+    }
+    for entry in &payload.additional_preference_channels {
+        let name = entry.name.trim();
+        if name.is_empty() || name.chars().count() > 200 {
+            return Err("channel_preferences_entry_invalid".to_string());
+        }
+        if let Some(domain) = entry.domain.as_deref() {
+            let domain = domain.trim();
+            if domain.chars().count() > 200 {
+                return Err("channel_preferences_entry_invalid".to_string());
+            }
+        }
+    }
+    for excluded in &payload.excluded_preference_channels {
+        let value = excluded.trim();
+        if value.is_empty() || value.chars().count() > 200 {
+            return Err("channel_preferences_exclusion_invalid".to_string());
+        }
+    }
+    Ok(())
+}
+
 pub(super) fn ensure_schema(connection: &Connection) -> Result<(), String> {
     connection
         .execute_batch(
@@ -148,6 +227,12 @@ pub(super) fn ensure_schema(connection: &Connection) -> Result<(), String> {
                 actor_session_id TEXT NOT NULL,
                 detail_json TEXT NOT NULL,
                 created_at TEXT NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS geo_channel_preferences (
+                singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+                additional_json TEXT NOT NULL DEFAULT '[]',
+                excluded_json TEXT NOT NULL DEFAULT '[]',
+                updated_at TEXT NOT NULL
              );",
         )
         .map_err(|error| format!("initialize distribution plan schema: {error}"))?;
@@ -213,6 +298,48 @@ impl BrandWorkspaceStore {
         read_distribution_plan(&connection, workspace_id, &request.plan_id)
     }
 
+    /// 偏好渠道 overlay（js_ai preferenceChannels）：品牌库内单例存储。
+    pub fn get_channel_preferences(
+        &self,
+        workspace_id: &str,
+        session_id: &str,
+        _request: ChannelPreferencesGetRequest,
+    ) -> Result<ChannelPreferencesPayload, String> {
+        let workspace = self.workspace(workspace_id)?;
+        let connection = open_database(&workspace)?;
+        require_distribution_session(&connection, session_id)?;
+        read_channel_preferences(&connection)
+    }
+
+    pub fn set_channel_preferences(
+        &self,
+        workspace_id: &str,
+        session_id: &str,
+        request: ChannelPreferencesSetRequest,
+    ) -> Result<ChannelPreferencesPayload, String> {
+        validate_channel_preferences(&request.preferences)?;
+        let workspace = self.workspace(workspace_id)?;
+        let connection = open_database(&workspace)?;
+        require_distribution_session(&connection, session_id)?;
+        let now = Utc::now().to_rfc3339();
+        connection
+            .execute(
+                "INSERT INTO geo_channel_preferences (singleton, additional_json, excluded_json, updated_at)
+                 VALUES (1, ?1, ?2, ?3)
+                 ON CONFLICT(singleton) DO UPDATE SET
+                   additional_json=excluded.additional_json,
+                   excluded_json=excluded.excluded_json,
+                   updated_at=excluded.updated_at",
+                params![
+                    canonical_json(&request.preferences.additional_preference_channels)?,
+                    canonical_json(&request.preferences.excluded_preference_channels)?,
+                    now
+                ],
+            )
+            .map_err(|error| format!("store channel preferences: {error}"))?;
+        read_channel_preferences(&connection)
+    }
+
     pub fn prepare_distribution_plan(
         &self,
         workspace_id: &str,
@@ -250,10 +377,13 @@ impl BrandWorkspaceStore {
         if articles.is_empty() {
             return Err("distribution_plan_approved_articles_required".to_string());
         }
-        let persisted_sources = context
-            .question_sources
+        // 被动路证据改为现场探测（js_ai 语义）：来源由 Node 探测产出，这里做
+        // 结构与溯源校验——question_id/question 必须命中已确认问题池，URL 必须
+        // 是合法 http(s)，id 唯一；article_ids 不信任请求，按权威映射重盖。
+        let pool_questions = context
+            .questions
             .iter()
-            .map(|source| (source.id.as_str(), source))
+            .map(|question| (question.id.as_str(), question))
             .collect::<HashMap<_, _>>();
         let mut question_sources = Vec::new();
         let mut source_ids = HashSet::new();
@@ -261,20 +391,23 @@ impl BrandWorkspaceStore {
             if !source_ids.insert(source.id.clone()) {
                 return Err("distribution_plan_question_source_duplicate".to_string());
             }
-            let persisted = persisted_sources
-                .get(source.id.as_str())
-                .ok_or_else(|| "distribution_plan_question_source_not_persisted".to_string())?;
-            if source.question_id != persisted.question_id
-                || normalize_compare(&source.question) != normalize_compare(&persisted.question)
-                || normalize_compare(&source.title) != normalize_compare(&persisted.title)
-                || source.url != persisted.url
-            {
-                return Err("distribution_plan_question_source_snapshot_mismatch".to_string());
+            let pool_question = pool_questions
+                .get(source.question_id.as_str())
+                .ok_or_else(|| "distribution_plan_question_not_in_confirmed_pool".to_string())?;
+            if normalize_compare(&source.question) != normalize_compare(&pool_question.question) {
+                return Err("distribution_plan_question_text_mismatch".to_string());
             }
-            let mut derived = (*persisted).clone();
-            derived
+            let url = source.url.trim();
+            if !(url.starts_with("http://") || url.starts_with("https://")) {
+                return Err("distribution_plan_question_source_url_invalid".to_string());
+            }
+            let mut derived = source.clone();
+            derived.article_ids = pool_question
                 .article_ids
-                .retain(|article_id| article_ids.contains(article_id));
+                .iter()
+                .filter(|article_id| article_ids.contains(article_id))
+                .cloned()
+                .collect();
             question_sources.push(derived);
         }
 
@@ -283,20 +416,12 @@ impl BrandWorkspaceStore {
         let artifact_id = Uuid::new_v4().to_string();
         let claim_token = Uuid::new_v4().to_string();
         let now = Utc::now().to_rfc3339();
-        let blocking_issues = if question_sources.is_empty() {
-            json!([
-                "distribution-provider-unavailable",
-                "question-source-evidence-missing",
-                "channel-candidate-unavailable",
-                "article-channel-unassigned"
-            ])
-        } else {
-            json!([
-                "distribution-provider-unavailable",
-                "channel-candidate-unavailable",
-                "article-channel-unassigned"
-            ])
-        };
+        // 被动证据为空不再构成初始阻断（用户裁决 2026-08-18）：探测失败只降级。
+        let blocking_issues = json!([
+            "distribution-provider-unavailable",
+            "channel-candidate-unavailable",
+            "article-channel-unassigned"
+        ]);
         let assignments = articles
             .iter()
             .map(|article| {
@@ -737,6 +862,29 @@ impl BrandWorkspaceStore {
     }
 }
 
+fn read_channel_preferences(
+    connection: &Connection,
+) -> Result<ChannelPreferencesPayload, String> {
+    let row: Option<(String, String)> = connection
+        .query_row(
+            "SELECT additional_json, excluded_json FROM geo_channel_preferences WHERE singleton=1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(|error| format!("read channel preferences: {error}"))?;
+    let Some((additional_json, excluded_json)) = row else {
+        return Ok(ChannelPreferencesPayload::default());
+    };
+    let additional: Vec<ChannelPreferenceEntryPayload> =
+        serde_json::from_str(&additional_json).unwrap_or_default();
+    let excluded: Vec<String> = serde_json::from_str(&excluded_json).unwrap_or_default();
+    Ok(ChannelPreferencesPayload {
+        additional_preference_channels: additional,
+        excluded_preference_channels: excluded,
+    })
+}
+
 fn require_distribution_plan_visibility(
     connection: &Connection,
     plan_id: &str,
@@ -843,105 +991,138 @@ fn read_distribution_context(
         .ok_or_else(|| "distribution_plan_industry_snapshot_invalid".to_string())?;
     let (question_article_map, baseline_scope) =
         read_question_article_map(connection, &operation_id)?;
-    let question_sources = read_persisted_question_sources(
-        connection,
-        knowledge_version,
-        &question_article_map,
-        baseline_scope.as_ref(),
-    )?;
+    let questions = read_context_questions(connection, knowledge_version, &question_article_map, baseline_scope.as_ref())?;
+    let derived_keywords = read_derived_keywords(connection, knowledge_version)?;
     Ok(DistributionPlanningContext {
         article_operation_id: operation_id,
         knowledge_version,
         industry,
         articles,
-        question_sources,
+        questions,
+        derived_keywords,
     })
 }
 
-fn read_persisted_question_sources(
+/// 已确认问题池的选中问题（js_ai 被动路语义）：confirmed-topic-plan 计划用
+/// 其绑定的 (pool_id, revision)，direct 文章用同知识版本最新 confirmed 池；
+/// 选中集读该池最新 decision 的 questions_json（无 decision 行回落池行本身）。
+fn read_context_questions(
     connection: &Connection,
     knowledge_version: i64,
     question_article_map: &HashMap<String, Vec<String>>,
-    baseline_scope: Option<&(String, i64)>,
-) -> Result<Vec<DistributionQuestionSource>, String> {
-    let baseline_id = if let Some((question_pool_id, question_pool_revision)) = baseline_scope {
+    scope: Option<&(String, i64)>,
+) -> Result<Vec<DistributionContextQuestion>, String> {
+    let pool_row: Option<(String, i64)> = if let Some((pool_id, pool_revision)) = scope {
         connection
             .query_row(
-                "SELECT id FROM geo_baselines
-                 WHERE knowledge_version=?1 AND question_pool_id=?2
-                   AND question_pool_revision=?3 AND status IN ('succeeded','partial')
-                 ORDER BY updated_at DESC, id DESC LIMIT 1",
-                params![knowledge_version, question_pool_id, question_pool_revision],
-                |row| row.get::<_, String>(0),
+                "SELECT id, revision FROM geo_question_pools
+                 WHERE id=?1 AND knowledge_version=?2 AND status='confirmed'",
+                params![pool_id, knowledge_version],
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()
+            .map_err(|error| format!("read scoped confirmed question pool: {error}"))?
+            .filter(|(_, revision)| *revision == *pool_revision)
+    } else {
+        None
+    };
+    let pool_id = if let Some(row) = pool_row {
+        row.0
     } else {
         connection
             .query_row(
-                "SELECT id FROM geo_baselines
-                 WHERE knowledge_version=?1 AND status IN ('succeeded','partial')
+                "SELECT id FROM geo_question_pools
+                 WHERE knowledge_version=?1 AND status='confirmed'
                  ORDER BY updated_at DESC, id DESC LIMIT 1",
                 [knowledge_version],
                 |row| row.get::<_, String>(0),
             )
             .optional()
-    }
-    .map_err(|error| format!("read distribution evidence baseline: {error}"))?;
-    let Some(baseline_id) = baseline_id else {
-        return Ok(vec![]);
+            .map_err(|error| format!("read latest confirmed question pool: {error}"))?
+            .ok_or_else(|| "distribution_plan_question_pool_missing".to_string())?
     };
-    let mut statement = connection
-        .prepare(
-            "SELECT id, question_id, question_text, citations_json
-             FROM geo_baseline_units
-             WHERE baseline_id=?1 AND status='succeeded'
-             ORDER BY question_id, id",
+    let questions_json: Option<String> = connection
+        .query_row(
+            "SELECT questions_json FROM geo_question_pool_decisions
+             WHERE pool_id=?1 ORDER BY revision DESC, decided_at DESC LIMIT 1",
+            [&pool_id],
+            |row| row.get(0),
         )
-        .map_err(|error| format!("prepare distribution question sources: {error}"))?;
-    let units = statement
-        .query_map([baseline_id], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
-            ))
-        })
-        .map_err(|error| format!("query distribution question sources: {error}"))?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| format!("read distribution question sources: {error}"))?;
-    let mut sources = Vec::new();
-    let mut seen_urls = HashSet::new();
-    for (unit_id, question_id, question, citations_json) in units {
-        let citations =
-            serde_json::from_str::<Value>(&citations_json).unwrap_or(Value::Array(vec![]));
-        for (index, citation) in citations.as_array().into_iter().flatten().enumerate() {
-            let Some(url) = citation.get("url").and_then(Value::as_str) else {
-                continue;
-            };
-            if !valid_http_url(url) || !seen_urls.insert((question_id.clone(), url.to_string())) {
-                continue;
-            }
-            let title = citation
-                .get("title")
-                .and_then(Value::as_str)
-                .filter(|value| !value.trim().is_empty())
-                .map(str::to_string)
-                .unwrap_or_else(|| url_host(url).unwrap_or_else(|| "已验证来源".to_string()));
-            sources.push(DistributionQuestionSource {
-                id: format!("{unit_id}:citation:{}", index + 1),
-                question_id: question_id.clone(),
-                question: question.clone(),
-                title,
-                url: url.to_string(),
-                article_ids: question_article_map
-                    .get(&question_id)
-                    .cloned()
-                    .unwrap_or_default(),
-            });
+        .optional()
+        .map_err(|error| format!("read confirmed pool decision questions: {error}"))?;
+    let raw = match questions_json {
+        Some(value) => value,
+        None => connection
+            .query_row(
+                "SELECT questions_json FROM geo_question_pools WHERE id=?1",
+                [&pool_id],
+                |row| row.get(0),
+            )
+            .map_err(|error| format!("read confirmed pool questions: {error}"))?,
+    };
+    let value: Value = serde_json::from_str(&raw)
+        .map_err(|error| format!("parse confirmed pool questions: {error}"))?;
+    let mut questions = Vec::new();
+    for entry in value.as_array().into_iter().flatten() {
+        if entry.get("selected").and_then(Value::as_bool) != Some(true) {
+            continue;
+        }
+        let Some(id) = entry.get("id").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(text) = entry.get("text").and_then(Value::as_str) else {
+            continue;
+        };
+        if id.trim().is_empty() || text.trim().is_empty() {
+            continue;
+        }
+        questions.push(DistributionContextQuestion {
+            id: id.trim().to_string(),
+            question: text.trim().to_string(),
+            article_ids: question_article_map.get(id).cloned().unwrap_or_default(),
+        });
+        if questions.len() >= 50 {
+            break;
         }
     }
-    Ok(sources)
+    Ok(questions)
+}
+
+/// 主动路全局召回的衍生关键词输入：知识快照里的品牌词库种子。
+fn read_derived_keywords(
+    connection: &Connection,
+    knowledge_version: i64,
+) -> Result<Vec<String>, String> {
+    let keywords_json: Option<String> = connection
+        .query_row(
+            "SELECT snapshot.normalized_value_json
+             FROM knowledge_version_facts snapshot
+             LEFT JOIN knowledge_current_facts current ON current.fact_key=snapshot.fact_key
+             WHERE snapshot.knowledge_version=?1
+               AND (snapshot.fact_key='derivedkeywords'
+                    OR current.predicate='enterprise-profile.derivedkeywords')
+             ORDER BY CASE WHEN snapshot.fact_key='derivedkeywords' THEN 0 ELSE 1 END LIMIT 1",
+            [knowledge_version],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| format!("read distribution derived keywords snapshot: {error}"))?;
+    let Some(raw) = keywords_json else {
+        return Ok(Vec::new());
+    };
+    let value: Value = serde_json::from_str(&raw)
+        .ok()
+        .unwrap_or(Value::Array(Vec::new()));
+    Ok(value
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::trim)
+        .filter(|keyword| !keyword.is_empty() && keyword.chars().count() <= 60)
+        .map(str::to_string)
+        .take(50)
+        .collect())
 }
 
 type QuestionArticleMap = (HashMap<String, Vec<String>>, Option<(String, i64)>);
@@ -1172,23 +1353,22 @@ fn validate_discovery_against_plan(
         .get("targetAudience")
         .and_then(Value::as_str)
         .ok_or_else(|| "distribution_plan_audience_invalid".to_string())?;
-    let preferred = projection
+    // preferredResourceIds 快照字段保留兼容读取，但偏好路校验已改为
+    // reference 前缀契约（js_ai preferenceChannels），不再消费该集合。
+    let _preferred = projection
         .get("preferredResourceIds")
         .and_then(Value::as_array)
-        .ok_or_else(|| "distribution_plan_preference_snapshot_invalid".to_string())?
-        .iter()
-        .filter_map(Value::as_i64)
-        .collect::<HashSet<_>>();
+        .ok_or_else(|| "distribution_plan_preference_snapshot_invalid".to_string())?;
     let candidates = request
         .candidates
         .as_array()
         .ok_or_else(|| "distribution_plan_candidates_invalid".to_string())?;
     for candidate in candidates {
-        let resource_id = candidate
+        let _resource_id = candidate
             .get("resourceId")
             .and_then(Value::as_i64)
             .ok_or_else(|| "distribution_plan_resource_identity_invalid".to_string())?;
-        let kind = candidate
+        let _kind = candidate
             .get("kind")
             .and_then(Value::as_str)
             .ok_or_else(|| "distribution_plan_resource_identity_invalid".to_string())?;
@@ -1285,26 +1465,28 @@ fn validate_discovery_against_plan(
                         return Err("distribution_plan_passive_evidence_mismatch".to_string());
                     }
                 }
+                // 主动路（ADR-0031 全局召回）：reference 携带召回渠道名，
+                // articleIds 允许携带主题→文章映射。
                 "active" => {
+                    if !reference.starts_with("recall:") || reference.len() <= "recall:".len() {
+                        return Err("distribution_plan_active_evidence_mismatch".to_string());
+                    }
+                }
+                // 保底路：结构化类目/人群规则匹配（合并后单路）。
+                "fallback" => {
                     if reference != format!("industry:{industry}")
                         && reference != format!("audience:{audience}")
                     {
-                        return Err("distribution_plan_active_evidence_mismatch".to_string());
+                        return Err("distribution_plan_fallback_evidence_mismatch".to_string());
                     }
                     if !article_ids.is_empty() {
-                        return Err("distribution_plan_active_evidence_mismatch".to_string());
-                    }
-                }
-                "fallback" => {
-                    if reference != format!("resource:{kind}:{resource_id}")
-                        || !article_ids.is_empty()
-                    {
                         return Err("distribution_plan_fallback_evidence_mismatch".to_string());
                     }
                 }
+                // 偏好路：reference 携带命中的偏好名单条目名。
                 "preference" => {
-                    if reference != format!("preferred-resource:{resource_id}")
-                        || !preferred.contains(&resource_id)
+                    if !reference.starts_with("preference:")
+                        || reference.len() <= "preference:".len()
                         || !article_ids.is_empty()
                     {
                         return Err("distribution_plan_preference_evidence_mismatch".to_string());
@@ -1321,11 +1503,7 @@ fn validate_resource_snapshot(resource: &Value) -> Result<(), String> {
     if resource.get("status").and_then(Value::as_i64) != Some(2) {
         return Err("distribution_plan_resource_unavailable".to_string());
     }
-    if let Some(rate) = resource.get("publishedRate").and_then(Value::as_f64) {
-        if rate > 0.0 && rate < 70.0 {
-            return Err("distribution_plan_resource_low_rate".to_string());
-        }
-    }
+    // 发布率不是决策输入（用户裁决 2026-08-18）：低发布率资源合法。
     if let Some(price) = parsed_price(resource.get("price")) {
         if price >= 150.0 {
             return Err("distribution_plan_resource_high_price".to_string());
@@ -1511,10 +1689,7 @@ fn confirmation_issues(projection: &Value) -> Result<Vec<String>, String> {
             Some(price) => total += price,
             None => issues.push("selected-channel-price-unknown".to_string()),
         }
-        match candidate.get("publishedRate").and_then(Value::as_f64) {
-            Some(rate) if rate > 0.0 => {}
-            _ => issues.push("selected-channel-published-rate-unknown".to_string()),
-        }
+        // 发布率不是决策输入（用户裁决 2026-08-18）：不再阻断确认。
         if candidate
             .get("evidence")
             .and_then(Value::as_array)
@@ -1652,18 +1827,6 @@ fn normalize_compare(value: &str) -> String {
     value.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-fn valid_http_url(value: &str) -> bool {
-    value.starts_with("https://") || value.starts_with("http://")
-}
-
-fn url_host(value: &str) -> Option<String> {
-    let rest = value.split_once("://")?.1;
-    rest.split('/')
-        .next()
-        .map(str::to_string)
-        .filter(|host| !host.is_empty())
-}
-
 fn looks_like_iso_time(value: &str) -> bool {
     chrono::DateTime::parse_from_rfc3339(value).is_ok()
 }
@@ -1775,7 +1938,12 @@ mod tests {
         connection.execute("INSERT INTO knowledge_version_facts (knowledge_version,fact_key,fact_version,normalized_value_json,unit,sources_json) VALUES (1,'industry',1,'\"汽车\"',NULL,'[]')", []).unwrap();
 
         connection.execute("INSERT INTO geo_operations (id,session_id,state,created_at) VALUES ('operation-pool','session-12','question-pool-confirmed',?1)", [&now]).unwrap();
-        connection.execute("INSERT INTO geo_question_pools (id,operation_id,created_by_session_id,knowledge_version,product_line,target_region,generation_parameters_json,source_evidence_json,keywords_json,questions_json,status,revision,created_at,updated_at) VALUES ('pool-12','operation-pool','session-12',1,'汽车音响','中国','{}','[]','[]','[]','confirmed',1,?1,?1)", [&now]).unwrap();
+        let pool_questions = json!([
+            {"id":"q1","text":"汽车音响怎么选","selected":true},
+            {"id":"q2","text":"新能源车主关注什么","selected":true}
+        ]);
+        connection.execute("INSERT INTO geo_question_pools (id,operation_id,created_by_session_id,knowledge_version,product_line,target_region,generation_parameters_json,source_evidence_json,keywords_json,questions_json,status,revision,created_at,updated_at) VALUES ('pool-12','operation-pool','session-12',1,'汽车音响','中国','{}','[]','[]',?1,'confirmed',1,?2,?2)", params![pool_questions.to_string(), now]).unwrap();
+        connection.execute("INSERT INTO geo_question_pool_decisions (id,pool_id,session_id,decision,expected_revision,revision,questions_json,selected_question_ids_json,actor_id,decided_at) VALUES ('decision-pool-12','pool-12','session-12','confirm-selection',0,1,?1,?2,'desktop-user',?3)", params![pool_questions.to_string(), "[\"q1\",\"q2\"]", now]).unwrap();
 
         connection.execute("INSERT INTO geo_operations (id,session_id,state,created_at) VALUES ('operation-topic','session-12','topic-plan-confirmed',?1)", [&now]).unwrap();
         let items = json!([
@@ -1817,6 +1985,23 @@ mod tests {
         }
     }
 
+    /// 模拟 Node 现场探测产出的问题来源（每问一条引用）。
+    fn probed_sources(context: &DistributionPlanningContext) -> Vec<DistributionQuestionSource> {
+        context
+            .questions
+            .iter()
+            .enumerate()
+            .map(|(index, question)| DistributionQuestionSource {
+                id: format!("probe:{}:1", question.id),
+                question_id: question.id.clone(),
+                question: question.question.clone(),
+                title: format!("探测来源{}", index + 1),
+                url: format!("https://probe-{index}.example.com/source"),
+                article_ids: Vec::new(),
+            })
+            .collect()
+    }
+
     fn prepare_request(context: &DistributionPlanningContext) -> DistributionPlanPrepareRequest {
         DistributionPlanPrepareRequest {
             article_operation_id: context.article_operation_id.clone(),
@@ -1827,7 +2012,7 @@ mod tests {
                 .collect(),
             industry: context.industry.clone(),
             target_audience: "新能源车主".to_string(),
-            question_sources: context.question_sources.clone(),
+            question_sources: probed_sources(context),
             preferred_resource_ids: vec![],
             mapping_mode: "one-to-one".to_string(),
             ratio: json!({"media": 1, "weMedia": 1}),
@@ -1874,13 +2059,13 @@ mod tests {
             "hitCount": 3,
             "pathHits": ["passive", "active", "fallback"],
             "evidence": [
-                {"path":"passive","weight":0.4,"label":"真实来源","reference":"q1","url":"https://source-one.example.com/guide","articleIds":["article-1"]},
-                {"path":"active","weight":0.2,"label":"行业","reference":"industry:汽车","url":"https://source-one.example.com","articleIds":[]},
-                {"path":"fallback","weight":0.1,"label":"GEO","reference":"resource:media:8","url":"https://source-one.example.com","articleIds":[]}
+                {"path":"passive","weight":0.4,"label":"真实来源","reference":"q1","url":"https://probe-0.example.com/source","articleIds":["article-1"]},
+                {"path":"active","weight":0.2,"label":"全局召回","reference":"recall:汽车 GEO 产业观察","url":"https://probe-0.example.com","articleIds":[]},
+                {"path":"fallback","weight":0.1,"label":"类目","reference":"industry:汽车","url":"https://source-one.example.com","articleIds":[]}
             ],
             "fitReasons": ["行业匹配", "内容可发"],
             "risks": [],
-            "uncertainties": if estimated_price.is_none() || published_rate == 0 { json!(["unknown"]) } else { json!([]) },
+            "uncertainties": if estimated_price.is_none() { json!(["unknown"]) } else { json!([]) },
             "resourceSnapshot": resource,
         });
         DistributionPlanDiscoveryFinishRequest {
@@ -1930,9 +2115,9 @@ mod tests {
         assert_eq!(context.industry, "汽车");
         assert_eq!(context.articles.len(), 2);
         let by_question = context
-            .question_sources
+            .questions
             .iter()
-            .map(|source| (source.question_id.as_str(), source.article_ids.clone()))
+            .map(|question| (question.id.as_str(), question.article_ids.clone()))
             .collect::<HashMap<_, _>>();
         assert_eq!(by_question["q1"], vec!["article-1"]);
         assert_eq!(by_question["q2"], vec!["article-2"]);
@@ -1953,9 +2138,9 @@ mod tests {
             )
             .unwrap();
         assert!(context
-            .question_sources
+            .questions
             .iter()
-            .all(|source| source.article_ids.is_empty()));
+            .all(|question| question.article_ids.is_empty()));
     }
 
     #[test]
@@ -1972,12 +2157,20 @@ mod tests {
             .unwrap();
 
         let mut tampered_source = prepare_request(&context);
-        tampered_source.question_sources[0].url = "https://attacker.example/fake".to_string();
+        tampered_source.question_sources[0].question = "伪造的问题文本".to_string();
         assert_eq!(
             store
                 .prepare_distribution_plan(&workspace.id, "session-12", tampered_source)
                 .unwrap_err(),
-            "distribution_plan_question_source_snapshot_mismatch"
+            "distribution_plan_question_text_mismatch"
+        );
+        let mut unknown_question = prepare_request(&context);
+        unknown_question.question_sources[0].question_id = "q-forged".to_string();
+        assert_eq!(
+            store
+                .prepare_distribution_plan(&workspace.id, "session-12", unknown_question)
+                .unwrap_err(),
+            "distribution_plan_question_not_in_confirmed_pool"
         );
 
         let mut tampered_article = prepare_request(&context);
@@ -2033,7 +2226,7 @@ mod tests {
             .unwrap();
         let mut source = prepare_request(&context);
         source.article_ids = vec!["article-1".to_string()];
-        source.question_sources = vec![context.question_sources[0].clone()];
+        source.question_sources = probed_sources(&context);
         let preparation = store
             .prepare_distribution_plan(&workspace.id, "session-12", source)
             .unwrap();
@@ -2068,7 +2261,7 @@ mod tests {
     }
 
     #[test]
-    fn rust_confirmation_recomputes_unknown_price_and_rate_blockers() {
+    fn rust_confirmation_recomputes_unknown_price_blockers_only() {
         let (store, workspace) = setup();
         let context = store
             .distribution_planning_context(
@@ -2081,7 +2274,7 @@ mod tests {
             .unwrap();
         let mut source = prepare_request(&context);
         source.article_ids = vec!["article-1".to_string()];
-        source.question_sources = vec![context.question_sources[0].clone()];
+        source.question_sources = probed_sources(&context);
         let preparation = store
             .prepare_distribution_plan(&workspace.id, "session-12", source)
             .unwrap();
@@ -2116,6 +2309,7 @@ mod tests {
             )
             .unwrap_err();
         assert!(error.contains("selected-channel-price-unknown"));
-        assert!(error.contains("selected-channel-published-rate-unknown"));
+        // 发布率不参与决策（用户裁决 2026-08-18）：不再产生 rate 阻断码。
+        assert!(!error.contains("selected-channel-published-rate-unknown"));
     }
 }

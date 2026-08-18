@@ -995,6 +995,7 @@ registerGateRevisionHandler(
         identity,
         createDistributionPlanPort(identity),
         capabilities.distribution,
+        capabilities.keywordSearch,
       );
     }, context),
   ),

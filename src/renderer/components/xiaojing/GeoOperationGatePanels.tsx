@@ -1,6 +1,7 @@
 import { memo } from "react";
 
 import type { GeoOperationProjection, GeoOperationStep } from "../../../shared/geo/operation";
+import GeoPlanAckPanel from "./GeoPlanAckPanel";
 import XiaojingGeoBaselinePanel from "./XiaojingGeoBaselinePanel";
 import XiaojingPostPublishMonitoringPanel from "./XiaojingPostPublishMonitoringPanel";
 import XiaojingRealGeoDashboard from "./XiaojingRealGeoDashboard";
@@ -33,6 +34,7 @@ function activeStep(
 
 export default memo(function GeoOperationGatePanels({
   operation,
+  onGateConfirmed,
 }: GeoOperationGatePanelsProps) {
   const step = activeStep(operation);
 
@@ -42,6 +44,19 @@ export default memo(function GeoOperationGatePanels({
 
   // key 绑定步骤：步骤推进即重挂载，面板总是加载当前闸门的最新权威数据。
   const gateKey = `${operation.id}:${step.id}`;
+
+  // 计划放行门是唯一挂在进度卡本体的确认面板：一次点击放行整份计划，
+  // 之后各阶段仍停在各自的产物门。
+  if (step.confirmation?.kind === "plan-ack") {
+    return (
+      <GeoPlanAckPanel
+        key={gateKey}
+        operation={operation}
+        step={step}
+        onGateConfirmed={onGateConfirmed}
+      />
+    );
+  }
 
   switch (step.capability) {
     // 票 27：粘贴/URL/文件导入的发起动作收敛到聊天输入区的材料导入入口

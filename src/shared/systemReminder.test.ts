@@ -3,8 +3,10 @@ import { describe, expect, it } from 'vitest';
 import {
   buildArticleApprovalDecisionReminder,
   buildDistributionPlanDecisionReminder,
+  buildGeoOperationEventReminder,
   buildKnowledgeBatchDecisionReminder,
   buildSessionFilesReminder,
+  parseDecisionReminderText,
 } from './systemReminder';
 
 describe('buildSessionFilesReminder', () => {
@@ -141,5 +143,45 @@ describe('buildKnowledgeBatchDecisionReminder', () => {
     }]);
     expect(reminder).toContain('&lt;fake&gt;x&lt;/fake&gt;');
     expect(reminder).not.toContain('<fake>');
+  });
+});
+
+describe('parseDecisionReminderText', () => {
+  it('整条 GEO 操作事件信封解析出 kind 与 action（转义还原）', () => {
+    const reminder = buildGeoOperationEventReminder({
+      workspaceId: 'ff545fb2-9915-48b5-b93b-36ccd5d0db90',
+      sessionId: '40dba1b8-9b16-403b-92cc-7b236f43b7f4',
+      operationId: 'f25f07b2-03b2-4441-a03f-390bc77ec49a',
+      revision: 2,
+      action: 'confirm-step:acknowledge-plan',
+      status: 'ready',
+    });
+    expect(parseDecisionReminderText(`  ${reminder}  `)).toEqual({
+      kind: 'XIAOJING_GEO_OPERATION_EVENT',
+      action: 'confirm-step:acknowledge-plan',
+    });
+  });
+
+  it('知识决策回执无 action 字段，只返回 kind', () => {
+    const reminder = buildKnowledgeBatchDecisionReminder([{
+      candidateId: 'candidate-1',
+      decision: 'adopt-new',
+      status: 'adopted',
+      factKey: 'brand|price|{}||',
+    }]);
+    expect(parseDecisionReminderText(reminder)).toEqual({
+      kind: 'XIAOJING_KNOWLEDGE_DECISION',
+    });
+  });
+
+  it('真实用户输入、拼接 reminder 的消息与未知 kind 一律不命中', () => {
+    expect(parseDecisionReminderText('认可本次计划')).toBeNull();
+    expect(parseDecisionReminderText('<system-reminder><XIAOJING_SESSION_FILES>')).toBeNull();
+    const sessionFiles = buildSessionFilesReminder([
+      { path: 'xiaojing_files/s1/notes.md', status: 'readable' },
+    ]);
+    // SESSION_FILES 只随真实用户消息附带，独立出现也不投影成回执气泡。
+    expect(parseDecisionReminderText(sessionFiles)).toBeNull();
+    expect(parseDecisionReminderText(`请继续\n${sessionFiles}`)).toBeNull();
   });
 });

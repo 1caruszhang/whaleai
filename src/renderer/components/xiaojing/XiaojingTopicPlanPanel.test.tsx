@@ -204,6 +204,13 @@ describe("XiaojingTopicPlanPanel read-only projection", () => {
     expect(
       await within(panel).findByText(/请回到聊天中的确认卡片/),
     ).toBeInTheDocument();
+    // 未确认计划不倾倒条目内容；条目只在确认后进入工作台。
+    expect(
+      within(panel).queryByText("成都汽车音响改装怎么选？本地判断指南"),
+    ).not.toBeInTheDocument();
+    expect(
+      within(panel).queryByText(/拟覆盖事实：/),
+    ).not.toBeInTheDocument();
     expect(within(panel).queryByRole("button")).not.toBeInTheDocument();
   });
 

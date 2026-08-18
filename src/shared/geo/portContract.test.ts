@@ -181,8 +181,7 @@ describe("GEO port contract", () => {
         surplusFill: true,
       },
       quality: {
-        minimumKnownPublishedRate: 70,
-        unknownPublishedRate: 0,
+        // 发布率不是决策输入（用户裁决 2026-08-18）：只剩价格上限。
         maximumPriceExclusive: 150,
       },
     });
@@ -324,7 +323,6 @@ describe("GEO port contract", () => {
     for (const testCase of fixture.channelQuality) {
       expect(
         isGeoChannelQualityEligible({
-          publishedRate: testCase.publishedRate,
           price: testCase.price,
         }),
       ).toBe(testCase.expected);

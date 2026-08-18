@@ -4,7 +4,7 @@ Ticket 12 只创建可编辑、可确认的推荐与文章分配计划。它不�
 
 ## Owner 与数据流
 
-- Renderer 是当前 Chat Tab 的控制面。它经 `useTabApi().apiPost` 展示 Rust 派生的上下文、真实资源候选、证据和风险；不直接请求 Provider 或 Management API。
+- Renderer 是当前 Chat Tab 的控制面。它经 `useTabApi().apiPost` 展示 Rust 派生的上下文、真实资源候选、证据与召回路命中；不直接请求 Provider 或 Management API。
 - Node `DistributionPlanningService` 拥有 js_ai `dev` 四路召回、硬过滤、20/10 配额、文章映射和 30 分钟只读资源缓存。相同资源 kind 的并发加载合并为一次请求；Sidecar generation 更换时缓存自然销毁。
 - Rust `BrandWorkspaceStore` 拥有 plan artifact、provider/resource/evidence snapshot、revision CAS、claim token、audit 和最终确认门。artifact 可由同一 BrandWorkspace 的其他已提交 Session 按 exact plan id 读取；创建 Session 只作 provenance。
 - 超级媒介 capability 在本阶段仅允许分页读取资源池。Provider 不可用时 plan 明确进入 `unavailable`，候选为空；严禁生成 demo、随机或模板候选。
@@ -13,22 +13,35 @@ Ticket 12 只创建可编辑、可确认的推荐与文章分配计划。它不�
 
 开始计划时，Rust 重新派生并核对以下事实，不能信任 Renderer 传入的同名字段：
 
-- industry 来自文章 operation 固定 knowledge version 的 `knowledge_version_facts`；
+- industry 与 derived keywords 来自文章 operation 固定 knowledge version 的 `knowledge_version_facts`；
 - articles 来自 exact article operation 的 approved revision；
-- question sources 来自同 workspace、同 knowledge version 的成功 baseline unit citations；
-- confirmed-topic-plan 文章通过 `source_plan_item_id` 与 plan item 的 `sourceQuestionIds` 精确映射到问题证据；direct article 没有可信映射时 citation 的 `articleIds` 为空。
+- questions 来自已确认问题池的选中问题（confirmed-topic-plan 计划用其绑定的 `(pool_id, revision)`，direct 文章用同知识版本最新 confirmed 池）——被动路探测的输入；confirmed-topic-plan 文章通过 `source_plan_item_id` 与 plan item 的 `sourceQuestionIds` 精确映射到问题；direct 文章无可信映射时 `articleIds` 为空；
+- question sources（被动证据）由 Node 在计划 start 时**对问题池逐问现场探测**产出（keyword-search typed port 的 `probeQuestion`：ARK Responses + `doubao_app.ai_search`，2-wide 窗口限流、逐问隔离失败）；prepare 校验 question id/question text 必须命中已确认池、URL 合法、id 唯一，`articleIds` 按权威映射重盖。**不依赖基线快照**（对齐 js_ai，2026-08-18 用户裁决）。
 
 prepare 后所有上述输入、Provider 非 secret 状态、候选资源白名单字段与四路证据都固定进 plan。start、edit、confirm 完成后均按 exact plan id 读回，不以 `latest` 猜测刚创建或刚修改的对象。
 
+## 四路召回（对齐 js_ai ADR-0026/0031，2026-08-18 用户裁决完全对齐）
+
+| 路 | 权重 | 证据来源 | 实现 |
+|---|---|---|---|
+| 被动 passive | 0.4 | 已确认问题逐问豆包探测的引用（域名/名称对齐资源池） | `probeQuestion` 现场探测，2 QPS 双槽窗口；失败只降级不阻断 |
+| 主动 active | 0.2 | 全局单次召回（ADR-0031）：全部已批准文章 topics+行业+衍生关键词一次联网调用，产出 20–30 个真实渠道（注册域名门+反幻觉约束+topicNumbers→文章映射） | `keywordSearch.search`（doubao-lite + enable_search） |
+| 保底 fallback | 0.1 | 规则匹配：超级媒介结构化类目/目标人群命中（GEO 收录信号并入同一路说明） | 纯规则，无模型 |
+| 偏好 preference | 0.3 | 人工策展：内置 exact 名单（js_ai DEFAULT_PREFERENCE_CHANNELS 十项，逐条一致）+ 品牌库 overlay（增补 `additional`/排除 `excluded`，`geo_channel_preferences` 单例表，management `/preferences/get|set`） | 域名优先；exact=精确名（全半角括号归一），用户条目=严格→模糊 |
+
+匹配器与名单合成逻辑在 `src/shared/geo/channelRecall.ts`（js_ai sourceAlignment/preferenceChannels/globalRecall 的忠实移植：`strictMatchScore`、`fuzzyMatchScore`（品牌域名表+子串+去后缀+Jaccard）、`resolvePreferenceChannels`、`buildGlobalRecallPrompt`/`parseGlobalRecallResult`/`clampTopicNumbers`）。
+
 ## 推荐、过滤与不确定性
 
-四路权重固定为 passive `0.4`、active `0.2`、fallback `0.1`、preference `0.3`，同一资源只累加不同路径。资源必须先满足超级媒介 `status=2`；已知正数成功率 `1..69` 和数值价格 `>=150` 在对齐与配额前硬过滤。成功率 `0`、null 与空价格表示未知，可以作为带明确不确定性的候选保留，但只要被选择或分配就阻断确认。
+四路权重固定为 passive `0.4`、active `0.2`、fallback `0.1`、preference `0.3`，同一资源只累加不同路径。资源必须先满足超级媒介 `status=2`；数值价格 `>=150` 在对齐与配额前硬过滤（唯一质量硬约束）。**发布率不是决策输入（用户裁决 2026-08-18）**：不设最低发布率门槛，发布率 `0`/null/未知既不过滤、不进不确定性、不阻断确认，也不在候选行展示；调度器消费已确认计划时快照缺失记 `0`，不因发布率报 `publish_channel_rate_unknown`。价格未知仍是候选不确定性并阻断确认。**被动证据为空不阻断**（对齐 js_ai：探测失败只是没有被动路，`question-source-evidence-missing` 阻断码已删除）。
 
-候选的 name、price、published rate 和 availability 只能来自 typed Provider resource snapshot。候选展示来源证据、适配理由、价格、成功率/可用性、权重与风险。空并集保持空，不移植 `random_balanced`。
+候选的 name、price 和 availability 只能来自 typed Provider resource snapshot。候选展示来源证据、召回路命中（被动/主动/保底/偏好，含各路证据说明）、适配理由、价格与权重；不再逐条展示风险行（用户裁决 2026-08-18），价格未知仍由行内「未知」标记与确认阻断码呈现。空并集保持空，不移植 `random_balanced`。Rust finish/confirm 门的证据校验按四路新契约：passive 的 reference=questionId 且 URL 必须命中来源、articleIds 等于来源并集；active 的 `recall:` 前缀；fallback 的 `industry:`/`audience:`；preference 的 `preference:` 前缀。
 
 一篇文章只分配一个渠道且渠道不能复用。计划支持 1:1 或媒体/自媒体比例映射、渠道组合、预算和发布时间编辑。Rust 确认时重新计算选择、分配、价格/成功率、证据、预算和时间护栏；仅靠客户端清空 `blockingIssues` 不能越过确认门。
 
 确认提交成功后，`distribution-plans/confirm` 路由在同一 Session 投递纯隐藏 `XIAOJING_DISTRIBUTION_PLAN_DECISION` reminder（只携带 plan/operation identity、revision、status 与 assignment 数），唤醒 agent 从权威计划继续进入发布准备，不重复询问已确认计划。提醒入队失败不回滚已提交的确认，响应显式返回 notification 状态。
+
+`plan_distribution` 工具结果是聊天转录的一部分，只返回**卡片最小投影**（id/状态/预算/选择/阻断 + 候选的名称·报价·路径命中·适配·证据标签≤64 字；articles 只带 id、assignments 全量保留防轮询前确认）——约 13K 字符/6K tokens，完整权威投影由卡片 3s 轮询 `/distribution-plans/latest` 水合。
 
 ## 聊天修订（票 38，ADR 0003）
 

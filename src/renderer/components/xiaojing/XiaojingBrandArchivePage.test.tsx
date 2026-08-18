@@ -40,8 +40,28 @@ const history = {
             },
           ],
         },
+        {
+          factKey: "enterprise-profile.fullname",
+          factVersion: 1,
+          normalizedValueJson: '"鲸跃科技（杭州）有限公司"',
+          sources: [],
+        },
       ],
       usedBy: [{ kind: "question-pool", id: "pool-7", revision: 3 }],
+    },
+    {
+      version: 6,
+      actorSessionId: "session-knowledge",
+      createdAt: "2026-08-14T00:00:00Z",
+      facts: [
+        {
+          factKey: "enterprise-profile.industry",
+          factVersion: 1,
+          normalizedValueJson: '"GEO 营销工具"',
+          sources: [],
+        },
+      ],
+      usedBy: [],
     },
   ],
   artifacts: [
@@ -86,7 +106,9 @@ describe("XiaojingBrandArchivePage", () => {
     render(<XiaojingBrandArchivePage workspace={workspace} />);
 
     const artifacts = await screen.findByRole("region", { name: "已批准产物" });
+    expect(within(artifacts).getByText("已批准文章")).toBeInTheDocument();
     expect(within(artifacts).getByText("approved-article")).toBeInTheDocument();
+    expect(within(artifacts).getByText("已批准")).toBeInTheDocument();
     expect(within(artifacts).getByText("article-7-v2 · revision 2")).toBeInTheDocument();
     expect(within(artifacts).getByText("topic-plan · topic-7 · revision 1")).toBeInTheDocument();
     expect(within(artifacts).getByText("distribution-plan · distribution-7 · revision 4")).toBeInTheDocument();
@@ -95,6 +117,25 @@ describe("XiaojingBrandArchivePage", () => {
     for (const action of [/批准/, /确认/, /采纳/, /发布/, /拒绝/, /暂停/, /取消/]) {
       expect(screen.queryByRole("button", { name: action })).not.toBeInTheDocument();
     }
+  });
+
+  it("labels archive fields in Chinese and collapses historical knowledge versions by default", async () => {
+    mocks.load.mockResolvedValue(history);
+
+    render(<XiaojingBrandArchivePage workspace={workspace} />);
+
+    const knowledge = await screen.findByRole("region", { name: "品牌知识版本" });
+    // 档案字段复用 knowledgeCard.fields 中文词表；领域私有 factKey 回退原文。
+    expect(within(knowledge).getByText("品牌全称")).toBeInTheDocument();
+    expect(within(knowledge).getByText("鲸跃科技（杭州）有限公司")).toBeInTheDocument();
+    expect(within(knowledge).getByText("brand.name")).toBeInTheDocument();
+    // 概览磁贴统计最新版本的档案字段数。
+    expect(screen.getByText("最新档案字段")).toBeInTheDocument();
+
+    // 最新版本默认展开，历史版本收起为摘要行；点击后显式展开。
+    expect(within(knowledge).queryByText("GEO 营销工具")).not.toBeInTheDocument();
+    fireEvent.click(within(knowledge).getByRole("button", { name: /知识版本 v6/ }));
+    expect(await within(knowledge).findByText("GEO 营销工具")).toBeInTheDocument();
   });
 
   it("reloads when the followed brand switches", async () => {

@@ -91,6 +91,7 @@ export type GeoOperationStepCondition =
   | "if-knowledge-refresh-requested";
 
 export type GeoOperationConfirmationKind =
+  | "plan-ack"
   | "knowledge-change"
   | "next-round-knowledge"
   | "question-selection"
@@ -103,6 +104,7 @@ export type GeoOperationConfirmationKind =
   | "monitoring-activation";
 
 export type GeoOperationConfirmationAuthority =
+  | "geo-operation"
   | "knowledge-authority"
   | "brand-workspace"
   | "publish-scheduler"
@@ -432,8 +434,30 @@ function nextRoundKnowledgeDecision(): GeoOperationConfirmation {
 }
 
 /**
+ * Every executable plan parks at the plan acknowledgement gate before any
+ * stage runs: the progress card broadcasts the plan, the user releases it
+ * once, then each stage still stops at its own consequential gate. The step
+ * borrows the first work step's capability so it groups into the opening
+ * phase instead of a stray「其他」group.
+ */
+function planAckStep(capability: GeoOperationCapability): StepDefinition {
+  return {
+    id: "acknowledge-plan",
+    title: "认可本轮计划",
+    capability,
+    confirmation: confirmation(
+      "plan-ack",
+      "geo-operation",
+      "认可本轮计划",
+      "查看上方阶段与步骤计划后放行；各阶段的产物仍会停在各自的确认门。",
+    ),
+  };
+}
+
+/**
  * The only intent-to-operation policy. Direct intents plan one capability
  * slice; full optimization composes the exact same definitions and gates.
+ * Every decided plan starts with the plan acknowledgement gate.
  */
 export function planGeoOperation(
   input: PlanGeoOperationInput,
@@ -555,7 +579,10 @@ export function planGeoOperation(
       break;
   }
 
-  const plannedSteps = steps(definitions);
+  const plannedSteps = steps([
+    planAckStep(definitions[0].capability),
+    ...definitions,
+  ]);
   const firstConfirmation = plannedSteps[0]?.confirmation ?? null;
   if (firstConfirmation) {
     plannedSteps[0].status = "awaiting-confirmation";

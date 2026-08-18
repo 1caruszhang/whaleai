@@ -5,6 +5,7 @@ import {
   TOPIC_PLAN_TITLE_BATCH_SIZE,
   buildTitlePlanningPrompt,
   buildTopicClusteringPrompt,
+  dealTitleStructureSeeds,
   buildTopicSemanticHints,
   buildTypeRecommendationPrompt,
   isTopicPlanItemProtected,
@@ -15,6 +16,7 @@ import {
   selectDistinctTitles,
   selectPlannedFacts,
   validateTitleCandidates,
+  titleBusinessAnchors,
   type TopicPlanConfirmation,
   type TopicPlanItem,
   type TopicPlanKnowledgeFact,
@@ -25,6 +27,10 @@ import {
   type TopicPlanTopic,
 } from "../../shared/geo/topicPlan";
 import { XIAOJING_GEO_PROVIDER_DEFAULTS } from "../../shared/geo/providerCapabilities";
+import {
+  deriveServiceScope,
+  projectBrandProfile,
+} from "../../shared/geo/profileInjection";
 import { managementApi } from "../utils/management-api-client";
 import type {
   GeoEmbeddingCapability,
@@ -182,17 +188,34 @@ function strings(value: unknown): string[] {
 }
 
 function deriveProfile(context: TopicPlanContext) {
+  // 入库 predicate 已被小写化（identity 归一化契约），后缀匹配必须大小写
+  // 不敏感——否则 .fullName/.shortNames 失配，品牌名回退到 workspace 名。
   const valuesFor = (suffix: string) =>
     context.facts
-      .filter((fact) => fact.predicate.endsWith(suffix))
+      .filter((fact) =>
+        fact.predicate.toLowerCase().endsWith(suffix.toLowerCase()),
+      )
       .flatMap((fact) => strings(parsedFactValue(fact)));
   const industry = valuesFor(".industry")[0];
   if (!industry) throw new Error("topic_plan_industry_required");
+  const projected = projectBrandProfile(context.facts);
   return {
     brandName: valuesFor(".fullName")[0] || context.brandName,
     shortNames: valuesFor(".shortNames"),
     competitors: valuesFor(".competitors"),
     industry,
+    // 业务词锚集来源（用户裁决 2026-08-19 修正）：品牌已确认产品与衍生关键词。
+    businessTerms: [
+      ...new Set([
+        ...(projected.products ?? []),
+        ...(projected.derivedKeywords ?? []),
+      ]),
+    ].slice(0, 60),
+    // 地域锚（ADR-0006 修正四）：声明服务范围优先于池上透传的 targetRegion，
+    // 原始 serviceArea 脏文本不再进入标题提示词与校验。
+    region:
+      deriveServiceScope(projectBrandProfile(context.facts))?.primary ??
+      context.targetRegion,
   };
 }
 
@@ -405,7 +428,7 @@ export class TopicPlanService {
               brandName: profile.brandName,
               industry: profile.industry,
               productLine: context.productLine,
-              targetRegion: context.targetRegion,
+              targetRegion: profile.region,
               questions: context.questions,
               semanticHints,
             }),
@@ -433,7 +456,7 @@ export class TopicPlanService {
             brandName: profile.brandName,
             industry: profile.industry,
             productLine: context.productLine,
-            targetRegion: context.targetRegion,
+            targetRegion: profile.region,
             topics,
           }),
         },
@@ -579,56 +602,100 @@ export class TopicPlanService {
     }> = [];
     const modelAttempts: TopicPlanModelAttempt[] = [];
     const priorTitles = protectedItems.map((item) => item.title);
+    // 结构种子批内洗牌发牌（2026-08-18 裁定：每批标题句式不得同构）。
+    const structureSeeds = dealTitleStructureSeeds(seeds.length);
     for (let offset = 0; offset < seeds.length; offset += TOPIC_PLAN_TITLE_BATCH_SIZE) {
       const batch = seeds.slice(offset, offset + TOPIC_PLAN_TITLE_BATCH_SIZE);
       const results = await Promise.all(
-        batch.map(async (seed) => {
-          const raw = await providerCall(() =>
-            this.generation.complete(
-              [
-                {
-                  role: "system",
-                  content: "只生成真实可用的中国市场 GEO 标题候选，不得输出正文或模板兜底。",
-                },
-                {
-                  role: "user",
-                  content: buildTitlePlanningPrompt({
-                    itemId: seed.itemId,
-                    topic: seed.topic,
-                    contentType: seed.contentType,
-                    sourceQuestions: context.questions.filter((question) =>
-                      seed.sourceQuestionIds.includes(question.id),
-                    ),
-                    plannedFacts: seed.plannedFacts,
-                    brandName: profile.brandName,
-                    shortName: profile.shortNames[0],
-                    competitors: profile.competitors,
-                    industry: profile.industry,
-                    targetRegion: context.targetRegion,
-                    currentYear: this.now().getFullYear(),
-                    existingTitles: [
-                      ...priorTitles,
-                      ...generated.map((item) => item.candidates[0]),
-                    ],
-                  }),
-                },
-              ],
-              { purpose: "title-planning" },
-            ),
-          );
-          const parsed = parseTitlePlan(raw, seed.itemId);
-          return {
-            ...parsed,
-            candidates: validateTitleCandidates({
-              candidates: parsed.candidates,
+        batch.map(async (seed, indexInBatch) => {
+          // 校验不足下限时补一次纠正重试（2026-08-19：业务词锚集下偶发
+          // 全灭不再整批失败；corrective 明示必须命中的锚词）。
+          const anchors = titleBusinessAnchors({
+            industry: profile.industry,
+            businessTerms: profile.businessTerms,
+          })
+            .filter((anchor) => anchor.length >= 3)
+            .slice(0, 8);
+          const corrective = [
+            "上一次候选未通过确定性校验。硬性要求：",
+            profile.region
+              ? `每条标题必须包含「${profile.region}」；`
+              : "",
+            `必须逐字包含一个业务词（任选其一）：${anchors.map((anchor) => `「${anchor}」`).join("、") || `「${profile.industry}」`}；`,
+            seed.contentType === "ranking"
+              ? `必须包含年份「${this.now().getFullYear()}」且不得出现品牌名；`
+              : "",
+            seed.contentType === "showcase"
+              ? `必须包含品牌「${profile.shortNames[0] || profile.brandName}」；`
+              : "",
+            "不得出现任何极限词（最/第一/唯一/榜等）与竞品名；重新给出 3–5 条彼此句式不同的候选。",
+          ]
+            .filter(Boolean)
+            .join("");
+          const complete = async (extra?: string) =>
+            providerCall(() =>
+              this.generation.complete(
+                [
+                  {
+                    role: "system",
+                    content:
+                      "你是一位专业的 GEO（生成式引擎优化）标题写作专家。只返回结构化 JSON 标题候选，不要 prose、不要 markdown 代码块、不要输出正文或模板兜底。",
+                  },
+                  {
+                    role: "user",
+                    content:
+                      buildTitlePlanningPrompt({
+                        itemId: seed.itemId,
+                        topic: seed.topic,
+                        contentType: seed.contentType,
+                        sourceQuestions: context.questions.filter((question) =>
+                          seed.sourceQuestionIds.includes(question.id),
+                        ),
+                        plannedFacts: seed.plannedFacts,
+                        brandName: profile.brandName,
+                        shortName: profile.shortNames[0],
+                        competitors: profile.competitors,
+                        industry: profile.industry,
+                        businessTerms: profile.businessTerms,
+                        targetRegion: profile.region,
+                        currentYear: this.now().getFullYear(),
+                        existingTitles: [
+                          ...priorTitles,
+                          ...generated.map((item) => item.candidates[0]),
+                        ],
+                        structureHint: structureSeeds[offset + indexInBatch]?.hint,
+                      }) + (extra ?? ""),
+                  },
+                ],
+                { purpose: "title-planning", maxTokens: 2048 },
+              ),
+            );
+          let raw = await complete();
+          let parsed = parseTitlePlan(raw, seed.itemId);
+          const validate = (candidates: string[]) =>
+            validateTitleCandidates({
+              candidates,
               contentType: seed.contentType,
-              targetRegion: context.targetRegion,
+              targetRegion: profile.region,
               industry: profile.industry,
+              businessTerms: profile.businessTerms,
               brandNames: [profile.brandName, ...profile.shortNames],
               competitors: profile.competitors,
               currentYear: this.now().getFullYear(),
-            }),
-          };
+            });
+          try {
+            return { ...parsed, candidates: validate(parsed.candidates) };
+          } catch (error) {
+            if (
+              !(error instanceof Error) ||
+              !error.message.startsWith("topic_plan_title_candidates_insufficient")
+            ) {
+              throw error;
+            }
+            raw = await complete(corrective);
+            parsed = parseTitlePlan(raw, seed.itemId);
+            return { ...parsed, candidates: validate(parsed.candidates) };
+          }
         }),
       );
       generated.push(...results);

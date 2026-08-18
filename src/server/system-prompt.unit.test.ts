@@ -31,6 +31,14 @@ describe('buildSystemPrompt', () => {
     expect(prompt).not.toContain('让用户选择');
   });
 
+  // 回归（多门共存）：计划认可卡与知识确认卡同回合出现时，
+  // agent 必须点明先后且说明裁决互不阻塞，不靠卡片顺序自解释。
+  it('explains gate sequencing when the plan-ack card and knowledge card coexist', () => {
+    expect(prompt).toContain('先在进度卡片上放行计划');
+    expect(prompt).toContain('第一阶段的第一道门');
+    expect(prompt).toContain('两道门的裁决互不阻塞');
+  });
+
   it('rations clarification to one structured AskUserQuestion with a recommended first option', () => {
     expect(prompt).toContain('通信默认是告知');
     expect(prompt).toContain('AskUserQuestion');
@@ -109,10 +117,25 @@ describe('session-files reminder copy stays in sync with the system prompt', () 
     expect(prompt).toContain('材料是否够用只在制定计划时判断一次');
   });
 
+  // 认可门是唯一入口：放行前不得开始执行任何计划步骤，
+  // 材料请求卡也不得提前发出；放行后按计划顺序、从第一步开始执行。
+  it('keeps every plan step (including the material request card) behind the plan-ack gate', () => {
+    expect(prompt).toContain('不得开始执行任何阶段');
+    expect(prompt).toContain('一律等放行后按计划顺序执行');
+    expect(prompt).toContain('先做什么取决于计划的第一步');
+    expect(prompt).toContain('不得在放行前提前发出');
+    expect(prompt).toContain('随计划执行的请求卡等放行后执行到该步骤才发出');
+    // 旧错误规则（与计划卡同回合发卡）不得回归。
+    expect(prompt).not.toContain('必须在创建操作的同一回合调用 request_brand_material');
+  });
+
   // GD-13 回归：所有闸门的操作入口统一为聊天内的交互卡片，
   // 卡片内容来自 agent 工具结果，右侧工作台只做结果展示。
   it('makes the in-chat gate cards the single entry for every confirmation', () => {
     expect(prompt).toContain('唯一的操作入口');
+    // 多卡共存时方位指代会指错对象，入口指引不带「上方/下方」。
+    expect(prompt).toContain('在聊天里对应的确认卡片上完成操作并确认');
+    expect(prompt).not.toContain('在下方的确认卡片');
     expect(prompt).toContain('run_question_pool');
     expect(prompt).toContain('产品线取领域级');
     expect(prompt).toContain('自动取品牌已确认的领域');

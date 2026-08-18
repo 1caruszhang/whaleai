@@ -35,7 +35,7 @@ Renderer 对处理中行每 3s 轮询 `/api/xiaojing/materials/status`（带 `ma
 
 ## 产品入口与 Session 归属
 
-真实用户入口全部在聊天内（ADR 0005，取代票 27 的输入区常驻形态）：上传由 agent 判断需要后经 `request_brand_material` 工具发起的**材料请求卡**承载（`MaterialRequestCard`，渲染在发起那轮助手消息内、随 transcript 持久），卡体提供粘贴文本、官网 URL 与文件选择三条路径，使用当前 Tab 的 `apiPost` 和固化 `sessionId`；聊天输入框上方的常驻导入区域已删除，零消息空态由起始建议中的材料引导语承接，显隐不存在任何 renderer 侧机械条件。会话附件（文件/图片）路线保持——附件由 Agent 经 `read_session_file` 判断后走 `import_pasted_material` 导入并停在知识裁决门；二进制附件由 Agent 调用 `request_brand_material` 转入材料请求卡。唤起标准（系统提示词硬规则）：制定计划时品牌无已确认知识或明显过薄、用户明确要求补材料、不可直读的二进制品牌材料；操作进行中缺材料佐证不唤起，按来源层级以 AI 补全行推进由用户裁决兜底。右侧工作台不挂任何材料面板，材料入口不出现在工作台，也不作为 GeoOperation 闸门。`BrandWorkspace` 只可由该 Tab 的 `workspacePath` 精确匹配得到，不能用全局 current workspace 补位；没有匹配品牌时材料请求卡禁用上传并说明原因。转录重放重新挂载卡片即恢复在途行与确认卡。
+真实用户入口全部在聊天内（ADR 0005，取代票 27 的输入区常驻形态）：上传由 agent 判断需要后经 `request_brand_material` 工具发起的**材料请求卡**承载（`MaterialRequestCard`，渲染在发起那轮助手消息内、随 transcript 持久），卡体提供粘贴文本、官网 URL 与文件选择三条路径，使用当前 Tab 的 `apiPost` 和固化 `sessionId`；聊天输入框上方的常驻导入区域已删除，零消息空态由起始建议中的材料引导语承接，显隐不存在任何 renderer 侧机械条件。会话附件（文件/图片）路线保持——附件由 Agent 经 `read_session_file` 判断后走 `import_pasted_material` 导入并停在知识裁决门；二进制附件由 Agent 调用 `request_brand_material` 转入材料请求卡。唤起标准（系统提示词硬规则）：制定计划时品牌无已确认知识或明显过薄、用户明确要求补材料、不可直读的二进制品牌材料；操作进行中缺材料佐证不唤起，按来源层级以 AI 补全行推进由用户裁决兜底；材料是否够用在制定计划时判断一次，判断结果只决定计划是否包含材料收集步骤——随计划执行的请求卡在放行后按步骤顺序发出，计划停在认可门期间不得提前出现（用户主动要求补充材料不受此限）。右侧工作台不挂任何材料面板，材料入口不出现在工作台，也不作为 GeoOperation 闸门。`BrandWorkspace` 只可由该 Tab 的 `workspacePath` 精确匹配得到，不能用全局 current workspace 补位；没有匹配品牌时材料请求卡禁用上传并说明原因。转录重放重新挂载卡片即恢复在途行与确认卡。
 
 - 文件通过现有 Tauri OS dialog 选择；Renderer 只把路径作为结构化操作参数交给 `importBrandMaterialFiles`，不打开、不解析也不记录路径。界面只显示 basename。
 - 粘贴资料和官网 URL 分别调用 `importBrandMaterialText`、`importBrandMaterialWebsite`，不伪造用户消息来触发导入。
@@ -84,14 +84,24 @@ Renderer 对处理中行每 3s 轮询 `/api/xiaojing/materials/status`（带 `ma
 
 每个字段显式属于品牌整体 scope，或属于 BrandWorkspace 已登记的某一产品线；未知产品线降为品牌 scope。品牌与产品线使用不同事实 identity，因此可并存且不会串值。
 
-## 竞品消歧与检索富化
+## 竞品两腿契约（js_ai enrich real competitors）
 
-js_ai `material-to-facts` 契约要求 "enrich real competitors"。抽取与富化规则：
+- **抽取提示词**：逐字段显式定义与边界（js_ai geo-fact-extraction 契约）——事实类字段（fullName/shortNames/addresses/serviceArea/industry/contactInfo）逐字复制、没有就省略；判断类字段（products/coreAdvantages/targetCustomers/customerPainPoints/customerCases/trustEndorsements/relatedBrands/competitors）材料没有时可推断并标 inferred（唯一例外见下：competitors 禁止推断）；derivedKeywords 一律 inferred；数组字段全部要求原子项。
+- **contactInfo 数组契约**：电话号码是数组字段——多门店/多号码各占一项全部保留；`contactInfo` 与 `addresses` 同属「一品牌多实体联系点」的字段形态。
+- **同 (field, scope) 合并护栏**：抽取契约是每字段每 scope 一条事实；模型重复输出同字段同 scope 多条时（如多门店电话各成一条），`parseProfileFacts` 落库前合并为一条——数组字段拼接去重、标量字段保留 provenance 层级最高且先出现者、合并后 provenance 整体取较低层级（与竞品富化合并的保守契约一致）。否则同一 fact key 会出现多条待决候选，整卡确认时第二条必然触发 `knowledge_version_conflict`（首条 adopt 后版本已 +1）。
+- **确定性自名过滤**：`parseProfileFacts` 在落库前对 `relatedBrands`/`competitors` 值剔除品牌名、同批抽出的 fullName 与 shortNames（大小写不敏感、双向子串——目标品牌「九味牛」连「成都九味牛食品」一起拦下）；全部被剔除时整条丢弃，不产出空数组候选。提示词只降频，这层是结构不变式（js_ai dedupeAndFilterCompetitors 契约）。
+- **原子化兜底拆分**：模型违反「数组保持原子项」契约（如把全部竞品拼成一个顿号长串）时，`cleanValue` 按中英文列表分隔符（、，,；;）把复合串拆回原子项并去重；`customerCases` 是散文式描述，句内逗号不是列表分隔，不拆。
+- **relatedBrands 消歧**：合作商、供应商、经销商、上下游公司、投资或母子公司关系属于 `relatedBrands`，其正向定义是「与目标品牌有业务关联、但不是直接竞品的其他品牌」（代理/经销、同集团兄弟品牌、战略合作、上下游深度绑定）；品牌自身、其全称/简称/别名不得进入 `relatedBrands` 与 `competitors`。
 
-- **消歧**：`competitors` 只收直接竞争品牌（同类可替代产品/服务的其他品牌）；合作商、供应商、经销商、上下游公司、投资或母子公司关系属于 `relatedBrands`；品牌自身及其别名不得进入 `competitors`。该规则同时写入抽取 prompt 与富化抽取 prompt。
-- **计数与目标**：已知竞品 = 本次抽取的品牌 scope `competitors` 值 ∪ KnowledgeAuthority 中该 fact key 的已确认权威值；目标 5 家（ranking 陈列位 1 为本品牌、2–6 为竞品，见 `articleGeneration` 质量门）。产品线 scope 竞品计入去重但不计入品牌目标。
-- **富化来源**：不足 5 家且注入 `keywordSearch` 能力时，先用真实检索（ARK `enable_search`，即 js_ai webGrounding 设计）查询「品牌 + 行业 + 主要竞争对手」，再用 extraction 能力做第二次严格 JSON 抽取：只允许输出在检索文本中**字面出现**的公司/品牌名（反虚构），排除品牌自身、已知竞品与 `relatedBrands` 值，逐名给出检索原文 `sourceExcerpt`，数量补足缺口即止。
-- **候选形态**：富化名一律 `inferred`（卡片「待确认」行，带纯视觉逐行确认；整卡确认时随全量采纳进入权威，见 ADR 0003）；与本次已抽出的品牌 scope 竞品**合并为同一条候选**，避免同一 fact key 出现多条候选导致顺序采纳互相覆盖。合并后的候选整体降为 `inferred`，excerpt 合并保留材料与检索两侧证据。
+竞品判别只有一条规则：**同体量层级、同赛道（看 products 不看 industry 大类）、同地域（看 serviceArea）、竞争关系（客户会二选一比价）四个条件必须同时满足**。来源只有两个——用户上传的材料、材料不足时的联网检索；**禁止模型凭记忆推断竞品**。
+
+- **材料腿（主抽取）**：只收材料里有明确竞争信号的名字（点名「竞品/对手」、客户二选一、对比中被列为替代选项；「被提到」不算）。提示词携带层级原则（先由 industry/products/serviceArea 判断目标品牌体量层级，按行业给例：医美——公立三甲/全国连锁/上市原料商不是；汽车音响改装——惠威/摩雷/阿尔派等**音响设备厂商**不是，它们卖器材给改装店不抢改装客户；开锁——跨城不算）、★前东家最高优先级排除（履历句式中的 X 不是竞品，输出前逐名自检）、其他禁止（供应商/设备品牌、客户/甲方、合作方、平台渠道、上下游、权威标杆与对标对象、品牌自身及别名）。材料没有就省略，空缺交给检索腿。
+- **触发与计数**：已知竞品 = 本次抽取的品牌 scope `competitors` 值 ∪ KnowledgeAuthority 中该 fact key 的已确认权威值；目标 8 家（ranking 陈列位 1 为本品牌、2–6 为竞品共 5 家 + 3 家缓冲）。产品线 scope 竞品计入去重但不计入品牌目标。
+- **画像注入**：检索腿判别四条件需要目标品牌画像——products/serviceArea 取本次材料值，缺失时用 KnowledgeAuthority 已确认权威值补齐（predicate 按小写化契约 `enterprise-profile.servicearea`）；都没有时提示词声明未知并收紧判别（名字必须与本地门店/服务商语境共现）。
+- **检索形态**：语料优先豆包搜索结构化召回（`keyword-search` typed port 的显式 `searchSources` 操作：`open.feedcoopapi.com/search_api/web_search`，逐条 Title/Summary 纯检索结果、无 LLM 改写、跨 query 按 URL 去重——js_ai `doubaoSearchProbe` 契约；Bearer 解析链：专用豆包搜索 key（可选配置）→ 复用 ARK key）；能力未注入或调用失败时回落 ARK `enable_search` 生成语料，回落记固定码降级日志（合法零结果不记）。query 用 js_ai 三互补形态：区域 + 行业已知时发「{区域} {行业} 排行榜 十大品牌 对比」「{区域} {行业} 哪家好 推荐 口碑」「{品牌} 主要竞争对手 同行」，未知时回落品牌点名单 query；逐 query 容错、结果拼接。排行榜语料混有的国际大牌由富化提示词的画像锚定与榜单警示过滤。
+- **富化抽取提示词**：目标品牌画像块（品牌/行业/核心产品/服务区域/体量层级）+ 四条件判别标准（同赛道明确「看具体产品/服务，不看行业大类」）+ 榜单语料警示（「国家/地区 + 品牌 + 英文名」的榜单行文是国际品牌条目，一律不取；散文/品类/评价语不是企业专名）+ 已知竞品与排除名单 + 宁缺毋滥（没有同层级本地同行返回空数组）。
+- **反虚构与自名过滤**：只允许输出在检索文本中**字面出现**的公司/品牌名；排除名单（品牌自身/别名/关联主体）按双向子串匹配。逐名给出检索原文 `sourceExcerpt`，数量补足缺口即止。
+- **候选形态**：富化名一律 `inferred`（卡片「待确认」行；整卡确认时随全量采纳进入权威，见 ADR 0003）；与本次已抽出的品牌 scope 竞品**合并为同一条候选**，避免同一 fact key 多条候选顺序采纳互相覆盖。合并后的候选整体降为 `inferred`，excerpt 合并保留材料与检索两侧证据。
 - **失败语义**：检索或富化解析失败按 independent-best-effort 静默跳过，不产生错误码、不影响主导入结果；后续 ranking 质量门仍会 fail-closed 挡住竞品不足的稿件。
 
 ## 失败、确认与版本

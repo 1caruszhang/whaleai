@@ -82,6 +82,16 @@ function formatValueForDisplay(raw: string, unit?: string | null): string {
   return unit ? `${text} ${unit}` : text;
 }
 
+/** 值 → 胶囊文本数组：数组值一值一胶囊（紧凑扫读），标量单胶囊；unit 逐项追加。 */
+function displayValueTexts(raw: string, unit?: string | null): string[] {
+  const parsed = parseCandidateValue(raw);
+  const suffix = unit ? ` ${unit}` : '';
+  if (Array.isArray(parsed)) {
+    return parsed.map((item) => plainTextOfValue(item) + suffix);
+  }
+  return [plainTextOfValue(parsed) + suffix];
+}
+
 function provenanceLabelKey(candidate: KnowledgeCardCandidate): string {
   const provenance = candidate.source.profileProvenance;
   if (provenance === 'extracted' || provenance === 'asked' || provenance === 'inferred') {
@@ -244,7 +254,6 @@ export default function KnowledgeBatchCard({ data, onDecided }: KnowledgeBatchCa
     [candidates, stateOf],
   );
   // 已「更改」的冲突候选由编辑值裁决（adopt-edited），不再要求二选一。
-  // 已「更改」的冲突候选由编辑值裁决（adopt-edited），不再要求二选一。
   const unresolvedConflictCount = activeCandidates.filter(
     (candidate) => candidate.status === 'conflict'
       && stateOf(candidate).editedValue === undefined
@@ -255,6 +264,25 @@ export default function KnowledgeBatchCard({ data, onDecided }: KnowledgeBatchCa
   ).length;
   const allSettled = activeCandidates.length === 0;
   const canSubmit = activeCandidates.length > 0 && unresolvedConflictCount === 0 && !busy;
+
+  // 按类分格（GD 反馈演进）：每类字段一格，格内已就绪（材料原文/用户补充）与
+  // 待确认（推断/冲突/失败）候选并存；含待确认内容的类排网格前部（组内保持
+  // 固定字段序）。行内视觉确认不改变归组，整卡裁决落地（settled）才重排。
+  const { orderedRows, pendingFieldCount } = useMemo(() => {
+    const cellNeedsReview = (row: KnowledgeFieldRow): boolean =>
+      row.candidates.some((candidate) => {
+        const state = stateOf(candidate);
+        if (state.outcome === 'settled') return false;
+        if (state.outcome === 'failed') return true;
+        const tier = candidateTier(candidate);
+        return tier === 'conflict' || tier === 'inferred';
+      });
+    const pending = fieldRows.filter(cellNeedsReview);
+    return {
+      orderedRows: [...pending, ...fieldRows.filter((row) => !pending.includes(row))],
+      pendingFieldCount: pending.length,
+    };
+  }, [fieldRows, stateOf]);
 
   const patchState = useCallback((candidate: KnowledgeCardCandidate, patch: Partial<CandidateState>) => {
     setStates((current) => ({
@@ -367,6 +395,13 @@ export default function KnowledgeBatchCard({ data, onDecided }: KnowledgeBatchCa
     }
   }, [busy, apiPost, identity, onDecided, stateOf, t]);
 
+  const submitLabel = busy
+    ? t('knowledgeCard.submitting')
+    : failedCount > 0
+      ? t('knowledgeCard.retryFailed', { count: activeCandidates.length })
+      : t('knowledgeCard.confirmAll', { count: activeCandidates.length });
+  const submitAll = () => { void submitDecisions(activeCandidates); };
+
   return (
     <section
       className={`overflow-hidden rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] transition-opacity ${
@@ -375,53 +410,77 @@ export default function KnowledgeBatchCard({ data, onDecided }: KnowledgeBatchCa
       data-knowledge-batch-card={identity.workspaceId}
       data-settled={allSettled}
     >
-      <button
-        type="button"
-        aria-expanded={open}
-        onClick={() => setOpen((value) => !value)}
-        className="flex w-full items-start gap-3 border-b border-[var(--line-subtle)] px-4 py-3 text-left hover:bg-[var(--hover-bg)]"
-      >
-        <div className={`mt-0.5 rounded-lg p-2 ${allSettled
-          ? 'bg-[var(--paper-inset)] text-[var(--ink-subtle)]'
-          : 'bg-[var(--accent-warm-subtle)] text-[var(--accent)]'}`}>
-          <ShieldCheck className="h-4 w-4" />
-        </div>
-        <div className="min-w-0 flex-1">
-          <h3 className="flex flex-wrap items-center gap-2 text-sm font-semibold text-[var(--ink)]">
-            {t('knowledgeCard.title')}
-            {allSettled && (
-              <span className="rounded-full bg-[var(--paper-inset)] px-2 py-0.5 text-xs font-normal text-[var(--ink-subtle)]">
-                {t('knowledgeCard.settledBadge')}
-              </span>
-            )}
-          </h3>
-          <p className="mt-0.5 text-xs text-[var(--ink-muted)]">
-            {[
-              data.material ? t('knowledgeCard.sourceMaterial', { name: data.material.displayName }) : null,
-              t('knowledgeCard.candidateCount', { count: candidates.length }),
-              t('knowledgeCard.headerSuffix'),
-            ].filter(Boolean).join(' · ')}
-          </p>
-        </div>
-        {open
-          ? <ChevronDown className="mt-1.5 h-4 w-4 shrink-0 text-[var(--ink-muted)]" />
-          : <ChevronRight className="mt-1.5 h-4 w-4 shrink-0 text-[var(--ink-muted)]" />}
-      </button>
+      <div className="flex items-start gap-2 border-b border-[var(--line-subtle)] px-4 py-3">
+        <button
+          type="button"
+          aria-expanded={open}
+          onClick={() => setOpen((value) => !value)}
+          className="flex min-w-0 flex-1 items-start gap-3 rounded-lg px-1 py-1 text-left hover:bg-[var(--hover-bg)]"
+        >
+          <div className={`mt-0.5 rounded-lg p-2 ${allSettled
+            ? 'bg-[var(--paper-inset)] text-[var(--ink-subtle)]'
+            : 'bg-[var(--accent-warm-subtle)] text-[var(--accent)]'}`}>
+            <ShieldCheck className="h-4 w-4" />
+          </div>
+          <div className="min-w-0 flex-1">
+            <h3 className="flex flex-wrap items-center gap-2 text-sm font-semibold text-[var(--ink)]">
+              {t('knowledgeCard.title')}
+              {allSettled && (
+                <span className="rounded-full bg-[var(--paper-inset)] px-2 py-0.5 text-xs font-normal text-[var(--ink-subtle)]">
+                  {t('knowledgeCard.settledBadge')}
+                </span>
+              )}
+            </h3>
+            <p className="mt-0.5 text-xs text-[var(--ink-muted)]">
+              {[
+                data.material ? t('knowledgeCard.sourceMaterial', { name: data.material.displayName }) : null,
+                pendingFieldCount > 0
+                  ? t('knowledgeCard.categorySummary', { fields: fieldRows.length, pending: pendingFieldCount })
+                  : t('knowledgeCard.categorySummaryReady', { fields: fieldRows.length }),
+                t('knowledgeCard.headerSuffix'),
+              ].filter(Boolean).join(' · ')}
+            </p>
+          </div>
+          {open
+            ? <ChevronDown className="mt-1.5 h-4 w-4 shrink-0 text-[var(--ink-muted)]" />
+            : <ChevronRight className="mt-1.5 h-4 w-4 shrink-0 text-[var(--ink-muted)]" />}
+        </button>
+        {/* 整卡确认常驻卡片头部：候选多、正文长时也能一眼找到主操作（GD 反馈）。 */}
+        {!allSettled && (
+          <button
+            type="button"
+            data-knowledge-confirm-cta
+            disabled={!canSubmit}
+            onClick={submitAll}
+            className="mt-1 shrink-0 rounded-md bg-[var(--button-dark-bg)] px-3 py-1.5 text-xs font-medium text-[var(--button-dark-text)] disabled:opacity-50"
+          >
+            {submitLabel}
+          </button>
+        )}
+      </div>
 
       {open && (
       <div className="space-y-2.5 px-4 py-3">
-        {fieldRows.map((row) => (
-          <FieldRow
-            key={row.field}
-            row={row}
-            stateOf={stateOf}
-            busy={busy}
-            onConfirmRow={confirmRow}
-            onChoose={chooseConflict}
-            onStageEdits={stageEdits}
-            onRetry={(targets) => { void submitDecisions(targets); }}
-          />
-        ))}
+        {/* 候选正文限高内滚（GD 反馈）：卡片出现在输入区导入面板等不参与聊天
+            滚动的容器里时，超长批次不能把内容推出窗口底边；头部确认按钮与
+            底部影响说明固定在滚动区外，浏览全部候选始终可达。 */}
+        <div
+          data-knowledge-grid
+          className="grid max-h-[60vh] auto-rows-min grid-cols-1 gap-3 overflow-y-auto pr-1 md:grid-cols-2"
+        >
+          {orderedRows.map((row) => (
+            <FieldRow
+              key={row.field}
+              row={row}
+              stateOf={stateOf}
+              busy={busy}
+              onConfirmRow={confirmRow}
+              onChoose={chooseConflict}
+              onStageEdits={stageEdits}
+              onRetry={(targets) => { void submitDecisions(targets); }}
+            />
+          ))}
+        </div>
 
         {submitError && (
           <p role="alert" className="rounded-lg bg-[var(--error-bg)] px-3 py-2 text-xs text-[var(--error)]">
@@ -434,27 +493,11 @@ export default function KnowledgeBatchCard({ data, onDecided }: KnowledgeBatchCa
             <Check className="h-3.5 w-3.5" />
             {t('knowledgeCard.allSettledNote')}
           </p>
-        ) : (
-          <div className="flex flex-wrap items-center gap-2 text-xs">
-            <button
-              type="button"
-              disabled={!canSubmit}
-              onClick={() => { void submitDecisions(activeCandidates); }}
-              className="rounded-md bg-[var(--button-dark-bg)] px-3 py-1.5 text-xs font-medium text-[var(--button-dark-text)] disabled:opacity-50"
-            >
-              {busy
-                ? t('knowledgeCard.submitting')
-                : failedCount > 0
-                  ? t('knowledgeCard.retryFailed', { count: activeCandidates.length })
-                  : t('knowledgeCard.confirmAll', { count: activeCandidates.length })}
-            </button>
-            {unresolvedConflictCount > 0 && (
-              <span className="text-[var(--warning)]">
-                {t('knowledgeCard.unresolvedConflictHint', { count: unresolvedConflictCount })}
-              </span>
-            )}
-          </div>
-        )}
+        ) : unresolvedConflictCount > 0 ? (
+          <p className="text-xs text-[var(--warning)]">
+            {t('knowledgeCard.unresolvedConflictHint', { count: unresolvedConflictCount })}
+          </p>
+        ) : null}
 
         <p className="rounded-lg bg-[var(--paper-inset)] px-3 py-2 text-xs text-[var(--ink-muted)]">
           <span className="font-medium text-[var(--ink-secondary)]">{t('knowledgeCard.impactLabel')}</span>
@@ -476,7 +519,26 @@ interface FieldRowProps {
   onRetry: (targets: KnowledgeCardCandidate[]) => void;
 }
 
-/** 字段行：同字段多值合并展示；徽章与控件按分层默认派生，摘录与置信度收进展开详情。 */
+/** 候选值胶囊：胶囊承载字段值本身（已就绪列 muted、待确认列高亮），字段名在行头。 */
+function ValuePill({ text, muted }: { text: string; muted?: boolean }) {
+  return (
+    <span
+      title={text}
+      className={`inline-flex max-w-[280px] items-center rounded-full border px-2 py-0.5 text-xs ${
+        muted
+          ? 'border-[var(--line-subtle)] bg-[var(--paper-inset)] text-[var(--ink-muted)]'
+          : 'border-[var(--line)] bg-[var(--paper)] text-[var(--ink)]'
+      }`}
+    >
+      <span className="truncate">{text}</span>
+    </span>
+  );
+}
+
+/**
+ * 字段行：同字段多候选合并为一组；候选值以胶囊呈现，徽章与控件按分层默认
+ * 派生到具体胶囊上（ADR 0003），摘录与置信度收进展开详情。
+ */
 function FieldRow({ row, stateOf, busy, onConfirmRow, onChoose, onStageEdits, onRetry }: FieldRowProps) {
   const { t } = useTranslation('chat');
   const [expanded, setExpanded] = useState(false);
@@ -487,9 +549,6 @@ function FieldRow({ row, stateOf, busy, onConfirmRow, onChoose, onStageEdits, on
     : row.field;
   const active = row.candidates.filter(
     (candidate) => stateOf(candidate).outcome !== 'settled',
-  );
-  const settled = row.candidates.filter(
-    (candidate) => stateOf(candidate).outcome === 'settled',
   );
   const isEdited = (candidate: KnowledgeCardCandidate) =>
     stateOf(candidate).editedValue !== undefined;
@@ -515,15 +574,24 @@ function FieldRow({ row, stateOf, busy, onConfirmRow, onChoose, onStageEdits, on
           : awaitingConfirm.length > 0
             ? 'pending'
             : 'ready';
-  const summary = row.candidates
-    .map((candidate) => {
-      const state = stateOf(candidate);
-      const raw = state.editedValue !== undefined
-        ? JSON.stringify(state.editedValue)
-        : candidate.normalizedValueJson;
-      return formatValueForDisplay(raw, candidate.unit);
-    })
-    .join('；');
+  // 类内状态摘要（与胶囊徽章同口径）：已就绪 = 材料原文/用户补充/视觉确认，
+  // 待确认 = 推断未确认/冲突/失败。
+  const pendingCount = active.filter((candidate) => {
+    const state = stateOf(candidate);
+    if (state.outcome === 'failed') return true;
+    if (isEdited(candidate)) return false;
+    if (candidate.status === 'conflict') return true;
+    return candidateTier(candidate) === 'inferred' && !state.confirmed;
+  }).length;
+  const readyCount = active.length - pendingCount;
+  /** 候选当前值（或已暂存编辑）→ 胶囊文本数组：数组值一值一胶囊。 */
+  const candidateValueTexts = (candidate: KnowledgeCardCandidate) => {
+    const state = stateOf(candidate);
+    const raw = state.editedValue !== undefined
+      ? JSON.stringify(state.editedValue)
+      : candidate.normalizedValueJson;
+    return displayValueTexts(raw, candidate.unit);
+  };
 
   const startEditing = () => {
     setDrafts(Object.fromEntries(
@@ -556,95 +624,29 @@ function FieldRow({ row, stateOf, busy, onConfirmRow, onChoose, onStageEdits, on
           type="button"
           aria-expanded={expanded}
           onClick={() => setExpanded((value) => !value)}
-          className="flex min-w-0 flex-1 items-center gap-2 text-left"
+          className="flex min-w-0 flex-1 items-center gap-1.5 text-left"
         >
           <span className="shrink-0 font-medium text-[var(--ink)]">{fieldText}</span>
-          <span className="min-w-0 flex-1 truncate text-[var(--ink-secondary)]" title={summary}>
-            {summary}
-          </span>
           {expanded
             ? <ChevronDown className="h-3.5 w-3.5 shrink-0 text-[var(--ink-subtle)]" />
             : <ChevronRight className="h-3.5 w-3.5 shrink-0 text-[var(--ink-subtle)]" />}
         </button>
-
-        {tier === 'failed' && (
-          <>
-            <span className="rounded-full bg-[var(--error-bg)] px-2 py-0.5 text-xs text-[var(--error)]">
-              {t('knowledgeCard.badgeFailed')}
-            </span>
-            <button
-              type="button"
-              disabled={busy}
-              aria-label={t('knowledgeCard.rowRetryAria', { field: fieldText })}
-              onClick={() => onRetry(failed)}
-              className="rounded-md border border-[var(--line)] px-2 py-0.5 text-xs text-[var(--ink-secondary)] hover:bg-[var(--hover-bg)] disabled:opacity-50"
-            >
-              {t('knowledgeCard.rowRetry')}
-            </button>
-          </>
-        )}
-        {tier === 'ready' && (
-          <span className="rounded-full bg-[var(--success-bg)] px-2 py-0.5 text-xs text-[var(--success)]">
-            {t('knowledgeCard.badgeReady')}
-          </span>
-        )}
-        {tier === 'user-edited' && (
-          <span className="rounded-full bg-[var(--success-bg)] px-2 py-0.5 text-xs text-[var(--success)]">
-            {t('knowledgeCard.badgeUserEdited')}
-          </span>
-        )}
-        {/* 部分编辑的合并行：已编辑候选逐条给出「用户补充」徽章，未编辑候选保持其分层控件。 */}
-        {edited.length > 0 && edited.length < active.length && edited.map((candidate) => (
+        {readyCount > 0 && (
           <span
-            key={candidate.id}
-            data-candidate-user-edited={candidate.id}
-            className="rounded-full bg-[var(--success-bg)] px-2 py-0.5 text-xs text-[var(--success)]"
+            data-row-chip="ready"
+            className="shrink-0 rounded-full bg-[var(--success-bg)] px-2 py-0.5 text-xs text-[var(--success)]"
           >
-            {t('knowledgeCard.badgeUserEdited')}
+            {t('knowledgeCard.rowReadyCount', { count: readyCount })}
           </span>
-        ))}
-        {tier === 'pending' && (
-          <>
-            <span className="rounded-full bg-[var(--paper-inset)] px-2 py-0.5 text-xs text-[var(--ink-muted)]">
-              {t('knowledgeCard.badgePending')}
-            </span>
-            <button
-              type="button"
-              aria-label={t('knowledgeCard.rowConfirmAria', { field: fieldText })}
-              onClick={() => onConfirmRow(row)}
-              className="rounded-md border border-[var(--line)] px-2 py-0.5 text-xs text-[var(--ink-secondary)] hover:bg-[var(--hover-bg)]"
-            >
-              {t('knowledgeCard.rowConfirm')}
-            </button>
-          </>
         )}
-        {conflicts.map((candidate) => {
-          const choice = stateOf(candidate).conflictChoice;
-          return (
-            <span
-              key={candidate.id}
-              role="group"
-              aria-label={t('knowledgeCard.conflictChoiceAria', { field: fieldText })}
-              className="flex items-center gap-1.5"
-            >
-              <span className="rounded-full bg-[var(--warning-bg)] px-2 py-0.5 text-xs text-[var(--warning)]">
-                {t('knowledgeCard.badgeConflict')}
-              </span>
-              <ConflictChoiceButton
-                pressed={choice === 'adopt-new'}
-                text={t('knowledgeCard.adoptNew')}
-                ariaLabel={t('knowledgeCard.adoptNewAria', { field: fieldText })}
-                onClick={() => onChoose(candidate, 'adopt-new')}
-              />
-              <ConflictChoiceButton
-                pressed={choice === 'keep-current'}
-                text={t('knowledgeCard.keepCurrent')}
-                ariaLabel={t('knowledgeCard.keepCurrentAria', { field: fieldText })}
-                onClick={() => onChoose(candidate, 'keep-current')}
-              />
-            </span>
-          );
-        })}
+        {pendingCount > 0 && (
+          <span
+            data-row-chip="pending"
+            className="shrink-0 rounded-full bg-[var(--warning-bg)] px-2 py-0.5 text-xs text-[var(--warning)]"
+          >
+            {t('knowledgeCard.rowPendingCount', { count: pendingCount })}
+          </span>
+        )}
         {active.length > 0 && (
           <button
             type="button"
@@ -656,18 +658,124 @@ function FieldRow({ row, stateOf, busy, onConfirmRow, onChoose, onStageEdits, on
             {t('knowledgeCard.rowEdit')}
           </button>
         )}
-        {settled.map((candidate) => {
-          const status = stateOf(candidate).settledStatus ?? '';
-          const resultKey = `knowledgeCard.results.${status}`;
-          const resultLabel = t(resultKey);
+      </div>
+
+      <div className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1.5">
+        {row.candidates.map((candidate) => {
+          const state = stateOf(candidate);
+          if (state.outcome === 'settled') {
+            const status = state.settledStatus ?? '';
+            const resultKey = `knowledgeCard.results.${status}`;
+            const resultLabel = t(resultKey);
+            return (
+              <span key={candidate.id} className="inline-flex items-center gap-1.5">
+                {candidateValueTexts(candidate).map((text, index) => (
+                  <ValuePill key={`${candidate.id}:${index}`} text={text} muted />
+                ))}
+                <span
+                  className="inline-flex items-center gap-1 text-[var(--ink-subtle)]"
+                  data-candidate-result={candidate.id}
+                >
+                  <Check className="h-3 w-3 text-[var(--success)]" />
+                  {resultLabel === resultKey ? status : resultLabel}
+                </span>
+              </span>
+            );
+          }
+          const editedNow = isEdited(candidate);
+          const conflict = candidate.status === 'conflict' && !editedNow;
+          const isFailed = state.outcome === 'failed';
+          const pendingBadge = candidateTier(candidate) === 'inferred'
+            && !state.confirmed && !editedNow && !isFailed;
+          const readyBadge = !editedNow && !isFailed && !conflict && !pendingBadge;
           return (
             <span
               key={candidate.id}
-              className="inline-flex items-center gap-1 text-[var(--ink-subtle)]"
-              data-candidate-result={candidate.id}
+              className="inline-flex flex-wrap items-center gap-1.5"
+              data-candidate-capsule={candidate.id}
             >
-              <Check className="h-3 w-3 text-[var(--success)]" />
-              {resultLabel === resultKey ? status : resultLabel}
+              {isFailed && (
+                <span className="rounded-full bg-[var(--error-bg)] px-2 py-0.5 text-xs text-[var(--error)]">
+                  {t('knowledgeCard.badgeFailed')}
+                </span>
+              )}
+              {readyBadge && (
+                <span className="rounded-full bg-[var(--success-bg)] px-2 py-0.5 text-xs text-[var(--success)]">
+                  {t('knowledgeCard.badgeReady')}
+                </span>
+              )}
+              {editedNow && (
+                <span
+                  className="rounded-full bg-[var(--success-bg)] px-2 py-0.5 text-xs text-[var(--success)]"
+                  data-candidate-user-edited={candidate.id}
+                >
+                  {t('knowledgeCard.badgeUserEdited')}
+                </span>
+              )}
+              {pendingBadge && (
+                <span
+                  data-candidate-pending={candidate.id}
+                  className="rounded-full bg-[var(--warning-bg)] px-2 py-0.5 text-xs text-[var(--warning)]"
+                >
+                  {t('knowledgeCard.badgePending')}
+                </span>
+              )}
+              {conflict && (
+                <span className="rounded-full bg-[var(--warning-bg)] px-2 py-0.5 text-xs text-[var(--warning)]">
+                  {t('knowledgeCard.badgeConflict')}
+                </span>
+              )}
+              {conflict && candidate.current && (
+                <>
+                  {displayValueTexts(
+                    candidate.current.normalizedValueJson,
+                    candidate.current.unit,
+                  ).map((text, index) => (
+                    <ValuePill key={`current:${candidate.id}:${index}`} text={text} muted />
+                  ))}
+                  <span aria-hidden className="text-[var(--ink-subtle)]">→</span>
+                </>
+              )}
+              {candidateValueTexts(candidate).map((text, index) => (
+                <ValuePill key={`${candidate.id}:${index}`} text={text} />
+              ))}
+              {isFailed && (
+                <button
+                  type="button"
+                  disabled={busy}
+                  aria-label={t('knowledgeCard.rowRetryAria', { field: fieldText })}
+                  onClick={() => onRetry(failed)}
+                  className="rounded-md border border-[var(--line)] px-2 py-0.5 text-xs text-[var(--ink-secondary)] hover:bg-[var(--hover-bg)] disabled:opacity-50"
+                >
+                  {t('knowledgeCard.rowRetry')}
+                </button>
+              )}
+              {pendingBadge && (
+                <button
+                  type="button"
+                  aria-label={t('knowledgeCard.rowConfirmAria', { field: fieldText })}
+                  onClick={() => onConfirmRow(row)}
+                  className="rounded-md border border-[var(--line)] px-2 py-0.5 text-xs text-[var(--ink-secondary)] hover:bg-[var(--hover-bg)]"
+                >
+                  {t('knowledgeCard.rowConfirm')}
+                </button>
+              )}
+              {conflict && (
+                <>
+                  <ConflictChoiceButton
+                    pressed={state.conflictChoice === 'adopt-new'}
+                    text={t('knowledgeCard.adoptNew')}
+                    ariaLabel={t('knowledgeCard.adoptNewAria', { field: fieldText })}
+                    onClick={() => onChoose(candidate, 'adopt-new')}
+                  />
+                  <ConflictChoiceButton
+                    pressed={state.conflictChoice === 'keep-current'}
+                    text={t('knowledgeCard.keepCurrent')}
+                    ariaLabel={t('knowledgeCard.keepCurrentAria', { field: fieldText })}
+                    onClick={() => onChoose(candidate, 'keep-current')}
+                  />
+                </>
+              )}
             </span>
           );
         })}

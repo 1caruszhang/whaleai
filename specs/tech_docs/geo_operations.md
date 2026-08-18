@@ -4,7 +4,7 @@ Ticket 16 只建立 GEO 领域编排，不建立通用 Workflow Engine、`GeoRun
 
 ## Owner 与 seam
 
-- `src/shared/geo/operation.ts` 是意图到最小能力切片、步骤、确认门和跨语言枚举的纯 policy；`GEO_OPERATION_PHASES` 把步骤映射为六个展示阶段（品牌知识、问题机会、内容生产、渠道计划、发布、监测），阶段名与 Agent 口头汇报的环节名一致，聊天进度卡片与右侧工作台共用同一分组，正文不复述阶段链条。工作台据此渲染六阶段竖向手风琴骨架：六个阶段行恒定排列，聚焦操作所处阶段展开显示该阶段产物面板，其余收起为单行（阶段名 + 状态点），点击可展开回看该阶段已生成产物；直接意图未覆盖的阶段行标「已跳过」。
+- `src/shared/geo/operation.ts` 是意图到最小能力切片、步骤、确认门和跨语言枚举的纯 policy；`GEO_OPERATION_PHASES` 把步骤映射为六个展示阶段（品牌知识、问题机会、内容生产、渠道计划、发布、监测），阶段名与 Agent 口头汇报的环节名一致，聊天进度卡片与右侧工作台共用同一分组，正文不复述阶段链条。工作台据此渲染六阶段竖向手风琴骨架：六个阶段行恒定排列，聚焦操作所处阶段展开显示该阶段产物面板，其余收起为单行（阶段名 + 状态点），点击可展开回看该阶段产物；直接意图未覆盖的阶段行标「已跳过」。各阶段面板只承载用户已确认的产物（已确认问题池的选定问题、已确认选题计划、已批准文章、已确认分发计划），未确认的过程产物留在聊天确认卡，面板以引导文案指回聊天。
 - `src/server/geo/operation.ts::GeoOperationService` 是 Node 编排 seam。它计划一次 Operation，并把 capability 返回的 artifact reference、checkpoint 和失败写回；它不复制问题、文章、分发、发布或监测算法。
 - 内置 `xiaojing-geo` MCP 只开放创建、读取、下一轮知识分支以及暂停/恢复/重试/取消。主模型选择明确 intent；字符串分类函数只服务测试和非 Agent 导入面，不拦截主聊天消息。
 - Rust `BrandWorkspaceStore` 是 Operation lifecycle、revision CAS、checkpoint 和 lineage 的持久化 owner。Management API 同时校验 immutable Sidecar id、generation、Session 与 workspace path。
@@ -24,6 +24,7 @@ Operation 状态为 `ready / queued / running / awaiting-confirmation / paused /
 
 - 每个 Session 继续使用自己的 1:1 Sidecar、对话 generator 与 GeoOperation revision/generation。品牌切换或工作台 unmount 只终止当次只读 projection 请求，不调用 Operation cancel；窗口可见时工作台以有界轮询刷新，重新显示或重新挂载立即从 Rust truth 重读。Chat turn 已进入后台时继续复用 `BackgroundCompletion` owner，不建立 GEO 专用 owner、port 或 Renderer lifecycle 副本。
 - 操作生命周期控制（暂停/恢复/重试失败单元/取消，经 `/api/xiaojing/geo-operations/control` 提交 revision CAS）与 provider 排队、checkpoint 恢复提示只呈现在聊天进度卡区域：控制按钮按操作状态呈现，provider 排队横幅沿用 `geo-provider-queue-updated` Tauri 事件通道（不新增 SSE 事件）。过程控制只有聊天一个入口。
+- 聊天进度卡按计划边界分层显示，且展示模式跟随 live 投影而非消息快照：live 停在计划认可门（即计划开始）或终态（succeeded/failed/cancelled，即计划结束）时渲染完整进度卡（含权威步骤计划重播与「GEO 操作已更新」标题；计划认可门停靠时认可面板作为卡头主操作、先于步骤重播渲染，其余闸门面板仍在卡尾）；用户放行计划后，承载认可面板的那张卡随轮询翻到中间态、就地收敛为闸门进度条，历史消息不残留步骤计划重播。其余一切非边界状态（ready/queued/running/paused/recovering 与中间确认门停靠，通常来自 reminder 唤醒的 `inspect_geo_operations` 回合）只渲染 compact 轻量条——目标行、状态行、闸门进度条、生命周期控制、排队/恢复提示与 `GeoOperationGatePanels` 阀门面板（保留 `data-geo-gate-panels` 深链锚点），不重播步骤计划，且非交互宿主的历史信封整条不渲染：同一操作任意时刻至多一条轻量条，随最新信封下移。闸门进度条（`GeoGateProgressStrip`，视觉语言参考 js_ai 的分段进度条）的段由计划内的确认门步骤按计划序派生——全量优化 8 道门，直接意图只显示自己的门子集；计划卡与轻量条渲染同一条进度条：停靠认可门时随计划卡一起出现（「计划」段停在待确认），放行后原地推进，不作为新元素出现；完成（succeeded/skipped）=accent 实心、当前运行=accent 脉冲、当前停在待确认=warning 脉冲、失败=error、未到=line，全部放行后整条实心无脉冲；段下两字短名，闸门全称与停靠状态放 tooltip；状态行报 `N/M 道闸门 · 当前：…`，无确认门的计划回退 `N/M 步`。输入框上方另挂常驻停靠条（`GeoOperationDockedStrip`）：只要本 Session 存在非终态操作（计划停靠认可门起、终态止）就常驻展示同一条闸门进度与状态行，不随消息滚动离开视野；取 `loadGeoOperations` 列表首个非终态操作（与工作台聚焦推导一致），`toolCompleteCount` 变化即刷新（新操作的进度卡出现的回合停靠条同拍出现）、在跑时按同款 3s 有界轮询补拉；停靠条只读，不承载确认或生命周期控制（过程控制仍只在聊天进度卡），点击定位到对应闸门卡锚点（复用通知深链同款滚动工具与「跟随底部」抑制），全部终态后消失。信封统一为轻量容器 `data-geo-operation-cards`，完整卡（`data-geo-operation-event`）与轻量条（`data-geo-operation-strip`）标记落在各自操作卡上。中间回合的产物确认由各阶段自己的闸门卡片承载（见 `DESIGN.md` 信息闸门卡片）。认可卡与其他确认卡（如附件导入产出的知识确认卡）同回合共存时，agent 正文必须点明先后：先放行计划，知识确认是第一阶段第一道门，先裁决任一门都不阻塞；卡片指引文案不用「上方/下方」方位指代。
 - 右侧工作台仅在聊天 Tab 挂载（欢迎页/设置页主区全宽），且已收为单一操作视图（票 31 移除「操作/效果」双页签），自上而下只有三段：多操作切换器（「目前所在阶段」跟随聚焦操作）→ 常驻当前已确认品牌知识面板 → 六阶段手风琴骨架。阶段行以状态点+文字表达暂停/出错，阶段总览 grid、最小执行步骤列表、checkpoint、pending/error 明细与原始产物引用等过程块只存在于聊天进度卡，工作台不再渲染；无进行中操作时骨架区显示空态并引导去聊天发起。按需基线探测、监测计划管理与真实证据看板由左侧栏「效果」一级入口整页承载（见 `geo_baseline.md`），不在工作台内。
 - 所有 typed GEO Provider ports 在真正出站前都向 Rust `GeoProviderLimiter` 申请 permit。该 limiter 是应用进程单一 owner，跨品牌、Session 和 Sidecar 共用 FIFO；Node 的文章 worker / embedding producer 只安排本地最小单元，不能成为全局并发 authority。embedding batch 会拆成单条真实请求逐项 admission，避免一个 permit 内并发多个上游请求。
 - `config.json::geoProviderConcurrencyLimit` 是配置入口，缺省为 5；Rust 对任何磁盘值强制夹在 `[1,16]`。队列最多 512 项，满时返回可见 `resource_exhausted`，不绕过 admission。projection 持久化 `queueReason/queuePosition`；permit release、cancel 或 Sidecar generation retirement 按 FIFO 推进位置。
@@ -39,15 +40,17 @@ Operation 状态为 `ready / queued / running / awaiting-confirmation / paused /
 
 ## 意图与确认门
 
-直接意图只生成所需切片：知识更新、问题机会、文章生成、表现检查、分发计划或监测互不夹带其它阶段；发布意图若已引用 confirmed distribution plan 就直接进入发布预览，否则只补齐“分发计划 → 确认”这一必需前置。`full-optimization` 组合相同知识、问题池、主题/文章、分发、发布与监测定义（共 18 步），不复制实现；主链不内嵌基线探测——基线改为品牌级「效果」入口内的按需动作（见 `geo_baseline.md`），监测启用前必须先冻结一次基线，`performance-inspection` 直接意图仍保留条件化补充探测。
+直接意图只生成所需切片：知识更新、问题机会、文章生成、表现检查、分发计划或监测互不夹带其它阶段；发布意图若已引用 confirmed distribution plan 就直接进入发布预览，否则只补齐“分发计划 → 确认”这一必需前置。`full-optimization` 组合相同知识、问题池、主题/文章、分发、发布与监测定义（含计划认可门共 19 步），不复制实现；主链不内嵌基线探测——基线改为品牌级「效果」入口内的按需动作（见 `geo_baseline.md`），监测启用前必须先冻结一次基线，`performance-inspection` 直接意图仍保留条件化补充探测。
 
 “下一轮优化”第一次固定停在“是否更新知识”：不更新从已有问题池选择开始；更新从知识材料/候选链路开始。Dashboard report 可以作为 `report` input ref，但 policy 不读取它决定分支。
+
+每个可执行计划的首步都是合成的 `acknowledge-plan` 步骤（borrowing 首个工作步骤的 capability 以落进开头阶段），携带 `plan-ack` typed confirmation：operation 创建即整单停靠在计划认可门，用户在聊天进度卡的 `GeoPlanAckPanel` 上一次点击放行整份计划（走既有 `/api/xiaojing/geo-operations/confirm-step` 端点与 revision CAS；路由随决策投递 `XIAOJING_GEO_OPERATION_EVENT` reminder 唤醒 agent 从第一阶段继续）。放行不裁决任何阶段产物：各阶段仍停在各自的产物门。`decide-knowledge-refresh` 未决分支是唯一没有计划认可门的计划——它本身就是决策步；`choose_next_round_knowledge` 的显式回答即计划放行，replace-plan 在 service seam 剥离认可门，替换后的计划直接从首个工作步骤（或首个产物门）开始，不再二次停靠。
 
 每个需要用户判断或 Provider 用量的步骤都携带 typed confirmation。知识、问题、主题、文章和分发确认继续由各自 BrandWorkspace owner 裁决；付费/外部发布的 authority 固定为 `PublishScheduler`，监测激活固定为 `PostPublishMonitor`。Node/MCP 的通用确认入口会拒绝后二者，不能把 Operation projection 当成付款或发布授权。Rust UI owner 完成真实确认后，独立 Tauri attestation 还必须校验 exact execution/plan revision 与已确认状态，才只推进 Operation projection；该入口不创建付款、发布或监测副作用，Management API 也显式拒绝同名 mutation action。
 
 ### Autonomy profile
 
-`config.json::geoAutonomyProfile` 是工作区级自治档位，Rust 在 Session Sidecar spawn 时读取并注入 `XIAOJING_GEO_AUTONOMY_PROFILE`（仅品牌工作区 Session；未知或缺失值一律回落 `manual`）。门位 widening 政策唯一权威在 `src/shared/geo/autonomy.ts::AUTO_CONFIRMABLE_CONFIRMATION_KINDS`，当前只含 `question-selection`：`auto` 档下问题池生成后按 `recommended` 标记自动确认选择门、照常播报决策提醒并记录 milestone，自动确认失败时安全退回 `awaiting-selection` 等待用户。知识裁决、基线探测、内容计划、文章批准、分发确认、付费/外部发布与监测激活在任何档位都保持用户所有。
+`config.json::geoAutonomyProfile` 是工作区级自治档位，Rust 在 Session Sidecar spawn 时读取并注入 `XIAOJING_GEO_AUTONOMY_PROFILE`（仅品牌工作区 Session；未知或缺失值一律回落 `manual`）。门位 widening 政策唯一权威在 `src/shared/geo/autonomy.ts::AUTO_CONFIRMABLE_CONFIRMATION_KINDS`，当前只含 `question-selection`：`auto` 档下问题池生成后按 `recommended` 标记自动确认选择门、照常播报决策提醒并记录 milestone，自动确认失败时安全退回 `awaiting-selection` 等待用户。计划认可门（`plan-ack`）、知识裁决、基线探测、内容计划、文章批准、分发确认、付费/外部发布与监测激活在任何档位都保持用户所有。
 
 ## 知识更新与历史
 
@@ -59,4 +62,4 @@ KnowledgeAuthority 采纳产生新知识版本时，在同一 SQLite transaction
 
 ## 测试边界
 
-Shared contract tests覆盖直接 intent、完整组合、下一轮两分支、报告非 authority 和所有 gate；Node tests 从 `GeoOperationService` seam 验证最小计划、分支替换、queue projection、Provider admission 和 Rust UI authority；Rust tests覆盖多 Session 隔离、应用级 FIFO/资源耗尽、revision + generation CAS、退出 checkpoint、crash recovery、stale event、最小 retry、终态、不可逆 gate 与知识引用标记。DOM tests覆盖聊天进度卡的排队原因/位置、恢复提示、控制按钮按操作状态呈现/禁用与 revision CAS 提交，工作台单一操作视图（无视图页签、无效果面板）与阶段骨架的当前阶段展开/收起行点击回看/产物按阶段归属渲染/暂停与出错状态点/空态引导，「效果」一级入口整页的三面板交互保留与控制面借用身份，以及工作台无控制按钮与排队/恢复横幅残留、仅挂载于聊天 Tab、卸载不产生 cancel。默认测试无网络、无真实凭据、无付款、上传或发布。
+Shared contract tests覆盖直接 intent、完整组合、下一轮两分支、报告非 authority、计划认可门和所有 gate；Node tests 从 `GeoOperationService` seam 验证最小计划、分支替换、queue projection、Provider admission 和 Rust UI authority；Rust tests覆盖多 Session 隔离、应用级 FIFO/资源耗尽、revision + generation CAS、退出 checkpoint、crash recovery、stale event、最小 retry、终态、不可逆 gate、知识引用标记与 plan-ack 放行前阻断/一步放行。DOM tests覆盖聊天进度卡的排队原因/位置、恢复提示、控制按钮按操作状态呈现/禁用与 revision CAS 提交、计划认可门确认面板（提交 confirm-step、失败不刷新宿主卡）、计划放行后完整卡就地收敛为闸门进度条、中间确认门停靠走轻量条不展开大卡，以及闸门进度条的分段派生/按状态配色/两字短名/全部放行无脉冲、输入框上方常驻停靠条（非终态操作渲染于输入框之上/全终态或无 Session 消失/点击定位锚点/toolCompleteCount 与可见性轮询刷新），工作台单一操作视图（无视图页签、无效果面板）与阶段骨架的当前阶段展开/收起行点击回看/产物按阶段归属渲染/暂停与出错状态点/空态引导，「效果」一级入口整页的三面板交互保留与控制面借用身份，以及工作台无控制按钮与排队/恢复横幅残留、仅挂载于聊天 Tab、卸载不产生 cancel。默认测试无网络、无真实凭据、无付款、上传或发布。

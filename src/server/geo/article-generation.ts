@@ -3,19 +3,35 @@ import {
   ARTICLE_GENERATION_POLICY_VERSION,
   buildArticleGenerationMessages,
   buildArticleReflectionMessages,
+  buildDirectTitleMessages,
   combineArticleReview,
+  dealNarrativeSeeds,
   deterministicArticleReview,
   parseArticleReflection,
+  parseDirectTitleCandidates,
   parseGeneratedArticleBody,
+  normalizeTitleIdentity,
   validateDirectArticleSource,
   type ArticleBodyProjection,
   type ArticleGenerationContext,
+  type ArticleNarrativeSeed,
   type ArticleOperationProjection,
   type ArticleOperationSource,
   type ArticleProjection,
   type ArticleReviewResult,
 } from "../../shared/geo/articleGeneration";
+import {
+  deriveServiceScope,
+  firstProfileValue,
+  isGenericTargetRegion,
+  projectBrandProfile,
+  renderBrandIdentityBlock,
+} from "../../shared/geo/profileInjection";
+import { validateTitleCandidates } from "../../shared/geo/topicPlan";
 import { XIAOJING_GEO_PROVIDER_DEFAULTS } from "../../shared/geo/providerCapabilities";
+
+/** 反思 LLM 审核开关：用户裁定（2026-08-18）先只审格式，暂停语义反思。 */
+const REFLECTION_REVIEW_ENABLED = false;
 import { managementApi } from "../utils/management-api-client";
 import type { GeoTextCapability } from "./provider-capabilities";
 
@@ -323,15 +339,71 @@ export class ArticleGenerationService {
         ? validateDirectArticleSource(input.source)
         : input.source;
     const operation = await this.persistence.start(source);
-    await mapWithArticleConcurrency(operation.articles, async (article) => {
-      await this.generateOne(article, "initial");
+    // 叙事视角种子按操作洗牌发牌（同批不重复直到发尽，ADR-0006 §3）。
+    const seeds = dealNarrativeSeeds(operation.articles.length);
+    await mapWithArticleConcurrency(operation.articles, async (article, index) => {
+      await this.generateOne(article, "initial", seeds[index]);
     });
     return this.persistence.getOperation(operation.id);
+  }
+
+  /**
+   * direct 路径补标题生成（ADR-0006 §2）：主题字符串只作标题输入，
+   * 3–5 候选 → 既有校验 → 取首个有效；失败 fail-loud 走 generation_failed。
+   * region/行业从 plannedFacts 投影画像锚定，画像缺服务区时不强制地域锚。
+   */
+  private async generateDirectTitle(
+    context: ArticleGenerationContext,
+  ): Promise<string> {
+    const profile = projectBrandProfile(context.article.plannedFacts);
+    // 地域锚（ADR-0006 修正四）：用派生的服务范围，不再透传原始 serviceArea。
+    const region = deriveServiceScope(profile)?.primary ?? context.targetRegion;
+    const industry = firstProfileValue(profile, "industry") ?? context.productLine;
+    // 业务词锚集（用户裁决 2026-08-19 修正）：品牌产品 + 衍生关键词。
+    const businessTerms = [
+      ...new Set([
+        ...(profile.products ?? []),
+        ...(profile.derivedKeywords ?? []),
+      ]),
+    ].slice(0, 60);
+    const currentYear = new Date().getFullYear();
+    const messages = buildDirectTitleMessages({
+      theme: context.article.topic,
+      contentType: context.article.contentType,
+      brandName: context.brandName,
+      ...(profile.shortNames?.[0] ? { shortName: profile.shortNames[0] } : {}),
+      competitors: profile.competitors ?? [],
+      industry,
+      businessTerms,
+      targetRegion: isGenericTargetRegion(region) ? "" : region,
+      currentYear,
+    });
+    const raw = await this.generation.complete(
+      [
+        { role: "system", content: messages.system },
+        { role: "user", content: messages.user },
+      ],
+      { purpose: "title-planning", maxTokens: 2048 },
+    );
+    const valid = validateTitleCandidates({
+      candidates: parseDirectTitleCandidates(raw),
+      contentType: context.article.contentType,
+      targetRegion: isGenericTargetRegion(region) ? "" : region,
+      industry,
+      businessTerms,
+      brandNames: [context.brandName, ...(profile.shortNames ?? [])].filter(
+        Boolean,
+      ),
+      competitors: profile.competitors ?? [],
+      currentYear,
+    });
+    return valid[0];
   }
 
   private async generateOne(
     article: ArticleProjection,
     mode: "initial" | "regenerate",
+    narrativeSeed?: ArticleNarrativeSeed,
   ): Promise<ArticleProjection> {
     const context = await this.persistence.claimGeneration({
       operationId: article.operationId,
@@ -340,15 +412,24 @@ export class ArticleGenerationService {
       mode,
     });
     try {
+      const requestedTitle =
+        context.article.sourcePlanItemId === null
+          ? await this.generateDirectTitle(context)
+          : context.article.requestedTitle;
+      const identityBlock = renderBrandIdentityBlock(
+        projectBrandProfile(context.article.plannedFacts),
+      );
       const messages = buildArticleGenerationMessages({
         brandName: context.brandName,
         productLine: context.productLine,
         targetRegion: context.targetRegion,
         contentType: context.article.contentType,
         topic: context.article.topic,
-        requestedTitle: context.article.requestedTitle,
+        requestedTitle,
         constraints: context.article.constraints,
         plannedFacts: context.article.plannedFacts,
+        ...(identityBlock ? { identityBlock } : {}),
+        ...(narrativeSeed ? { narrativeSeed } : {}),
       });
       const raw = await this.generation.complete([
         { role: "system", content: messages.system },
@@ -360,14 +441,14 @@ export class ArticleGenerationService {
       });
       const body = parseGeneratedArticleBody(
         raw,
-        context.article.requestedTitle,
+        requestedTitle,
       );
       return await this.persistence.finishGeneration({
         operationId: context.article.operationId,
         articleId: context.article.id,
         expectedRevision: context.article.revision,
         claimToken: context.claimToken,
-        title: context.article.requestedTitle,
+        title: requestedTitle,
         body,
         modelAudit: {
           policyVersion: ARTICLE_GENERATION_POLICY_VERSION,
@@ -406,7 +487,9 @@ export class ArticleGenerationService {
     if (article.revision !== input.expectedRevision) {
       throw new Error("article_generation_revision_conflict");
     }
-    return this.generateOne(article, "regenerate");
+    // 重试也发一颗种子（重洗单张），保持批次内表达多样性。
+    const [retrySeed] = dealNarrativeSeeds(1);
+    return this.generateOne(article, "regenerate", retrySeed);
   }
 
   body(input: {
@@ -434,7 +517,10 @@ export class ArticleGenerationService {
   }): Promise<ArticleProjection> {
     this.assertIdentity(input);
     const firstLine = input.body.trim().split(/\r?\n/, 1)[0]?.trim();
-    if (firstLine !== `# ${input.title.trim()}`) {
+    if (
+      normalizeTitleIdentity(firstLine ?? "") !==
+      normalizeTitleIdentity(`# ${input.title.trim()}`)
+    ) {
       throw new Error("article_generation_title_mismatch");
     }
     return this.persistence.edit(input);
@@ -454,6 +540,22 @@ export class ArticleGenerationService {
       context.article.plannedFacts,
       context.article.contentType,
     );
+    // 用户裁定（2026-08-18）：审核先只做格式确定性检查，反思 LLM 审核暂停
+    // （省一次 LLM 调用与等待；恢复时改回 REFLECTION_REVIEW_ENABLED=true）。
+    if (!REFLECTION_REVIEW_ENABLED) {
+      return this.persistence.finishReview({
+        operationId: context.article.operationId,
+        articleId: context.article.id,
+        expectedRevision: context.article.revision,
+        claimToken: context.claimToken,
+        review: {
+          policyVersion: ARTICLE_GENERATION_POLICY_VERSION,
+          passed: !deterministic.some((issue) => issue.severity === "blocking"),
+          issues: [...deterministic],
+        },
+        passed: !deterministic.some((issue) => issue.severity === "blocking"),
+      });
+    }
     let reflection;
     try {
       const messages = buildArticleReflectionMessages({
@@ -462,10 +564,13 @@ export class ArticleGenerationService {
         contentType: context.article.contentType,
       });
       reflection = parseArticleReflection(
-        await this.reflection.complete([
-          { role: "system", content: messages.system },
-          { role: "user", content: messages.user },
-        ]),
+        await this.reflection.complete(
+          [
+            { role: "system", content: messages.system },
+            { role: "user", content: messages.user },
+          ],
+          { maxTokens: 2048 },
+        ),
       );
     } catch (error) {
       reflection = unavailableReflection(

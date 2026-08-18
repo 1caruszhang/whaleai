@@ -91,9 +91,21 @@ const geoOperationResult = JSON.stringify([{
       workspaceId: 'brand-1',
       sessionId: 'session-1',
       goal: '完整 GEO 优化',
+      // 完整卡只在计划边界渲染：停靠认可门（awaiting 的 plan-ack 步骤）
+      // 才产出「GEO 操作已更新」大卡，中间态走闸门进度条。
       status: 'awaiting-confirmation',
       revision: 1,
-      steps: [{ id: 'step-1', title: '品牌理解', status: 'succeeded' }],
+      steps: [{
+        id: 'acknowledge-plan',
+        title: '认可本轮计划',
+        status: 'awaiting-confirmation',
+        confirmation: {
+          kind: 'plan-ack',
+          authority: 'geo-operation',
+          title: '认可本轮计划',
+          summary: '查看阶段与步骤计划后放行；各阶段的产物仍会停在各自的确认门。',
+        },
+      }],
     },
   }),
 }]);
@@ -155,7 +167,7 @@ describe('Message 决策卡渲染', () => {
 
     expect(screen.getByText('GEO 操作已更新')).toBeInTheDocument();
     expect(screen.getByText('完整 GEO 优化')).toBeInTheDocument();
-    expect(screen.getByText(/1\/1 步/)).toBeInTheDocument();
+    expect(screen.getByText(/0\/1 步/)).toBeInTheDocument();
   });
 
   // GD-13 后续回归：思考/流式未结束时决策卡不出现，

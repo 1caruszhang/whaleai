@@ -4,6 +4,7 @@ import { XIAOJING_GEO_PROVIDER_DEFAULTS } from "../../shared/geo/providerCapabil
 import type {
   DistributionPlanProjection,
   DistributionPlanStartInput,
+  DistributionPlanningContext,
 } from "../../shared/geo/distributionPlan";
 import {
   DistributionPlanningService,
@@ -87,7 +88,6 @@ function plan(id: string): DistributionPlanProjection {
       inputResources: 0,
       approvedResources: 0,
       filteredUnavailable: 0,
-      filteredLowPublishedRate: 0,
       filteredHighPrice: 0,
       alignedResources: 0,
       recommendedResources: 0,
@@ -103,7 +103,30 @@ function persistence() {
   const plans = new Map<string, DistributionPlanProjection>();
   let sequence = 0;
   const port: DistributionPlanPersistencePort = {
-    context: vi.fn(),
+    context: vi.fn(async (): Promise<DistributionPlanningContext> => ({
+      articleOperationId: "article-operation",
+      knowledgeVersion: 1,
+      industry: "汽车改装",
+      articles: [
+        {
+          id: "article-1",
+          operationId: "article-operation",
+          approvedRevision: 1,
+          title: "汽车行业观察",
+          topic: "新能源车售后",
+          contentType: "news" as const,
+        },
+      ],
+      questions: [
+        {
+          id: "q-1",
+          question: "新能源车售后怎么选？",
+          articleIds: ["article-1"],
+        },
+      ],
+      derivedKeywords: ["汽车音响", "改装"],
+    })),
+    channelPreferences: vi.fn(async () => undefined),
     latest: vi.fn(async () => plan("unrelated-latest")),
     get: vi.fn(async (planId) => {
       const value = plans.get(planId);
@@ -179,6 +202,48 @@ afterEach(() => {
   delete process.env.XIAOJING_SIDECAR_ID;
 });
 
+/** keyword-search 端口 fake：被动探测返回引用，主动召回返回渠道数组。 */
+function keywordSearch() {
+  return {
+    probeQuestion: vi.fn(async () => ({
+      rawEvidence: {
+        output: [
+          {
+            content: [
+              {
+                type: "output_text",
+                text: "回答正文",
+                annotations: [
+                  {
+                    type: "url_citation",
+                    url_citation: {
+                      url: "https://auto.example.com/question/1",
+                      title: "汽车日报",
+                    },
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      },
+      snapshot: {
+        engineId: "doubao",
+        provider: "volcengine",
+        capabilitySlot: "keyword-search",
+        model: "doubao-seed-2-0-lite",
+        endpointFamily: "ark-responses",
+        searchMode: "doubao-app-ai-search",
+        configurationFingerprint: "test",
+      } as never,
+    })),
+    search: vi.fn(
+      async () =>
+        '[{"name":"汽车日报","url":"https://auto.example.com/recall","topicNumbers":[1]}]',
+    ),
+  };
+}
+
 describe("DistributionPlanningService", () => {
   it("persists real resource fields and reads the exact created plan, never latest", async () => {
     const { port } = persistence();
@@ -186,6 +251,7 @@ describe("DistributionPlanningService", () => {
       { workspaceId: "workspace", sessionId: "session" },
       port,
       provider(),
+      keywordSearch(),
       () => new Date("2026-08-15T00:00:00.000Z"),
     );
 
@@ -216,6 +282,7 @@ describe("DistributionPlanningService", () => {
       { workspaceId: "workspace", sessionId: "session" },
       port,
       capability,
+      keywordSearch(),
       () => new Date(nowMs),
     );
     const request = {
@@ -245,6 +312,7 @@ describe("DistributionPlanningService", () => {
       { workspaceId: "workspace", sessionId: "session" },
       port,
       capability,
+      keywordSearch(),
     );
 
     const result = await service.start({
@@ -270,6 +338,7 @@ describe("DistributionPlanningService", () => {
       { workspaceId: "workspace", sessionId: "session" },
       port,
       provider(),
+      keywordSearch(),
     );
 
     await expect(

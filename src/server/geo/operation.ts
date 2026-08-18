@@ -199,11 +199,16 @@ export class GeoOperationService {
       sourceOperationId: operation.sourceOperationId ?? undefined,
       updateKnowledge: input.updateKnowledge,
     });
+    // 用户在聊天里显式回答了分支问题，这次交互本身就是计划放行：
+    // 剥离计划认可门，替换后的计划直接从首个工作步骤（或首个产物门）开始。
+    const releasedSteps = plan.steps.filter(
+      (step) => step.confirmation?.kind !== "plan-ack",
+    );
     return this.mutate({
       operationId: input.operationId,
       expectedRevision: input.expectedRevision,
       action: "replace-plan",
-      replacementSteps: plan.steps,
+      replacementSteps: releasedSteps,
     });
   }
 

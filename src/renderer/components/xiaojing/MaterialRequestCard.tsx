@@ -8,7 +8,7 @@ import {
   RotateCcw,
   XCircle,
 } from 'lucide-react';
-import { memo, useCallback, useEffect, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import {
   fetchBrandMaterialStatuses,
@@ -100,9 +100,13 @@ export default memo(function MaterialRequestCard({ data }: MaterialRequestCardPr
   const [rows, setRows] = useState<MaterialRow[]>([]);
   const [cards, setCards] = useState<KnowledgeCandidatesCardData[]>([]);
   const nextRowIdRef = useRef(0);
-  const identity = currentWorkspace?.id && sessionId && !isPendingSessionId(sessionId)
-    ? { workspaceId: currentWorkspace.id, sessionId }
-    : null;
+  const identity = useMemo(
+    () =>
+      currentWorkspace?.id && sessionId && !isPendingSessionId(sessionId)
+        ? { workspaceId: currentWorkspace.id, sessionId }
+        : null,
+    [currentWorkspace?.id, sessionId],
+  );
   const processing = rows.some((row) => row.status === 'processing');
   const canSubmit = identity !== null && !processing;
 

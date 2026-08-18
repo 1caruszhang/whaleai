@@ -1,0 +1,109 @@
+import { describe, expect, it } from "vitest";
+
+import {
+  DEFAULT_PREFERENCE_CHANNELS,
+  buildGlobalRecallPrompt,
+  clampTopicNumbers,
+  fuzzyMatchScore,
+  normalizeChannelName,
+  parseGlobalRecallResult,
+  preferenceEntryMatches,
+  registeredDomain,
+  resolvePreferenceChannels,
+  strictMatchScore,
+} from "./channelRecall";
+
+describe("channel recall ported from js_ai", () => {
+  it("reduces URLs to registered domains", () => {
+    expect(registeredDomain("https://auto.sohu.com/page/1")).toBe("sohu.com");
+    expect(registeredDomain("https://www.news.example.com.cn/a")).toBe(
+      "example.com.cn",
+    );
+    expect(registeredDomain("not a url")).toBeNull();
+  });
+
+  it("keeps strict matching tighter than fuzzy matching", () => {
+    const source = { title: "搜狐健康", url: "https://health.sohu.com" };
+    expect(strictMatchScore(source, "搜狐健康频道")).toBe(1.0);
+    expect(strictMatchScore(source, "毫不相关名字")).toBe(0);
+    // 品牌家族 + 渠道字重叠走模糊分（≥0.4 疑似命中），严格分不放行。
+    expect(fuzzyMatchScore(source, "搜狐网健康（GEO）")).toBeGreaterThan(0.4);
+    expect(strictMatchScore(source, "毫不相关名字")).toBe(0);
+  });
+
+  it("resolves the preference list as (defaults − excluded) + additions", () => {
+    const resolved = resolvePreferenceChannels({
+      excludedPreferenceChannels: ["盐城网"],
+      additionalPreferenceChannels: [
+        { name: "用户手输渠道", domain: "custom.example.com" },
+      ],
+    });
+    const names = resolved.map((entry) => entry.name);
+    expect(names).not.toContain("盐城网");
+    expect(names).toContain("蓝色河畔（GEO排名）");
+    expect(names).toContain("用户手输渠道");
+    // 全角/半角括号归一后精确相等。
+    expect(
+      preferenceEntryMatches(
+        { name: "南郡新闻(官方头条号)", exact: true },
+        { name: "南郡新闻（官方头条号）", entranceLink: null },
+      ),
+    ).toBe(true);
+    // exact 名单不泛化到同前缀兄弟资源。
+    expect(
+      preferenceEntryMatches(
+        { name: "南郡新闻（官方头条号）", exact: true },
+        { name: "南郡新闻（geo优化）", entranceLink: null },
+      ),
+    ).toBe(false);
+    // 用户手输条目走严格→模糊容错。
+    expect(
+      preferenceEntryMatches(
+        { name: "南郡新闻" },
+        { name: "南郡新闻（geo优化）", entranceLink: null },
+      ),
+    ).toBe(true);
+    // 域名优先。
+    expect(
+      preferenceEntryMatches(
+        { name: "随便叫什么", domain: "https://auto.sohu.com" },
+        { name: "搜狐汽车", entranceLink: "https://car.sohu.com" },
+      ),
+    ).toBe(true);
+  });
+
+  it("ships the same built-in preference baseline as js_ai", () => {
+    expect(DEFAULT_PREFERENCE_CHANNELS).toHaveLength(10);
+    expect(DEFAULT_PREFERENCE_CHANNELS.every((entry) => entry.exact === true)).toBe(true);
+    expect(normalizeChannelName("南郡新闻（官方头条号）")).toBe(
+      normalizeChannelName("南郡新闻(官方头条号)"),
+    );
+  });
+
+  it("parses global recall output with the registered-domain gate", () => {
+    const channels = parseGlobalRecallResult(
+      '```json\n[{"name":"搜狐汽车","url":"https://auto.sohu.com","topicNumbers":[1,99,0,1.5]},{"name":"无URL渠道","topicNumbers":[1]},{"name":"坏域名","url":"http://localhost/x"}]\n```',
+    );
+    expect(channels).toEqual([
+      {
+        name: "搜狐汽车",
+        url: "https://auto.sohu.com",
+        // 解析层只做类型收敛（去 0 与非整数）；越界编号由 clamp 层处理。
+        topicNumbers: [1, 99],
+      },
+    ]);
+    expect(clampTopicNumbers([1, 2, 99], 2)).toEqual([1, 2]);
+  });
+
+  it("builds the numbered-topic global recall prompt", () => {
+    const prompt = buildGlobalRecallPrompt({
+      topics: ["新能源车售后", "新能源车售后", "门店服务指南"],
+      industry: "汽车改装",
+      derivedKeywords: ["汽车音响"],
+    });
+    expect(prompt).toContain("[1]新能源车售后 [2]门店服务指南");
+    expect(prompt).toContain("行业：汽车改装");
+    expect(prompt).toContain("衍生关键词：汽车音响");
+    expect(prompt).toContain("严禁编造或臆测任何 URL");
+  });
+});

@@ -207,6 +207,51 @@ describe("topic/type/title shared contract", () => {
     ).toThrow("topic_plan_title_candidates_insufficient");
   });
 
+  it("accepts business-anchor variants and reports per-rule reject counts", () => {
+    // 业务词锚集（用户裁决 2026-08-19 修正）：行业后缀锚「音响改装」逐字命中
+    // 或品牌业务词整体替换；「汽车音响店」这类丢业务动作的写法不合格。
+    const businessTerms = [
+      "汽车音响升级",
+      "全车隔音降噪",
+      "360°全景影像",
+      "无损改装",
+      "DSP功放",
+    ];
+    expect(
+      validateTitleCandidates({
+        candidates: [
+          "成都音响改装升级避坑指南",
+          "成都无损改装怎么选",
+          "成都全景影像改装预算参考",
+        ],
+        contentType: "guide",
+        targetRegion: "成都",
+        industry: "汽车音响改装",
+        businessTerms,
+        brandNames: [],
+        competitors: [],
+        currentYear: 2026,
+      }),
+    ).toHaveLength(3);
+    // 丢了业务动作（音响店/贴膜/洗车）全部拦截，且错误码带拒因计数。
+    expect(() =>
+      validateTitleCandidates({
+        candidates: [
+          "成都汽车音响店怎么挑",
+          "成都汽车贴膜哪家快",
+          "成都洗车店盘点",
+        ],
+        contentType: "guide",
+        targetRegion: "成都",
+        industry: "汽车音响改装",
+        businessTerms,
+        brandNames: [],
+        competitors: [],
+        currentYear: 2026,
+      }),
+    ).toThrow("topic_plan_title_candidates_insufficient:industry=3");
+  });
+
   it("records embedding-based semantic dedup and chooses a non-duplicate candidate", () => {
     const result = selectDistinctTitles({
       protectedSelections: [{ itemId: "protected", title: "既有标题" }],
@@ -232,6 +277,45 @@ describe("topic/type/title shared contract", () => {
         threshold: TOPIC_PLAN_TITLE_DUPLICATE_THRESHOLD,
       },
     });
+  });
+
+  it("prefers a structurally distinct candidate when earlier picks used the same skeleton", () => {
+    // 2026-08-18 裁定：批内标题句式不得同构——语义都过关时优先结构指纹不同者。
+    const result = selectDistinctTitles({
+      items: [
+        { itemId: "a", candidates: ["成都汽车音响改装哪家好？六大维度测评"] },
+        {
+          itemId: "b",
+          candidates: [
+            "成都汽车隔音哪家好？三大维度测评",
+            "成都汽车隔音升级指南：流程与价格",
+          ],
+        },
+      ],
+      vectors: {
+        "a:成都汽车音响改装哪家好？六大维度测评": [1, 0],
+        "b:成都汽车隔音哪家好？三大维度测评": [0.6, 0.8],
+        "b:成都汽车隔音升级指南：流程与价格": [0, 1],
+      },
+    });
+    expect(result.map((entry) => entry.title)).toEqual([
+      "成都汽车音响改装哪家好？六大维度测评",
+      "成都汽车隔音升级指南：流程与价格",
+    ]);
+  });
+
+  it("falls back to the first passing candidate when every candidate shares the used structure", () => {
+    const result = selectDistinctTitles({
+      items: [
+        { itemId: "a", candidates: ["成都汽车音响改装推荐"] },
+        { itemId: "b", candidates: ["成都汽车隔音推荐"] },
+      ],
+      vectors: {
+        "a:成都汽车音响改装推荐": [1, 0],
+        "b:成都汽车隔音推荐": [0.2, 0.98],
+      },
+    });
+    expect(result[1].title).toBe("成都汽车隔音推荐");
   });
 
   it("never overwrites user-edited or approved items during local regeneration", () => {
@@ -278,7 +362,36 @@ describe("topic/type/title shared contract", () => {
     expect(prompt).toContain("搜索意图");
     expect(prompt).toContain("避免同义重复");
     expect(prompt).toContain("目标品牌");
-    expect(prompt).toContain("中国市场");
     expect(prompt).toContain("拟覆盖知识事实");
+    // ADR-0006 标题 prompt 不变量：风格释义、占位符 few-shot、反抄录、口语化反堆砌。
+    // 2026-08-18：few-shot 换为用户《标题示范》12 条的泛化母本（35 字上限）。
+    expect(prompt).toContain("疑问式");
+    expect(prompt).toContain("【地域】【行业】选【目标品牌】—【卖点】·【卖点】·【卖点】");
+    expect(prompt).toContain("只传风格与结构元素");
+    expect(prompt).toContain("严禁照抄原句");
+    expect(prompt).toContain("像真人会搜的");
+    expect(prompt).toContain("有点击吸引力但不标题党");
+    expect(prompt).toContain("标题长度不超过 28 个中文字符");
+    expect(prompt).toContain("【品牌名红线】");
+    expect(prompt).toContain("内容类型：guide");
+  });
+
+  it("injects the dealt structure hint and the anti-uniform rule into the title prompt", () => {
+    const prompt = buildTitlePlanningPrompt({
+      itemId: "item-topic-1-guide",
+      topic: topics[0],
+      contentType: "guide",
+      sourceQuestions: questions.slice(0, 2),
+      plannedFacts: item().plannedFacts,
+      brandName: "鲸跃",
+      competitors: [],
+      industry: "汽车音响改装",
+      targetRegion: "成都",
+      currentYear: 2026,
+      existingTitles: [],
+      structureHint: "冒号副题：主标题：副题说明（测评/解析/指南等），冒号分层",
+    });
+    expect(prompt).toContain("【句式错开】本条结构倾向——冒号副题");
+    expect(prompt).toContain("不得复用已出现过的形态");
   });
 });

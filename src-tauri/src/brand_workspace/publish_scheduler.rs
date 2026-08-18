@@ -749,11 +749,13 @@ impl BrandWorkspaceStore {
                 .and_then(Value::as_f64)
                 .filter(|value| value.is_finite() && *value >= 0.0)
                 .ok_or_else(|| "publish_channel_price_unknown".to_string())?;
+            // 发布率不是决策输入（用户裁决 2026-08-18）：缺失或非法时快照记 0，
+            // 不再阻断发布准备；数值仍进确认摘要保持确定性。
             let published_rate = candidate
                 .get("publishedRate")
                 .and_then(Value::as_f64)
                 .filter(|value| value.is_finite() && *value >= 0.0)
-                .ok_or_else(|| "publish_channel_rate_unknown".to_string())?;
+                .unwrap_or(0.0);
             let kind = candidate
                 .get("kind")
                 .and_then(Value::as_str)

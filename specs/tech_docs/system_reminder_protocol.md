@@ -15,7 +15,9 @@
 发送顺序固定为：
 
 1. Rust owner 提交决策并返回成功的 exact revision。
-2. Node 路由经 `sendXiaojingMessage`（`xiaojing-reminder-send.ts` 单出口）在同一 Session 投递隐藏 envelope；没有 visible tail，因此不会生成虚假用户气泡。
+2. Node 路由经 `sendXiaojingMessage`（`xiaojing-reminder-send.ts` 单出口）在同一 Session 投递隐藏 envelope；没有 visible tail。
 3. Agent 重新读取对应 owner，再决定下一步。
+
+Renderer 投影：决策回执 reminder 会作为用户消息进入 transcript（Agent 需要读到信封原文才能继续），聊天流里由 `parseDecisionReminderText`（`src/shared/systemReminder.ts`）识别「整条消息就是一个决策回执信封」的用户消息，在 `Message.tsx` 投影成自然语言气泡（如「认可本次计划」），并打上 `data-system-reminder` 标记；XML 扁平文本与 UUID 不进入可见 UI。解析失败或真实用户输入回落普通用户气泡，信封原文始终保留在 transcript 中供 LLM。
 
 Reminder 不是持久化 authority、队列或重试日志。提交失败时不得发送；重复投递也不能绕过 idempotency/revision 检查。提醒入队失败不回滚已提交的决策，路由响应显式返回 `notificationQueued` / `notificationError` 状态。

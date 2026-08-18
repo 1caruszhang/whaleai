@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
 
 import {
@@ -5,12 +7,32 @@ import {
   mapWithArticleConcurrency,
   type ArticlePersistencePort,
 } from "./article-generation";
-import type {
-  ArticleGenerationContext,
-  ArticleOperationProjection,
-  ArticleProjection,
+import {
+  ARTICLE_GENERATION_POLICY_VERSION,
+  type ArticleGenerationContext,
+  type ArticleOperationProjection,
+  type ArticleProjection,
 } from "../../shared/geo/articleGeneration";
 import type { GeoTextCapability, GeoTextMessage } from "./provider-capabilities";
+
+/** direct 路径先跑标题生成（guide/知识服务，满足 validateTitleCandidates）再跑正文。 */
+const TITLE_CANDIDATES = [
+  "测试品牌知识服务怎么选",
+  "知识服务怎么选看这3点",
+  "想做知识服务先搞清这几个问题",
+];
+
+type CompleteOptions = Parameters<GeoTextCapability["complete"]>[1];
+
+function directGenerationComplete(
+  messages: readonly GeoTextMessage[],
+  options?: CompleteOptions,
+): string {
+  if (options?.purpose === "title-planning") {
+    return JSON.stringify({ candidates: TITLE_CANDIDATES });
+  }
+  return `# ${TITLE_CANDIDATES[0]}\n\n## 定义\n品牌成立10年。\n\n## 清单\n- 核对事实\n- 固定版本`;
+}
 
 function article(id: string): ArticleProjection {
   return {
@@ -51,7 +73,7 @@ function operation(articles: ArticleProjection[]): ArticleOperationProjection {
     topicPlanId: null,
     topicPlanRevision: null,
     knowledgeVersion: 7,
-    policyVersion: "js-ai-dev-direct-article-generation-v1",
+    policyVersion: "xiaojing-content-prompt-v2",
     status: "running",
     articles,
     createdAt: "2026-01-01T00:00:00Z",
@@ -106,11 +128,13 @@ describe("ArticleGenerationService", () => {
     } as unknown as ArticlePersistencePort;
     const generation = {
       slot: "generation",
-      complete: vi.fn(async (messages: readonly GeoTextMessage[]) => {
-        const prompt = messages.map((message) => message.content).join("\n");
-        if (prompt.includes("标题 a1")) throw new Error("provider unavailable");
-        return "# 标题 a2\n\n## 定义\n品牌成立10年。\n\n## 清单\n- 核对事实\n- 固定版本";
-      }),
+      complete: vi.fn(
+        async (messages: readonly GeoTextMessage[], options?: CompleteOptions) => {
+          const prompt = messages.map((message) => message.content).join("\n");
+          if (prompt.includes("主题 a1")) throw new Error("provider unavailable");
+          return directGenerationComplete(messages, options);
+        },
+      ),
     } satisfies GeoTextCapability;
     const reflection = {
       slot: "reflection",
@@ -145,6 +169,11 @@ describe("ArticleGenerationService", () => {
     expect(generation.complete).toHaveBeenCalledWith(
       expect.any(Array),
       { maxTokens: 8_192, temperature: 0.85, topP: 0.9 },
+    );
+    // direct 路径的标题生成调用（ADR-0006 §2）。
+    expect(generation.complete).toHaveBeenCalledWith(
+      expect.any(Array),
+      { purpose: "title-planning", maxTokens: 2048 },
     );
   });
 
@@ -204,16 +233,19 @@ describe("ArticleGenerationService", () => {
     });
     const generationA = {
       slot: "generation",
-      complete: vi.fn(async () => {
-        markAStarted();
-        await aCanFinish;
-        return "# 标题 article-a\n\n## 定义\n知识服务。\n\n## 清单\n- 核对事实\n- 固定版本";
-      }),
+      complete: vi.fn(
+        async (messages: readonly GeoTextMessage[], options?: CompleteOptions) => {
+          markAStarted();
+          await aCanFinish;
+          return directGenerationComplete(messages, options);
+        },
+      ),
     } satisfies GeoTextCapability;
     const generationB = {
       slot: "generation",
-      complete: vi.fn(async () =>
-        "# 标题 article-b\n\n## 定义\n知识服务。\n\n## 清单\n- 核对事实\n- 固定版本",
+      complete: vi.fn(
+        async (messages: readonly GeoTextMessage[], options?: CompleteOptions) =>
+          directGenerationComplete(messages, options),
       ),
     } satisfies GeoTextCapability;
     const portA = makePort(operationA);
@@ -376,7 +408,7 @@ describe("ArticleGenerationService", () => {
           articleId: draft.id,
           revision: 1,
           title: draft.requestedTitle,
-          body: `# ${draft.requestedTitle}\n\n## 定义\n知识服务。\n\n## 清单\n- 核对事实\n- 固定版本`,
+          body: `# ${draft.requestedTitle}\n\n## 定义\n知识服务。\n\n## 清单\n- 核对事实\n- 固定版本\n\n## 场景\n- 团队协作`,
           approved: false,
         },
       })),
@@ -400,16 +432,33 @@ describe("ArticleGenerationService", () => {
       expectedRevision: 1,
     });
 
+    // 用户裁定（2026-08-18）：审核先只做格式确定性检查，反思 LLM 暂停——
+    // 反思 provider 即便返回坏 JSON 也不参与裁决，格式合格即通过。
     expect(finishReview).toHaveBeenCalledWith(
       expect.objectContaining({
-        passed: false,
+        passed: true,
         review: expect.objectContaining({
-          passed: false,
-          reflection: expect.objectContaining({
-            semanticQuality: expect.objectContaining({ pass: false }),
-          }),
+          passed: true,
+          issues: [],
         }),
       }),
     );
+    expect(
+      (finishReview.mock.calls[0]?.[0] as { review?: { reflection?: unknown } })
+        .review?.reflection,
+    ).toBeUndefined();
+  });
+});
+
+describe("article generation policy version contract with BrandWorkspace", () => {
+  it("stamps geo_article_operations with the policy version the Sidecar reports in model audit", () => {
+    const rust = readFileSync(
+      fileURLToPath(
+        new URL("../../../src-tauri/src/brand_workspace/articles.rs", import.meta.url),
+      ),
+      "utf8",
+    );
+    const declared = rust.match(/const POLICY_VERSION: &str = "([^"]+)";/);
+    expect(declared?.[1]).toBe(ARTICLE_GENERATION_POLICY_VERSION);
   });
 });

@@ -5,7 +5,7 @@ import {
   type GeoContentType,
 } from "./portContract";
 
-export const TOPIC_PLAN_POLICY_VERSION = "js-ai-dev-topic-type-title-v1";
+export const TOPIC_PLAN_POLICY_VERSION = "xiaojing-content-prompt-v2";
 export const TOPIC_PLAN_MAX_ITEMS = 50;
 export const TOPIC_PLAN_MAX_CONFIRMED_ITEMS = 20;
 export const TOPIC_PLAN_TITLE_BATCH_SIZE = 3;
@@ -437,6 +437,112 @@ export function selectPlannedFacts(input: {
     .map(({ fact }) => fact);
 }
 
+/** 标题风格的中文释义（ADR-0006：portContract 的英文 style 必须配上可执行释义）。 */
+export const TITLE_STYLE_DEFINITIONS: Record<GeoContentType, string> = {
+  guide:
+    "疑问式——以设问/反问引发读者好奇心，直击痛点，给出求解方向",
+  showcase:
+    "SEO 式——自然嵌入地域+行业与品牌名，像品牌详情页的标题",
+  ranking:
+    "吸引眼球——并列陈列口吻，客观中立，绝不带名次、评分或比较断言",
+  news: "专业严谨——新闻式陈述，突出事件性与信息量",
+  news_light: "专业严谨——轻量便民资讯口吻，贴近日常表达",
+};
+
+/**
+ * 占位符式 few-shot：母本为用户提供的《标题示范》12 条真实标题（2026-08-18
+ * 裁定「完全按照实例」），逐条泛化为占位符。品牌分布忠实示范：guide 2/3、
+ * showcase 1/3、ranking 0/3、news 3/3（news_light 无示范母本，沿用旧例）。
+ * 示范只传风格与结构元素（破折号卖点串、间隔号、冒号副题、问句、数字、
+ * 年份），生成时结合主题泛化，不逐字套骨架。
+ */
+const TITLE_FEWSHOT: Record<GeoContentType, readonly string[]> = {
+  guide: [
+    "【地域】【行业】选【目标品牌】—【卖点】·【卖点】·【卖点】",
+    "【年份】年【地域】【行业】【数字】大核心服务深度测评：【方向】选型指南",
+    "【地域】【行业】进入【趋势短语】时代：解析【目标品牌】的技术体系与全链服务能力",
+  ],
+  showcase: [
+    "【地域】【行业】哪家靠谱？【目标品牌】【数字】年匠心技术+【背书短语】",
+    "【地域】【行业】哪家好？【数字】大核心维度全面测评",
+    "【地域】【行业】专业实测：多维度解析优质推荐",
+  ],
+  ranking: [
+    "【地域】【行业】店哪家专业靠谱？【规模亮点】本地推荐",
+    "【年份】【地域】【行业】推荐",
+    "【地域】【行业】哪家好？【维度】-【维度】-【维度】横向对比",
+  ],
+  news: [
+    "【新做法】对比【旧做法】：【目标品牌】【行业】升级的核心优势解析",
+    "【年份】【地域】【行业】本地连锁品牌服务品质多维度升级——【地域】【目标品牌】",
+    "【痛点短语】【目标品牌】推出【方案短语】",
+  ],
+  news_light: [
+    "【地域】【行业】便民新选择：【目标品牌】服务升级上线",
+    "【地域】居民注意：【行业】服务有了新变化",
+    "【目标品牌】走进【地域】：【行业】服务体验小升级",
+  ],
+};
+
+/**
+ * 标题结构种子（2026-08-18 裁定：每批标题句式不得同构）：骨架族源自示范
+ * 母本，按条目洗牌发牌（同批不重复直到发尽），只作结构倾向参考。
+ */
+export interface TitleStructureSeed {
+  name: string;
+  hint: string;
+}
+
+export const TITLE_STRUCTURE_SEEDS: readonly TitleStructureSeed[] = [
+  { name: "问句引导", hint: "前半抛出用户真实疑问（哪家好/怎么选/靠谱吗），后半给出解答方向" },
+  { name: "冒号副题", hint: "主标题：副题说明（测评/解析/指南等），冒号分层" },
+  { name: "破折号卖点串", hint: "主题—卖点·卖点·卖点，破折号后用间隔号串 2–3 个核心卖点" },
+  { name: "年份盘点", hint: "以年份开头，配合数字盘点（N 大/N 个/N 维度）" },
+  { name: "痛点叙事", hint: "以具体痛点场景开头，品牌动作收尾（推出/上线）" },
+  { name: "对比解析", hint: "新旧做法或两种方案对比，冒号后解析要点" },
+  { name: "极简推荐", hint: "年份+地域+行业+推荐类短句，不加修饰" },
+  { name: "实测测评", hint: "专业实测/全面测评口吻，配数字维度词（六大/多维度）" },
+];
+
+export function shuffledTitleStructureSeeds(
+  rng: () => number = Math.random,
+): TitleStructureSeed[] {
+  const deck = [...TITLE_STRUCTURE_SEEDS];
+  for (let i = deck.length - 1; i > 0; i -= 1) {
+    const j = Math.floor(rng() * (i + 1));
+    [deck[i], deck[j]] = [deck[j], deck[i]];
+  }
+  return deck;
+}
+
+/** 同批洗牌发牌：一副发尽后重新洗牌继续，保证同批尽量不重复。 */
+export function dealTitleStructureSeeds(
+  count: number,
+  rng: () => number = Math.random,
+): TitleStructureSeed[] {
+  const dealt: TitleStructureSeed[] = [];
+  while (dealt.length < count) {
+    dealt.push(
+      ...shuffledTitleStructureSeeds(rng).slice(0, count - dealt.length),
+    );
+  }
+  return dealt;
+}
+
+/** 结构指纹：结构元素（年份/问句/冒号/破折号/间隔号/加号/数字）的组合签名。 */
+export function titleStructureSignature(title: string): string {
+  const trimmed = title.trim();
+  const parts: string[] = [];
+  if (/^[12]\d{3}/.test(trimmed)) parts.push("year");
+  if (/[？?]/.test(trimmed)) parts.push("q");
+  if (/[：:]/.test(trimmed)) parts.push("colon");
+  if (/[—–－]/.test(trimmed)) parts.push("dash");
+  if (/[·•]/.test(trimmed)) parts.push("dots");
+  if (/\+/.test(trimmed)) parts.push("plus");
+  if (/\d/.test(trimmed.replace(/^[12]\d{3}/, ""))) parts.push("num");
+  return parts.join("-") || "plain";
+}
+
 export function buildTitlePlanningPrompt(input: {
   itemId: string;
   topic: TopicPlanTopic;
@@ -447,9 +553,13 @@ export function buildTitlePlanningPrompt(input: {
   shortName?: string;
   competitors: readonly string[];
   industry: string;
+  /** 品牌已确认业务词汇（产品 + 衍生关键词）；标题业务词锚集来源之一。 */
+  businessTerms?: readonly string[];
   targetRegion: string;
   currentYear: number;
   existingTitles: readonly string[];
+  /** 本条结构种子 hint（TITLE_STRUCTURE_SEEDS 发牌）；缺省给通用错开规则。 */
+  structureHint?: string;
 }): string {
   const contract = GEO_PORT_CONTRACT.promptStructures.titleGeneration;
   const brandRule =
@@ -462,16 +572,36 @@ export function buildTitlePlanningPrompt(input: {
     input.contentType === "ranking"
       ? `ranking 标题必须包含当前年份「${input.currentYear}」。`
       : "不得为了时效性编造年份、政策或事件。";
+  // 业务词锚集（用户裁决 2026-08-19 修正）：行业后缀锚 + 品牌业务词，
+  // 提示词把锚集显式列给模型，与校验器同契约。
+  const anchors = titleBusinessAnchors({
+    industry: input.industry,
+    businessTerms: input.businessTerms,
+  });
+  const anchorList = anchors.filter((anchor) => anchor.length >= 3).slice(0, 8);
+  const industryRule = `1. 每个标题【必须包含】${input.targetRegion ? `「${input.targetRegion}」和` : ""}一个业务词（逐字出现，可任选其一）：${anchorList.map((anchor) => `「${anchor}」`).join("、") || `「${input.industry}」`}。业务词可以换成品牌其他真实业务（如「无损改装」「音响改装升级」「全景影像改装」），但连一个业务词都不含的标题不合格。`;
   return [
-    "你是一位面向中国市场的 GEO 标题策划专家。为一个确定的主题/内容类型生成 3–5 个标题候选。",
-    "标题必须同时覆盖来源问题的核心诉求、匹配搜索意图、避免与已有标题重复、适配目标品牌，并符合自然中文搜索表达；不得关键词堆砌或标题党。",
-    `内容类型：${input.contentType}；标题风格：${contract.styles[input.contentType]}；最多 ${contract.maximumCharacters[input.contentType]} 个中文字符。`,
-    `每个标题必须自然包含目标地域「${input.targetRegion}」和行业规范统称「${input.industry}」。`,
+    "你是一位专业的 GEO（生成式引擎优化）标题写作专家。",
+    `任务：为下方确定的主题生成 ${contract.candidates[0]}–${contract.candidates[1]} 个高质量的文章标题候选。`,
+    industryRule,
+    "2. 标题要自然口语化、像真人会搜的——带地域、带场景，不是关键词堆砌。",
+    `3. 标题长度不超过 ${contract.maximumCharacters[input.contentType]} 个中文字符，有点击吸引力但不标题党。`,
+    "4. 标题【禁止出现】「头部」「首选」「TOP」「排行」「榜」「靠谱」「权威」「有限」「背书」「医院排名」以及「最」「第一」「唯一」「绝对」等极限词。",
+    `5. 风格倾向（${contract.styles[input.contentType]}）：${TITLE_STYLE_DEFINITIONS[input.contentType]}`,
+    `6. 【品牌名红线】标题中如出现品牌名，【只能】是目标品牌「${input.shortName || input.brandName}」；严禁出现任何其他真实公司名/店铺名/品牌名（竞品名单：${input.competitors.join("、") || "无已确认竞品"}），不确定的名字一律用泛称（本地连锁/三店连锁/A 品牌）。`,
+    ...(input.structureHint
+      ? [
+          `7. 【句式错开】本条结构倾向——${input.structureHint}；且不得与「已有标题」同构：问句式、冒号副题、破折号卖点串、年份盘点等结构元素的组合不得复用已出现过的形态。`,
+        ]
+      : [
+          "7. 【句式错开】同一批标题句式必须错开：问句式、冒号副题、破折号卖点串、年份盘点等结构不得连续复用同一种。",
+        ]),
     brandRule,
     yearRule,
-    `严禁出现竞品名：${input.competitors.join("、") || "无已确认竞品"}。`,
-    "严禁出现「头部」「首选」「TOP」「排行」「榜」「靠谱」「权威」「有限」「背书」「医院排名」以及「最」「第一」「唯一」「绝对」等极限词。",
-    '只返回 JSON：{"itemId":"...","candidates":["标题1","标题2","标题3"],"rationale":{"questionCoverage":"...","searchIntent":"...","differentiation":"...","brandFit":"...","chinaMarketExpression":"..."}}',
+    "【示例（母本为真实示范标题的泛化，只传风格与结构元素——破折号卖点串、间隔号·、冒号副题、问句、数字、年份；结合本主题与品牌事实泛化改写，严禁照抄原句、严禁与示例高度雷同）】",
+    ...TITLE_FEWSHOT[input.contentType].map((example) => `  · ${example}`),
+    "## 输入信息",
+    `内容类型：${input.contentType}（风格 ${contract.styles[input.contentType]}）`,
     `itemId：${input.itemId}`,
     `主题：${input.topic.name}｜${input.topic.summary}`,
     `搜索意图：${input.topic.searchIntent}`,
@@ -479,6 +609,7 @@ export function buildTitlePlanningPrompt(input: {
     `拟覆盖知识事实：${input.plannedFacts.map((fact) => `${fact.predicate}=${fact.normalizedValueJson}`).join("；")}`,
     `目标品牌：${input.brandName}${input.shortName ? `（简称：${input.shortName}）` : ""}`,
     `已有标题（必须避免同义重复）：${input.existingTitles.join("；") || "无"}`,
+    '只返回 JSON：{"itemId":"...","candidates":["标题1","标题2","标题3"],"rationale":{"questionCoverage":"...","searchIntent":"...","differentiation":"...","brandFit":"...","chinaMarketExpression":"..."}}',
   ].join("\n");
 }
 
@@ -540,11 +671,44 @@ const FORBIDDEN_TITLE_TERMS = [
   "绝对",
 ] as const;
 
+/**
+ * 标题业务词锚集（用户裁决 2026-08-19 修正）：标题必须逐字包含一个业务词。
+ * 锚来源：①行业词的全部 ≥4 字后缀（「汽车音响改装」→ 含「音响改装」，丢
+ * 品类前缀但保业务动作）；②品牌已确认业务词汇（产品 + 衍生关键词），并附
+ * 去前导数字/符号噪声的变体（「360°全景影像」→「全景影像」）。命中任一锚
+ * 即合格——「无损改装」「音响改装升级」「全景影像改装」都是合法业务替换；
+ * 「汽车音响店」这类丢了业务动作的写法不合格。
+ */
+export function titleBusinessAnchors(input: {
+  industry: string;
+  businessTerms?: readonly string[];
+}): string[] {
+  const anchors = new Set<string>();
+  const industry = input.industry.trim();
+  if (industry) {
+    const minLength = Math.min(4, industry.length);
+    for (let start = 0; start <= industry.length - minLength; start += 1) {
+      anchors.add(industry.slice(start));
+    }
+  }
+  for (const term of input.businessTerms ?? []) {
+    const trimmed = term.trim();
+    if (trimmed.length < 3) continue;
+    anchors.add(trimmed);
+    const stripped = trimmed.replace(/^[0-9０-９°·.．\s]+/, "");
+    if (stripped.length >= 3) anchors.add(stripped);
+    if (anchors.size > 120) break;
+  }
+  return [...anchors];
+}
+
 export function validateTitleCandidates(input: {
   candidates: readonly string[];
   contentType: GeoContentType;
   targetRegion: string;
   industry: string;
+  /** 品牌已确认业务词汇（产品 + 衍生关键词）；缺省只用行业词后缀锚。 */
+  businessTerms?: readonly string[];
   brandNames: readonly string[];
   competitors: readonly string[];
   currentYear: number;
@@ -554,31 +718,73 @@ export function validateTitleCandidates(input: {
       input.contentType
     ];
   const targetBrand = input.brandNames.find((brand) => brand.trim())?.trim();
+  const anchors = titleBusinessAnchors({
+    industry: input.industry,
+    businessTerms: input.businessTerms,
+  });
   const unique = new Set<string>();
+  const rejected = new Map<string, number>();
+  const reject = (reason: string) =>
+    rejected.set(reason, (rejected.get(reason) ?? 0) + 1);
   const valid = input.candidates.filter((candidate) => {
     const title = candidate.trim();
     const identity = title
       .toLocaleLowerCase("zh-CN")
       .replace(/[\s，,。.!！?？:：;；—_-]+/g, "");
-    if (!identity || unique.has(identity) || Array.from(title).length > limit)
+    if (!identity || unique.has(identity) || Array.from(title).length > limit) {
+      reject("length-or-duplicate");
       return false;
-    if (title.includes("【目标品牌】")) return false;
-    if (FORBIDDEN_TITLE_TERMS.some((term) => title.includes(term))) return false;
-    if (input.competitors.some((competitor) => competitor && title.includes(competitor)))
+    }
+    // few-shot 占位符不止【目标品牌】（还有【卖点】【数字】等），任何未替换的
+    // 占位符都说明模型在照抄示例。
+    if (title.includes("【") || title.includes("】")) {
+      reject("placeholder");
       return false;
-    if (input.targetRegion && !title.includes(input.targetRegion)) return false;
-    if (input.industry && !title.includes(input.industry)) return false;
-    if (input.contentType === "showcase" && targetBrand && !input.brandNames.some((brand) => brand && title.includes(brand)))
+    }
+    if (FORBIDDEN_TITLE_TERMS.some((term) => title.includes(term))) {
+      reject("forbidden-term");
       return false;
-    if (input.contentType === "ranking" && input.brandNames.some((brand) => brand && title.includes(brand)))
+    }
+    if (input.competitors.some((competitor) => competitor && title.includes(competitor))) {
+      reject("competitor");
       return false;
-    if (input.contentType === "ranking" && !title.includes(String(input.currentYear)))
+    }
+    if (input.targetRegion && !title.includes(input.targetRegion)) {
+      reject("region");
       return false;
+    }
+    // 业务词命中（用户裁决 2026-08-19 修正）：锚集逐字包含——行业后缀保业务
+    // 动作（「音响改装」逐字），品牌业务词（无损改装/全景影像改装等）可整体
+    // 替换；完全不含任何业务词的标题（贴膜/洗车类跑题）仍然拦截。
+    if (anchors.length > 0 && !anchors.some((anchor) => title.includes(anchor))) {
+      reject("industry");
+      return false;
+    }
+    if (input.contentType === "showcase" && targetBrand && !input.brandNames.some((brand) => brand && title.includes(brand))) {
+      reject("showcase-brand");
+      return false;
+    }
+    if (input.contentType === "ranking" && input.brandNames.some((brand) => brand && title.includes(brand))) {
+      reject("ranking-brand");
+      return false;
+    }
+    if (input.contentType === "ranking" && !title.includes(String(input.currentYear))) {
+      reject("ranking-year");
+      return false;
+    }
     unique.add(identity);
     return true;
   });
   if (valid.length < GEO_PORT_CONTRACT.promptStructures.titleGeneration.candidates[0]) {
-    throw new Error("topic_plan_title_candidates_insufficient");
+    // 拒因计数（不含标题内容）随错误码透出，现场即可定位是哪条规则杀的。
+    const breakdown = [...rejected.entries()]
+      .map(([reason, count]) => `${reason}=${count}`)
+      .join(",");
+    throw new Error(
+      breakdown
+        ? `topic_plan_title_candidates_insufficient:${breakdown}`
+        : "topic_plan_title_candidates_insufficient",
+    );
   }
   return valid.slice(0, GEO_PORT_CONTRACT.promptStructures.titleGeneration.candidates[1]);
 }
@@ -601,13 +807,11 @@ export function selectDistinctTitles(input: {
     evidence: TopicPlanDeduplicationEvidence;
   }> = [];
   for (const item of input.items) {
-    let choice:
-      | {
-          title: string;
-          maxSimilarity: number;
-          comparedItemIds: string[];
-        }
-      | undefined;
+    const passing: Array<{
+      candidate: string;
+      maxSimilarity: number;
+      comparedItemIds: string[];
+    }> = [];
     for (const candidate of item.candidates) {
       const vector = input.vectors[`${item.itemId}:${candidate}`];
       if (!vector) throw new Error("topic_plan_title_embedding_missing");
@@ -624,19 +828,29 @@ export function selectDistinctTitles(input: {
           ? 0
           : Math.max(...comparisons.map((comparison) => comparison.similarity));
       if (maxSimilarity < threshold) {
-        choice = {
-          title: candidate,
+        passing.push({
+          candidate,
           maxSimilarity,
           comparedItemIds: comparisons.map((comparison) => comparison.itemId),
-        };
-        break;
+        });
       }
     }
-    if (!choice) throw new Error("topic_plan_title_diversity_insufficient");
-    selected.push({ itemId: item.itemId, title: choice.title });
+    if (passing.length === 0)
+      throw new Error("topic_plan_title_diversity_insufficient");
+    // 结构错开（2026-08-18 裁定）：优先选结构指纹未被同批已选标题占用的
+    // 候选；全部同构时退回首个通过项，不因结构硬失败。
+    const usedSignatures = new Set(
+      selected.map((previous) => titleStructureSignature(previous.title)),
+    );
+    const choice =
+      passing.find(
+        (entry) =>
+          !usedSignatures.has(titleStructureSignature(entry.candidate)),
+      ) ?? passing[0];
+    selected.push({ itemId: item.itemId, title: choice.candidate });
     output.push({
       itemId: item.itemId,
-      title: choice.title,
+      title: choice.candidate,
       evidence: {
         method: "embedding",
         comparedItemIds: choice.comparedItemIds,

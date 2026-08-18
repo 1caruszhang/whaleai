@@ -6,12 +6,15 @@ import {
   RefreshCcw,
 } from "lucide-react";
 import { memo, useCallback, useEffect, useState } from "react";
+import { useTranslation } from "react-i18next";
+import type { TFunction } from "i18next";
 
 import { loadBrandHistory } from "@/api/brandHistoryClient";
 import type {
   BrandHistoryProjection,
   BrandKnowledgeHistoryFact,
 } from "../../../shared/geo/brandHistory";
+import { canonicalEnterpriseProfileField } from "../../../shared/geo/enterpriseProfile";
 import { KNOWLEDGE_DECIDED_EVENT } from "./KnowledgeBatchCard";
 
 interface Props {
@@ -53,13 +56,23 @@ function displayFactValue(raw: string, unit?: string | null): string {
   }
 }
 
+/** predicate → 可读标签：企业 Profile 字段映射 i18n 字段名（大小写不敏感归一），其余保留原文。 */
+function factPredicateLabel(predicate: string, t: TFunction): string {
+  if (predicate.startsWith('enterprise-profile.')) {
+    const canonical = canonicalEnterpriseProfileField(predicate.slice('enterprise-profile.'.length));
+    if (canonical) return t(`knowledgeCard.fields.${canonical}`);
+  }
+  return predicate;
+}
+
 function FactItem({ fact }: { fact: BrandKnowledgeHistoryFact }) {
+  const { t } = useTranslation('chat');
   const label = parseFactKey(fact.factKey);
   return (
     <li className="rounded-md bg-[var(--paper-elevated)] p-2">
       <p className="break-words font-medium text-[var(--ink)]">
         {label.subject}
-        {label.predicate ? ` / ${label.predicate}` : ""}
+        {label.predicate ? ` / ${factPredicateLabel(label.predicate, t)}` : ""}
       </p>
       <p className="mt-1 break-words text-[var(--ink-muted)]">
         {displayFactValue(fact.normalizedValueJson, fact.unit)}

@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   confirmTopicPlan,
   loadLatestTopicPlan,
+  saveTopicPlanItems,
   type TopicPlanApiPost,
 } from "./topicPlanClient";
 
@@ -48,5 +49,48 @@ describe("topicPlanClient", () => {
         selectedItemIds: [],
       }),
     ).rejects.toThrow("topic_plan_confirmation_failed");
+  });
+
+  it("persists checkbox approvals through the items user-edit seam", async () => {
+    const result = {
+      plan: { id: "plan-10", revision: 4 },
+      mutationId: "mutation-10",
+      preservedItemIds: [],
+    };
+    const apiPostMock = vi.fn(async () => ({
+      success: true,
+      result,
+    })) as unknown as TopicPlanApiPost;
+
+    await expect(
+      saveTopicPlanItems(apiPostMock, identity, {
+        planId: "plan-10",
+        expectedRevision: 3,
+        items: [],
+      }),
+    ).resolves.toBe(result);
+    expect(apiPostMock).toHaveBeenCalledWith(
+      "/api/xiaojing/topic-plans/items",
+      {
+        ...identity,
+        planId: "plan-10",
+        expectedRevision: 3,
+        items: [],
+      },
+    );
+  });
+
+  it("rejects an items write without a server-returned mutation result", async () => {
+    const apiPost = vi.fn(async () => ({
+      success: false,
+      error: "topic_plan_revision_conflict",
+    })) as unknown as TopicPlanApiPost;
+    await expect(
+      saveTopicPlanItems(apiPost, identity, {
+        planId: "plan-10",
+        expectedRevision: 3,
+        items: [],
+      }),
+    ).rejects.toThrow("topic_plan_revision_conflict");
   });
 });

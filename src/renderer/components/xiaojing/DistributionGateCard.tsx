@@ -29,6 +29,14 @@ export interface DistributionGateCardData {
   plan: DistributionPlanProjection;
 }
 
+/** 召回路命中的展示词（与四路召回契约 passive/active/fallback/preference 一一对应）。 */
+const PATH_LABEL: Record<string, string> = {
+  passive: "被动召回",
+  active: "主动召回",
+  fallback: "保底召回",
+  preference: "偏好召回",
+};
+
 function isPlan(value: unknown): value is DistributionPlanProjection {
   if (!value || typeof value !== "object") return false;
   const candidate = value as Partial<DistributionPlanProjection>;
@@ -207,20 +215,24 @@ export default function DistributionGateCard({
                     {KIND_LABEL[candidate.kind]} · 报价{" "}
                     {candidate.estimatedPriceCny === null
                       ? "未知"
-                      : `¥${candidate.estimatedPriceCny}`}{" "}
-                    · 历史发布率{" "}
-                    {candidate.publishedRate === null || candidate.publishedRate === 0
-                      ? "未知"
-                      : `${candidate.publishedRate}%`}
+                      : `¥${candidate.estimatedPriceCny}`}
                   </span>
                   <span className="mt-1 block text-xs leading-4 text-[var(--ink-muted)]">
                     适配：{candidate.fitReasons.join("；")}
                   </span>
-                  {(candidate.risks.length > 0 || candidate.uncertainties.length > 0) && (
-                    <span className="mt-1 block text-xs text-[var(--warning)]">
-                      风险：{[...candidate.risks, ...candidate.uncertainties].join("；")}
-                    </span>
-                  )}
+                  <span className="mt-1 block text-xs leading-4 text-[var(--ink-muted)]">
+                    召回路命中：
+                    {candidate.pathHits
+                      .map((path) => {
+                        const evidence = candidate.evidence.find(
+                          (item) => item.path === path,
+                        );
+                        return `${PATH_LABEL[path] ?? path}${
+                          evidence ? `（${evidence.label}）` : ""
+                        }`;
+                      })
+                      .join("；")}
+                  </span>
                 </span>
               </label>
             </article>

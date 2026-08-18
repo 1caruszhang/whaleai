@@ -33,7 +33,11 @@
 
 Ticket 09 已在同一个 `keyword-search` typed port 上增加显式 `probeQuestion` 操作：固定使用 ARK Responses `/responses` 与 `doubao_app.ai_search`，逐个已确认问题保存回答和结构化引用。该操作与关键词挖掘的 Chat + `enable_search` wire shape 分开，仍共享同一 ARK 应用级凭据 owner；其非 secret model/mode/endpoint-family snapshot 由 baseline 持久化，密钥和 Authorization 永不进入 snapshot 或品牌库。
 
-Ticket 10 的标题规划继续使用 `generation` port，但通过显式 `purpose: title-planning` 选择 js_ai `dev` 固定的 mini 模型；聚类与类型推荐仍使用 generation 默认 pro 模型。Topic plan 同时保存这两个非 secret model snapshot 与逐阶段 attempt。任何模型不可用、响应解析失败、标题约束不足或 Embedding 去重失败都显式失败，不能调用 js_ai 的 `generateMockTitles` 或模板 fallback 生成生产计划。
+竞品富化又在该 typed port 上增加显式可选操作 `searchSources`：直连豆包搜索 HTTP API `https://open.feedcoopapi.com/search_api/web_search`（`{Query, Count, SearchType:'web', NeedSummary:true}`，默认 Count 20），返回结构化 `title/url/summary` 逐条召回（按 URL 去重，Title 缺失回退 SiteName/URL），不经 LLM 改写——js_ai `doubaoSearchProbe` 契约。Bearer 解析链：专用豆包搜索 key（Ark 服务可选字段 `doubaoSearchApiKey`，联网搜索控制台签发、月度免费额度；Rust admission 注入 `XIAOJING_DOUBAO_SEARCH_API_KEY`，dev `.env` 源 `DOUBAO_SEARCH_API_KEY`，设置页 ark 槽位可选字段）→ 复用 `arkApiKey`（volcengine 主 key / Agent Plan key 兼容豆包搜索计费面）。key 不被接受或能力未注入时，调用方（材料导入竞品腿）回落 `search()` 的 `enable_search` 生成语料，回落时记固定码降级日志（`competitor-search / degraded / doubao_search_unavailable`，合法零结果不记）。问题池的关键词挖掘继续走 `search()` 不变。
+
+Ticket 10 的标题规划继续使用 `generation` port，但通过显式 `purpose: title-planning` 选择 js_ai `dev` 固定的 mini 模型（小鲸同学 落地为 lite），调用带 system persona 与 `maxTokens=2048`（ADR-0006 调用形态统一）；聚类与类型推荐仍使用 generation 默认 pro 模型（`maxTokens=4096`）。Topic plan 同时保存这两个非 secret model snapshot 与逐阶段 attempt。任何模型不可用、响应解析失败、标题约束不足或 Embedding 去重失败都显式失败，不能调用 js_ai 的 `generateMockTitles` 或模板 fallback 生成生产计划。
+
+Ticket 05 的 `keywordSearch.search` 接口按 ADR-0006 扩展可选 `system` 与 `maxTokens` 参数：挖词调用传「搜索词研究专家」persona 与 `maxTokens=4096`，消息体在传 system 时变为 system+user 双消息；缺省时保持单 user 消息（竞品富化回落等旧调用不受影响）。
 
 Ticket 11 的正文使用 `generation` 默认 pro 模型并显式保留 js_ai 参数 `max_tokens=8192 / temperature=0.85 / top_p=0.9`；审校使用 `reflection` DeepSeek pro。Provider 响应不直接拥有批准权：确定性事实、广告法、占位符和可引用结构检查先执行，再与严格 reflection JSON 合并。任一 Provider 缺失、解析失败或硬门失败均显式阻断，不能返回模板、mock 或随机正文。正文和 review response 不记录到 Provider 状态、日志或 Session transcript。
 

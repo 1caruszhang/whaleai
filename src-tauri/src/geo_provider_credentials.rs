@@ -21,6 +21,7 @@ const DISTRIBUTION_BASE_URL: &str = "https://vip.chaojimeijie.com/api";
 
 pub(crate) const SIDECAR_ENV_NAMES: &[&str] = &[
     "XIAOJING_ARK_API_KEY",
+    "XIAOJING_DOUBAO_SEARCH_API_KEY",
     "XIAOJING_ARK_CONFIGURATION_FINGERPRINT",
     "XIAOJING_ARK_EMBEDDING_API_KEY",
     "XIAOJING_ARK_EMBEDDING_ENDPOINT_ID",
@@ -36,6 +37,7 @@ pub(crate) const SIDECAR_ENV_NAMES: &[&str] = &[
 
 pub(crate) const DEVELOPMENT_SOURCE_ENV_NAMES: &[&str] = &[
     "ARK_API_KEY",
+    "DOUBAO_SEARCH_API_KEY",
     "ARK_EMBEDDING_API_KEY",
     "ARK_EMBEDDING_MODEL",
     "ALI_OSS_ACCESS_KEY_ID",
@@ -70,7 +72,7 @@ impl GeoProviderServiceId {
 
     fn allowed_fields(self) -> &'static [&'static str] {
         match self {
-            Self::Ark => &["apiKey"],
+            Self::Ark => &["apiKey", "doubaoSearchApiKey"],
             Self::Embedding => &["apiKey", "endpointId"],
             Self::ObjectStorage => &[
                 "accessKeyId",
@@ -275,7 +277,13 @@ fn development_credential(service: GeoProviderServiceId) -> Option<ServiceCreden
     #[cfg(debug_assertions)]
     {
         let pairs: &[(&str, Option<String>)] = match service {
-            GeoProviderServiceId::Ark => &[("apiKey", env_value("ARK_API_KEY"))],
+            GeoProviderServiceId::Ark => &[
+                ("apiKey", env_value("ARK_API_KEY")),
+                (
+                    "doubaoSearchApiKey",
+                    env_value("DOUBAO_SEARCH_API_KEY"),
+                ),
+            ],
             GeoProviderServiceId::Embedding => &[
                 (
                     "apiKey",
@@ -457,6 +465,12 @@ pub(crate) fn inject_into_sidecar(command: &mut std::process::Command) -> Result
 
     if let Some(value) = ark.as_ref().and_then(|value| config_value(value, "apiKey")) {
         command.env("XIAOJING_ARK_API_KEY", value);
+    }
+    if let Some(value) = ark
+        .as_ref()
+        .and_then(|value| config_value(value, "doubaoSearchApiKey"))
+    {
+        command.env("XIAOJING_DOUBAO_SEARCH_API_KEY", value);
     }
     if let Some(value) = ark.as_ref() {
         let encoded =
@@ -679,7 +693,7 @@ async fn verify_oss(
     ));
     client
         .get(format!(
-            "https://{bucket}.{region}.aliyuncs.com/?max-keys=0"
+            "https://{bucket}.{region}.aliyuncs.com/?max-keys=1"
         ))
         .header("Date", date)
         .header("Authorization", format!("OSS {access_key_id}:{signature}"))
@@ -789,6 +803,17 @@ mod tests {
         assert!(
             validate_service_credential(GeoProviderServiceId::Embedding, BTreeMap::new()).is_err()
         );
+    }
+
+    #[test]
+    fn ark_accepts_optional_doubao_search_key() {
+        let mut fields = BTreeMap::new();
+        fields.insert("apiKey".to_string(), "paygo-key".to_string());
+        fields.insert("doubaoSearchApiKey".to_string(), "search-key".to_string());
+        assert!(validate_service_credential(GeoProviderServiceId::Ark, fields.clone()).is_ok());
+        // 空值在归一化时被剔除：只配 paygo key（走 arkApiKey 兜底）也合法。
+        fields.insert("doubaoSearchApiKey".to_string(), "  ".to_string());
+        assert!(validate_service_credential(GeoProviderServiceId::Ark, fields).is_ok());
     }
 
     #[test]

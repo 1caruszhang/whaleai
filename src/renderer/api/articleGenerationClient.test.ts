@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   type ArticleApiPost,
   approveArticle,
+  editArticle,
   loadArticleOperation,
   loadArticleBody,
 } from "./articleGenerationClient";
@@ -52,5 +53,35 @@ describe("articleGenerationClient", () => {
         articleId: "article-1",
       });
     }
+  });
+
+  it("edits one exact article with its identity, revision, title and body", async () => {
+    const apiPostMock = vi.fn(async () => ({
+      success: true,
+      article: { id: "article-1" },
+    }));
+    await editArticle(
+      apiPostMock as unknown as ArticleApiPost,
+      { workspaceId: "workspace-1", sessionId: "session-1" },
+      {
+        operationId: "operation-1",
+        articleId: "article-1",
+        expectedRevision: 2,
+        title: "成都车载音响选购指南",
+        body: "# 成都车载音响选购指南\n\n正文",
+      },
+    );
+    expect(apiPostMock).toHaveBeenCalledWith(
+      "/api/xiaojing/articles/edit",
+      {
+        workspaceId: "workspace-1",
+        sessionId: "session-1",
+        operationId: "operation-1",
+        articleId: "article-1",
+        expectedRevision: 2,
+        title: "成都车载音响选购指南",
+        body: "# 成都车载音响选购指南\n\n正文",
+      },
+    );
   });
 });

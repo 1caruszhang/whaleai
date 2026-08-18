@@ -18,7 +18,9 @@
 
 正文固定使用 generation 槽位的 `doubao-seed-2-0-pro-260215`，plain Markdown，`max_tokens=8192 / temperature=0.85 / top_p=0.9`。五类语义保持为 `guide / showcase / ranking / news / news_light`：非 ranking 不得出现竞品；showcase 只写已确认的品牌详情；news 两类只有在事实足够时才写 5W1H 事件；ranking 使用六家并列、相同六维清单，不打分、不作名次或绝对化比较，也不能用泛称、模板或虚构竞品补位。
 
-批准是双门且 fail closed：纯规则先检查未获事实支持的数字/成就硬主张、广告法与模板禁词、占位符及可引用结构，ranking 另检查六个序号 H2 和逐家相同六维；reflection 槽位再检查语义、事实、广告法和可引用性。任一硬门失败、Provider 不可用或 JSON 无效都进入 `rejected`，不能批准。生产路径没有 demo、随机指标、mock output 或模板正文 fallback；确定性 mock Provider 只用于测试。
+ADR-0006 增补三层结构：①每篇正文 prompt 恒注入品牌身份块（实体层字段 + 加粗规则，`renderBrandIdentityBlock`）与叙事视角种子（12 组 {切入角度, 开篇写法, 小标题措屑倾向}，操作内洗牌发牌、发尽重洗、重试重发单张），种子只影响表达层并显式声明「不放松任何硬纪律」；②五类规范改为三段式纯数据契约（格式契约｜表达参考｜事实衔接，`CONTENT_TYPE_CONTRACTS`），system 同时注入「骨架非填空」与「事实三层纪律」；③`direct` 路径在正文前先跑单篇标题生成（`buildDirectTitleMessages`：3–5 候选 → 既有 `validateTitleCandidates` → 取首个有效，region/行业从 plannedFacts 投影画像锚定），失败 fail-loud 进入 `generation_failed`，不做模板兜底、不降级为主题原文。不变量清单与偏离登记见 `content_prompt_invariants.md`。
+
+批准是双门且 fail closed：纯规则先检查未获事实支持的数字/成就硬主张（按三层纪律收窄为「具体命名/数字才须溯源」，泛化修辞放行）、广告法与模板禁词、占位符及可引用结构，另检查格式契约（per-type H2 下限：guide/showcase 3、ranking 6、news 两类 2；品牌名出现必须加粗且逐字命中全称/已确认简称；段落不超过 3 句），ranking 另检查六个序号 H2 和逐家相同六维；reflection 槽位再检查语义、事实、广告法和可引用性（不裁语气修辞，只裁具体捏造与实体保真）。任一硬门失败、Provider 不可用或 JSON 无效都进入 `rejected`，不能批准。生产路径没有 demo、随机指标、mock output 或模板正文 fallback；确定性 mock Provider 只用于测试。
 
 批准提交成功后，`articles/approve` 路由在同一 Session 投递纯隐藏 `XIAOJING_ARTICLE_APPROVAL_DECISION` reminder（只携带 operation/article identity、revision、status、approvedRevision 与 knowledge version），唤醒 agent 从权威审校结果继续进入渠道分发规划，不重复询问已裁决文章。提醒入队失败不回滚已提交的批准，响应显式返回 notification 状态。
 
@@ -33,6 +35,8 @@ SQLite 只保存正文相对路径、SHA-256、revision、origin、review/model 
 ## 聊天修订（票 38，ADR 0003）
 
 待审批（draft_ready）文章的标题与正文可经通用闸门修订工具 `revise_gate_content`（gate=`article`，仅 modify）修改：handler 走既有 `ArticleGenerationService.edit` 语义（新版本行 origin=`user-edited`、状态回到 draft_ready、必须重新过审批门），`edit` 携带 `reason`（用户指令原文）写入版本行 `model_audit_json.revisionReason`。已批准/生成中/审校中的文章按 `target_not_pending` 拒绝；delete/add 不是本闸门语义，回执 `action_not_supported`。批准卡（`ArticleApprovalGateCard`）待审批期间每 3s 轮询 `/articles/latest` 采信新投影（批准继续走既有审批门）。
+
+批准卡同样提供卡内直改（js_ai 门卡交互）：正文可展开/收起（按 revision 缓存），draft_ready 稿件可在卡上进入编辑并经 `POST /api/xiaojing/articles/edit`（不带 `reason`，`model_audit_json` 保持 `{}`）落成 `user-edited` 新版本，标题取正文首行 H1；整卡「批准并继续」按各篇最新 revision 逐篇走既有 `articles/approve`（单篇失败不阻断其余），批准后的稿件才是进入分发计划的事实依据。
 
 ## 测试
 

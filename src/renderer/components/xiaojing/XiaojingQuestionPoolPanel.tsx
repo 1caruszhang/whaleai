@@ -15,12 +15,6 @@ interface XiaojingQuestionPoolPanelProps {
 }
 
 const PRIORITY_LABEL = { high: "高", medium: "中", low: "低" } as const;
-const KEYWORD_CATEGORY_LABEL = {
-  core: "核心词",
-  scene: "场景词",
-  longtail: "长尾词",
-} as const;
-const KEYWORD_HEAT_LABEL = { high: "高", medium: "中", low: "低" } as const;
 
 /**
  * 票 29：问题池阶段面板是纯只读投影。生成、勾选、编辑与确认只出现在
@@ -64,6 +58,8 @@ export default memo(function XiaojingQuestionPoolPanel({
 
   const selectedCount =
     pool?.questions.filter((question) => question.selected).length ?? 0;
+  const selectedQuestions =
+    pool?.questions.filter((question) => question.selected) ?? [];
 
   return (
     <section
@@ -75,7 +71,7 @@ export default memo(function XiaojingQuestionPoolPanel({
         <div>
           <h3 className="text-sm font-medium">关键词与问题池</h3>
           <p className="mt-1 text-xs leading-4 text-[var(--ink-muted)]">
-            生成与确认在聊天卡片上完成；这里展示当前权威结果。
+            生成与确认在聊天卡片上完成；这里只展示确认后选定的问题。
           </p>
         </div>
       </div>
@@ -98,7 +94,13 @@ export default memo(function XiaojingQuestionPoolPanel({
         </p>
       )}
 
-      {pool && (
+      {pool && pool.status !== "confirmed" && (
+        <p className="mt-3 rounded-lg bg-[var(--paper-inset)] px-3 py-2 text-xs leading-5 text-[var(--ink-muted)]">
+          问题池尚未确认；请回到聊天中的确认卡片完成选题，确认后这里展示选定问题。
+        </p>
+      )}
+
+      {pool && pool.status === "confirmed" && (
         <div className="mt-3" role="region" aria-label="问题池选择">
           <div className="flex flex-wrap items-center gap-1.5 text-xs text-[var(--ink-muted)]">
             <span className="rounded-full bg-[var(--paper-inset)] px-2 py-0.5">
@@ -110,65 +112,33 @@ export default memo(function XiaojingQuestionPoolPanel({
             <span className="rounded-full bg-[var(--paper-inset)] px-2 py-0.5">
               {pool.reused ? "已复用" : "新生成"}
             </span>
-            <span className="ml-auto">
-              已选 {selectedCount}/{pool.questions.length}
-            </span>
+            <span className="ml-auto">已选 {selectedCount}</span>
           </div>
-          {pool.keywords.length > 0 && (
-            <div
-              className="mt-2 rounded-lg bg-[var(--paper-inset)] p-2"
-              aria-label="本次挖掘的搜索词"
-            >
-              <p className="text-xs font-medium text-[var(--ink-muted)]">
-                本次联网挖掘的搜索词（已用于生成下列问题，确认时请一并审阅）
-              </p>
-              <div className="mt-1.5 flex flex-wrap gap-1">
-                {pool.keywords.map((keyword) => (
-                  <span
-                    key={keyword.id}
-                    className="rounded-full bg-[var(--paper)] px-2 py-0.5 text-xs"
-                  >
-                    {KEYWORD_CATEGORY_LABEL[keyword.category]} · {keyword.term}
-                    <span className="text-[var(--ink-subtle)]">
-                      {" "}
-                      · 热度{KEYWORD_HEAT_LABEL[keyword.heat]}
-                    </span>
-                  </span>
-                ))}
-              </div>
-            </div>
-          )}
-          <div className="mt-2 space-y-2">
-            {pool.questions.map((question) => (
-              <article
-                key={question.id}
-                className="rounded-lg border border-[var(--line-subtle)] bg-[var(--paper)] p-2"
-              >
-                <div className="flex items-start gap-2">
-                  <div className="min-w-0 flex-1">
-                    <p className="text-sm leading-5">{question.text}</p>
-                    <p className="mt-1 text-xs text-[var(--ink-subtle)]">
-                      {PRIORITY_LABEL[question.score.priority]}优先级 · 相关{" "}
-                      {question.score.relevance} · 最近池相似{" "}
-                      {question.score.recentPoolSimilarity} · 潜力{" "}
-                      {question.score.optimizationPotential}
-                    </p>
-                  </div>
-                </div>
-              </article>
-            ))}
-          </div>
-
-          {pool.checkpoints.length > 0 && (
-            <p className="mt-2 text-xs leading-4 text-[var(--ink-subtle)]">
-              checkpoint：
-              {pool.checkpoints
-                .map(
-                  (checkpoint) =>
-                    `${checkpoint.stage}:${checkpoint.status}#${checkpoint.attemptNumber}`,
-                )
-                .join(" · ")}
+          {selectedQuestions.length === 0 ? (
+            <p className="mt-2 text-center text-xs text-[var(--ink-subtle)]">
+              本次确认未选定任何问题。
             </p>
+          ) : (
+            <div className="mt-2 space-y-2">
+              {selectedQuestions.map((question) => (
+                <article
+                  key={question.id}
+                  className="rounded-lg border border-[var(--line-subtle)] bg-[var(--paper)] p-2"
+                >
+                  <div className="flex items-start gap-2">
+                    <div className="min-w-0 flex-1">
+                      <p className="text-sm leading-5">{question.text}</p>
+                      <p className="mt-1 text-xs text-[var(--ink-subtle)]">
+                        {PRIORITY_LABEL[question.score.priority]}优先级 · 相关{" "}
+                        {question.score.relevance} · 最近池相似{" "}
+                        {question.score.recentPoolSimilarity} · 潜力{" "}
+                        {question.score.optimizationPotential}
+                      </p>
+                    </div>
+                  </div>
+                </article>
+              ))}
+            </div>
           )}
         </div>
       )}

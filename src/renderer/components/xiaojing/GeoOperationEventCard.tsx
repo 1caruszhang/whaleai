@@ -34,6 +34,11 @@ import {
 import type { GeoOperationProjection } from "../../../shared/geo/operation";
 import { unwrapToolResultText } from "../../../shared/toolResult";
 import GeoOperationGatePanels from "./GeoOperationGatePanels";
+import GeoGateProgressStrip, {
+  deriveGateSegments,
+  findCurrentGate,
+  isGateDone,
+} from "./GeoGateProgressStrip";
 
 export interface GeoOperationEventCardData {
   kind: "geo-operation" | "geo-operation-projection";
@@ -118,7 +123,11 @@ export function parseGeoOperationEventCard(
   }
 }
 
-const STATUS_LABEL: Record<GeoOperationProjection["status"], string> = {
+/** 操作状态文案：进度卡与输入框上方停靠条共用。 */
+export const GEO_OPERATION_STATUS_LABEL: Record<
+  GeoOperationProjection["status"],
+  string
+> = {
   ready: "待开始",
   queued: "排队中",
   running: "进行中",
@@ -143,11 +152,26 @@ const STEP_STATUS_LABEL: Record<
   skipped: "已跳过",
 };
 
-const TERMINAL = new Set<GeoOperationProjection["status"]>([
+/** 终态集合：进度卡与输入框上方停靠条共用。 */
+export const TERMINAL = new Set<GeoOperationProjection["status"]>([
   "succeeded",
   "failed",
   "cancelled",
 ]);
+
+/**
+ * 完整进度卡只在计划边界渲染：认可门未放行（计划开始）或终态（计划结束）。
+ * 模式跟随 live 投影而非消息快照——用户在卡头放行计划后，本卡就地收敛为
+ * 闸门进度条，不在历史消息里残留 19 步大卡；中间门的停靠与确认由各阶段
+ * 自己的闸门卡承载，进度卡只以轻量条表达位置。
+ */
+function hasPendingPlanAck(operation: GeoOperationProjection): boolean {
+  return operation.steps.some(
+    (step) =>
+      step.status === "awaiting-confirmation" &&
+      step.confirmation?.kind === "plan-ack",
+  );
+}
 
 /**
  * 闸门交互宿主去重：同一条消息流里同一操作可能出现多张进度卡片
@@ -392,10 +416,30 @@ function OperationArticle({ operation }: { operation: GeoOperationProjection }) 
   const showProviderQueueBanner =
     isHost && !terminal && live.status !== "queued" && !!providerQueue;
 
-  return (
-    <article
-      className="rounded-lg bg-[var(--paper-inset)] p-2.5"
-    >
+  // 完整卡 = 计划边界（认可门停靠或终态）。轻量条只认最新快照：
+  // 非宿主的历史信封不渲染，同一操作任意时刻至多一条轻量条。
+  const pendingPlanAck = hasPendingPlanAck(live);
+  const fullMode = terminal || pendingPlanAck;
+  if (!fullMode && !isHost) return null;
+
+  // 轻量条按闸门报进度（只显示门，不复述步骤）；无确认门的计划回退步数。
+  const gateSegments = deriveGateSegments(live.steps);
+  const currentGate = findCurrentGate(gateSegments);
+  const gateDone = gateSegments.filter(isGateDone).length;
+  const progressLine =
+    fullMode || gateSegments.length === 0
+      ? `${completed}/${live.steps.length} 步`
+      : `${gateDone}/${gateSegments.length} 道闸门${
+          currentGate ? ` · 当前：${currentGate.title}` : ""
+        }`;
+
+  // 计划认可门是本卡的主操作：停靠时认可面板提到卡头（目标行之后、
+  // 步骤重播之前），沿用知识确认卡「整卡确认常驻卡头、不藏在长列表
+  // 底部」的既定原则；其余闸门面板保持在卡尾。
+  const showGatePanels = isHost && !terminal && !isAgentResponding;
+
+  const content = (
+    <>
       <div className="flex min-w-0 items-start gap-2">
         {statusIcon(live)}
         <div className="min-w-0 flex-1">
@@ -403,9 +447,11 @@ function OperationArticle({ operation }: { operation: GeoOperationProjection }) 
             {live.goal}
           </p>
           <p className="mt-1 text-xs text-[var(--ink-muted)]">
-            {STATUS_LABEL[live.status]} · {completed}/
-            {live.steps.length} 步
+            {GEO_OPERATION_STATUS_LABEL[live.status]} · {progressLine}
           </p>
+          {gateSegments.length > 0 && (
+            <GeoGateProgressStrip operationId={live.id} steps={live.steps} />
+          )}
           {live.status === "queued" && (
             <p className="mt-1 break-words text-xs text-[var(--info)]">
               排队位置 {live.queuePosition ?? "待分配"}
@@ -421,6 +467,15 @@ function OperationArticle({ operation }: { operation: GeoOperationProjection }) 
               正在从已保存 checkpoint 恢复
             </p>
           )}
+          {showGatePanels && pendingPlanAck && (
+            <div className="mt-2" data-geo-gate-panels={live.id}>
+              <GeoOperationGatePanels
+                operation={live}
+                onGateConfirmed={() => setRefreshTick((value) => value + 1)}
+              />
+            </div>
+          )}
+          {fullMode && (
           <ol
             aria-label="GEO 操作步骤计划"
             className="mt-1.5 space-y-1.5"
@@ -478,6 +533,7 @@ function OperationArticle({ operation }: { operation: GeoOperationProjection }) 
               );
             })}
           </ol>
+          )}
         </div>
       </div>
       {isHost &&
@@ -554,7 +610,7 @@ function OperationArticle({ operation }: { operation: GeoOperationProjection }) 
           )}
         </div>
       )}
-      {isHost && !terminal && !isAgentResponding && (
+      {showGatePanels && !pendingPlanAck && (
         <div className="mt-2" data-geo-gate-panels={live.id}>
           <GeoOperationGatePanels
             operation={live}
@@ -562,6 +618,32 @@ function OperationArticle({ operation }: { operation: GeoOperationProjection }) 
           />
         </div>
       )}
+    </>
+  );
+
+  if (fullMode) {
+    return (
+      <article
+        className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-3"
+        data-geo-operation-event
+      >
+        <p className="text-xs font-semibold tracking-[0.04em] text-[var(--ink-muted)]">
+          GEO 操作已更新
+        </p>
+        <div className="mt-2">{content}</div>
+        <p className="mt-2 text-xs leading-5 text-[var(--ink-subtle)]">
+          这是系统维护的进度卡片，不是用户发送的消息；计划放行与各阶段的产物确认都在聊天内对应的卡片上完成。
+        </p>
+      </article>
+    );
+  }
+
+  return (
+    <article
+      className="rounded-lg bg-[var(--paper-inset)] p-2.5"
+      data-geo-operation-strip
+    >
+      {content}
     </article>
   );
 }
@@ -587,21 +669,17 @@ export default memo(function GeoOperationEventCard({
       </section>
     );
   }
+  // 信封统一为轻量容器：每张操作卡按 live 投影自行决定完整卡（计划边界）
+  // 或闸门进度条；放行后的历史信封就地收敛，不残留步骤计划重播。
   return (
     <section
       aria-label="GEO 优化进度"
-      className="space-y-2 rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-3"
-      data-geo-operation-event
+      className="space-y-2"
+      data-geo-operation-cards
     >
-      <p className="text-xs font-semibold tracking-[0.04em] text-[var(--ink-muted)]">
-        GEO 操作已更新
-      </p>
       {data.operations.slice(0, 5).map((operation) => (
         <OperationArticle key={operation.id} operation={operation} />
       ))}
-      <p className="text-xs leading-5 text-[var(--ink-subtle)]">
-        这是系统维护的进度卡片，不是用户发送的消息；需要你确认的操作直接在上方卡片里完成。
-      </p>
     </section>
   );
 });

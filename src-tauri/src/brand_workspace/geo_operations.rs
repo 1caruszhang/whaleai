@@ -75,7 +75,8 @@ const RETRY_UNITS: [&str; 5] = [
     "publish-item",
     "monitor-item",
 ];
-const CONFIRMATION_KINDS: [&str; 10] = [
+const CONFIRMATION_KINDS: [&str; 11] = [
+    "plan-ack",
     "knowledge-change",
     "next-round-knowledge",
     "question-selection",
@@ -87,7 +88,8 @@ const CONFIRMATION_KINDS: [&str; 10] = [
     "external-publish",
     "monitoring-activation",
 ];
-const CONFIRMATION_AUTHORITIES: [&str; 4] = [
+const CONFIRMATION_AUTHORITIES: [&str; 5] = [
+    "geo-operation",
     "knowledge-authority",
     "brand-workspace",
     "publish-scheduler",
@@ -1424,6 +1426,7 @@ fn validate_confirmation(value: &GeoOperationConfirmation) -> Result<(), String>
         return Err("geo_operation_confirmation_invalid".to_string());
     }
     let authority_matches = match value.kind.as_str() {
+        "plan-ack" => value.authority == "geo-operation",
         "knowledge-change" => value.authority == "knowledge-authority",
         "paid-publish" | "external-publish" => value.authority == "publish-scheduler",
         "monitoring-activation" => value.authority == "post-publish-monitor",
@@ -2223,6 +2226,71 @@ mod tests {
         assert_eq!(running.execution_sidecar_generation, Some(41));
         assert_eq!(running.queue_reason, None);
         assert_eq!(running.queue_position, None);
+    }
+
+    #[test]
+    fn plan_ack_gate_parks_a_fresh_operation_and_confirm_step_releases_it() {
+        let (store, workspace) = fixture();
+        let gate = GeoOperationConfirmation {
+            kind: "plan-ack".into(),
+            authority: "geo-operation".into(),
+            title: "认可本轮计划".into(),
+            summary: "查看阶段与步骤计划后放行；各阶段产物仍停在各自的确认门。".into(),
+        };
+        let operation = store
+            .create_geo_operation(GeoOperationCreateRequest {
+                workspace_id: workspace.id.clone(),
+                session_id: "session-operation".into(),
+                kind: "full-optimization".into(),
+                goal: "完整 GEO 优化".into(),
+                status: "awaiting-confirmation".into(),
+                steps: vec![
+                    step(
+                        "acknowledge-plan",
+                        "brand-material-import",
+                        "awaiting-confirmation",
+                        Some(gate.clone()),
+                    ),
+                    step("collect-materials", "brand-material-import", "pending", None),
+                ],
+                input_refs: vec![],
+                pending_confirmation: Some(gate),
+                source_operation_id: None,
+            })
+            .unwrap();
+        assert_eq!(operation.status, "awaiting-confirmation");
+
+        // 计划未放行前，任何工作步骤都不能开始。
+        let premature = store
+            .mutate_geo_operation(mutation(
+                &workspace,
+                &operation,
+                "start-step",
+                Some("collect-materials"),
+            ))
+            .unwrap_err();
+        assert!(premature.contains("geo_operation_transition_invalid:awaiting-confirmation"));
+
+        // plan-ack 走通用 confirm-step：不是 Rust UI authority，一步放行整份计划。
+        let released = store
+            .mutate_geo_operation(mutation(
+                &workspace,
+                &operation,
+                "confirm-step",
+                Some("acknowledge-plan"),
+            ))
+            .unwrap();
+        assert_eq!(released.status, "ready");
+        assert_eq!(released.pending_confirmation, None);
+        assert_eq!(
+            released
+                .steps
+                .iter()
+                .find(|step| step.id == "collect-materials")
+                .unwrap()
+                .status,
+            "ready"
+        );
     }
 
     #[test]

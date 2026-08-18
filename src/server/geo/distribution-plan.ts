@@ -14,15 +14,33 @@ import {
   type DistributionPlanStartInput,
   type DistributionPlanningContext,
   type DistributionProviderSnapshot,
+  type DistributionQuestionSource,
   type DistributionResourceInput,
   type DistributionResourceSnapshot,
 } from "../../shared/geo/distributionPlan";
+import {
+  buildGlobalRecallPrompt,
+  clampTopicNumbers,
+  parseGlobalRecallResult,
+  resolvePreferenceChannels,
+  type PreferenceChannelEntry,
+  type PreferenceChannelSettings,
+  type RecallSource,
+} from "../../shared/geo/channelRecall";
+import { parseGeoProbeProviderResponse } from "../../shared/geo/baseline";
 import { XIAOJING_GEO_PROVIDER_DEFAULTS } from "../../shared/geo/providerCapabilities";
 import { managementApi } from "../utils/management-api-client";
 import type {
   GeoDistributionCapability,
   GeoDistributionResource,
+  GeoKeywordSearchCapability,
 } from "./provider-capabilities";
+
+/** 四路召回对 keyword-search 端口的消费面（探测 + 联网生成，便于测试注入）。 */
+export type DistributionKeywordSearchPort = Pick<
+  GeoKeywordSearchCapability,
+  "probeQuestion" | "search"
+>;
 
 export interface DistributionPlanPreparation {
   plan: DistributionPlanProjection;
@@ -33,6 +51,8 @@ export interface DistributionPlanPersistencePort {
   context(articleOperationId?: string): Promise<DistributionPlanningContext>;
   latest(): Promise<DistributionPlanProjection | null>;
   get(planId: string): Promise<DistributionPlanProjection>;
+  /** 偏好渠道 overlay（品牌库单例；读失败按无 overlay 降级）。 */
+  channelPreferences(): Promise<PreferenceChannelSettings | undefined>;
   prepare(
     input: DistributionPlanStartInput,
   ): Promise<DistributionPlanPreparation>;
@@ -104,6 +124,20 @@ export class RustDistributionPlanPort
       "/api/brand-distribution-plans/context",
       { articleOperationId },
       "context",
+    );
+  }
+
+  channelPreferences(): Promise<PreferenceChannelSettings | undefined> {
+    return managementApi(
+      "/api/brand-distribution-plans/preferences/get",
+      "POST",
+      this.envelope({}),
+    ).then(
+      (result) =>
+        result.ok === true
+          ? (result.preferences as PreferenceChannelSettings | undefined)
+          : undefined,
+      () => undefined,
     );
   }
 
@@ -195,6 +229,14 @@ function unavailableSnapshot(): DistributionProviderSnapshot {
   };
 }
 
+function hostOf(url: string): string | null {
+  try {
+    return new URL(url).hostname;
+  } catch {
+    return null;
+  }
+}
+
 export class DistributionPlanningService {
   private readonly resourceCache: Partial<
     Record<
@@ -217,6 +259,7 @@ export class DistributionPlanningService {
     private readonly identity: { workspaceId: string; sessionId: string },
     private readonly persistence: DistributionPlanPersistencePort,
     private readonly distribution: GeoDistributionCapability,
+    private readonly keywordSearch: DistributionKeywordSearchPort,
     private readonly now: () => Date = () => new Date(),
   ) {}
 
@@ -261,6 +304,114 @@ export class DistributionPlanningService {
     return load;
   }
 
+  /**
+   * 被动路（js_ai probePassiveRecallMulti 语义）：对已确认问题池逐问现场
+   * 探测豆包引用（Responses + ai_search），2-wide 窗口限流、逐问隔离失败。
+   * 整体失败返回空数组——被动证据缺失只降级，不阻断（用户裁决 2026-08-18）。
+   */
+  private async probeQuestionSources(
+    context: DistributionPlanningContext,
+  ): Promise<DistributionQuestionSource[]> {
+    const questions = context.questions.slice(0, 20);
+    const outcomes: Array<
+      { question: DistributionPlanningContext["questions"][number]; ok: true; citations: Array<{ url: string; title?: string }> } | { question: DistributionPlanningContext["questions"][number]; ok: false }
+    > = [];
+    let cursor = 0;
+    const worker = async () => {
+      for (;;) {
+        const question = questions[cursor++];
+        if (!question) return;
+        try {
+          const response = await this.keywordSearch.probeQuestion(
+            "doubao",
+            question.question,
+          );
+          outcomes.push({
+            question,
+            ok: true,
+            citations: parseGeoProbeProviderResponse(response.rawEvidence)
+              .citations,
+          });
+        } catch {
+          outcomes.push({ question, ok: false });
+        }
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(2, questions.length) }, worker));
+    const sources: DistributionQuestionSource[] = [];
+    const seen = new Set<string>();
+    for (const outcome of outcomes) {
+      if (!outcome.ok) continue;
+      for (const [index, citation] of outcome.citations.entries()) {
+        const url = citation.url.trim();
+        if (!/^https?:\/\//i.test(url)) continue;
+        if (!seen.add(`${outcome.question.id}:${url}`)) continue;
+        sources.push({
+          id: `probe:${outcome.question.id}:${index + 1}`,
+          questionId: outcome.question.id,
+          question: outcome.question.question,
+          title: citation.title?.trim() || hostOf(url) || "已验证来源",
+          url,
+          articleIds: outcome.question.articleIds,
+        });
+        if (sources.length >= 100) return sources;
+      }
+    }
+    return sources;
+  }
+
+  /**
+   * 主动路（ADR-0031 全局单次召回）：topics+行业+衍生关键词一次联网调用，
+   * 产出渠道+主题编号；解析带注册域名门（无域名渠道宁缺勿滥）。失败返回
+   * 空数组（independent-best-effort）。
+   */
+  private async recallActiveSources(
+    context: DistributionPlanningContext,
+  ): Promise<RecallSource[]> {
+    try {
+      const topics = context.articles
+        .map((article) => article.topic?.trim() ?? "")
+        .filter((topic) => topic.length > 0);
+      if (topics.length === 0) return [];
+      const prompt = buildGlobalRecallPrompt({
+        topics,
+        industry: context.industry,
+        derivedKeywords: context.derivedKeywords,
+      });
+      const answer = await this.keywordSearch.search(prompt, {
+        system: "你是 GEO 渠道投放专家；只返回 JSON 数组，不要解释。",
+        maxTokens: 4096,
+      });
+      const channels = parseGlobalRecallResult(answer);
+      const deduped: string[] = [];
+      const seen = new Set<string>();
+      for (const topic of topics) {
+        if (seen.has(topic)) continue;
+        seen.add(topic);
+        deduped.push(topic);
+      }
+      const topicArticles = new Map<string, string[]>();
+      for (const article of context.articles) {
+        const topic = article.topic?.trim();
+        if (!topic) continue;
+        topicArticles.set(topic, [
+          ...(topicArticles.get(topic) ?? []),
+          article.id,
+        ]);
+      }
+      return channels.map((channel) => ({
+        title: channel.name,
+        url: channel.url,
+        articleIds: clampTopicNumbers(
+          channel.topicNumbers,
+          deduped.length,
+        ).flatMap((number) => topicArticles.get(deduped[number - 1]!) ?? []),
+      }));
+    } catch {
+      return [];
+    }
+  }
+
   async latest(input: {
     workspaceId: string;
     sessionId: string;
@@ -285,7 +436,22 @@ export class DistributionPlanningService {
   }): Promise<DistributionPlanProjection> {
     this.assertIdentity(input);
     const source = validateDistributionPlanStartInput(input.source);
-    const preparation = await this.persistence.prepare(source);
+    // 四路召回的现场证据（js_ai 语义）：被动=问题池逐问探测、主动=全局单次
+    // 召回、偏好=品牌 overlay 合成；保底是纯规则路（无外部输入）。探测与召回
+    // 均按 independent-best-effort 降级——失败只损失对应路的证据，不阻断计划。
+    const context = await this.persistence.context(source.articleOperationId);
+    const [questionSources, activeSources, preferenceSettings] =
+      await Promise.all([
+        this.probeQuestionSources(context),
+        this.recallActiveSources(context),
+        this.persistence.channelPreferences().catch(() => undefined),
+      ]);
+    const preferenceChannels: PreferenceChannelEntry[] =
+      resolvePreferenceChannels(preferenceSettings);
+    const preparation = await this.persistence.prepare({
+      ...source,
+      questionSources,
+    });
     const base = preparation.plan;
     let media: { total: number; items: GeoDistributionResource[] };
     let weMedia: { total: number; items: GeoDistributionResource[] };
@@ -314,7 +480,6 @@ export class DistributionPlanningService {
           inputResources: 0,
           approvedResources: 0,
           filteredUnavailable: 0,
-          filteredLowPublishedRate: 0,
           filteredHighPrice: 0,
           alignedResources: 0,
           recommendedResources: 0,
@@ -347,7 +512,8 @@ export class DistributionPlanningService {
       industry: base.industry,
       targetAudience: base.targetAudience,
       questionSources: base.questionSources,
-      preferredResourceIds: base.preferredResourceIds,
+      activeSources,
+      preferenceChannels,
       articles: base.articles,
       resources: normalized,
     });

@@ -139,6 +139,36 @@ describe("XiaojingPublishSchedulerPanel read-only projection", () => {
     expect(within(panel).getByText(/预计 ¥88.00 \/ 预算 ¥500.00/)).toBeInTheDocument();
   });
 
+  // 参照 js_ai 的发布状态设计：每个发布项展示 OSS 上传与超级媒介订单
+  // 两段徽章，随调度器推进刷新。
+  it("renders per-item OSS and order stage badges", async () => {
+    const base = execution();
+    mocks.latest.mockResolvedValue(
+      execution({
+        status: "running",
+        items: [
+          base.items[0]!,
+          {
+            ...base.items[0]!,
+            id: "item-submitted",
+            status: "submitted" as const,
+            objectUrl: "https://oss.example/ops/article-1.html",
+            externalOrderId: "SN-20260820-003",
+          },
+        ],
+      }),
+    );
+    render(<XiaojingPublishSchedulerPanel workspaceId="brand-13" />);
+    const panel = await screen.findByRole("region", { name: "确定性发布计划" });
+    expect(within(panel).getAllByText("OSS 未上传")).toHaveLength(1);
+    expect(within(panel).getAllByText("订单未提交")).toHaveLength(1);
+    expect(within(panel).getAllByText("OSS 已上传")).toHaveLength(1);
+    expect(within(panel).getAllByText("订单已提交")).toHaveLength(1);
+    expect(
+      within(panel).getByText(/外部订单：SN-20260820-003/),
+    ).toBeInTheDocument();
+  });
+
   // GD-13 回归：付费发布授权是不可逆操作，面板只展示不可逆影响说明，
   // 授权交互只出现在聊天卡片。
   it("surfaces the irreversible impact without authorization controls", async () => {
