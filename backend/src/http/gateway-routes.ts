@@ -8,6 +8,7 @@ import { extractUsageFromMessageJson, SseUsageTap } from '../gateway/anthropic-u
 import { sanitizedUpstreamErrorBody } from '../gateway/sanitize';
 import { AppError } from '../errors';
 import { requireAccountAuth } from './auth-routes';
+import { readBearerToken } from './request';
 import type { BackendEnv } from './app';
 
 /**
@@ -53,7 +54,9 @@ export function createGatewayRoutes(deps: BackendDeps) {
     c.body(
       sanitizedUpstreamErrorBody(await response.text(), [
         deps.config.deepseekApiKey,
-        c.req.header('Authorization') ?? '',
+        // 用裸 token 而非整段 Authorization 头：裸 token 是其子串，
+        // 能同时命中「Bearer <token>」与裸回显两种形态。
+        readBearerToken(c.req.header('Authorization')),
       ]),
       response.status as ContentfulStatusCode,
       { 'content-type': 'application/json' },

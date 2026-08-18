@@ -305,18 +305,19 @@ describe('gateway main agent channel and hidden chat quota', () => {
   });
 
   it('passes upstream error status through but never leaks the upstream key or account token', async () => {
-    const { accessToken } = await provisionLoggedInAccount(tb.app);
-
-    // 上游错误体回显密钥与账号 token：状态码透传，正文必须清洗。
+    // 上游错误体回显本次请求所用的账号 token（闭包注入，保证断言非空转）
+    // 与上游密钥：状态码透传，正文必须清洗。
+    let victimToken = '';
     const leaky = mockUpstream(() =>
       Response.json(
-        { type: 'error', error: { type: 'api_error', message: `auth failed for ${TEST_DEEPSEEK_API_KEY} and ${accessToken}` } },
+        { type: 'error', error: { type: 'api_error', message: `auth failed for ${TEST_DEEPSEEK_API_KEY} and Bearer ${victimToken}` } },
         { status: 500 },
       ),
     );
     await tb.cleanup();
     tb = await startTestBackend({ fetch: leaky.fetch });
     const { accessToken: freshToken } = await provisionLoggedInAccount(tb.app, '13800000002', 'initial-pass-2');
+    victimToken = freshToken;
     const errored = await postMessages(freshToken, {
       model: 'deepseek-chat', max_tokens: 8, messages: [],
     });
@@ -325,6 +326,19 @@ describe('gateway main agent channel and hidden chat quota', () => {
     expect(erroredText).not.toContain(TEST_DEEPSEEK_API_KEY);
     expect(erroredText).not.toContain(freshToken);
     expect(JSON.parse(erroredText)).toMatchObject({ type: 'error' });
+
+    // 裸 token 回显（无 Bearer 前缀）同样必须被抹掉。
+    let bareToken = '';
+    const bare = mockUpstream(() =>
+      Response.json({ error: `stale token ${bareToken}` }, { status: 401 }),
+    );
+    await tb.cleanup();
+    tb = await startTestBackend({ fetch: bare.fetch });
+    const { accessToken: bareVictim } = await provisionLoggedInAccount(tb.app, '13800000009', 'initial-pass-9');
+    bareToken = bareVictim;
+    const bareRes = await postMessages(bareVictim, { model: 'deepseek-chat', max_tokens: 8, messages: [] });
+    expect(bareRes.status).toBe(401);
+    expect(await bareRes.text()).not.toContain(bareVictim);
 
     // 非 JSON 错误体（HTML 网关页）含密钥 → 同样清洗，返回通用错误体。
     const html = mockUpstream(() =>
