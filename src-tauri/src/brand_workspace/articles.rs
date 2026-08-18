@@ -816,9 +816,7 @@ impl BrandWorkspaceStore {
             .as_deref()
             .map(str::trim)
             .filter(|value| !value.is_empty())
-            .map(|value| {
-                serde_json::json!({ "revisionReason": value }).to_string()
-            })
+            .map(|value| serde_json::json!({ "revisionReason": value }).to_string())
             .unwrap_or_else(|| "{}".to_string());
         transaction
             .execute(

@@ -919,9 +919,10 @@ fn apply_action(
             normalize_first_step(operation)?;
         }
         "pause" => {
-            if let Err(error) =
-                require_status(&operation.status, &["ready", "queued", "running", "recovering"])
-            {
+            if let Err(error) = require_status(
+                &operation.status,
+                &["ready", "queued", "running", "recovering"],
+            ) {
                 return Err(control_guard_error(&error, &operation.status));
             }
             if operation.status == "running"
@@ -2251,7 +2252,12 @@ mod tests {
                         "awaiting-confirmation",
                         Some(gate.clone()),
                     ),
-                    step("collect-materials", "brand-material-import", "pending", None),
+                    step(
+                        "collect-materials",
+                        "brand-material-import",
+                        "pending",
+                        None,
+                    ),
                 ],
                 input_refs: vec![],
                 pending_confirmation: Some(gate),

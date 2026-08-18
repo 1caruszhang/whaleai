@@ -1163,9 +1163,7 @@ impl BrandWorkspaceStore {
             return Err("publish_revision_actor_invalid".to_string());
         }
         if request.reason.trim().is_empty() {
-            return Err(
-                "publish revision requires the user's explicit instruction".to_string(),
-            );
+            return Err("publish revision requires the user's explicit instruction".to_string());
         }
         let budget = match request.budget_cny {
             Some(value) if value.is_finite() && value >= 0.0 => Some(value),
@@ -1185,17 +1183,17 @@ impl BrandWorkspaceStore {
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|error| format!("revise publish execution transaction: {error}"))?;
-        let (revision, status, owner_session_id, plan_id, plan_revision, current_budget, spend, current_start_at, provider_snapshot_json): (
-            i64,
-            String,
-            String,
-            String,
-            i64,
-            f64,
-            f64,
-            String,
-            String,
-        ) = transaction
+        let (
+            revision,
+            status,
+            owner_session_id,
+            plan_id,
+            plan_revision,
+            current_budget,
+            spend,
+            current_start_at,
+            provider_snapshot_json,
+        ): (i64, String, String, String, i64, f64, f64, String, String) = transaction
             .query_row(
                 "SELECT revision, status, created_by_session_id, distribution_plan_id,
                         distribution_plan_revision, budget_cny, estimated_spend_cny,
@@ -1294,7 +1292,17 @@ impl BrandWorkspaceStore {
         // 排期应用复用读取时的请求摘要快照（此刻行尚未被本次事务修改）。
         let mut summary_by_item: std::collections::HashMap<String, String> =
             std::collections::HashMap::new();
-        for (item_id, article_id, approved_revision, approved_body_sha256, channel_json, scheduled_at, payload_hash, summary_json) in &rows {
+        for (
+            item_id,
+            article_id,
+            approved_revision,
+            approved_body_sha256,
+            channel_json,
+            scheduled_at,
+            payload_hash,
+            summary_json,
+        ) in &rows
+        {
             summary_by_item.insert(item_id.clone(), summary_json.clone());
             let channel: Value = serde_json::from_str(channel_json)
                 .map_err(|_| "publish_channel_snapshot_invalid".to_string())?;

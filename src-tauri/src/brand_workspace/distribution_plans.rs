@@ -236,12 +236,7 @@ pub(super) fn ensure_schema(connection: &Connection) -> Result<(), String> {
              );",
         )
         .map_err(|error| format!("initialize distribution plan schema: {error}"))?;
-    super::ensure_column(
-        connection,
-        "geo_distribution_plan_audit",
-        "reason",
-        "TEXT",
-    )?;
+    super::ensure_column(connection, "geo_distribution_plan_audit", "reason", "TEXT")?;
     super::drop_brand_sessions_foreign_keys(
         connection,
         &["geo_distribution_plans", "geo_distribution_plan_audit"],
@@ -862,9 +857,7 @@ impl BrandWorkspaceStore {
     }
 }
 
-fn read_channel_preferences(
-    connection: &Connection,
-) -> Result<ChannelPreferencesPayload, String> {
+fn read_channel_preferences(connection: &Connection) -> Result<ChannelPreferencesPayload, String> {
     let row: Option<(String, String)> = connection
         .query_row(
             "SELECT additional_json, excluded_json FROM geo_channel_preferences WHERE singleton=1",
@@ -991,7 +984,12 @@ fn read_distribution_context(
         .ok_or_else(|| "distribution_plan_industry_snapshot_invalid".to_string())?;
     let (question_article_map, baseline_scope) =
         read_question_article_map(connection, &operation_id)?;
-    let questions = read_context_questions(connection, knowledge_version, &question_article_map, baseline_scope.as_ref())?;
+    let questions = read_context_questions(
+        connection,
+        knowledge_version,
+        &question_article_map,
+        baseline_scope.as_ref(),
+    )?;
     let derived_keywords = read_derived_keywords(connection, knowledge_version)?;
     Ok(DistributionPlanningContext {
         article_operation_id: operation_id,

@@ -1699,14 +1699,9 @@ async fn brand_channel_preferences_get_handler(
         Ok(store) => store,
         Err(error) => return Json(error),
     };
-    match store.get_channel_preferences(
-        &request.workspace_id,
-        &request.session_id,
-        request.payload,
-    ) {
-        Ok(preferences) => {
-            Json(serde_json::json!({ "ok": true, "preferences": preferences }))
-        }
+    match store.get_channel_preferences(&request.workspace_id, &request.session_id, request.payload)
+    {
+        Ok(preferences) => Json(serde_json::json!({ "ok": true, "preferences": preferences })),
         Err(error) => Json(serde_json::json!({ "ok": false, "error": error })),
     }
 }
@@ -1721,14 +1716,9 @@ async fn brand_channel_preferences_set_handler(
         Ok(store) => store,
         Err(error) => return Json(error),
     };
-    match store.set_channel_preferences(
-        &request.workspace_id,
-        &request.session_id,
-        request.payload,
-    ) {
-        Ok(preferences) => {
-            Json(serde_json::json!({ "ok": true, "preferences": preferences }))
-        }
+    match store.set_channel_preferences(&request.workspace_id, &request.session_id, request.payload)
+    {
+        Ok(preferences) => Json(serde_json::json!({ "ok": true, "preferences": preferences })),
         Err(error) => Json(serde_json::json!({ "ok": false, "error": error })),
     }
 }
@@ -1878,9 +1868,7 @@ async fn brand_publish_preview_handler(
 /// 只重算摘要并审计，不触碰不可逆动作。
 async fn brand_publish_scheduler_revise_handler(
     headers: HeaderMap,
-    Json(request): Json<
-        BrandKnowledgeEnvelope<crate::brand_workspace::PublishRevisionRequest>,
-    >,
+    Json(request): Json<BrandKnowledgeEnvelope<crate::brand_workspace::PublishRevisionRequest>>,
 ) -> Json<serde_json::Value> {
     let store = match validate_brand_knowledge_request(&headers, &request) {
         Ok(store) => store,

@@ -1017,7 +1017,10 @@ pub async fn session_sidecar_http_request(
             .await?;
     let request = request.resolve(&dispatch)?;
     let response = crate::logger::LOG_CONTEXT
-        .scope(log_ctx, execute_http_request(app, spill_manager.inner().clone(), request))
+        .scope(
+            log_ctx,
+            execute_http_request(app, spill_manager.inner().clone(), request),
+        )
         .await;
     // The generation lease protects only the Sidecar request and response
     // body. Tauri/WebKit IPC delivery is a separate transport phase and must
@@ -1328,8 +1331,7 @@ mod tests {
         let ctx = correlation_log_context("sess-x", "tab", "tab-x", None);
         crate::logger::LOG_CONTEXT
             .scope(ctx, async {
-                let current = crate::logger::LogContext::current()
-                    .expect("context inside scope");
+                let current = crate::logger::LogContext::current().expect("context inside scope");
                 assert_eq!(current.session_id.as_deref(), Some("sess-x"));
             })
             .await;

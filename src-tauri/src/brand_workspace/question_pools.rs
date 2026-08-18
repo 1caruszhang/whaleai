@@ -1500,7 +1500,9 @@ fn read_checkpoint(
         .ok_or_else(|| "question_pool_checkpoint_not_found".to_string())
 }
 
-fn validate_question_entries(questions: &Value) -> Result<std::collections::HashSet<String>, String> {
+fn validate_question_entries(
+    questions: &Value,
+) -> Result<std::collections::HashSet<String>, String> {
     let list = questions
         .as_array()
         .ok_or_else(|| "question_pool_questions_invalid".to_string())?;

@@ -203,7 +203,10 @@ mod with_config_lock_tests {
             Ok(())
         })
         .expect("no-op under lock");
-        assert_eq!(out.to_string(), before.trim().replace("\n", "").replace("  ", ""));
+        assert_eq!(
+            out.to_string(),
+            before.trim().replace("\n", "").replace("  ", "")
+        );
         assert_eq!(fs::read_to_string(&path).unwrap(), before, "file untouched");
         assert!(!path.with_file_name("config.json.bak").exists());
         fs::remove_dir_all(path.parent().unwrap()).ok();

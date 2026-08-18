@@ -279,10 +279,7 @@ fn development_credential(service: GeoProviderServiceId) -> Option<ServiceCreden
         let pairs: &[(&str, Option<String>)] = match service {
             GeoProviderServiceId::Ark => &[
                 ("apiKey", env_value("ARK_API_KEY")),
-                (
-                    "doubaoSearchApiKey",
-                    env_value("DOUBAO_SEARCH_API_KEY"),
-                ),
+                ("doubaoSearchApiKey", env_value("DOUBAO_SEARCH_API_KEY")),
             ],
             GeoProviderServiceId::Embedding => &[
                 (

@@ -361,8 +361,10 @@ mod tests {
         let blocker = tempfile::tempdir().unwrap();
         let file = blocker.path().join("not-a-dir");
         std::fs::write(&file, b"occupied").unwrap();
-        let error = apply_ui_language_in(&file, app.handle(), UiLanguage::ZhCn)
-            .unwrap_err();
-        assert!(error.contains("[i18n]") || error.contains("config"), "{error}");
+        let error = apply_ui_language_in(&file, app.handle(), UiLanguage::ZhCn).unwrap_err();
+        assert!(
+            error.contains("[i18n]") || error.contains("config"),
+            "{error}"
+        );
     }
 }
