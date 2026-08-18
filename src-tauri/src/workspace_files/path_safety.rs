@@ -723,6 +723,9 @@ fn verify_opened_workspace_parent(root: &Path, relative: &Path, fd: libc::c_int)
             std::io::Error::last_os_error()
         ));
     }
+    // st_dev 的 libc 类型随平台变化（macOS i32 / Linux u64），cast 在
+    // macOS 是必要转换、在 Linux 被 clippy 视为冗余——平台差异 cast。
+    #[allow(clippy::unnecessary_cast)]
     if current_metadata.dev() != opened.st_dev as u64 || current_metadata.ino() != opened.st_ino {
         return Err("Destination parent changed while writing".to_string());
     }
