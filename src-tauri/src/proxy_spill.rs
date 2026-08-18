@@ -1022,7 +1022,9 @@ mod tests {
         });
         let _ = tokio::join!(first_ready, second_ready, third_ready);
 
-        tokio::time::timeout(Duration::from_secs(2), async {
+        // 两个流的 spill 落盘后才可见 60_000 预算；CI runner 磁盘慢时 2s 偶发
+        // 不够（run 32177626264 rerun 即绿），放宽到 10s 只加时序余量不改断言。
+        tokio::time::timeout(Duration::from_secs(10), async {
             loop {
                 if manager.budget_snapshot().await.0 == 60_000 {
                     break;
