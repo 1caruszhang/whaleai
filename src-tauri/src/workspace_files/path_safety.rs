@@ -866,7 +866,7 @@ fn open_windows_relative_handle(
                 "Windows path component is too long",
             )
         })?;
-    if wide.is_empty() || wide.iter().any(|value| *value == 0) {
+    if wide.is_empty() || wide.contains(&0) {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             "Windows path component is empty or contains NUL",

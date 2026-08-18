@@ -627,7 +627,7 @@ pub async fn cmd_geo_provider_credentials_save(
     {
         platform::write(service_id, &credential)?;
         crate::sidecar::restart_xiaojing_session_sidecars(&app_handle, sidecars.inner()).await?;
-        return cmd_geo_provider_capability_status().await;
+        cmd_geo_provider_capability_status().await
     }
     #[cfg(not(windows))]
     {
@@ -646,7 +646,7 @@ pub async fn cmd_geo_provider_credentials_delete(
     {
         platform::delete(service_id)?;
         crate::sidecar::restart_xiaojing_session_sidecars(&app_handle, sidecars.inner()).await?;
-        return cmd_geo_provider_capability_status().await;
+        cmd_geo_provider_capability_status().await
     }
     #[cfg(not(windows))]
     {
