@@ -2,6 +2,7 @@ import { basename, resolve } from 'node:path';
 
 import {
   configureXiaojingGeoProviderAdmission,
+  getXiaojingGeoBillingPermitChannel,
   getXiaojingGeoProviderCapabilities,
 } from '../geo/provider-runtime';
 import {
@@ -231,6 +232,8 @@ function materialImportService(): MaterialImportService {
     createKnowledgeAuthority(identity),
     {},
     capabilities.keywordSearch,
+    undefined,
+    getXiaojingGeoBillingPermitChannel(),
   );
 }
 
@@ -253,6 +256,7 @@ function questionPoolService(): QuestionPoolService {
     capabilities.keywordSearch,
     capabilities.generation,
     capabilities.embedding,
+    getXiaojingGeoBillingPermitChannel(),
   );
   questionPoolRuntime = { key, service };
   return service;
@@ -269,6 +273,8 @@ function topicPlanService(): TopicPlanService {
     createTopicPlanPort(identity),
     capabilities.generation,
     capabilities.embedding,
+    undefined,
+    getXiaojingGeoBillingPermitChannel(),
   );
   topicPlanRuntime = { key, service };
   return service;
@@ -285,6 +291,7 @@ function articleService(): ArticleGenerationService {
     createArticlePort(identity),
     capabilities.generation,
     capabilities.reflection,
+    getXiaojingGeoBillingPermitChannel(),
   );
   articleRuntime = { key, service };
   return service;
@@ -301,6 +308,8 @@ function distributionService(): DistributionPlanningService {
     createDistributionPlanPort(identity),
     capabilities.distribution,
     capabilities.keywordSearch,
+    undefined,
+    getXiaojingGeoBillingPermitChannel(),
   );
   distributionRuntime = { key, service };
   return service;

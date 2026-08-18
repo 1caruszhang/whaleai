@@ -24,6 +24,8 @@ describe("GEO typed provider capabilities", () => {
       XIAOJING_DISTRIBUTION_SECRET: "distribution-secret",
       XIAOJING_ARK_PAYGO_BASE_URL: "https://gateway.example.test/api/v3",
       XIAOJING_DOUBAO_SEARCH_BASE_URL: "https://gateway.example.test/search",
+      XIAOJING_GATEWAY_BASE_URL: "https://gw.example.test",
+      XIAOJING_ACCOUNT_ACCESS_TOKEN: "account-access-token-secret",
     };
     expect(captureGeoProviderRuntimeSecrets(env)).toMatchObject({
       arkApiKey: "ark-secret",
@@ -34,8 +36,115 @@ describe("GEO typed provider capabilities", () => {
       distributionSecret: "distribution-secret",
       arkPaygoBaseUrl: "https://gateway.example.test/api/v3",
       doubaoSearchBaseUrl: "https://gateway.example.test/search",
+      gatewayBaseUrl: "https://gw.example.test",
+      accountAccessToken: "account-access-token-secret",
     });
     expect(env).toEqual({});
+  });
+
+  it("routes every billed provider wire route to the gateway with the account token (ticket 07)", async () => {
+    const calls: Array<{
+      url: string;
+      method: string;
+      headers: Record<string, string>;
+      body: string;
+    }> = [];
+    const gatewayFetch = vi.fn(
+      async (input: string | URL | Request, init?: RequestInit) => {
+        const request = new Request(input, init);
+        calls.push({
+          url: request.url,
+          method: request.method,
+          headers: Object.fromEntries(
+            [...request.headers].map(([k, v]) => [k.toLowerCase(), v]),
+          ),
+          body: await request.text(),
+        });
+        const url = request.url;
+        if (url.endsWith("/embeddings/multimodal"))
+          return jsonResponse({
+            data: { embedding: Array.from({ length: 2048 }, (_, i) => i) },
+          });
+        if (url.endsWith("/responses")) return jsonResponse({ output_text: "ok" });
+        if (url.includes("/gw/oss/"))
+          return jsonResponse({ url: "https://cdn.example.test/geo/a.html" });
+        if (url.includes("/gw/distribution/media/resource"))
+          return jsonResponse({
+            code: 200,
+            data: { total: 1, items: [{ id: 7, name: "渠道" }] },
+          });
+        if (url.includes("/search_api/web_search"))
+          return jsonResponse({
+            Result: {
+              WebResults: [{ Title: "t", Url: "https://e.test/a", Summary: "s" }],
+            },
+          });
+        return jsonResponse({ choices: [{ message: { content: "ok" } }] });
+      },
+    );
+    // 网关模式只依赖票 06 admission 注入的网关基地址 + 账号 token；Provider
+    // 密钥一概缺省（Rust 账号 admission 已清洗旧传输名）。
+    const capabilities = createGeoProviderCapabilities(
+      {
+        gatewayBaseUrl: "https://gw.example.test/",
+        accountAccessToken: "account-token-1",
+      },
+      { fetch: gatewayFetch as typeof fetch },
+    );
+
+    expect(capabilities.keywordSearch.baselineEngines()).toMatchObject([
+      { id: "doubao", available: true },
+    ]);
+
+    await capabilities.extraction.complete([{ role: "user", content: "e" }]);
+    await capabilities.reflection.complete([{ role: "user", content: "r" }]);
+    await capabilities.keywordSearch.search("search");
+    await capabilities.generation.complete([{ role: "user", content: "g" }]);
+    await capabilities.keywordSearch.probeQuestion("doubao", "问一句");
+    await capabilities.embedding.embed(["one"]);
+    await capabilities.keywordSearch.searchSources!("query");
+    const uploaded = await capabilities.objectStorage.putHtml(
+      "geo/a.html",
+      "<html></html>",
+    );
+    const resources = await capabilities.distribution.listResources("media", 1, 20);
+
+    expect(calls.map((call) => `${call.method} ${call.url}`)).toEqual([
+      "POST https://gw.example.test/gw/deepseek/chat/completions",
+      "POST https://gw.example.test/gw/deepseek/chat/completions",
+      "POST https://gw.example.test/gw/ark/chat/completions",
+      "POST https://gw.example.test/gw/ark/chat/completions",
+      "POST https://gw.example.test/gw/ark/responses",
+      "POST https://gw.example.test/gw/ark/embeddings/multimodal",
+      "POST https://gw.example.test/gw/doubao-search/search_api/web_search",
+      "PUT https://gw.example.test/gw/oss/geo/a.html",
+      "GET https://gw.example.test/gw/distribution/media/resource?page=1&size=20",
+    ]);
+    // 鉴权一律账号 token；wire body 形状不变（embedding 在网关模式省略
+    // model 字段，交由网关按服务器配置补齐）。
+    for (const call of calls) {
+      expect(call.headers.authorization).toBe("Bearer account-token-1");
+    }
+    const embeddingBody = JSON.parse(calls[5]!.body);
+    expect(embeddingBody).toEqual({
+      input: [{ type: "text", text: "one" }],
+    });
+    expect(calls[7]!.body).toBe("<html></html>");
+    expect(calls[8]!.headers["content-type"]).toBeUndefined();
+    expect(uploaded).toEqual({ url: "https://cdn.example.test/geo/a.html" });
+    expect(resources).toEqual({
+      total: 1,
+      items: [{ id: 7, name: "渠道" }],
+    });
+    // 账号 token 不得出现在任何错误投影里（脱敏名单含 admission 传输名）。
+    const sanitized = sanitizeGeoProviderError(
+      new Error("upstream said Bearer account-token-1 failed"),
+      {
+        gatewayBaseUrl: "https://gw.example.test",
+        accountAccessToken: "account-token-1",
+      },
+    );
+    expect(sanitized.message).not.toContain("account-token-1");
   });
 
   it("pins extraction, generation, reflection and keyword-search wire routes", async () => {

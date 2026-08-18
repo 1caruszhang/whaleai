@@ -350,12 +350,14 @@ describe('ledger and permit billing core HTTP contract', () => {
     expect(wrongUnitPrice.status).toBe(400);
     expect(wrongUnitPrice.body.error).toBe('price_mismatch');
 
-    // 分发计划漏报基础费 → 同样拒绝（claimed base 0 ≠ 30）。
+    // 分发计划显式漏报基础费（claimed base 0 ≠ 30）→ 拒绝。
+    // （票 07 起省略字段 = 服务端定价，见下方 server-priced 用例。）
     const missingBase = await applyPermit(token, {
       permitId: 'pm-dist-nobase',
       operation: 'distribution_planning',
       units: 4,
       unitPrice: 5,
+      basePrice: 0,
     });
     expect(missingBase.status).toBe(400);
     expect(missingBase.body.error).toBe('price_mismatch');
@@ -403,6 +405,47 @@ describe('ledger and permit billing core HTTP contract', () => {
       refundedPoints: 40,
       frozenPoints: 0,
     });
+  });
+
+  it('defaults omitted prices to the server-side price table (ticket 07 client shape)', async () => {
+    const { accessToken: token } = await provisionLoggedInAccount(tb.app);
+
+    // 票 07 客户端只报操作类型 + 单位数：省略单价/基础费时按服务端价目
+    // 定价（服务端定价权威，客户端零价目镜像）。
+    const applied = await applyPermit(token, {
+      permitId: 'pm-server-priced',
+      operation: 'distribution_planning',
+      units: 4,
+    });
+    expect(applied.status).toBe(201);
+    expect(permitOf(applied.body)).toMatchObject({
+      unitPrice: 5,
+      basePrice: 30,
+      totalPoints: 50,
+      frozenPoints: 50,
+    });
+
+    // 幂等重放：省略价目与携带服务端价目回放同一 permitId 参数等价。
+    const replay = await applyPermit(token, {
+      permitId: 'pm-server-priced',
+      operation: 'distribution_planning',
+      units: 4,
+      unitPrice: 5,
+      basePrice: 30,
+    });
+    expect(replay.status).toBe(200);
+    expect(permitOf(replay.body)).toMatchObject({ totalPoints: 50, frozenPoints: 50 });
+
+    // 显式携带漂移价目仍被拒绝（对账口径保留）。
+    const drift = await applyPermit(token, {
+      permitId: 'pm-server-priced',
+      operation: 'distribution_planning',
+      units: 4,
+      unitPrice: 4,
+      basePrice: 30,
+    });
+    expect(drift.status).toBe(409);
+    expect(drift.body.error).toBe('permit_id_conflict');
   });
 
   it('releases all remaining frozen points on close (unreported units refund)', async () => {

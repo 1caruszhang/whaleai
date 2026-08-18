@@ -6,9 +6,13 @@ import { createGeoDashboardPort, GeoDashboardService } from '../geo/dashboard';
 import {
   checkPublishedPageAccess,
   PostPublishBaselineProbeService,
+  PostPublishInsufficientBalanceError,
   type PostPublishBaselineProbeInput,
 } from '../geo/post-publish-monitoring';
-import { getXiaojingGeoProviderCapabilities } from '../geo/provider-runtime';
+import {
+  getXiaojingGeoBillingPermitChannel,
+  getXiaojingGeoProviderCapabilities,
+} from '../geo/provider-runtime';
 import { createPublishSchedulerPort } from '../geo/publish-scheduler';
 import { jsonResponse } from '../utils/http';
 import {
@@ -393,9 +397,23 @@ export async function handleXiaojingEffectsRoute(
       }
       const result = await new PostPublishBaselineProbeService(
         getXiaojingGeoProviderCapabilities().keywordSearch,
+        getXiaojingGeoBillingPermitChannel(),
       ).probe(payload.input);
       return jsonResponse({ success: true, result });
     } catch (error) {
+      // 余额预检拦截（票 07 监测欠费暂停）：402 + insufficient_balance 固定
+      // 码——Rust wake executor 按非重试失败收尾本轮，充值后下一轮自动恢复。
+      if (error instanceof PostPublishInsufficientBalanceError) {
+        return jsonResponse(
+          {
+            success: false,
+            error: "insufficient_balance",
+            required: error.required,
+            available: error.available,
+          },
+          402,
+        );
+      }
       const message = error instanceof Error ? error.message : String(error);
       return jsonResponse(
         {

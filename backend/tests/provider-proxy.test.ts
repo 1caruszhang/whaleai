@@ -268,6 +268,39 @@ describe('gateway provider proxy (ticket 05)', () => {
     expect(dedicated.calls[0]!.headers['authorization']).toBe('Bearer test-ark-embedding-key');
   });
 
+  it('fills the embedding endpoint id server-side when the ticket-07 client omits it', async () => {
+    const upstream = mockUpstream(() =>
+      Response.json({ data: { embedding: [0.1] }, usage: { prompt_tokens: 3 } }),
+    );
+    await tb.cleanup();
+    tb = await startTestBackend({
+      fetch: upstream.fetch,
+      config: { arkEmbeddingEndpointId: 'ep-ops-managed-embedding' },
+    });
+    const { accessToken } = await provisionLoggedInAccount(tb.app);
+    // 网关模式 sidecar 不再携带账号级 embedding endpoint id（账号 admission
+    // 清洗了它）；body 缺 model 时网关按服务器配置补齐。
+    const res = await tb.app.request('/gw/ark/embeddings/multimodal', {
+      method: 'POST',
+      headers: { authorization: `Bearer ${accessToken}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ input: [{ type: 'text', text: '知识片段' }] }),
+    });
+    expect(res.status).toBe(200);
+    expect(JSON.parse(upstream.calls[0]!.body)).toEqual({
+      model: 'ep-ops-managed-embedding',
+      input: [{ type: 'text', text: '知识片段' }],
+    });
+
+    // 客户端显式携带 model → 透传不覆盖。
+    const explicit = await tb.app.request('/gw/ark/embeddings/multimodal', {
+      method: 'POST',
+      headers: { authorization: `Bearer ${accessToken}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'ep-client-explicit', input: [{ type: 'text', text: 'x' }] }),
+    });
+    expect(explicit.status).toBe(200);
+    expect(JSON.parse(upstream.calls[1]!.body).model).toBe('ep-client-explicit');
+  });
+
   it('proxies doubao search searchSources with the dedicated search key', async () => {
     const upstream = mockUpstream(() =>
       Response.json({

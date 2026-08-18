@@ -32,6 +32,7 @@ import {
   projectBrandProfile,
 } from "../../shared/geo/profileInjection";
 import { managementApi } from "../utils/management-api-client";
+import type { GeoBillingPermitPort } from "./billing-permit";
 import type {
   GeoEmbeddingCapability,
   GeoTextCapability,
@@ -353,6 +354,8 @@ export class TopicPlanService {
     private readonly generation: GeoTextCapability,
     private readonly embedding: GeoEmbeddingCapability,
     private readonly now: () => Date = () => new Date(),
+    /** 网关计费（票 07）：初次 20 点/次、重生成 10 点/次；缺省跳过。 */
+    private readonly permits?: GeoBillingPermitPort,
   ) {}
 
   private assertIdentity(input: { workspaceId: string; sessionId: string }) {
@@ -395,6 +398,33 @@ export class TopicPlanService {
     const preparation = await this.persistence.prepare(questionPoolId);
     if (preparation.existing) return preparation.existing;
     const { context } = preparation;
+    // 计费（票 07）：主题规划初次 20 点/次。permitId 绑定源快照（问题池 +
+    // 知识版本）：崩溃/网络重试后重跑同一快照重放同一 permit，不二次预扣；
+    // 快照变化即新操作。existing 复用（缓存）已在上面提前返回，不扣点。
+    if (!this.permits) return this.runInitialGeneration(context);
+    const permitId = `topic:${context.questionPoolId}:${context.questionPoolRevision}:${context.knowledgeVersion}`;
+    await this.permits.apply({
+      permitId,
+      operation: "topic_planning",
+      units: 1,
+    });
+    try {
+      const plan = await this.runInitialGeneration(context);
+      await this.permits.reportUnit(permitId, 0, "success").catch(
+        () => undefined,
+      );
+      return plan;
+    } catch (error) {
+      await this.permits.reportUnit(permitId, 0, "failure").catch(
+        () => undefined,
+      );
+      throw error;
+    }
+  }
+
+  private async runInitialGeneration(
+    context: TopicPlanContext,
+  ): Promise<TopicPlanProjection> {
     if (context.questions.length === 0) {
       throw new Error("topic_plan_confirmed_questions_required");
     }
@@ -814,6 +844,45 @@ export class TopicPlanService {
     const eligible = plan.items.filter(
       (item) => targetIds.includes(item.id) && !isTopicPlanItemProtected(item),
     );
+    // 计费（票 07）：重生成 10 点/次。permitId 绑定 (plan, expectedRevision)：
+    // 同一修订的网络重试重放同一 permit；修订号随每次 mutation 递增，下一轮
+    // 重生成自然是新计费轮。无可再生条目（全受保护）不发起模型调用，不扣点。
+    if (!this.permits || eligible.length === 0) {
+      return this.runRegeneration(plan, eligible, preserved, targetIds, input.expectedRevision);
+    }
+    const permitId = `topic-regen:${plan.id}:${input.expectedRevision}`;
+    await this.permits.apply({
+      permitId,
+      operation: "topic_planning_regen",
+      units: 1,
+    });
+    try {
+      const result = await this.runRegeneration(
+        plan,
+        eligible,
+        preserved,
+        targetIds,
+        input.expectedRevision,
+      );
+      await this.permits.reportUnit(permitId, 0, "success").catch(
+        () => undefined,
+      );
+      return result;
+    } catch (error) {
+      await this.permits.reportUnit(permitId, 0, "failure").catch(
+        () => undefined,
+      );
+      throw error;
+    }
+  }
+
+  private async runRegeneration(
+    plan: TopicPlanProjection,
+    eligible: TopicPlanItem[],
+    preserved: TopicPlanItem[],
+    targetIds: string[],
+    expectedRevision: number,
+  ): Promise<TopicPlanMutationResult> {
     let replacements: TopicPlanItem[] = [];
     let regenerationAttempts: TopicPlanModelAttempt[] = [];
     if (eligible.length > 0) {
@@ -866,7 +935,7 @@ export class TopicPlanService {
     });
     return this.persistence.mutate({
       planId: plan.id,
-      expectedRevision: input.expectedRevision,
+      expectedRevision,
       kind: "partial-regeneration",
       items: merged.items,
       targetItemIds: targetIds,

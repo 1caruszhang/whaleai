@@ -5,6 +5,7 @@ import type {
   QuestionPoolProjection,
   QuestionPoolStage,
 } from "../../shared/geo/questionPool";
+import { GatewayBillingError } from "./billing-permit";
 import {
   QuestionPoolService,
   type QuestionPoolPersistencePort,
@@ -612,5 +613,164 @@ describe("QuestionPoolService", () => {
       }),
     ).rejects.toThrow("question_pool_identity_mismatch");
     expect(persistence.revisions).toHaveLength(0);
+  });
+});
+
+describe("QuestionPoolService billing permits (ticket 07)", () => {
+  function permitPort(options: { failApplyWith?: Error } = {}) {
+    const calls: Array<
+      | { kind: "apply"; permitId: string; operation: string; units: number }
+      | { kind: "report"; permitId: string; unit: number; outcome: string }
+      | { kind: "close"; permitId: string }
+    > = [];
+    return {
+      calls,
+      port: {
+        async apply(input: { permitId: string; operation: string; units: number }) {
+          calls.push({ kind: "apply", ...input });
+          if (options.failApplyWith) throw options.failApplyWith;
+          return {
+            permitId: input.permitId,
+            operation: input.operation,
+            units: input.units,
+            totalPoints: 15,
+            status: "open" as const,
+            frozenPoints: 15,
+            consumedPoints: 0,
+            refundedPoints: 0,
+          };
+        },
+        async reportUnit(permitId: string, unit: number, outcome: string) {
+          calls.push({ kind: "report", permitId, unit, outcome });
+        },
+        async close(permitId: string) {
+          calls.push({ kind: "close", permitId });
+        },
+      },
+    };
+  }
+
+  function billedService(
+    persistence: FakePersistence,
+    permits: ReturnType<typeof permitPort>["port"],
+    provider = providers(),
+  ) {
+    return new QuestionPoolService(
+      { workspaceId: "brand-08", sessionId: "session-08" },
+      persistence,
+      provider.keywordSearch,
+      provider.generation,
+      provider.embedding,
+      permits,
+    );
+  }
+
+  it("applies one question_pool permit per attempt and reports success on persist", async () => {
+    const persistence = new FakePersistence();
+    const permits = permitPort();
+    const subject = billedService(persistence, permits.port);
+
+    const pool = await subject.generate(input);
+
+    expect(pool.status).toBe("awaiting-selection");
+    expect(permits.calls).toEqual([
+      { kind: "apply", permitId: "qpool:attempt-08", operation: "question_pool", units: 1 },
+      { kind: "report", permitId: "qpool:attempt-08", unit: 0, outcome: "success" },
+    ]);
+  });
+
+  it("aborts before any provider call when the permit application is rejected", async () => {
+    const persistence = new FakePersistence();
+    const permits = permitPort({
+      failApplyWith: new GatewayBillingError(
+        "insufficient_balance",
+        "点数不足：本次需 15 点，当前可用 4 点，请充值后再试。",
+        402,
+        { required: 15, available: 4 },
+      ),
+    });
+    const provider = providers();
+    const subject = billedService(persistence, permits.port, provider);
+
+    await expect(subject.generate(input)).rejects.toMatchObject({
+      code: "insufficient_balance",
+    });
+    expect(provider.keywordSearch.search).not.toHaveBeenCalled();
+    expect(provider.generation.complete).not.toHaveBeenCalled();
+    // 申请未成功：不产生任何回报/结清。
+    expect(permits.calls).toEqual([
+      { kind: "apply", permitId: "qpool:attempt-08", operation: "question_pool", units: 1 },
+    ]);
+  });
+
+  it("reports the single unit as failure (full refund) when generation fails", async () => {
+    const persistence = new FakePersistence();
+    const permits = permitPort();
+    const provider = providers();
+    provider.generation.complete.mockRejectedValue(
+      new Error("question_pool_provider_failed"),
+    );
+    const subject = billedService(persistence, permits.port, provider);
+
+    await expect(subject.generate(input)).rejects.toThrow();
+    expect(permits.calls).toEqual([
+      { kind: "apply", permitId: "qpool:attempt-08", operation: "question_pool", units: 1 },
+      { kind: "report", permitId: "qpool:attempt-08", unit: 0, outcome: "failure" },
+    ]);
+  });
+
+  it("skips the permit channel entirely on reused pools (cache hit, free)", async () => {
+    const persistence = new FakePersistence();
+    persistence.reuse = basePool({ status: "awaiting-selection" });
+    const permits = permitPort();
+    const subject = billedService(persistence, permits.port);
+
+    await subject.generate(input);
+
+    expect(permits.calls).toEqual([]);
+  });
+
+  it("replays the same permitId on a fully cached recovery re-run without double reporting", async () => {
+    const persistence = new FakePersistence();
+    const keyword = {
+      id: "kw-1",
+      term: "成都汽车改装",
+      category: "core" as const,
+      heat: "high" as const,
+      platform: "doubao" as const,
+    };
+    persistence.outputs.set("keyword-search", { raw: "raw", keywords: [keyword] });
+    persistence.outputs.set("question-generation", {
+      raw: "raw",
+      candidates: [
+        { text: "成都汽车改装哪家好？", recommended: true, sourceKeywords: ["成都汽车改装"] },
+      ],
+    });
+    persistence.outputs.set("embedding", {
+      vectors: [
+        [1, 0],
+        [0, 1],
+        [1, 1],
+      ],
+    });
+    persistence.outputs.set("persist", { poolId: "pool-08", revision: 1 });
+    for (const stage of ["keyword-search", "question-generation", "embedding", "persist"] as const) {
+      persistence.status.set(stage, "completed");
+    }
+    const permits = permitPort();
+    const provider = providers();
+    const subject = billedService(persistence, permits.port, provider);
+
+    await subject.generate(input);
+
+    // 全阶段缓存命中：零 Provider 调用；permit 申请与回报各重放一次
+    //（服务端幂等，不二次预扣）。
+    expect(provider.keywordSearch.search).not.toHaveBeenCalled();
+    expect(provider.generation.complete).not.toHaveBeenCalled();
+    expect(provider.embedding.embed).not.toHaveBeenCalled();
+    expect(permits.calls).toEqual([
+      { kind: "apply", permitId: "qpool:attempt-08", operation: "question_pool", units: 1 },
+      { kind: "report", permitId: "qpool:attempt-08", unit: 0, outcome: "success" },
+    ]);
   });
 });

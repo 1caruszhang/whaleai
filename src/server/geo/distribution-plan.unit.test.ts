@@ -367,3 +367,129 @@ describe("DistributionPlanningService", () => {
     ).toBeDefined();
   });
 });
+
+describe("DistributionPlanningService billing permits (ticket 07)", () => {
+  function permitPort() {
+    const calls: Array<
+      | { kind: "apply"; permitId: string; operation: string; units: number }
+      | { kind: "report"; permitId: string; unit: number; outcome: string }
+      | { kind: "close"; permitId: string }
+    > = [];
+    return {
+      calls,
+      port: {
+        async apply(input: { permitId: string; operation: string; units: number }) {
+          calls.push({ kind: "apply", ...input });
+          return {
+            permitId: input.permitId,
+            operation: input.operation,
+            units: input.units,
+            totalPoints: 30 + 5 * input.units,
+            status: "open" as const,
+            frozenPoints: 30 + 5 * input.units,
+            consumedPoints: 0,
+            refundedPoints: 0,
+          };
+        },
+        async reportUnit(permitId: string, unit: number, outcome: string) {
+          calls.push({ kind: "report", permitId, unit, outcome });
+        },
+        async close(permitId: string) {
+          calls.push({ kind: "close", permitId });
+        },
+      },
+    };
+  }
+
+  function billedService(
+    persistencePort: ReturnType<typeof persistence>["port"],
+    permits: ReturnType<typeof permitPort>["port"],
+    search: ReturnType<typeof keywordSearch> = keywordSearch(),
+  ) {
+    return new DistributionPlanningService(
+      { workspaceId: "workspace", sessionId: "session" },
+      persistencePort,
+      provider(),
+      search,
+      () => new Date("2026-08-15T00:00:00.000Z"),
+      permits,
+    );
+  }
+
+  it("pre-deducts base + passive-question units and reports each probe outcome", async () => {
+    const { port } = persistence();
+    const permits = permitPort();
+    const service = billedService(port, permits.port);
+
+    const result = await service.start({
+      workspaceId: "workspace",
+      sessionId: "session",
+      source,
+    });
+
+    expect(result.id).toBe("plan-1");
+    // 上下文只有 1 个已确认问题 → units = 1（基础 30 + 5）。
+    expect(permits.calls[0]).toMatchObject({
+      kind: "apply",
+      operation: "distribution_planning",
+      units: 1,
+    });
+    expect(permits.calls[0].permitId).toMatch(/^dist:article-operation:[0-9a-f]{16}$/);
+    expect(permits.calls).toEqual([
+      permits.calls[0],
+      { kind: "report", permitId: permits.calls[0].permitId, unit: 0, outcome: "success" },
+    ]);
+  });
+
+  it("reports failed passive probes as failure units (per-question refund)", async () => {
+    const { port } = persistence();
+    const permits = permitPort();
+    const search = keywordSearch();
+    search.probeQuestion.mockRejectedValue(new Error("keyword-search 上游请求失败"));
+    const service = billedService(port, permits.port, search);
+
+    const result = await service.start({
+      workspaceId: "workspace",
+      sessionId: "session",
+      source,
+    });
+
+    // 被动路 independent-best-effort：探测失败计划仍产出（降级），但该问
+    // 单位按失败回补（服务端口径：全失败时基础费随整体退回）。
+    expect(result.status).toBeDefined();
+    expect(permits.calls).toEqual([
+      permits.calls[0],
+      { kind: "report", permitId: permits.calls[0].permitId, unit: 0, outcome: "failure" },
+    ]);
+  });
+
+  it("replays the same permitId for the same source (recovery re-run) and never bills resource browsing", async () => {
+    const { port } = persistence();
+    const permits = permitPort();
+    const search = keywordSearch();
+    const service = billedService(port, permits.port, search);
+
+    await service.start({ workspaceId: "workspace", sessionId: "session", source });
+    const firstPermitId = permits.calls[0].permitId;
+    const resourceCallsBefore = (provider().listResources as ReturnType<typeof vi.fn>).mock;
+    expect(resourceCallsBefore).toBeDefined();
+
+    // 同一来源恢复重跑：重放同一 permitId，不产生第二笔申请。
+    const secondPersistence = persistence();
+    const secondPermits = permitPort();
+    const service2 = billedService(secondPersistence.port, secondPermits.port, search);
+    await service2.start({ workspaceId: "workspace", sessionId: "session", source });
+    expect(secondPermits.calls[0]).toMatchObject({
+      kind: "apply",
+      permitId: firstPermitId,
+      units: 1,
+    });
+
+    // 浏览/读取面（latest/get/context/edit/confirm）零 permit 调用。
+    const readPermits = permitPort();
+    const readService = billedService(persistence().port, readPermits.port, search);
+    await readService.latest({ workspaceId: "workspace", sessionId: "session" });
+    await readService.context({ workspaceId: "workspace", sessionId: "session" });
+    expect(readPermits.calls).toEqual([]);
+  });
+});

@@ -22,6 +22,7 @@ import { toKnowledgeCardCandidate } from '../../shared/geo/knowledgeCard';
 import { buildSsrfGuardedDispatcher, isUrlSchemeSafe } from '../utils/ssrf';
 import { withAbortSignal } from '../utils/cancellation';
 import { managementApi, managementApiBytes } from '../utils/management-api-client';
+import type { GeoBillingPermitPort } from './billing-permit';
 import type { KnowledgeAuthority, KnowledgeCandidate } from './knowledge-authority';
 import type {
   GeoKeywordSearchCapability,
@@ -792,6 +793,8 @@ export class MaterialImportService {
     private readonly websiteDeps: WebsiteFetchDependencies = {},
     private readonly keywordSearch?: Pick<GeoKeywordSearchCapability, 'search' | 'searchSources'>,
     private readonly extractionTimeoutMs: number = DEFAULT_EXTRACTION_TIMEOUT_MS,
+    /** 网关计费（票 07）：材料导入 20 点/份，失败份退回；缺省跳过。 */
+    private readonly permits?: GeoBillingPermitPort,
   ) {}
 
   async importFiles(sourcePaths: readonly string[]): Promise<MaterialProcessResult[]> {
@@ -1103,7 +1106,26 @@ export class MaterialImportService {
     } catch (error) {
       return { ok: false, materialId, errorCode: errorCode(error) };
     }
+    // 计费（票 07）：材料导入 20 点/份，最小成败单位 = 单份处理 attempt。
+    // permitId 绑定 attempt：同一 attempt 的网络重试重放同一 permit；显式
+    // 重试失败份是新的 attempt（上轮失败已回补）。begin 被拒（已处理/状态
+    // 无效）在上面提前返回，不扣点。permit 申请失败按本份失败收尾，未取得
+    // 的 permit 不回报。
+    const permitId = `mat:${attempt.id}`;
+    let permitAcquired = false;
+    const settlePermit = async (outcome: 'success' | 'failure') => {
+      if (!this.permits || !permitAcquired) return;
+      await this.permits.reportUnit(permitId, 0, outcome).catch(() => undefined);
+    };
     try {
+      if (this.permits) {
+        await this.permits.apply({
+          permitId,
+          operation: 'material_import',
+          units: 1,
+        });
+        permitAcquired = true;
+      }
       const [context, material, bytes] = await Promise.all([
         this.materialPort.context(),
         this.materialPort.get(materialId),
@@ -1184,6 +1206,7 @@ export class MaterialImportService {
         status: 'awaiting-confirmation',
         candidateIds,
       });
+      await settlePermit('success');
       return {
         ok: true,
         material: updated,
@@ -1200,6 +1223,7 @@ export class MaterialImportService {
         candidateIds,
         errorCode: code,
       }).catch(() => {});
+      await settlePermit('failure');
       return { ok: false, materialId, errorCode: code };
     }
   }

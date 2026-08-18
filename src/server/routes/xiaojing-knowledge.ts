@@ -21,7 +21,10 @@ import {
   type MaterialErrorCode,
 } from '../geo/material-import';
 import { recordGeoOperationMilestone } from '../geo/operation-progress';
-import { getXiaojingGeoProviderCapabilities } from '../geo/provider-runtime';
+import {
+  getXiaojingGeoBillingPermitChannel,
+  getXiaojingGeoProviderCapabilities,
+} from '../geo/provider-runtime';
 import { jsonResponse } from '../utils/http';
 import { sendXiaojingMessage } from '../xiaojing-reminder-send';
 import { getRuntimeSessionIdForRequest, type XiaojingRouteContext } from './xiaojing-shared';
@@ -65,6 +68,8 @@ async function runBackgroundProcessing(input: {
     createKnowledgeAuthority(identity),
     {},
     capabilities.keywordSearch,
+    undefined,
+    getXiaojingGeoBillingPermitChannel(),
   );
   for (const materialId of materialIds) {
     const result = await service.process(materialId);

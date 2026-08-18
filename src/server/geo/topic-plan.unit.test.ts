@@ -560,3 +560,138 @@ describe("topic plan policy version contract with BrandWorkspace", () => {
     expect(declared?.[1]).toBe(TOPIC_PLAN_POLICY_VERSION);
   });
 });
+
+describe("TopicPlanService billing permits (ticket 07)", () => {
+  function permitPort(options: { failApplyWith?: Error } = {}) {
+    const calls: Array<
+      | { kind: "apply"; permitId: string; operation: string; units: number }
+      | { kind: "report"; permitId: string; unit: number; outcome: string }
+      | { kind: "close"; permitId: string }
+    > = [];
+    return {
+      calls,
+      port: {
+        async apply(input: { permitId: string; operation: string; units: number }) {
+          calls.push({ kind: "apply", ...input });
+          if (options.failApplyWith) throw options.failApplyWith;
+          return {
+            permitId: input.permitId,
+            operation: input.operation,
+            units: input.units,
+            totalPoints: 20,
+            status: "open" as const,
+            frozenPoints: 20,
+            consumedPoints: 0,
+            refundedPoints: 0,
+          };
+        },
+        async reportUnit(permitId: string, unit: number, outcome: string) {
+          calls.push({ kind: "report", permitId, unit, outcome });
+        },
+        async close(permitId: string) {
+          calls.push({ kind: "close", permitId });
+        },
+      },
+    };
+  }
+
+  function billedService(
+    persistence: FakePersistence,
+    permits: ReturnType<typeof permitPort>["port"],
+    generation: GeoTextCapability = new DeterministicGeneration(),
+  ) {
+    return new TopicPlanService(
+      identity,
+      persistence,
+      generation,
+      new DeterministicEmbedding(),
+      () => new Date("2026-08-15T00:00:00.000Z"),
+      permits,
+    );
+  }
+
+  it("bills the initial planning run once against the source snapshot and reports success", async () => {
+    const persistence = new FakePersistence();
+    const permits = permitPort();
+    const subject = billedService(persistence, permits.port);
+
+    const plan = await subject.generate({ ...identity });
+
+    expect(plan.items.length).toBeGreaterThan(0);
+    expect(permits.calls).toEqual([
+      { kind: "apply", permitId: "topic:pool-08:4:7", operation: "topic_planning", units: 1 },
+      { kind: "report", permitId: "topic:pool-08:4:7", unit: 0, outcome: "success" },
+    ]);
+  });
+
+  it("re-uses the same permitId when the same snapshot is re-run (recovery) and skips on cache", async () => {
+    const persistence = new FakePersistence();
+    const permits = permitPort();
+    const subject = billedService(persistence, permits.port);
+    await subject.generate({ ...identity });
+
+    // 恢复重跑（崩溃在 create 落库前）：同一源快照重放同一 permitId。
+    persistence.plan = null;
+    const second = permitPort();
+    const subject2 = billedService(persistence, second.port);
+    await subject2.generate({ ...identity });
+    expect(second.calls).toEqual([
+      { kind: "apply", permitId: "topic:pool-08:4:7", operation: "topic_planning", units: 1 },
+      { kind: "report", permitId: "topic:pool-08:4:7", unit: 0, outcome: "success" },
+    ]);
+
+    // 缓存命中（existing 已存在）：零 permit。
+    const cached = permitPort();
+    const subject3 = billedService(persistence, cached.port);
+    await subject3.generate({ ...identity });
+    expect(cached.calls).toEqual([]);
+  });
+
+  it("reports the initial run as failure (full refund) when the provider fails", async () => {
+    const persistence = new FakePersistence();
+    const permits = permitPort();
+    const failing = new DeterministicGeneration();
+    failing.complete = vi.fn(async () => {
+      throw new Error("generation 上游请求失败（HTTP 500）");
+    });
+    const subject = billedService(persistence, permits.port, failing);
+
+    await expect(subject.generate({ ...identity })).rejects.toThrow();
+    expect(permits.calls).toEqual([
+      { kind: "apply", permitId: "topic:pool-08:4:7", operation: "topic_planning", units: 1 },
+      { kind: "report", permitId: "topic:pool-08:4:7", unit: 0, outcome: "failure" },
+    ]);
+  });
+
+  it("bills regeneration at the regen price keyed by plan revision", async () => {
+    const persistence = new FakePersistence();
+    const permits = permitPort();
+    const subject = billedService(persistence, permits.port);
+    const plan = await subject.generate({ ...identity });
+
+    const result = await subject.regenerate({
+      ...identity,
+      planId: plan.id,
+      expectedRevision: plan.revision,
+      itemIds: [plan.items[0].id],
+    });
+
+    expect(result.plan.items).toBeDefined();
+    expect(permits.calls).toEqual([
+      { kind: "apply", permitId: "topic:pool-08:4:7", operation: "topic_planning", units: 1 },
+      { kind: "report", permitId: "topic:pool-08:4:7", unit: 0, outcome: "success" },
+      {
+        kind: "apply",
+        permitId: `topic-regen:${plan.id}:${plan.revision}`,
+        operation: "topic_planning_regen",
+        units: 1,
+      },
+      {
+        kind: "report",
+        permitId: `topic-regen:${plan.id}:${plan.revision}`,
+        unit: 0,
+        outcome: "success",
+      },
+    ]);
+  });
+});
