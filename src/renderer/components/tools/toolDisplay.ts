@@ -14,6 +14,7 @@ const XIAOJING_GEO_TOOL_LABEL_KEYS: Record<string, string> = {
   'mcp__xiaojing-geo__propose_brand_fact': 'process.tools.proposeBrandFact',
   'mcp__xiaojing-geo__inspect_brand_fact': 'process.tools.inspectBrandFact',
   'mcp__xiaojing-geo__revise_gate_content': 'process.tools.reviseGateContent',
+  'mcp__xiaojing-geo__request_brand_material': 'process.tools.requestBrandMaterial',
   'mcp__xiaojing-geo__import_pasted_material': 'process.tools.importPastedMaterial',
   'mcp__xiaojing-geo__read_session_file': 'process.tools.readSessionFile',
   'mcp__xiaojing-geo__import_website_material': 'process.tools.importWebsiteMaterial',

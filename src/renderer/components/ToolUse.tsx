@@ -11,6 +11,7 @@ import {
 } from './tools/toolDisplay';
 import GeoOperationEventCard, { parseGeoOperationEventCard } from './xiaojing/GeoOperationEventCard';
 import KnowledgeBatchCard, { parseKnowledgeCandidatesCard } from './xiaojing/KnowledgeBatchCard';
+import MaterialRequestCard, { parseMaterialRequestCard } from './xiaojing/MaterialRequestCard';
 import KnowledgeConflictCard, { parseKnowledgeConflictCard } from './xiaojing/KnowledgeConflictCard';
 import QuestionPoolGateCard, { parseQuestionPoolGateCard } from './xiaojing/QuestionPoolGateCard';
 import TopicPlanGateCard, { parseTopicPlanGateCard } from './xiaojing/TopicPlanGateCard';
@@ -35,6 +36,10 @@ export default function ToolUse({ tool }: ToolUseProps): React.JSX.Element {
   if (tool.name.startsWith('mcp__xiaojing-geo__') && tool.result) {
     const batchCard = parseKnowledgeCandidatesCard(tool.result);
     if (batchCard) return <KnowledgeBatchCard data={batchCard} />;
+  }
+  if (tool.name === 'mcp__xiaojing-geo__request_brand_material' && tool.result) {
+    const materialRequest = parseMaterialRequestCard(tool.result);
+    if (materialRequest) return <MaterialRequestCard data={materialRequest} />;
   }
   if (tool.name === 'mcp__xiaojing-geo__propose_brand_fact' && tool.result) {
     const knowledgeCard = parseKnowledgeConflictCard(tool.result);

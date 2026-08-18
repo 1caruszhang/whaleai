@@ -5,8 +5,6 @@ import { AskUserQuestionPrompt } from '@/components/AskUserQuestionPrompt';
 import ChatStarterSuggestions from '@/components/chat/ChatStarterSuggestions';
 import Message from '@/components/Message';
 import SimpleChatInput, { type ImageAttachment, type SessionFileRef } from '@/components/SimpleChatInput';
-import XiaojingChatMaterialImport from '@/components/xiaojing/XiaojingChatMaterialImport';
-import { useCurrentWorkspace } from '@/context/CurrentWorkspaceContext';
 import { useTabState } from '@/context/TabContext';
 import { FileActionProvider } from '@/context/FileActionContext';
 import { useWorkspaceChangeSignal } from '@/hooks/useWorkspaceChangeSignal';
@@ -52,8 +50,6 @@ export default function Chat({
     stopResponse,
     retryCurrentSessionRestore,
   } = useTabState();
-  // 材料导入入口只服从本 Tab 精确匹配的品牌，不用全局 current workspace 补位。
-  const currentWorkspace = useCurrentWorkspace();
   const [draftTitle, setDraftTitle] = useState(sessionTitle);
   const [renaming, setRenaming] = useState(false);
   const consumedInitialRef = useRef<InitialMessage | null>(null);
@@ -219,10 +215,6 @@ export default function Chat({
           )}
         </div>
       </div>
-
-      {currentWorkspace && (
-        <XiaojingChatMaterialImport workspaceId={currentWorkspace.id} />
-      )}
 
       <SimpleChatInput
         onSend={handleSend}

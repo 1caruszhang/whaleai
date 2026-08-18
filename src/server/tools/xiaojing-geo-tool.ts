@@ -40,6 +40,7 @@ import {
   type GeoOperationCreateInput,
 } from '../geo/operation';
 import { buildKnowledgeCandidatesCardData } from '../../shared/geo/knowledgeCard';
+import { buildMaterialRequestCardData } from '../../shared/geo/materialRequestCard';
 import {
   dispatchGateRevision,
   GATE_REVISION_GATE_TYPES,
@@ -413,7 +414,7 @@ export async function createXiaojingGeoServer() {
       ),
       tool(
         'start_geo_operation',
-        "Create the one BrandWorkspace GeoOperation that matches the user's intent. Use the direct intent when the user names a specific stage; when the user states a GEO goal without naming a stage, create full-optimization instead of asking which intent to pick. Keep goal a short plain-language phrase (e.g. 一轮完整的 GEO 优化) — the chat progress card broadcasts the full stage and step plan, so never restate every step in prose; report only the stage and the confirmation gate the operation currently stops at. For next-round-optimization, omit updateKnowledge first so the operation stops and asks, then record the user's answer with choose_next_round_knowledge. When reporting to the user, use natural, professional Simplified Chinese and keep your own thinking in Simplified Chinese; never surface internal enum values, operation IDs, UUIDs, revision numbers, tool names, or endpoint names — describe the operation by its goal and stages in plain language.",
+        "Create the one BrandWorkspace GeoOperation that matches the user's intent. Use the direct intent when the user names a specific stage; when the user states a GEO goal without naming a stage, create full-optimization instead of asking which intent to pick. Keep goal a short plain-language phrase (e.g. 一轮完整的 GEO 优化) — the chat progress card broadcasts the full stage and step plan, so never restate every step in prose; report only the stage and the confirmation gate the operation currently stops at. Every new operation first parks at the plan acknowledgement gate: after creating it, briefly state the goal and the opening stage, tell the user to review and release the plan on the progress card, then end your turn — do not start any stage before the operation event reminder tells you the plan was released. For next-round-optimization, omit updateKnowledge first so the operation stops and asks, then record the user's answer with choose_next_round_knowledge; the explicit answer releases the replaced plan, which starts directly at its first work step (still stopping at that stage's confirmation gate). When reporting to the user, use natural, professional Simplified Chinese and keep your own thinking in Simplified Chinese; never surface internal enum values, operation IDs, UUIDs, revision numbers, tool names, or endpoint names — describe the operation by its goal and stages in plain language.",
         {
           intent: z.enum(GEO_OPERATION_KINDS),
           goal: z.string().min(1).max(500),
@@ -655,6 +656,17 @@ export async function createXiaojingGeoServer() {
         { alwaysLoad: true },
       ),
       tool(
+        'request_brand_material',
+        "Surface the brand-material request card in chat where the user uploads materials (file picker, pasted text or official-site URL; PDF/Office are parsed there). Call it exactly when: (1) at planning time the brand has no confirmed knowledge, or the confirmed knowledge is clearly too thin for the goal; (2) the user explicitly asks to add brand material; (3) the user attached a binary file that read_session_file cannot parse and it is brand material. Never call it mid-operation just because a gate lacks material evidence — proceed with AI-completion rows and let the user adjudicate on that card. reason is one plain-language line shown on the card header. After calling it, tell the user to upload on the card and end your turn; the knowledge confirmation card follows the import automatically.",
+        { reason: z.string().min(1).max(300).describe('One plain-language line telling the user why material is needed now.') },
+        async (input) => ({
+          content: [
+            { type: 'text' as const, text: JSON.stringify(buildMaterialRequestCardData(input.reason)) },
+          ],
+        }),
+        { alwaysLoad: true },
+      ),
+      tool(
         'import_pasted_material',
         'Save user-pasted brand material as a traceable original, extract Enterprise Profile candidates, and submit every candidate to KnowledgeAuthority. Never use this for a local file path.',
         {
@@ -676,7 +688,7 @@ export async function createXiaojingGeoServer() {
       ),
       tool(
         'read_session_file',
-        'Read one file the user attached to a chat message. Scope is strictly the current session directory xiaojing_files/<sessionId>/; returns a bounded head of text plus totalChars and a truncated flag — continue larger files with offsetChars. Binary attachments are rejected with guidance to import them as brand material instead.',
+        'Read one file the user attached to a chat message. Scope is strictly the current session directory xiaojing_files/<sessionId>/; returns a bounded head of text plus totalChars and a truncated flag — continue larger files with offsetChars. Binary attachments are rejected with guidance to surface the material request card via request_brand_material instead.',
         {
           path: z
             .string()
@@ -704,7 +716,7 @@ export async function createXiaojingGeoServer() {
           if (!isSessionFileTextReadable(input.path)) {
             return fail(
               'binary_not_readable',
-              'This file type cannot be read as text. If it is brand material, guide the user to the material import entry in the chat input area (paste, official-site URL or file picker; PDF/Office are parsed there).',
+              'This file type cannot be read as text. If it is brand material, call request_brand_material so the user can upload it on the chat material request card (paste, official-site URL or file picker; PDF/Office are parsed there).',
             );
           }
           const sidecarId = process.env.XIAOJING_SIDECAR_ID?.trim();
@@ -780,7 +792,7 @@ export async function createXiaojingGeoServer() {
       ),
       tool(
         'run_question_pool',
-        'Run the question-opportunity stage for one product line (domain-level, e.g. 汽车音响改装 — not a fine-grained service item): the service reuses the confirmed pool for the current knowledge version when valid, otherwise mines keywords online and generates candidate questions (real provider spend). Omit productLine to use the brand\'s first confirmed product line (synced from the industry fact at knowledge confirmation — if none exists, guide the user to import brand material and confirm knowledge first). When the user names a specific business within the domain (e.g. 汽车隔音), pass it as businessFocus instead of inventing a new product line. The result renders as the confirmation card where the user reviews the mined keywords and selects questions — never claim the pool is confirmed; the user confirms on the card. Derive targetRegion from brand context or the user goal instead of asking.',
+        'Run the question-opportunity stage for one product line (domain-level, e.g. 汽车音响改装 — not a fine-grained service item): the service reuses the confirmed pool for the current knowledge version when valid, otherwise mines keywords online and generates candidate questions (real provider spend). Omit productLine to use the brand\'s first confirmed product line (synced from the industry fact at knowledge confirmation — if none exists, call request_brand_material so the user can import brand material and confirm knowledge first, then retry). When the user names a specific business within the domain (e.g. 汽车隔音), pass it as businessFocus instead of inventing a new product line. The result renders as the confirmation card where the user reviews the mined keywords and selects questions — never claim the pool is confirmed; the user confirms on the card. Derive targetRegion from brand context or the user goal instead of asking.',
         {
           productLine: z.string().min(1).max(120).optional(),
           targetRegion: z.string().min(1).max(60),
@@ -812,7 +824,7 @@ export async function createXiaojingGeoServer() {
             const first = (lines as string[]).find((line) => line.trim().length > 0);
             if (!first) {
               throw new Error(
-                '品牌还没有已确认的产品线（领域）：请先引导用户导入品牌资料并在确认卡片上完成知识裁决，行业事实确认后产品线会自动同步。',
+                '品牌还没有已确认的产品线（领域）：请先用 request_brand_material 发起材料请求，待用户上传品牌资料并在确认卡片上完成知识裁决后重试；行业事实确认后产品线会自动同步。',
               );
             }
             productLine = first;

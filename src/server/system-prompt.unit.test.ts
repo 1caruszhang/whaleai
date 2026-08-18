@@ -89,11 +89,24 @@ describe('session-files reminder copy stays in sync with the system prompt', () 
     expect(prompt).toContain('查询品牌知识');
   });
 
-  it('both sides route binary files to the chat input material import entry and act instead of open-ended asking', () => {
-    expect(reminder).toContain('material import entry in the chat input area');
-    expect(prompt).toContain('材料导入入口');
+  it('both sides route binary files to the agent-invoked material request card and act instead of open-ended asking', () => {
+    expect(reminder).toContain('request_brand_material');
+    expect(reminder).toContain('material request card');
+    expect(prompt).toContain('request_brand_material');
+    expect(prompt).toContain('材料请求卡');
     expect(reminder).toContain('do not stop at an open-ended question');
     expect(prompt).toContain('不要停在开放式提问');
+  });
+
+  // ADR 0005 回归：材料请求卡的唤起标准是提示词硬规则，含标准②的刻意
+  // 排除——操作中途缺材料佐证不得打断，按来源层级推进交用户裁决。
+  it('pins the material-request invocation criteria and the mid-operation exclusion', () => {
+    expect(prompt).toContain('只在你判断需要新材料时调用');
+    expect(prompt).toContain('制定计划时品牌还没有已确认知识');
+    expect(prompt).toContain('用户明确表示要补充品牌材料');
+    expect(prompt).toContain('不可直读的二进制品牌材料');
+    expect(prompt).toContain('操作进行中不得因某个确认门缺材料佐证而调用');
+    expect(prompt).toContain('材料是否够用只在制定计划时判断一次');
   });
 
   // GD-13 回归：所有闸门的操作入口统一为聊天内的交互卡片，

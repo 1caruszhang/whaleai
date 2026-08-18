@@ -29,18 +29,18 @@ LLM 抽取可能远超转发控制面请求的 120s 代理超时，因此导入�
 1. **请求内只做有界存储**（文件复制 / 文本落盘 / 官网抓取，无 LLM），按输入顺序返回 `{entries: [{ok:true, material} | {ok:false, errorCode}]}`。
 2. **抽取在 Sidecar 内按 Session 串行的后台队列执行**；逐材料落 `awaiting-confirmation` / `failed` 终态并尽力推进 GeoOperation 里程碑。队列只活在 Sidecar 进程内，材料与 attempt 状态由 Rust 持久化。
 
-Renderer 对处理中行每 3s 轮询 `/api/xiaojing/materials/status`（带 `materialIds`）；缺省 `materialIds` 的同一路由返回本 Session 最近材料（Rust `/api/brand-materials/list`，按 `updated_at` 倒序、上限 10），用于聊天侧导入区重挂载后恢复在途行与确认卡。非处理中材料在响应中携带批量确认卡投影——确认卡数据以权威候选为源重建，不依赖一次性响应存活。挂载恢复接管的在途行允许直接单材料重试：其原后台队列可能已随 Sidecar 进程消失。
+Renderer 对处理中行每 3s 轮询 `/api/xiaojing/materials/status`（带 `materialIds`）；缺省 `materialIds` 的同一路由返回本 Session 最近材料（Rust `/api/brand-materials/list`，按 `updated_at` 倒序、上限 10），用于材料请求卡重挂载（transcript 重放）后恢复在途行与确认卡。非处理中材料在响应中携带批量确认卡投影——确认卡数据以权威候选为源重建，不依赖一次性响应存活。挂载恢复接管的在途行允许直接单材料重试：其原后台队列可能已随 Sidecar 进程消失。
 
 抽取链路（含竞品富化的检索与二次抽取）带 10 分钟硬超时信号；provider 挂起按 `model_failed` 落回 failed 终态，材料不会永远停在 processing。Renderer 传输层失败（代理超时 / IPC / 网络）显示专用 `material_request_failed`，与服务端业务错误码严格区分。
 
 ## 产品入口与 Session 归属
 
-真实用户入口全部在聊天内（票 27）：粘贴资料与官网 URL（以及文件选择）由聊天输入区的材料导入入口（`XiaojingChatMaterialImport`，挂在聊天输入框上方、同一个 `TabProvider` 内）发起，使用当前 Tab 的 `apiPost` 和固化 `sessionId`；会话附件（文件/图片）路线保持——附件由 Agent 经 `read_session_file` 判断后走 `import_pasted_material` 导入并停在知识裁决门。右侧工作台不挂任何材料面板，材料入口不出现在工作台。`BrandWorkspace` 只可由该 Tab 的 `workspacePath` 精确匹配得到，不能用全局 current workspace 补位；没有匹配品牌时不挂载该入口。仍是 pending Session 或尚无 Session 时不允许提交，并引导用户先在当前聊天建立 Session。
+真实用户入口全部在聊天内（ADR 0005，取代票 27 的输入区常驻形态）：上传由 agent 判断需要后经 `request_brand_material` 工具发起的**材料请求卡**承载（`MaterialRequestCard`，渲染在发起那轮助手消息内、随 transcript 持久），卡体提供粘贴文本、官网 URL 与文件选择三条路径，使用当前 Tab 的 `apiPost` 和固化 `sessionId`；聊天输入框上方的常驻导入区域已删除，零消息空态由起始建议中的材料引导语承接，显隐不存在任何 renderer 侧机械条件。会话附件（文件/图片）路线保持——附件由 Agent 经 `read_session_file` 判断后走 `import_pasted_material` 导入并停在知识裁决门；二进制附件由 Agent 调用 `request_brand_material` 转入材料请求卡。唤起标准（系统提示词硬规则）：制定计划时品牌无已确认知识或明显过薄、用户明确要求补材料、不可直读的二进制品牌材料；操作进行中缺材料佐证不唤起，按来源层级以 AI 补全行推进由用户裁决兜底。右侧工作台不挂任何材料面板，材料入口不出现在工作台，也不作为 GeoOperation 闸门。`BrandWorkspace` 只可由该 Tab 的 `workspacePath` 精确匹配得到，不能用全局 current workspace 补位；没有匹配品牌时材料请求卡禁用上传并说明原因。转录重放重新挂载卡片即恢复在途行与确认卡。
 
 - 文件通过现有 Tauri OS dialog 选择；Renderer 只把路径作为结构化操作参数交给 `importBrandMaterialFiles`，不打开、不解析也不记录路径。界面只显示 basename。
 - 粘贴资料和官网 URL 分别调用 `importBrandMaterialText`、`importBrandMaterialWebsite`，不伪造用户消息来触发导入。
 - 批量文件逐项投影处理中、成功或失败、`materialId` 与候选数；一项失败不遮蔽其他结果。只有已取得 `materialId` 的失败项显示“仅重试此项”，并只调用单材料 retry API（同样只启动后台抽取，立即返回）。
-- 入口在 deferred chat 阶段禁用导入操作，避免在 Tab 的真实 Session identity 就绪前发起请求。
+- 材料请求卡只出现在真实 Session 的转录里（agent 调用先于任何上传发生），deferred chat 阶段不存在可提交的导入 UI；恢复窗口内提交仍由 Session identity 守卫拦截。
 - 批量确认卡是权威候选的投影，呈现为字段行复核卡（分层默认与整卡全量采纳语义见
   `knowledge_authority.md` 与 ADR 0003）：裁决提交后卡片保留、整体变暗并只读（行内呈现逐条裁决结果）；入口重挂载时按 Session 材料列表重建卡片（含已裁决的只读卡）。裁决经 decide 路由提交后，隐藏 reminder 汇总权威结果并唤醒主聊天继续推进当前 GeoOperation。卡片待决期间用户可随时在聊天中以自然语言下达修改（改/删/增候选），Agent 经通用闸门修订工具执行并记 `user-stated`，卡片按既有 3s 轮询重渲染，服务端改动覆盖卡片本地暂存编辑。
 

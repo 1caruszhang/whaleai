@@ -1,8 +1,9 @@
-import { FilePenLine, Radar, SearchCheck, Sparkles } from 'lucide-react';
+import { FilePenLine, FileUp, Radar, SearchCheck, Sparkles } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import type { ComponentType } from 'react';
 
 const STARTER_SUGGESTION_KEYS = [
+  'materialImport',
   'fullOptimization',
   'questionOpportunities',
   'contentGeneration',
@@ -12,6 +13,7 @@ const STARTER_SUGGESTION_KEYS = [
 export type ChatStarterSuggestionKey = (typeof STARTER_SUGGESTION_KEYS)[number];
 
 const SUGGESTION_ICONS: Record<ChatStarterSuggestionKey, ComponentType<{ className?: string }>> = {
+  materialImport: FileUp,
   fullOptimization: Sparkles,
   questionOpportunities: SearchCheck,
   contentGeneration: FilePenLine,

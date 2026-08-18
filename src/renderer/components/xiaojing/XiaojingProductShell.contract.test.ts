@@ -194,11 +194,13 @@ describe("Xiaojing product shell contract", () => {
     expect(sidebar).not.toContain("useConfig");
   });
 
-  it("mounts material import only in the tab-scoped chat input area", () => {
+  it("surfaces material upload only via the agent-invoked in-chat request card", () => {
     const app = source("src/renderer/App.tsx");
     const chat = source("src/renderer/pages/Chat.tsx");
-    const materialImport = source(
-      "src/renderer/components/xiaojing/XiaojingChatMaterialImport.tsx",
+    const toolUse = source("src/renderer/components/ToolUse.tsx");
+    const message = source("src/renderer/components/Message.tsx");
+    const requestCard = source(
+      "src/renderer/components/xiaojing/MaterialRequestCard.tsx",
     );
     const workbench = source(
       "src/renderer/components/xiaojing/XiaojingGeoWorkbench.tsx",
@@ -209,19 +211,22 @@ describe("Xiaojing product shell contract", () => {
     const gatePanels = source(
       "src/renderer/components/xiaojing/GeoOperationGatePanels.tsx",
     );
+    // ADR 0005：输入框上方常驻导入区域删除；上传只出现在 agent 经
+    // request_brand_material 发起的消息流卡片上，随转录持久与恢复。
     expect(app).toContain("workspaceForPath(brandState.workspaces, tab.workspacePath)");
     expect(app).toContain("workspacePathsEqual(workspace.rootPath, path)");
-    expect(chat).toContain("useCurrentWorkspace()");
-    expect(chat).toContain("<XiaojingChatMaterialImport");
-    // 票 27：材料入口只存在于聊天输入区；工作台与闸门卡不出现材料面板。
+    expect(chat).not.toContain("XiaojingChatMaterialImport");
+    expect(toolUse).toContain("parseMaterialRequestCard(tool.result)");
+    expect(message).toContain("parseMaterialRequestCard");
+    expect(requestCard).toContain("useCurrentWorkspace()");
+    expect(requestCard).toContain("useTabApi()");
+    expect(requestCard).toContain("useTabState()");
+    expect(requestCard).toContain("import('@tauri-apps/plugin-dialog')");
+    expect(requestCard).not.toContain("readFile");
+    // 票 27 的边界保持：工作台与闸门卡仍不出现任何材料面板或导入发起。
     expect(workbench).not.toContain("MaterialImport");
     expect(operationPanel).not.toContain("MaterialImport");
     expect(gatePanels).not.toContain("MaterialImport");
-    expect(materialImport).toContain("useTabApi()");
-    expect(materialImport).toContain("useTabState()");
-    expect(materialImport).toContain("isPendingSessionId(sessionId)");
-    expect(materialImport).toContain("import('@tauri-apps/plugin-dialog')");
-    expect(materialImport).not.toContain("readFile");
   });
 
   it("uses the Xiaojing identity and removes generic product controls from GEO chat chrome", () => {

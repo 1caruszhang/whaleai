@@ -10,7 +10,12 @@ import { useImagePreview } from '@/context/ImagePreviewContext';
 import type { ContentBlock, Message as MessageType, ToolUseSimple } from '@/types/chat';
 import { copyPlainText } from '@/utils/clipboard';
 import { extractSessionFileReferences } from '@/../shared/sessionFileReference';
+import {
+  parseDecisionReminderText,
+  type ParsedDecisionReminder,
+} from '../../shared/systemReminder';
 import { parseKnowledgeCandidatesCard } from '../../shared/geo/knowledgeCard';
+import { parseMaterialRequestCard } from '../../shared/geo/materialRequestCard';
 import { parseKnowledgeConflictCard } from './xiaojing/KnowledgeConflictCard';
 import { parseGeoOperationEventCard } from './xiaojing/GeoOperationEventCard';
 import { parseQuestionPoolGateCard } from './xiaojing/QuestionPoolGateCard';
@@ -64,6 +69,7 @@ function isDecisionCardTool(tool: ToolUseSimple): boolean {
     return false;
   }
   return parseKnowledgeCandidatesCard(tool.result) !== null
+    || parseMaterialRequestCard(tool.result) !== null
     || parseKnowledgeConflictCard(tool.result) !== null
     || parseQuestionPoolGateCard(tool.result) !== null
     || parseTopicPlanGateCard(tool.result) !== null
@@ -127,6 +133,36 @@ function AssistantBlocks({
   );
 }
 
+/**
+ * 决策回执 reminder 的自然语言投影：阀门确认后服务端会把结构化信封作为
+ * 用户消息入队唤醒 Agent（协议原文只给 LLM 读）；renderer 用这里返回的
+ * 文案代替裸 XML 扁平文本，避免聊天流里出现 UUID/枚举机器串。
+ */
+function decisionReminderLabel(reminder: ParsedDecisionReminder): string | null {
+  if (reminder.kind === 'XIAOJING_GEO_OPERATION_EVENT') {
+    const action = reminder.action ?? '';
+    if (action === 'confirm-step:acknowledge-plan') return '认可本次计划';
+    if (action.startsWith('confirm-step:')) return '确认操作步骤';
+    switch (action) {
+      case 'pause': return '暂停 GEO 操作';
+      case 'resume': return '恢复 GEO 操作';
+      case 'retry': return '重试失败单元';
+      case 'cancel': return '取消 GEO 操作';
+      case 'next-round-update-knowledge': return '下一轮更新品牌知识';
+      case 'next-round-keep-knowledge': return '下一轮沿用品牌知识';
+      default: return 'GEO 操作已更新';
+    }
+  }
+  switch (reminder.kind) {
+    case 'XIAOJING_KNOWLEDGE_DECISION': return '确认品牌知识候选';
+    case 'XIAOJING_QUESTION_POOL_DECISION': return '确认题库选题';
+    case 'XIAOJING_TOPIC_PLAN_DECISION': return '确认选题计划';
+    case 'XIAOJING_ARTICLE_APPROVAL_DECISION': return '提交文章审核结果';
+    case 'XIAOJING_DISTRIBUTION_PLAN_DECISION': return '确认分发计划';
+    default: return null;
+  }
+}
+
 function formatTimestamp(date: Date): string {
   const segments = [
     date.getFullYear(),
@@ -151,6 +187,12 @@ export default memo(function Message({ message, isLoading = false }: MessageProp
     const { cleanText, references } = typeof message.content === 'string'
       ? extractSessionFileReferences(message.content)
       : { cleanText: '', references: [] };
+    // 决策回执 reminder（阀门确认后自动入队）：整条内容就是结构化信封时
+    // 投影成自然语言，而不是把 XML 扁平化文本当作用户输入渲染。
+    const reminder = typeof message.content === 'string'
+      ? parseDecisionReminderText(message.content)
+      : null;
+    const reminderText = reminder ? decisionReminderLabel(reminder) : null;
     return (
       <div className="group/user-actions ml-auto w-fit max-w-[85%]">
         <article className="rounded-2xl rounded-br-md bg-[var(--accent)]/15 p-4 text-[var(--ink)]" data-message-role="user">
@@ -176,7 +218,15 @@ export default memo(function Message({ message, isLoading = false }: MessageProp
               className="mb-2"
             />
           ) : null}
-          {typeof message.content === 'string' && cleanText ? (
+          {reminderText ? (
+            <div
+              className="user-message-content"
+              data-system-reminder={reminder?.kind}
+              title={typeof message.content === 'string' ? message.content : undefined}
+            >
+              <p className="whitespace-pre-wrap break-words">{reminderText}</p>
+            </div>
+          ) : typeof message.content === 'string' && cleanText ? (
             <div className="user-message-content">
               <Markdown>{cleanText}</Markdown>
             </div>

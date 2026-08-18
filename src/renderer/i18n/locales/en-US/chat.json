@@ -46,6 +46,7 @@
       "proposeBrandFact": "Propose brand fact",
       "inspectBrandFact": "Inspect brand fact",
       "reviseGateContent": "Revise pending content",
+      "requestBrandMaterial": "Request brand material",
       "importPastedMaterial": "Import pasted material",
       "readSessionFile": "Read session file",
       "importWebsiteMaterial": "Import website material",
@@ -58,6 +59,10 @@
     "sourceMaterial": "Source material: {{name}}",
     "candidateCount": "{{count}} candidates",
     "headerSuffix": "confirmed entries are written to authoritative brand knowledge",
+    "columnReadyTitle": "Ready · adopted on confirm ({{count}})",
+    "columnPendingTitle": "Needs review ({{count}})",
+    "columnReadyEmpty": "Every candidate in this batch needs your review first.",
+    "columnPendingEmpty": "Nothing left to review in this batch.",
     "badgeReady": "Ready",
     "badgePending": "Needs review",
     "badgeConflict": "Conflict",
@@ -146,6 +151,11 @@
     "heading": "Tell Xiaojing which GEO step you want to start with.",
     "hint": "Click a goal to begin, or just type.",
     "items": {
+      "materialImport": {
+        "title": "Import brand material",
+        "description": "Start with company profile, product info, or the official site",
+        "prompt": "我想先补充品牌材料，请帮我发起材料导入。"
+      },
       "fullOptimization": {
         "title": "Full GEO optimization",
         "description": "A gated loop from brand understanding to publish monitoring",

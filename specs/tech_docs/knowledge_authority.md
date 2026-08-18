@@ -27,17 +27,29 @@
 裁决入口固定为聊天内的结构化卡片：材料导入（`import_pasted_material` /
 `import_website_material` / `retry_brand_material` 的工具结果）渲染一张字段行复核卡
 （`knowledge-candidates-card`，候选上限 50，同字段候选合并为一行、按固定字段序排列，
-被截断的字段在行内提示溢出），单条提议渲染 `knowledge-conflict-card`。聊天输入区材料
-导入入口发起的导入复用同一卡组件。卡片按来源层级分层默认（ADR 0003）：材料原文行
+被截断的字段在行内提示溢出），单条提议渲染 `knowledge-conflict-card`。材料请求卡
+（ADR 0005）发起的上传复用同一卡组件，确认卡直接渲染在请求卡卡体内。卡片正文默认左右两列（GD 反馈）：左列「已就绪 ·
+确认后直接采纳」承载材料原文与已裁决候选，右列「待确认 · 需要你过目」承载推断、冲突、
+失败与已编辑候选；同字段两类兼有时整行归右列供对照裁决，空列给固定空态提示。候选值以
+胶囊（pill）呈现，冲突胶囊内联展示「当前值 → 新值」对比；字段名由行头承载，摘录与
+置信度收进展开详情。两列正文限高内滚（`max-h-[60vh] overflow-y-auto`）：所有确认卡
+都随聊天滚动，超长批次靠卡片自身滚轴浏览，不得把
+内容推出窗口底边。整卡确认按钮常驻卡片头部（收起正文也可见），全部裁决后隐藏。
+卡片按来源层级分层默认（ADR 0003）：材料原文行
 （`extracted`）视为已就绪、无任何控件；AI 补全行（`inferred`）只带纯视觉的逐行
 「确认」（本地状态，按候选 id 扛住 3s 轮询重建）；冲突行必须显式「采用新值 / 保留
 当前值」，未全部解决前整卡确认禁用；每行可「更改」（内联编辑、暂存不落库），被更改
-行视为「用户补充」（`asked`）、已就绪。行内不展示摘录与置信度，摘录收进展开详情。
-卡片不提供拒绝；整卡一次「确认」即构成对全部未决候选的用户裁决并全量采纳（含从未
+行视为「用户补充」（`asked`）、已就绪。卡片不提供拒绝；整卡一次「确认」即构成对全部未决候选的用户裁决并全量采纳（含从未
 逐条查看的 AI 补全行；改值行提交 `adopt-edited`，其余 `adopt-new`）。确认后的权威
 事实投影在右侧 GEO 工作台常驻的「品牌知识」面板（位于多操作
 切换器与六阶段骨架之间，工作台组成见 `geo_operations.md`），Agent 通过一条聚合
 `XIAOJING_KNOWLEDGE_DECISION` reminder 得到全部结果。
+
+字段行的分组键与展示标签按 `knowledgeFieldKeyOfPredicate` 大小写不敏感归一为规范
+camelCase 字段 token（`canonicalEnterpriseProfileField`）：identity 入库时 predicate
+被统一小写（如 `enterprise-profile.servicearea`），展示侧必须还原成 `serviceArea`
+并映射 i18n 字段标签（「服务区域」），不得让裸 predicate 或重复语义字段漏出到 UI；
+右侧「品牌知识」面板的 FactItem 沿用同一映射，非 Profile 字段保持 predicate 原文。
 
 知识版本史与产物血缘的呈现位置是左侧栏「品牌档案」一级入口：品牌级只读整页
 （`XiaojingBrandArchivePage`），跟随当前选中品牌、不依赖任何 Session，数据来自

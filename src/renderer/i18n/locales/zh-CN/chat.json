@@ -46,6 +46,7 @@
       "proposeBrandFact": "提交品牌事实候选",
       "inspectBrandFact": "查询品牌事实",
       "reviseGateContent": "修订待确认内容",
+      "requestBrandMaterial": "请求品牌材料",
       "importPastedMaterial": "导入品牌材料",
       "readSessionFile": "读取会话文件",
       "importWebsiteMaterial": "导入网站材料",
@@ -58,6 +59,10 @@
     "sourceMaterial": "来源材料：{{name}}",
     "candidateCount": "共 {{count}} 条候选",
     "headerSuffix": "确认后写入权威品牌知识",
+    "columnReadyTitle": "已就绪 · 确认后直接采纳（{{count}}）",
+    "columnPendingTitle": "待确认 · 需要你过目（{{count}}）",
+    "columnReadyEmpty": "本批候选都需要你先过目。",
+    "columnPendingEmpty": "本批没有待复核的候选。",
     "badgeReady": "已就绪",
     "badgePending": "待确认",
     "badgeConflict": "冲突",
@@ -146,6 +151,11 @@
     "heading": "告诉小鲸你想先完成哪一步 GEO 工作。",
     "hint": "点击一个目标即可开始，也可以直接输入。",
     "items": {
+      "materialImport": {
+        "title": "导入品牌材料",
+        "description": "先补充企业介绍、产品资料或官网信息",
+        "prompt": "我想先补充品牌材料，请帮我发起材料导入。"
+      },
       "fullOptimization": {
         "title": "完整 GEO 优化",
         "description": "从品牌理解到发布监测的受控闭环",

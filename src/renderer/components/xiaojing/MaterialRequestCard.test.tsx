@@ -2,10 +2,11 @@ import { act, fireEvent, render, screen, waitFor, within } from '@testing-librar
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { BrandMaterialProcessResult, TabApiPost } from '@/api/brandMaterialClient';
-import XiaojingChatMaterialImport from './XiaojingChatMaterialImport';
+import MaterialRequestCard from './MaterialRequestCard';
 
 const mocks = vi.hoisted(() => ({
   sessionId: 'session-07',
+  hasWorkspace: true,
   apiPost: vi.fn(),
   open: vi.fn(),
   importFiles: vi.fn(),
@@ -18,6 +19,20 @@ const mocks = vi.hoisted(() => ({
 vi.mock('@/context/TabContext', () => ({
   useTabApi: () => ({ apiPost: mocks.apiPost as unknown as TabApiPost }),
   useTabState: () => ({ sessionId: mocks.sessionId }),
+}));
+
+vi.mock('@/context/CurrentWorkspaceContext', () => ({
+  useCurrentWorkspace: () =>
+    mocks.hasWorkspace
+      ? {
+        id: 'brand-07',
+        name: '鲸跃科技',
+        productLines: ['旗舰产品'],
+        rootPath: 'C:\\Xiaojing\\brands\\brand-07',
+        createdAt: '2026-08-15T00:00:00Z',
+        updatedAt: '2026-08-15T00:00:00Z',
+      }
+      : null,
 }));
 
 vi.mock('@tauri-apps/plugin-dialog', () => ({ open: mocks.open }));
@@ -34,21 +49,12 @@ vi.mock('@/api/brandMaterialClient', async (importOriginal) => {
   };
 });
 
-const workspace = {
-  id: 'brand-07',
-  name: '鲸跃科技',
-  productLines: ['旗舰产品'],
-  rootPath: 'C:\\Xiaojing\\brands\\brand-07',
-  createdAt: '2026-08-15T00:00:00Z',
-  updatedAt: '2026-08-15T00:00:00Z',
-};
-
 function started(id: string, kind: 'file' | 'pasted-text' | 'website-url'): BrandMaterialProcessResult {
   return {
     ok: true,
     material: {
       id,
-      workspaceId: workspace.id,
+      workspaceId: 'brand-07',
       inputKind: kind,
       displayName: `${id}.txt`,
       status: 'stored',
@@ -66,7 +72,7 @@ function statusEntry(input: {
 }) {
   const candidates = Array.from({ length: input.candidateCount ?? 0 }, (_unused, index) => ({
     id: `candidate-${input.id}-${index}`,
-    workspaceId: workspace.id,
+    workspaceId: 'brand-07',
     sessionId: mocks.sessionId,
     key: {
       subject: '鲸跃科技',
@@ -92,7 +98,7 @@ function statusEntry(input: {
   return {
     material: {
       id: input.id,
-      workspaceId: workspace.id,
+      workspaceId: 'brand-07',
       inputKind: 'file' as const,
       displayName: input.displayName ?? `${input.id}.txt`,
       status: input.status,
@@ -110,18 +116,18 @@ function statusEntry(input: {
   };
 }
 
-function renderChatImport() {
-  return render(<XiaojingChatMaterialImport workspaceId={workspace.id} />);
+function renderRequestCard(reason = '还没有已确认的品牌知识，先补充材料再推进计划。') {
+  return render(
+    <MaterialRequestCard
+      data={{ kind: 'material-request-card', requiresUserDecision: true, reason }}
+    />,
+  );
 }
 
-/** 票 27：入口折叠为输入区上方的一行，展开后才出现粘贴/URL/文件表单。 */
-function openImportForm() {
-  fireEvent.click(screen.getByRole('button', { name: '导入品牌材料' }));
-}
-
-describe('chat-side Xiaojing material import entry', () => {
+describe('MaterialRequestCard', () => {
   beforeEach(() => {
     mocks.sessionId = 'session-07';
+    mocks.hasWorkspace = true;
     for (const mock of [
       mocks.apiPost,
       mocks.open,
@@ -139,26 +145,14 @@ describe('chat-side Xiaojing material import entry', () => {
     vi.useRealTimers();
   });
 
-  it('collapses the form by default and expands it from the chat input area entry', () => {
-    renderChatImport();
+  it('renders expanded with the agent reason and all three upload paths', () => {
+    renderRequestCard('计划需要行业与产品线事实，但品牌还没有已确认知识。');
 
-    expect(screen.getByRole('button', { name: '导入品牌材料' })).toHaveAttribute(
-      'aria-expanded',
-      'false',
-    );
+    expect(screen.getByText('补充品牌材料')).toBeInTheDocument();
     expect(
-      screen.queryByPlaceholderText('粘贴企业介绍、产品资料或品牌事实'),
-    ).not.toBeInTheDocument();
-    expect(screen.queryByPlaceholderText('https://example.com/about')).not.toBeInTheDocument();
-
-    openImportForm();
-    expect(screen.getByRole('button', { name: '导入品牌材料' })).toHaveAttribute(
-      'aria-expanded',
-      'true',
-    );
-    expect(
-      screen.getByPlaceholderText('粘贴企业介绍、产品资料或品牌事实'),
+      screen.getByText('计划需要行业与产品线事实，但品牌还没有已确认知识。'),
     ).toBeInTheDocument();
+    expect(screen.getByPlaceholderText('粘贴企业介绍、产品资料或品牌事实')).toBeInTheDocument();
     expect(screen.getByPlaceholderText('https://example.com/about')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '选择文件' })).toBeInTheDocument();
   });
@@ -172,8 +166,7 @@ describe('chat-side Xiaojing material import entry', () => {
       started('material-ok', 'file'),
       { ok: false, errorCode: 'material_import_failed' },
     ] satisfies BrandMaterialProcessResult[]);
-    renderChatImport();
-    openImportForm();
+    renderRequestCard();
 
     fireEvent.click(screen.getByRole('button', { name: '选择文件' }));
 
@@ -195,11 +188,10 @@ describe('chat-side Xiaojing material import entry', () => {
     expect(within(results).queryByRole('button', { name: '仅重试 broken.docx' })).not.toBeInTheDocument();
   });
 
-  it('imports pasted text from the entry, collapses the form, and stops at the in-chat confirmation card', async () => {
+  it('imports pasted text, collapses the form, and stops at the in-chat confirmation card', async () => {
     vi.useFakeTimers();
     mocks.importText.mockResolvedValue([started('material-paste', 'pasted-text')]);
-    renderChatImport();
-    openImportForm();
+    renderRequestCard();
 
     fireEvent.change(screen.getByPlaceholderText('粘贴企业介绍、产品资料或品牌事实'), {
       target: { value: '公司全称：鲸跃科技' },
@@ -212,7 +204,7 @@ describe('chat-side Xiaojing material import entry', () => {
       '公司全称：鲸跃科技',
     );
     expect(screen.getByText(/正在保存并抽取/)).toBeInTheDocument();
-    // 提交后表单收起：流程停在聊天内的结果与确认卡，而不是停留在表单。
+    // 提交后表单收起：流程停在卡内的结果与确认卡，而不是停留在表单。
     expect(
       screen.queryByPlaceholderText('粘贴企业介绍、产品资料或品牌事实'),
     ).not.toBeInTheDocument();
@@ -240,10 +232,9 @@ describe('chat-side Xiaojing material import entry', () => {
     expect(within(cards).getByText('品牌知识待确认')).toBeInTheDocument();
   });
 
-  it('imports an official-site URL from the entry through the same chat card flow', async () => {
+  it('imports an official-site URL through the same in-card flow', async () => {
     mocks.importWebsite.mockResolvedValue([started('material-site', 'website-url')]);
-    renderChatImport();
-    openImportForm();
+    renderRequestCard();
 
     fireEvent.change(screen.getByPlaceholderText('https://example.com/about'), {
       target: { value: 'https://example.com/about' },
@@ -256,7 +247,7 @@ describe('chat-side Xiaojing material import entry', () => {
       'https://example.com/about',
     ));
     expect(await screen.findByText(/正在保存并抽取/)).toBeInTheDocument();
-    // URL 提交成功同样收起表单，停在聊天内处理结果。
+    // URL 提交成功同样收起表单，停在卡内处理结果。
     expect(screen.queryByPlaceholderText('https://example.com/about')).not.toBeInTheDocument();
   });
 
@@ -265,7 +256,7 @@ describe('chat-side Xiaojing material import entry', () => {
       statusEntry({ id: 'material-done', status: 'awaiting-confirmation', candidateCount: 1 }),
       statusEntry({ id: 'material-running', displayName: '在途材料.docx', status: 'processing' }),
     ]);
-    renderChatImport();
+    renderRequestCard();
 
     const cards = await screen.findByRole('region', { name: '待确认知识候选' });
     expect(within(cards).getByText('品牌知识待确认')).toBeInTheDocument();
@@ -278,8 +269,7 @@ describe('chat-side Xiaojing material import entry', () => {
 
   it('marks transport failures as material_request_failed instead of import failure', async () => {
     mocks.importText.mockRejectedValue(new Error('proxy timeout'));
-    renderChatImport();
-    openImportForm();
+    renderRequestCard();
 
     fireEvent.change(screen.getByPlaceholderText('粘贴企业介绍、产品资料或品牌事实'), {
       target: { value: '公司全称：鲸跃科技' },
@@ -293,8 +283,7 @@ describe('chat-side Xiaojing material import entry', () => {
     vi.useFakeTimers();
     mocks.open.mockResolvedValue(['C:\\selected\\profile.pdf']);
     mocks.importFiles.mockResolvedValue([started('material-x', 'file')]);
-    renderChatImport();
-    openImportForm();
+    renderRequestCard();
 
     fireEvent.click(screen.getByRole('button', { name: '选择文件' }));
     await act(async () => { await vi.advanceTimersByTimeAsync(0); });
@@ -318,16 +307,49 @@ describe('chat-side Xiaojing material import entry', () => {
     expect(within(results).getByText(/正在保存并抽取/)).toBeInTheDocument();
   });
 
-  it('disables all material operations while the Tab still has a pending Session identity', () => {
-    mocks.sessionId = 'pending-brand-07';
-    renderChatImport();
-    openImportForm();
+  it('disables all upload paths when the Tab has no exact-match brand', () => {
+    mocks.hasWorkspace = false;
+    renderRequestCard();
 
-    expect(screen.getByText(/建立真实 Session 后再导入材料/)).toBeInTheDocument();
+    expect(screen.getByText(/当前聊天没有精确匹配的品牌/)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '选择文件' })).toBeDisabled();
     expect(screen.getByRole('button', { name: '保存并抽取粘贴资料' })).toBeDisabled();
     expect(screen.getByRole('button', { name: '保存并抽取官网资料' })).toBeDisabled();
     expect(mocks.open).not.toHaveBeenCalled();
     expect(mocks.importFiles).not.toHaveBeenCalled();
+  });
+
+  it('silently blocks uploads while the Tab still has a pending Session identity', () => {
+    // 卡片只出现在真实 Session 的转录里；守卫只兜恢复窗口，不给提示 UI。
+    mocks.sessionId = 'pending-brand-07';
+    renderRequestCard();
+
+    expect(screen.getByRole('button', { name: '选择文件' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: '保存并抽取粘贴资料' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: '保存并抽取官网资料' })).toBeDisabled();
+    expect(mocks.fetchStatuses).not.toHaveBeenCalled();
+  });
+
+  it('reopens the form from the header toggle after a successful submit collapses it', async () => {
+    mocks.importText.mockResolvedValue([started('material-reopen', 'pasted-text')]);
+    renderRequestCard();
+
+    fireEvent.change(screen.getByPlaceholderText('粘贴企业介绍、产品资料或品牌事实'), {
+      target: { value: '公司全称：鲸跃科技' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: '保存并抽取粘贴资料' }));
+    expect(await screen.findByText(/正在保存并抽取/)).toBeInTheDocument();
+    // 提交成功后表单收起，但三条上传路径必须能从卡头重新展开（ADR 0005）。
+    expect(
+      screen.queryByPlaceholderText('粘贴企业介绍、产品资料或品牌事实'),
+    ).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: '继续添加品牌材料' }));
+
+    expect(
+      screen.getByPlaceholderText('粘贴企业介绍、产品资料或品牌事实'),
+    ).toBeInTheDocument();
+    expect(screen.getByPlaceholderText('https://example.com/about')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '选择文件' })).toBeInTheDocument();
   });
 });

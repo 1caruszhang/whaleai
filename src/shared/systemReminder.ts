@@ -201,6 +201,52 @@ export function buildGeoOperationEventReminder(input: GeoOperationEventReminderI
   );
 }
 
+/** 决策回执类 reminder：会作为独立用户消息入队唤醒 Agent，renderer 需要投影成自然语言。 */
+const DECISION_REMINDER_KINDS = [
+  'XIAOJING_KNOWLEDGE_DECISION',
+  'XIAOJING_QUESTION_POOL_DECISION',
+  'XIAOJING_TOPIC_PLAN_DECISION',
+  'XIAOJING_ARTICLE_APPROVAL_DECISION',
+  'XIAOJING_DISTRIBUTION_PLAN_DECISION',
+  'XIAOJING_GEO_OPERATION_EVENT',
+] as const;
+
+export type DecisionReminderKind = (typeof DECISION_REMINDER_KINDS)[number];
+
+export interface ParsedDecisionReminder {
+  kind: DecisionReminderKind;
+  /** 仅 GEO_OPERATION_EVENT 携带：confirm-step:*、pause/resume/retry/cancel、next-round-*。 */
+  action?: string;
+}
+
+function unescapeEntities(value: string): string {
+  return value
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&amp;/g, '&');
+}
+
+/**
+ * 识别「整条消息就是一个决策回执 reminder 信封」的用户消息（builder 转义过的
+ * 原文直接入队，不另带用户文本）。命中时 renderer 把它投影成自然语言气泡，
+ * 信封原文仍保留在 transcript 供 LLM 消费；真实用户输入与其余形态返回 null。
+ */
+export function parseDecisionReminderText(text: string): ParsedDecisionReminder | null {
+  const trimmed = text.trim();
+  if (!trimmed.startsWith(OPEN) || !trimmed.endsWith(CLOSE)) return null;
+  const kind = trimmed.match(/^<system-reminder>\s*<([A-Z0-9_]+)>/)?.[1];
+  if (!kind || !(DECISION_REMINDER_KINDS as readonly string[]).includes(kind)) {
+    return null;
+  }
+  const action = trimmed.match(/<action>([^<]*)<\/action>/)?.[1];
+  return {
+    kind: kind as DecisionReminderKind,
+    ...(action !== undefined ? { action: unescapeEntities(action) } : {}),
+  };
+}
+
 export type SessionFileReminderStatus = 'readable' | 'binary' | 'imported';
 
 export interface SessionFilesReminderFile {
@@ -220,7 +266,7 @@ export function buildSessionFilesReminder(files: SessionFilesReminderFile[]): st
       '</session-files>',
       '<status-legend>',
       'readable = text file, call read_session_file (head is bounded; continue with offsetChars)',
-      'binary = cannot be read directly; if it is brand material, guide the user to the material import entry in the chat input area',
+      'binary = cannot be read directly; if it is brand material, call request_brand_material so the user uploads it on the chat material request card',
       'imported = already imported as brand material; query brand knowledge, do not re-read',
       '</status-legend>',
     ],
