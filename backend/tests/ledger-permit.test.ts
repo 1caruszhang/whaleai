@@ -303,6 +303,40 @@ describe('ledger and permit billing core HTTP contract', () => {
     expect(noNote.status).toBe(400);
   });
 
+  it('orders entries by insertion order even when they share the same created_at', async () => {
+    // 快机器上同一毫秒会落多笔流水；created_at 并列时排序必须是全序且
+    // 与落账顺序一致。固定假时钟让 topup/两笔 adjust 共享同一时间戳，
+    // 确定性复现同毫秒平手场景（票 03 遗留缺陷的回归）。
+    const { adminToken, accountId } = await provisionLoggedInAccount(tb.app);
+    tb.setNow(Date.now());
+
+    expect((await postJson(tb.app, '/admin/ledger/topup', {
+      accountId, points: 2000, note: '对公转账',
+    }, adminToken)).status).toBe(200);
+    expect((await postJson(tb.app, '/admin/ledger/adjust', {
+      accountId, delta: 50, note: '活动补偿',
+    }, adminToken)).status).toBe(200);
+    expect((await postJson(tb.app, '/admin/ledger/adjust', {
+      accountId, delta: -100, note: '误充冲正',
+    }, adminToken)).status).toBe(200);
+
+    const ledger = await getJson(tb.app, `/admin/accounts/${accountId}/ledger`, adminToken);
+    expect(ledger.status).toBe(200);
+    const entries = ledger.body.entries as Array<{ delta: number; balanceAfter: number; kind: string; createdAt: string }>;
+
+    // 三笔确实共享同一 created_at：平手场景被真实触发，而非碰运气。
+    expect(new Set(entries.slice(0, 3).map(entry => entry.createdAt)).size).toBe(1);
+
+    // 最新在前且与插入顺序一致：adjust -100 → adjust +50 → topup +2000 → grant +500。
+    expect(entries.map(entry => [entry.kind, entry.delta])).toEqual([
+      ['adjust', -100],
+      ['adjust', 50],
+      ['topup', 2000],
+      ['grant', 500],
+    ]);
+    expect(entries[0].balanceAfter).toBe(2450);
+  });
+
   it('validates prices against the server-side price table', async () => {
     const { accessToken: token } = await provisionLoggedInAccount(tb.app);
 
