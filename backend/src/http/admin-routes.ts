@@ -1,8 +1,9 @@
-import { createHash, timingSafeEqual } from 'node:crypto';
 import { Hono } from 'hono';
 import { createMiddleware } from 'hono/factory';
 import { z } from 'zod';
 import type { BackendDeps } from '../deps';
+import type { AdminLoginThrottle } from '../auth/admin-login-throttle';
+import { timingSafeStringEqual } from '../auth/passwords';
 import { accountProjection, createAccountWithGrant, findAccountById } from '../domain/accounts';
 import { applyAccountLedgerDelta, balanceSnapshot, listLedgerEntries } from '../domain/ledger';
 import { listChatUsageRecords } from '../domain/chat-usage';
@@ -26,12 +27,6 @@ function requireAdminAuth(deps: BackendDeps) {
     }
     await next();
   });
-}
-
-function timingSafePasswordEqual(actual: string, expected: string): boolean {
-  const actualHash = createHash('sha256').update(actual).digest();
-  const expectedHash = createHash('sha256').update(expected).digest();
-  return timingSafeEqual(actualHash, expectedHash);
 }
 
 const adminLoginSchema = z.object({ password: passwordSchema });
@@ -59,15 +54,18 @@ const adjustSchema = z.object({
   note: z.string().min(1, '调点必须带备注').max(500),
 });
 
-export function createAdminRoutes(deps: BackendDeps) {
+export function createAdminRoutes(deps: BackendDeps, throttle: AdminLoginThrottle) {
   const routes = new Hono();
   const requireAdmin = requireAdminAuth(deps);
 
   routes.post('/admin/login', async c => {
     const body = await parseJsonBody(c, adminLoginSchema);
-    if (!timingSafePasswordEqual(body.password, deps.config.adminPassword)) {
+    if (!timingSafeStringEqual(body.password, deps.config.adminPassword)) {
+      // 与 SSR 登录同一节流实例（票 10）：连续失败递增延时，防在线爆破。
+      await throttle.penalize();
       throw new AppError('invalid_credentials', '运营密码不正确。', 401);
     }
+    throttle.reset();
     return c.json({
       adminToken: await signAdminToken(deps.config.authSecret, deps.config.adminTokenTtlSeconds, deps.now()),
       tokenType: 'Bearer',

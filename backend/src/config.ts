@@ -15,6 +15,14 @@ export interface BackendConfig {
   refreshTokenTtlSeconds: number;
   /** /admin 运营 JWT 有效期。 */
   adminTokenTtlSeconds: number;
+  /**
+   * 运营密码错误登录的节流基步长（毫秒）：连续失败第 n 次延时
+   * min(n×步长, 20×步长)。内存计数、单进程（Docker 单容器部署口径），
+   * 只延时不断锁，防在线爆破又不给运营自锁。
+   */
+  adminLoginThrottleUnitMs: number;
+  /** 媒介池低余额提醒阈值（分，规格默认 ¥500）。 */
+  adminMediaPoolLowBalanceCents: number;
   /** 开号赠送点数（内测期 500）。 */
   signupGrantPoints: number;
   /** 每账号并发计费准入上限（open permit 数，规格决策为 2）。 */
@@ -153,6 +161,10 @@ export function loadBackendConfig(env: Record<string, string | undefined>): Back
     accessTokenTtlSeconds: readPositiveInt(env, 'ACCESS_TOKEN_TTL_SECONDS', 7200),
     refreshTokenTtlSeconds: readPositiveInt(env, 'REFRESH_TOKEN_TTL_SECONDS', THIRTY_DAYS_SECONDS),
     adminTokenTtlSeconds: readPositiveInt(env, 'ADMIN_TOKEN_TTL_SECONDS', 3600),
+    adminLoginThrottleUnitMs: readPositiveInt(env, 'ADMIN_LOGIN_THROTTLE_UNIT_MS', 500),
+    adminMediaPoolLowBalanceCents: Math.round(
+      readPositiveNumber(env, 'ADMIN_MEDIA_POOL_LOW_BALANCE_CNY', 500) * 100,
+    ),
     signupGrantPoints: readPositiveInt(env, 'SIGNUP_GRANT_POINTS', 500),
     maxConcurrentPermitsPerAccount: readPositiveInt(env, 'MAX_CONCURRENT_PERMITS_PER_ACCOUNT', 2),
     chatHiddenQuotaPoints: readPositiveInt(env, 'CHAT_HIDDEN_QUOTA_POINTS', 100),

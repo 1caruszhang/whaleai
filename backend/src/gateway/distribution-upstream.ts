@@ -122,6 +122,27 @@ export class DistributionUpstream {
     return { ok: false, response: new Response(text, { status: responseStatus }) };
   }
 
+  /**
+   * 代理商资金池余额（票 10 运营台）：GET /profile 经同款展平签名代理。
+   * 上游文档未随网关仓库给出余额字段名，防御式解析 data.money /
+   * data.balance（number 或十进制字符串）为分；取不到有限数字按上游
+   * 失败处理（页面降级为「获取失败」，不阻断账号管理）。
+   */
+  async fetchProfile(): Promise<UpstreamCallResult<{ balanceCents: number }>> {
+    const { status, envelope, text } = await this.call('/profile', this.signedFlat({}));
+    if (status < 200 || status >= 300 || envelope.code !== 200) {
+      return DistributionUpstream.fail(status, text);
+    }
+    const data = envelope.data as Record<string, unknown> | null | undefined;
+    const raw = data?.money ?? data?.balance;
+    const yuan =
+      typeof raw === 'number' ? raw : typeof raw === 'string' && raw.trim() !== '' ? Number(raw) : NaN;
+    if (!Number.isFinite(yuan)) {
+      return DistributionUpstream.fail(status, text);
+    }
+    return { ok: true, data: { balanceCents: Math.round(yuan * 100) }, text };
+  }
+
   /** 创建订单：成功提取 partner_sn。 */
   async placeOrder(
     kind: PublishOrderKind,

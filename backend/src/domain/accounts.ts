@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { BackendDeps } from '../deps';
 import type { SqlClient } from '../db/client';
-import type { AccountRow } from './types';
+import type { AccountRow, AccountStatus } from './types';
 import { AppError } from '../errors';
 import { hashPassword, verifyPassword } from '../auth/passwords';
 import { revokeAccountSessions, startSession, type StartedSession } from '../auth/sessions';
@@ -21,6 +21,65 @@ export function findAccountById(db: SqlClient, id: string): AccountRow | undefin
 
 export function findAccountByPhone(db: SqlClient, phone: string): AccountRow | undefined {
   return db.get<AccountRow>('SELECT * FROM accounts WHERE phone = ?', [phone]);
+}
+
+/** 运营页账号列表行（不含密码哈希等内部字段）。 */
+export interface AdminAccountListItem {
+  id: string;
+  phone: string;
+  status: AccountStatus;
+  balance: number;
+  mustChangePassword: boolean;
+  createdAt: string;
+}
+
+/** 运营列表视图：最新建号在前，内测期量级小，单页上限由调用方定。 */
+export function listAccounts(db: SqlClient, limit: number): AdminAccountListItem[] {
+  return db
+    .all<{
+      id: string;
+      phone: string;
+      status: AccountStatus;
+      balance: number;
+      must_change_password: number;
+      created_at: string;
+    }>(
+      'SELECT id, phone, status, balance, must_change_password, created_at FROM accounts ORDER BY created_at DESC, id DESC LIMIT ?',
+      [limit],
+    )
+    .map(row => ({
+      id: row.id,
+      phone: row.phone,
+      status: row.status,
+      balance: row.balance,
+      mustChangePassword: row.must_change_password === 1,
+      createdAt: row.created_at,
+    }));
+}
+
+/**
+ * 运营停用/启用（票 10）。停用同时吊销账号全部会话（refresh 立即失效；
+ * access JWT 由 requireAccountAuth 的 status 检查拦截），余额与流水不动。
+ */
+export function setAccountStatus(
+  deps: BackendDeps,
+  accountId: string,
+  status: AccountStatus,
+): AccountRow {
+  const account = findAccountById(deps.db, accountId);
+  if (!account) throw new AppError('account_not_found', '账号不存在。', 404);
+  const nowIso = new Date(deps.now()).toISOString();
+  deps.db.transaction(() => {
+    deps.db.run('UPDATE accounts SET status = ?, updated_at = ? WHERE id = ?', [
+      status,
+      nowIso,
+      accountId,
+    ]);
+    if (status === 'disabled') revokeAccountSessions(deps, accountId, 'admin_disabled');
+  });
+  const updated = findAccountById(deps.db, accountId);
+  if (!updated) throw new AppError('internal_error', '状态更新后读不到账号行。', 500);
+  return updated;
 }
 
 /** 对外账号投影：密码哈希/版本等内部字段不出领域层。 */
