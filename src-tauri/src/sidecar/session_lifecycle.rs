@@ -692,6 +692,12 @@ fn create_new_session_sidecar<'a, R: Runtime>(
     } else {
         cmd.env_remove(crate::deepseek_credentials::SIDECAR_SECRET_ENV);
         cmd.env_remove("DEEPSEEK_API_KEY");
+        for name in crate::deepseek_credentials::SIDECAR_URL_ENV_NAMES {
+            cmd.env_remove(name);
+        }
+        for name in crate::deepseek_credentials::DEVELOPMENT_URL_ENV_NAMES {
+            cmd.env_remove(name);
+        }
         for name in crate::geo_provider_credentials::SIDECAR_ENV_NAMES {
             cmd.env_remove(name);
         }

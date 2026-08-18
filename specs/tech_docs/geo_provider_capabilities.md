@@ -11,6 +11,7 @@
 - Rust `geo_provider_credentials.rs` 是 ARK、Embedding、OSS、超级媒介应用级凭据的唯一持久化 owner；DeepSeek 继续由 `deepseek_credentials.rs` 拥有。Windows 安装版使用 Credential Manager，一个应用配置供所有品牌复用。
 - 凭据不是 `BrandWorkspace` 数据。品牌知识、产物、订单与观测仍显式绑定各自 workspace；能力复用不允许引入进程级 Active Project。
 - Rust 只在已确认的品牌 Session Sidecar 出生时通过一次性 `XIAOJING_*` 环境传输注入服务配置。Node `provider-runtime.ts` 在组合 `xiaojing-geo` MCP 时立即捕获并删除传输变量；Renderer、config、品牌数据库、Session transcript 与工具结果都拿不到明文。
+- Provider 端点覆盖走同一 admission 传输（`XIAOJING_ARK_PAYGO_BASE_URL`、`XIAOJING_DOUBAO_SEARCH_BASE_URL`、`XIAOJING_DEEPSEEK_OPENAI_BASE_URL`，主 Agent SDK 根为 `XIAOJING_DEEPSEEK_ANTHROPIC_BASE_URL`）：未注入时逐字节回落 `providerCapabilities.ts` 固定默认值，注入时只替换 host 根、路径与 wire shape 不变，业务层零感知。这些变量非密钥但同样在 Sidecar 出生时捕获删除；Rust 在所有生成路径无条件清除（含非品牌 Sidecar），release 构建不从环境注入端点——伪造父环境不能把带凭据的流量重定向到任意地址。
 - Node GEO 业务只能依赖 `provider-capabilities.ts` 的 `GeoTextCapability`、`GeoKeywordSearchCapability`、`GeoEmbeddingCapability`、`GeoObjectStorageCapability`、`GeoDistributionCapability`。业务步骤不得读取 `process.env`、Rust credential DTO 或通用 Provider DTO。
 - `GeoDistributionCapability` 当前只开放资源池读取；付费订单提交仍必须由后续 `PublishScheduler` 在用户确认后拥有，不能通过模型能力口绕过。
 
@@ -33,7 +34,7 @@
 
 Ticket 09 已在同一个 `keyword-search` typed port 上增加显式 `probeQuestion` 操作：固定使用 ARK Responses `/responses` 与 `doubao_app.ai_search`，逐个已确认问题保存回答和结构化引用。该操作与关键词挖掘的 Chat + `enable_search` wire shape 分开，仍共享同一 ARK 应用级凭据 owner；其非 secret model/mode/endpoint-family snapshot 由 baseline 持久化，密钥和 Authorization 永不进入 snapshot 或品牌库。
 
-竞品富化又在该 typed port 上增加显式可选操作 `searchSources`：直连豆包搜索 HTTP API `https://open.feedcoopapi.com/search_api/web_search`（`{Query, Count, SearchType:'web', NeedSummary:true}`，默认 Count 20），返回结构化 `title/url/summary` 逐条召回（按 URL 去重，Title 缺失回退 SiteName/URL），不经 LLM 改写——js_ai `doubaoSearchProbe` 契约。Bearer 解析链：专用豆包搜索 key（Ark 服务可选字段 `doubaoSearchApiKey`，联网搜索控制台签发、月度免费额度；Rust admission 注入 `XIAOJING_DOUBAO_SEARCH_API_KEY`，dev `.env` 源 `DOUBAO_SEARCH_API_KEY`，设置页 ark 槽位可选字段）→ 复用 `arkApiKey`（volcengine 主 key / Agent Plan key 兼容豆包搜索计费面）。key 不被接受或能力未注入时，调用方（材料导入竞品腿）回落 `search()` 的 `enable_search` 生成语料，回落时记固定码降级日志（`competitor-search / degraded / doubao_search_unavailable`，合法零结果不记）。问题池的关键词挖掘继续走 `search()` 不变。
+竞品富化又在该 typed port 上增加显式可选操作 `searchSources`：默认直连豆包搜索 HTTP API `https://open.feedcoopapi.com/search_api/web_search`（`{Query, Count, SearchType:'web', NeedSummary:true}`，默认 Count 20），返回结构化 `title/url/summary` 逐条召回（按 URL 去重，Title 缺失回退 SiteName/URL），不经 LLM 改写——js_ai `doubaoSearchProbe` 契约。该 URL 不是硬编码：默认值钉在 `providerCapabilities.ts` 目录（keyword-search 槽位 `searchSourcesEndpoint` 语义），可被 admission 注入的 `XIAOJING_DOUBAO_SEARCH_BASE_URL` 覆盖，且与 `search`/`probeQuestion` 一样进入 Rust permit 通道（unitKind `search-sources`），不留计量缺口。Bearer 解析链：专用豆包搜索 key（Ark 服务可选字段 `doubaoSearchApiKey`，联网搜索控制台签发、月度免费额度；Rust admission 注入 `XIAOJING_DOUBAO_SEARCH_API_KEY`，dev `.env` 源 `DOUBAO_SEARCH_API_KEY`，设置页 ark 槽位可选字段）→ 复用 `arkApiKey`（volcengine 主 key / Agent Plan key 兼容豆包搜索计费面）。key 不被接受或能力未注入时，调用方（材料导入竞品腿）回落 `search()` 的 `enable_search` 生成语料，回落时记固定码降级日志（`competitor-search / degraded / doubao_search_unavailable`，合法零结果不记）。问题池的关键词挖掘继续走 `search()` 不变。
 
 Ticket 10 的标题规划继续使用 `generation` port，但通过显式 `purpose: title-planning` 选择 js_ai `dev` 固定的 mini 模型（小鲸同学 落地为 lite），调用带 system persona 与 `maxTokens=2048`（ADR-0006 调用形态统一）；聚类与类型推荐仍使用 generation 默认 pro 模型（`maxTokens=4096`）。Topic plan 同时保存这两个非 secret model snapshot 与逐阶段 attempt。任何模型不可用、响应解析失败、标题约束不足或 Embedding 去重失败都显式失败，不能调用 js_ai 的 `generateMockTitles` 或模板 fallback 生成生产计划。
 
@@ -49,11 +50,13 @@ Ticket 12 的渠道发现只使用 `distribution` port 分页读取媒体与自�
 
 开发环境的 `.env` 兼容变量：
 
-- `DEEPSEEK_API_KEY`
-- `ARK_API_KEY`
+- `DEEPSEEK_API_KEY`，以及可选端点覆盖 `DEEPSEEK_MAIN_AGENT_BASE_URL`（主 Agent Anthropic 协议根）与 `DEEPSEEK_API_BASE_URL`（extraction / reflection 的 OpenAI 兼容根）
+- `ARK_API_KEY`，以及可选端点覆盖 `ARK_PAYGO_BASE_URL`（Paygo Chat/Responses/Embedding 统一根）与 `DOUBAO_SEARCH_BASE_URL`（searchSources 结构化召回根）
 - `ARK_EMBEDDING_API_KEY`（可选，缺失时复用 ARK）与 `ARK_EMBEDDING_MODEL`
 - `ALI_OSS_ACCESS_KEY_ID`、`ALI_OSS_ACCESS_KEY_SECRET`、`ALI_OSS_BUCKET`、`ALI_OSS_REGION`、`ALI_OSS_PUBLIC_BASE_URL`
 - `CHAOJIMEIJIE_APPID`、`CHAOJIMEIJIE_SECRET`、`CHAOJIMEIJIE_API_BASE_URL`
+
+端点覆盖值必须是绝对 http(s) URL（开发构建允许 `http://` 便于本地网关冒烟）；留空时全部回落官方默认地址。
 
 `.env.example` 的所有值必须为空。release 构建不从环境降级读取服务密钥。
 

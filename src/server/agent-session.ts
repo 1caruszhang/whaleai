@@ -36,7 +36,10 @@ import {
   messageAttachmentsFromImagePayloads,
   resolveImagePayloads,
 } from './utils/image-payload';
-import { resolveXiaojingDeepseekSecret } from './xiaojing-native-secret';
+import {
+  resolveXiaojingDeepseekAnthropicBaseUrl,
+  resolveXiaojingDeepseekSecret,
+} from './xiaojing-native-secret';
 
 type SessionCompletionTerminal = Readonly<{
   sessionId: string;
@@ -255,7 +258,12 @@ function buildProviderEnv(): Record<string, string | undefined> {
   // runTurn 对缺失凭据 fail-fast，query 永远拿不到空 token。
   return {
     ...process.env,
-    ANTHROPIC_BASE_URL: XIAOJING_MAIN_AGENT.anthropicBaseUrl,
+    // admission 注入的端点覆盖优先（运营网关切流预留），缺省回落策略表；
+    // 尾斜杠归一化与其余三个端点根一致，避免拼出 //v1/messages。
+    ANTHROPIC_BASE_URL: (
+      resolveXiaojingDeepseekAnthropicBaseUrl()
+        ?? XIAOJING_MAIN_AGENT.anthropicBaseUrl
+    ).replace(/\/+$/, ""),
     ANTHROPIC_AUTH_TOKEN: secret ?? '',
     ANTHROPIC_API_KEY: '',
     ANTHROPIC_DEFAULT_OPUS_MODEL: XIAOJING_MAIN_AGENT.model,

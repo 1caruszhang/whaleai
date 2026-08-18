@@ -21,6 +21,35 @@ const identity = {
   sidecarId: "sidecar-18",
 };
 
+const unavailable = async (): Promise<never> => {
+  throw new Error("not used");
+};
+
+function baseCapabilities(
+  overrides: Partial<GeoProviderCapabilities> = {},
+): GeoProviderCapabilities {
+  return {
+    extraction: { slot: "extraction", complete: unavailable },
+    generation: { slot: "generation", complete: unavailable },
+    reflection: { slot: "reflection", complete: unavailable },
+    keywordSearch: {
+      slot: "keyword-search",
+      search: unavailable,
+      baselineEngines: () => [],
+      probeQuestion: unavailable,
+    },
+    embedding: {
+      slot: "embedding",
+      dimensions: 1,
+      concurrency: 1,
+      embed: unavailable,
+    },
+    objectStorage: { slot: "object-storage", putHtml: unavailable },
+    distribution: { slot: "distribution", listResources: unavailable },
+    ...overrides,
+  };
+}
+
 function permit(
   state: "queued" | "acquired",
   overrides: Record<string, unknown> = {},
@@ -159,28 +188,14 @@ describe("GeoProviderAdmission", () => {
     const embed = vi.fn(async (texts: readonly string[]) =>
       texts.map((text) => [text.length]),
     );
-    const unavailable = async (): Promise<never> => {
-      throw new Error("not used");
-    };
-    const capabilities: GeoProviderCapabilities = {
-      extraction: { slot: "extraction", complete: unavailable },
-      generation: { slot: "generation", complete: unavailable },
-      reflection: { slot: "reflection", complete: unavailable },
-      keywordSearch: {
-        slot: "keyword-search",
-        search: unavailable,
-        baselineEngines: () => [],
-        probeQuestion: unavailable,
-      },
+    const capabilities = baseCapabilities({
       embedding: {
         slot: "embedding",
         dimensions: 1,
         concurrency: 1,
         embed,
       },
-      objectStorage: { slot: "object-storage", putHtml: unavailable },
-      distribution: { slot: "distribution", listResources: unavailable },
-    };
+    });
     configureGeoProviderAdmission({
       workspacePath: "/brands/brand-18",
       sessionId: "session-18",
@@ -202,6 +217,63 @@ describe("GeoProviderAdmission", () => {
         String(path).endsWith("/release"),
       ),
     ).toHaveLength(2);
+    vi.unstubAllEnvs();
+  });
+
+  it("admits searchSources retrieval through the same permit channel as keyword search", async () => {
+    vi.stubEnv("XIAOJING_SIDECAR_ID", "sidecar-18");
+    moduleMocks.managementApi.mockReset();
+    moduleMocks.managementApi.mockImplementation(
+      async (path: string, _method: string, body: Record<string, unknown>) => {
+        const payload = body.payload as Record<string, unknown>;
+        if (path.endsWith("/acquire")) {
+          return permit("acquired", { requestId: payload.requestId });
+        }
+        return { ok: true, released: true };
+      },
+    );
+    const searchSources = vi.fn(async () => [
+      { title: "同行动态", url: "https://rank.example/1" },
+    ]);
+    const base = baseCapabilities({
+      keywordSearch: {
+        slot: "keyword-search",
+        search: unavailable,
+        searchSources,
+        baselineEngines: () => [],
+        probeQuestion: unavailable,
+      },
+    });
+    configureGeoProviderAdmission({
+      workspacePath: "/brands/brand-18",
+      sessionId: "session-18",
+    });
+
+    await expect(
+      wrapGeoProviderCapabilities(base).keywordSearch.searchSources!(
+        "成都新都 医美 排行榜",
+        { count: 20 },
+      ),
+    ).resolves.toEqual([{ title: "同行动态", url: "https://rank.example/1" }]);
+
+    const acquire = moduleMocks.managementApi.mock.calls.find(([path]) =>
+      String(path).endsWith("/acquire"),
+    );
+    expect(acquire?.[2]).toMatchObject({
+      ...identity,
+      payload: { slot: "keyword-search", unitKind: "search-sources" },
+    });
+    expect(searchSources).toHaveBeenCalledTimes(1);
+
+    // 旧能力注入未实现 searchSources 时包装层保持缺省，不制造新入口。
+    const legacyKeywordSearch = { ...base.keywordSearch };
+    delete legacyKeywordSearch.searchSources;
+    expect(
+      wrapGeoProviderCapabilities({
+        ...base,
+        keywordSearch: legacyKeywordSearch,
+      }).keywordSearch.searchSources,
+    ).toBeUndefined();
     vi.unstubAllEnvs();
   });
 });

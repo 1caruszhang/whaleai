@@ -22,6 +22,8 @@ describe("GEO typed provider capabilities", () => {
       XIAOJING_ARK_EMBEDDING_ENDPOINT_ID: "ep-test",
       XIAOJING_OSS_ACCESS_KEY_SECRET: "oss-secret",
       XIAOJING_DISTRIBUTION_SECRET: "distribution-secret",
+      XIAOJING_ARK_PAYGO_BASE_URL: "https://gateway.example.test/api/v3",
+      XIAOJING_DOUBAO_SEARCH_BASE_URL: "https://gateway.example.test/search",
     };
     expect(captureGeoProviderRuntimeSecrets(env)).toMatchObject({
       arkApiKey: "ark-secret",
@@ -30,6 +32,8 @@ describe("GEO typed provider capabilities", () => {
       embeddingEndpointId: "ep-test",
       ossAccessKeySecret: "oss-secret",
       distributionSecret: "distribution-secret",
+      arkPaygoBaseUrl: "https://gateway.example.test/api/v3",
+      doubaoSearchBaseUrl: "https://gateway.example.test/search",
     });
     expect(env).toEqual({});
   });
@@ -125,6 +129,59 @@ describe("GEO typed provider capabilities", () => {
     expect(sources).toEqual([
       { title: "新都医美排行", url: "https://rank.example/1", summary: "本地同行讨论" },
       { title: "口碑站", url: "https://word.example/2", summary: "哪家好" },
+    ]);
+  });
+
+  it("redirects every provider wire route to injected endpoint overrides without changing wire shapes", async () => {
+    const urls: string[] = [];
+    const okFetch = vi.fn(
+      async (input: string | URL | Request, _init?: RequestInit) => {
+        const url = String(input);
+        urls.push(url);
+        return jsonResponse(
+          url.endsWith("/embeddings/multimodal")
+            ? { data: { embedding: Array.from({ length: 2048 }, (_, i) => i) } }
+            : url.endsWith("/responses")
+              ? { output_text: "ok" }
+              : { choices: [{ message: { content: "ok" } }] },
+        );
+      },
+    );
+    // 尾斜杠证明归一化；覆盖值来自 Rust admission 一次性注入传输。
+    const capabilities = createGeoProviderCapabilities(
+      {
+        deepseekApiKey: "deepseek-test",
+        arkApiKey: "ark-test",
+        embeddingEndpointId: "ep-test",
+        deepseekOpenAiBaseUrl: "https://gw.example.test/deepseek",
+        arkPaygoBaseUrl: "https://gw.example.test/ark/",
+        doubaoSearchBaseUrl: "https://gw.example.test/doubao-search",
+      },
+      { fetch: okFetch as typeof fetch },
+    );
+
+    await capabilities.extraction.complete([
+      { role: "user", content: "extract" },
+    ]);
+    await capabilities.reflection.complete([
+      { role: "user", content: "review" },
+    ]);
+    await capabilities.keywordSearch.search("search");
+    await capabilities.generation.complete([
+      { role: "user", content: "generate" },
+    ]);
+    await capabilities.keywordSearch.probeQuestion("doubao", "问一句");
+    await capabilities.embedding.embed(["one"]);
+    await capabilities.keywordSearch.searchSources!("query");
+
+    expect(urls).toEqual([
+      "https://gw.example.test/deepseek/chat/completions",
+      "https://gw.example.test/deepseek/chat/completions",
+      "https://gw.example.test/ark/chat/completions",
+      "https://gw.example.test/ark/chat/completions",
+      "https://gw.example.test/ark/responses",
+      "https://gw.example.test/ark/embeddings/multimodal",
+      "https://gw.example.test/doubao-search/search_api/web_search",
     ]);
   });
 

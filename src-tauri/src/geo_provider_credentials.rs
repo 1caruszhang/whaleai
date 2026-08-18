@@ -33,6 +33,8 @@ pub(crate) const SIDECAR_ENV_NAMES: &[&str] = &[
     "XIAOJING_DISTRIBUTION_APP_ID",
     "XIAOJING_DISTRIBUTION_SECRET",
     "XIAOJING_DISTRIBUTION_BASE_URL",
+    "XIAOJING_ARK_PAYGO_BASE_URL",
+    "XIAOJING_DOUBAO_SEARCH_BASE_URL",
 ];
 
 pub(crate) const DEVELOPMENT_SOURCE_ENV_NAMES: &[&str] = &[
@@ -48,6 +50,8 @@ pub(crate) const DEVELOPMENT_SOURCE_ENV_NAMES: &[&str] = &[
     "CHAOJIMEIJIE_APPID",
     "CHAOJIMEIJIE_SECRET",
     "CHAOJIMEIJIE_API_BASE_URL",
+    "ARK_PAYGO_BASE_URL",
+    "DOUBAO_SEARCH_BASE_URL",
 ];
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
@@ -266,6 +270,41 @@ fn env_value(name: &str) -> Option<String> {
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
+}
+
+/// Development-only endpoint override passthrough. Values must be absolute
+/// http(s) URLs; release builds never honor environment-provided endpoints so
+/// a forged parent environment cannot redirect credentialed traffic.
+#[cfg_attr(not(debug_assertions), allow(dead_code))]
+pub(crate) fn endpoint_override_from_env(name: &str) -> Option<String> {
+    normalize_endpoint_override(env_value(name))
+}
+
+#[cfg_attr(not(debug_assertions), allow(dead_code))]
+pub(crate) fn normalize_endpoint_override(raw: Option<String>) -> Option<String> {
+    raw.filter(|value| {
+        url::Url::parse(value)
+            .map(|parsed| {
+                (parsed.scheme() == "http" || parsed.scheme() == "https")
+                    && parsed.host_str().is_some()
+            })
+            .unwrap_or(false)
+    })
+}
+
+/// Shared debug-build passthrough for endpoint overrides. Each credential
+/// module passes its own (dev source, sidecar transport) pairs so env-name
+/// ownership stays with the module that owns the namespace.
+#[cfg(debug_assertions)]
+pub(crate) fn inject_debug_endpoint_overrides(
+    command: &mut std::process::Command,
+    pairs: &[(&str, &str)],
+) {
+    for (source, target) in pairs {
+        if let Some(value) = endpoint_override_from_env(source) {
+            command.env(target, value);
+        }
+    }
 }
 
 fn development_credential(service: GeoProviderServiceId) -> Option<ServiceCredential> {
@@ -516,6 +555,17 @@ pub(crate) fn inject_into_sidecar(command: &mut std::process::Command) -> Result
     for name in DEVELOPMENT_SOURCE_ENV_NAMES {
         command.env_remove(name);
     }
+    // Provider 端点覆盖（运营网关切流预留）：非密钥、仅开发环境从 .env/
+    // 启动环境透传；release 构建在上方 SIDECAR_ENV_NAMES 清除后保持缺省，
+    // 由后续网关 admission 注入。
+    #[cfg(debug_assertions)]
+    inject_debug_endpoint_overrides(
+        command,
+        &[
+            ("ARK_PAYGO_BASE_URL", "XIAOJING_ARK_PAYGO_BASE_URL"),
+            ("DOUBAO_SEARCH_BASE_URL", "XIAOJING_DOUBAO_SEARCH_BASE_URL"),
+        ],
+    );
     Ok(())
 }
 
@@ -825,6 +875,28 @@ mod tests {
         assert_eq!(value["state"], "available");
         assert!(value.get("apiKey").is_none());
         assert!(value.get("fields").is_none());
+    }
+
+    #[test]
+    fn endpoint_overrides_require_absolute_http_urls() {
+        assert_eq!(
+            normalize_endpoint_override(Some("https://gateway.example.test/api".to_string())),
+            Some("https://gateway.example.test/api".to_string())
+        );
+        // 本地网关冒烟允许 http，但协议外方案与残缺值一律拒绝。
+        assert_eq!(
+            normalize_endpoint_override(Some("http://127.0.0.1:8787".to_string())),
+            Some("http://127.0.0.1:8787".to_string())
+        );
+        assert_eq!(
+            normalize_endpoint_override(Some("ftp://gateway.example.test".to_string())),
+            None
+        );
+        assert_eq!(
+            normalize_endpoint_override(Some("not-a-url".to_string())),
+            None
+        );
+        assert_eq!(normalize_endpoint_override(None), None);
     }
 
     #[test]

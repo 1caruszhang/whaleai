@@ -26,6 +26,15 @@ export interface GeoProviderRuntimeSecrets {
   distributionAppId?: string;
   distributionSecret?: string;
   distributionBaseUrl?: string;
+  /**
+   * 非密钥端点覆盖（运营网关切流预留）：缺省回落共享层固定默认值。
+   * ark/doubao 由 captureGeoProviderRuntimeSecrets 捕获；deepseek 属
+   * XIAOJING_DEEPSEEK_* 命名空间，由 provider-runtime 合并自
+   * xiaojing-native-secret 的捕获。
+   */
+  deepseekOpenAiBaseUrl?: string;
+  arkPaygoBaseUrl?: string;
+  doubaoSearchBaseUrl?: string;
 }
 
 export interface GeoTextMessage {
@@ -174,6 +183,8 @@ export function captureGeoProviderRuntimeSecrets(
     distributionAppId: read("XIAOJING_DISTRIBUTION_APP_ID"),
     distributionSecret: read("XIAOJING_DISTRIBUTION_SECRET"),
     distributionBaseUrl: read("XIAOJING_DISTRIBUTION_BASE_URL"),
+    arkPaygoBaseUrl: read("XIAOJING_ARK_PAYGO_BASE_URL"),
+    doubaoSearchBaseUrl: read("XIAOJING_DOUBAO_SEARCH_BASE_URL"),
   };
   for (const name of [
     ...secretTransportEnvNames,
@@ -183,6 +194,8 @@ export function captureGeoProviderRuntimeSecrets(
     "XIAOJING_OSS_REGION",
     "XIAOJING_OSS_PUBLIC_BASE_URL",
     "XIAOJING_DISTRIBUTION_BASE_URL",
+    "XIAOJING_ARK_PAYGO_BASE_URL",
+    "XIAOJING_DOUBAO_SEARCH_BASE_URL",
   ]) {
     delete env[name];
   }
@@ -296,9 +309,26 @@ export function createGeoProviderCapabilities(
     deps.sleep ??
     ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
   const now = deps.now ?? (() => new Date());
-  const deepseekEndpoint = `${XIAOJING_GEO_PROVIDER_DEFAULTS.deepseekOpenAiBaseUrl}/chat/completions`;
-  const arkEndpoint = `${XIAOJING_GEO_PROVIDER_DEFAULTS.arkPaygoBaseUrl}/chat/completions`;
-  const arkResponsesEndpoint = `${XIAOJING_GEO_PROVIDER_DEFAULTS.arkPaygoBaseUrl}/responses`;
+  // 端点覆盖（Rust admission 一次性注入）：缺省逐字节回落固定默认值，
+  // 注入时只替换 host 根，路径与 wire shape 不变，业务层零感知。
+  const endpointRoot = (override: string | undefined, fallback: string) =>
+    (override || fallback).replace(/\/+$/, "");
+  const deepseekOpenAiBaseUrl = endpointRoot(
+    secrets.deepseekOpenAiBaseUrl,
+    XIAOJING_GEO_PROVIDER_DEFAULTS.deepseekOpenAiBaseUrl,
+  );
+  const arkPaygoBaseUrl = endpointRoot(
+    secrets.arkPaygoBaseUrl,
+    XIAOJING_GEO_PROVIDER_DEFAULTS.arkPaygoBaseUrl,
+  );
+  const doubaoSearchBaseUrl = endpointRoot(
+    secrets.doubaoSearchBaseUrl,
+    XIAOJING_GEO_PROVIDER_DEFAULTS.doubaoSearchBaseUrl,
+  );
+  const deepseekEndpoint = `${deepseekOpenAiBaseUrl}/chat/completions`;
+  const arkEndpoint = `${arkPaygoBaseUrl}/chat/completions`;
+  const arkResponsesEndpoint = `${arkPaygoBaseUrl}/responses`;
+  const arkEmbeddingEndpoint = `${arkPaygoBaseUrl}/embeddings/multimodal`;
   const doubaoBaselineSnapshot: GeoBaselineProviderSnapshot = {
     engineId: "doubao",
     provider: "volcengine",
@@ -405,7 +435,7 @@ export function createGeoProviderCapabilities(
         // 接受时由调用方回落 search() 的 enable_search 生成语料。
         try {
           const response = await fetchImpl(
-            "https://open.feedcoopapi.com/search_api/web_search",
+            `${doubaoSearchBaseUrl}/search_api/web_search`,
             {
               method: "POST",
               headers: {
@@ -516,7 +546,6 @@ export function createGeoProviderCapabilities(
       async embed(texts, options) {
         const results: number[][] = new Array(texts.length);
         let nextIndex = 0;
-        const endpoint = `${XIAOJING_GEO_PROVIDER_DEFAULTS.arkPaygoBaseUrl}/embeddings/multimodal`;
         const apiKey = required(
           secrets.embeddingApiKey ?? secrets.arkApiKey,
           "embedding",
@@ -533,7 +562,7 @@ export function createGeoProviderCapabilities(
               attempt++
             ) {
               try {
-                const response = await fetchImpl(endpoint, {
+                const response = await fetchImpl(arkEmbeddingEndpoint, {
                   method: "POST",
                   headers: {
                     Authorization: `Bearer ${apiKey}`,

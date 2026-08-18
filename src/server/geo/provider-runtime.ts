@@ -1,4 +1,4 @@
-import { resolveXiaojingDeepseekSecret } from "../xiaojing-native-secret";
+import { resolveXiaojingDeepseekOpenAiBaseUrl, resolveXiaojingDeepseekSecret } from "../xiaojing-native-secret";
 import {
   captureGeoProviderRuntimeSecrets,
   createGeoProviderCapabilities,
@@ -14,6 +14,7 @@ import {
 // the Rust transport variables.
 const runtimeSecrets = captureGeoProviderRuntimeSecrets();
 runtimeSecrets.deepseekApiKey = resolveXiaojingDeepseekSecret();
+runtimeSecrets.deepseekOpenAiBaseUrl = resolveXiaojingDeepseekOpenAiBaseUrl();
 
 let capabilities: GeoProviderCapabilities | undefined;
 

@@ -25,6 +25,7 @@ describe("Xiaojing fixed GEO provider capability catalog", () => {
       embeddingDimensions: 2048,
       embeddingConcurrency: 2,
       embeddingMaxRetries: 2,
+      doubaoSearchBaseUrl: "https://open.feedcoopapi.com",
       distributionCacheTtlMs: 1_800_000,
     });
     expect(
@@ -32,7 +33,12 @@ describe("Xiaojing fixed GEO provider capability catalog", () => {
         ({ slot }) => slot === "keyword-search",
       ),
     ).toMatchObject({
-      semantics: { enable_search: true, billingSurface: "paygo" },
+      semantics: {
+        enable_search: true,
+        billingSurface: "paygo",
+        searchSourcesEndpoint:
+          "https://open.feedcoopapi.com/search_api/web_search",
+      },
     });
     expect(
       GEO_PROVIDER_CAPABILITY_CATALOG.find(({ slot }) => slot === "embedding"),
@@ -52,7 +58,11 @@ describe("Xiaojing fixed GEO provider capability catalog", () => {
     expect(assignments.map((line) => line.slice(0, line.indexOf("=")))).toEqual(
       [
         "DEEPSEEK_API_KEY",
+        "DEEPSEEK_MAIN_AGENT_BASE_URL",
+        "DEEPSEEK_API_BASE_URL",
         "ARK_API_KEY",
+        "ARK_PAYGO_BASE_URL",
+        "DOUBAO_SEARCH_BASE_URL",
         "ARK_EMBEDDING_API_KEY",
         "ARK_EMBEDDING_MODEL",
         "ALI_OSS_ACCESS_KEY_ID",

@@ -68,6 +68,7 @@ export const XIAOJING_GEO_PROVIDER_DEFAULTS = {
   embeddingDimensions: 2048,
   embeddingConcurrency: 2,
   embeddingMaxRetries: 2,
+  doubaoSearchBaseUrl: "https://open.feedcoopapi.com",
   distributionBaseUrl: "https://vip.chaojimeijie.com/api",
   distributionCacheTtlMs: 30 * 60 * 1000,
   ossDefaultRegion: "oss-cn-beijing",
@@ -104,6 +105,9 @@ export const GEO_PROVIDER_CAPABILITY_CATALOG: readonly GeoProviderCapabilitySpec
         protocol: "openai-chat",
         enable_search: true,
         billingSurface: "paygo",
+        // 竞品富化 searchSources 的第二条 wire route；与主端点一样可被
+        // admission 注入的端点覆盖替换（运营网关计量面），目录只钉默认值。
+        searchSourcesEndpoint: `${XIAOJING_GEO_PROVIDER_DEFAULTS.doubaoSearchBaseUrl}/search_api/web_search`,
       },
     },
     {
