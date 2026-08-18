@@ -16,6 +16,7 @@ const EXTRA_SEARCH_DIRS: &[&str] = &[
 ];
 
 pub fn find(binary_name: &str) -> Option<PathBuf> {
+    #[cfg_attr(target_os = "windows", allow(unused_mut))]
     let mut directories = std::env::var_os("PATH")
         .map(|value| std::env::split_paths(&value).collect::<Vec<_>>())
         .unwrap_or_default();

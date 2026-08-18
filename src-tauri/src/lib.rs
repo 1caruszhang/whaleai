@@ -73,7 +73,7 @@ fn classify_navigation(url: &Url) -> NavigationDecision {
     }
 }
 
-pub(crate) fn show_main_window(app: &tauri::AppHandle) {
+pub(crate) fn show_main_window<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.show();
         let _ = window.unminimize();
@@ -336,23 +336,27 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("failed to build Xiaojing desktop shell");
 
-    app.run(move |app_handle, event| match event {
-        tauri::RunEvent::ExitRequested { .. } => {
-            if !cleanup_for_exit.swap(true, Ordering::Relaxed) {
-                let _ = begin_app_exit_shutdown();
-                if let Ok(store) = brand_workspace::production_store() {
-                    let _ = store.pause_active_geo_operations_for_shutdown();
+    app.run(move |app_handle, event| {
+        #[cfg(not(target_os = "macos"))]
+        let _ = &app_handle;
+        match event {
+            tauri::RunEvent::ExitRequested { .. } => {
+                if !cleanup_for_exit.swap(true, Ordering::Relaxed) {
+                    let _ = begin_app_exit_shutdown();
+                    if let Ok(store) = brand_workspace::production_store() {
+                        let _ = store.pause_active_geo_operations_for_shutdown();
+                    }
+                    let _ = geo_provider_runtime::global_geo_provider_limiter().clear();
+                    app_dirs::record_clean_exit();
+                    let _ = stop_all_sidecars(&sidecars_for_exit, "app-exit");
+                    process_cmd::settle_pending_tree_terminations();
+                    app_dirs::release_lock();
                 }
-                let _ = geo_provider_runtime::global_geo_provider_limiter().clear();
-                app_dirs::record_clean_exit();
-                let _ = stop_all_sidecars(&sidecars_for_exit, "app-exit");
-                process_cmd::settle_pending_tree_terminations();
-                app_dirs::release_lock();
             }
+            #[cfg(target_os = "macos")]
+            tauri::RunEvent::Reopen { .. } => show_main_window(app_handle),
+            _ => {}
         }
-        #[cfg(target_os = "macos")]
-        tauri::RunEvent::Reopen { .. } => show_main_window(app_handle),
-        _ => {}
     });
 }
 
