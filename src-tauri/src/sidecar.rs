@@ -46,8 +46,6 @@ pub use cleanup::{
 #[allow(unused_imports)]
 pub use commands::cmd_reconcile_session_tab_activation;
 use health::{check_sidecar_http_health, wait_for_health, wait_for_readiness};
-#[cfg(windows)]
-pub(crate) use instances::restart_xiaojing_session_sidecars;
 pub use instances::{
     forward_terminal_events_to_renderer, monitor_session_sidecars, monitor_turn_wake_lock,
 };
