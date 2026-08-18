@@ -7,6 +7,7 @@ import { createAdminRoutes } from './admin-routes';
 import { createAuthRoutes } from './auth-routes';
 import { createBillingRoutes } from './billing-routes';
 import { createGatewayRoutes } from './gateway-routes';
+import { createProviderProxyRoutes } from './provider-proxy-routes';
 
 export interface BackendEnv {
   Variables: {
@@ -39,6 +40,7 @@ export function createBackendApp(deps: BackendDeps): Hono<BackendEnv> {
   app.route('/', createBillingRoutes(deps));
   app.route('/', createAdminRoutes(deps));
   app.route('/', createGatewayRoutes(deps));
+  app.route('/', createProviderProxyRoutes(deps));
 
   return app;
 }

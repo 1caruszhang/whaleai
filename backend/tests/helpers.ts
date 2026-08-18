@@ -9,6 +9,13 @@ import { createBackendApp, type BackendEnv } from '../src/http/app';
 
 export const TEST_ADMIN_PASSWORD = 'ops-password-123';
 export const TEST_DEEPSEEK_API_KEY = 'sk-test-deepseek-upstream-key';
+export const TEST_ARK_API_KEY = 'test-ark-upstream-key';
+export const TEST_DOUBAO_SEARCH_API_KEY = 'test-doubao-search-upstream-key';
+export const TEST_OSS_ACCESS_KEY_ID = 'test-oss-access-key-id';
+export const TEST_OSS_ACCESS_KEY_SECRET = 'test-oss-access-key-secret';
+export const TEST_OSS_BUCKET = 'test-bucket';
+export const TEST_DISTRIBUTION_APP_ID = 'test-distribution-appid';
+export const TEST_DISTRIBUTION_SECRET = 'test-distribution-secret';
 const TEST_AUTH_SECRET = 'unit-test-auth-secret-0123456789abcdef0123456789';
 
 export interface TestBackend {
@@ -24,7 +31,7 @@ export async function startTestBackend(
   overrides?: {
     config?: Partial<BackendConfig>;
     initialNowMs?: number;
-    /** 网关上游 mock（票 04）：注入后 /v1/* 代理打到这里，不触真实网络。 */
+    /** 网关上游 mock（票 04/05）：注入后 /v1/* 与 /gw/* 代理打到这里，不触真实网络。 */
     fetch?: typeof globalThis.fetch;
   },
 ): Promise<TestBackend> {
@@ -36,6 +43,13 @@ export async function startTestBackend(
       AUTH_SECRET: TEST_AUTH_SECRET,
       ADMIN_PASSWORD: TEST_ADMIN_PASSWORD,
       DEEPSEEK_API_KEY: TEST_DEEPSEEK_API_KEY,
+      ARK_API_KEY: TEST_ARK_API_KEY,
+      DOUBAO_SEARCH_API_KEY: TEST_DOUBAO_SEARCH_API_KEY,
+      OSS_ACCESS_KEY_ID: TEST_OSS_ACCESS_KEY_ID,
+      OSS_ACCESS_KEY_SECRET: TEST_OSS_ACCESS_KEY_SECRET,
+      OSS_BUCKET: TEST_OSS_BUCKET,
+      DISTRIBUTION_APP_ID: TEST_DISTRIBUTION_APP_ID,
+      DISTRIBUTION_SECRET: TEST_DISTRIBUTION_SECRET,
     }),
     ...overrides?.config,
   };
