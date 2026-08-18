@@ -866,6 +866,9 @@ mod writer_loop_tests {
         let dir = tempfile::tempdir().unwrap();
         let logs_dir = dir.path().to_path_buf();
         let (tx, rx) = tokio::sync::mpsc::channel::<String>(16);
+        // writer loop 必须留在 current_thread 测试 runtime 上（task.await 的时序
+        // 依赖同 runtime 调度），不适用 tauri::async_runtime 红线。
+        #[allow(clippy::disallowed_methods)]
         let task = tokio::spawn(run_writer_loop(rx, logs_dir.clone(), 64));
 
         let big_line = "x".repeat(100) + "\n";
@@ -908,6 +911,7 @@ mod writer_loop_tests {
         let dir = tempfile::tempdir().unwrap();
         let logs_dir = dir.path().to_path_buf();
         let (tx, rx) = tokio::sync::mpsc::channel::<String>(16);
+        #[allow(clippy::disallowed_methods)]
         let task = tokio::spawn(run_writer_loop(rx, logs_dir.clone(), 1024));
 
         tx.send("line-one\n".to_string()).await.unwrap();
