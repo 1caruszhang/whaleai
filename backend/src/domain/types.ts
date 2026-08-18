@@ -76,6 +76,63 @@ export interface PermitUnitReportRow {
   reported_at: string;
 }
 
+export type PublishOrderKind = 'media' | 'we-media';
+
+/** 下单三态：pending = 冻结中、上游结果未回；placed = 上游受理（partner_sn 已回）；failed = 未受理且冻结已释放（可重试）。 */
+export type PublishOrderPlacementStatus = 'pending' | 'placed' | 'failed';
+
+/**
+ * 订单账本三态（票 08 状态机）：frozen = 预扣冻结（计入账号冻结口径）；
+ * settled = 已结转（consume 流水已落）；refunded = 原路回补（frozen 释放
+ * 或 settled 后退款落 refund 正流水）。
+ */
+export type PublishOrderLedgerStatus = 'frozen' | 'settled' | 'refunded';
+
+/**
+ * 发布订单（票 08）：sn 为客户端生成的代理商订单号（幂等键，与上游同键）。
+ * points 为预扣点数（媒介费×1.6 → 点数向上取整）；media_price_cents 为
+ * 下单时上游权威媒介价（分），与 points 一同留档供对账。closed_observed_at
+ * 为「已关闭(9)」观察标记——资金语义上线后核实，期间维持原 ledger_status。
+ */
+export interface PublishOrderRow {
+  sn: string;
+  account_id: string;
+  kind: PublishOrderKind;
+  resource_id: number;
+  title: string;
+  content_url: string;
+  remark: string;
+  owner: string;
+  publish_form: number | null;
+  publish_type: number | null;
+  account_rule: number | null;
+  media_price_cents: number;
+  points: number;
+  placement_status: PublishOrderPlacementStatus;
+  ledger_status: PublishOrderLedgerStatus;
+  partner_sn: string | null;
+  upstream_status: number | null;
+  url: string | null;
+  published_at: string | null;
+  closed_observed_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/**
+ * 渠道资源快照缓存（票 08）：下单定价的权威价格缓存。下单时读缓存，
+ * miss/失效回源 /media|we-media/resource/query 后回填；资源变更回调
+ * （event=1）刷新。只存定价与展示所需的最小字段，不存整页资源。
+ */
+export interface DistributionResourceCacheRow {
+  kind: PublishOrderKind;
+  resource_id: number;
+  name: string;
+  price_cents: number;
+  status: number | null;
+  fetched_at: string;
+}
+
 /**
  * 对话旁路计量记录（票 04）：网关每次 /v1/messages 调用的真实 token 用量
  * 与折点（千分之一点）。只作运营与 DeepSeek 账单对账，不改点数余额。

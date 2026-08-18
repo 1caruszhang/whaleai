@@ -1,4 +1,4 @@
-import { createHmac } from "node:crypto";
+import { createHash, createHmac } from "node:crypto";
 
 import {
   XIAOJING_GEO_PROVIDER_DEFAULTS,
@@ -133,14 +133,97 @@ export interface GeoDistributionResource {
   [key: string]: unknown;
 }
 
+/** 发布订单下单输入（票 08）：sn 为客户端生成的幂等键（见 distributionOrderSn）。 */
+export interface GeoDistributionOrderPlacement {
+  /** 代理商订单号（幂等键，与网关/上游同键，≤64 安全字符集）。 */
+  sn: string;
+  resourceId: number;
+  title: string;
+  /** 稿件内容预览地址（OSS 文章预览 URL，putHtml 产物）。 */
+  contentUrl: string;
+  remark?: string;
+  owner?: string;
+  /** 自媒体订单必填三元组（上游契约：发布形式/发布类型/发布规则）。 */
+  publishForm?: number;
+  publishType?: number;
+  accountRule?: number;
+}
+
+/** 网关下单结果投影：points 为网关按服务器侧媒介价预扣的点数。 */
+export interface GeoDistributionPlacedOrder {
+  sn: string;
+  partnerSn: string | null;
+  points: number;
+  ledgerStatus: "frozen" | "settled" | "refunded";
+}
+
+/**
+ * 上游订单状态条目（查单透传形状的类型化；screenshot 为用户来源 HTML，
+ * 消费方展示必须走现有 sanitize 栈，绝不入持久层）。
+ */
+export interface GeoDistributionOrderStatus {
+  sn: string;
+  status: number;
+  url: string | null;
+  screenshot: string | null;
+  publishedAt: string | null;
+  feedback: Record<string, unknown> | null;
+}
+
 export interface GeoDistributionCapability {
   readonly slot: "distribution";
-  /** Read-only resource discovery. Paid order submission belongs to PublishScheduler. */
+  /** Read-only resource discovery. */
   listResources(
     kind: "media" | "we-media",
     page?: number,
     size?: number,
   ): Promise<{ total: number; items: GeoDistributionResource[] }>;
+  /**
+   * 真实下单（票 08）：网关按服务器侧渠道价预扣冻结（媒介费×1.6 → 点数
+   * 向上取整），sn 幂等——重放同参数不二次下单、不二次扣点。计费权威
+   * 在网关，直连模式（无账号 token）不可下单。
+   */
+  placeOrder(
+    kind: "media" | "we-media",
+    order: GeoDistributionOrderPlacement,
+  ): Promise<GeoDistributionPlacedOrder>;
+  /** 查单（≤20 个 sn）：网关借查单对账驱动订单状态机（结转/退点）。 */
+  queryOrders(
+    kind: "media" | "we-media",
+    sns: readonly string[],
+  ): Promise<GeoDistributionOrderStatus[]>;
+  /** 催稿。 */
+  urgeOrder(kind: "media" | "we-media", sn: string): Promise<void>;
+  /** 取消（上游仅待处理状态可取消）。 */
+  cancelOrder(
+    kind: "media" | "we-media",
+    sn: string,
+    reason: string,
+  ): Promise<void>;
+  /** 申请退款（发布中申请不保证成功，最终以编辑为准）。 */
+  applyRefund(
+    kind: "media" | "we-media",
+    sn: string,
+    reason: string,
+  ): Promise<void>;
+  /** 申请补发（仅新闻媒体包收录订单，上游契约）。 */
+  applyRepublish(kind: "media" | "we-media", sn: string): Promise<void>;
+}
+
+/**
+ * 发布订单 sn（幂等键）：由执行项确定性派生——同一执行项的网络重试/
+ * 恢复重跑重放同一 sn，不重复下单（幂等持久层在网关 publish_orders 表，
+ * sn 即主键）。形态：`xj-` + sha256(executionId, itemId) 前 32 hex，
+ * 共 35 字符，落在上游 ≤64 与安全字符集约束内。
+ */
+export function distributionOrderSn(
+  executionId: string,
+  itemId: string,
+): string {
+  const digest = createHash("sha256")
+    .update(`${executionId}\n${itemId}`)
+    .digest("hex");
+  return `xj-${digest.slice(0, 32)}`;
 }
 
 export interface GeoProviderCapabilities {
@@ -406,6 +489,40 @@ export function createGeoProviderCapabilities(
     ) =>
     () =>
       gatewayMode ? bearerToken(slot) : required(key, slot);
+
+  // 订单操作（催稿/取消/申请退款/申请补发，票 08）：网关纯代理端点的
+  // 统一发出口——上游信封 code != 200 一律按业务错误终止。
+  const gatewayOrderAction = async (
+    kind: "media" | "we-media",
+    action: string,
+    body: Record<string, unknown>,
+  ): Promise<void> => {
+    if (!gatewayMode) {
+      throw new Error(
+        "distribution 订单操作需要网关模式（账号 admission 注入网关地址与账号 token）",
+      );
+    }
+    const response = await fetchImpl(
+      `${gatewayRoot}/gw/distribution/${kind}/order/${action}`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${bearerToken("distribution")}`,
+          "Content-Type": "application/json",
+          Accept: "application/json",
+        },
+        body: JSON.stringify(body),
+      },
+    );
+    if (!response.ok)
+      throw safeUpstreamFailure("distribution", response.status);
+    const envelope = (await response.json()) as { code?: number };
+    if (envelope.code !== 200) {
+      throw new Error(
+        `distribution 返回业务错误（code ${envelope.code ?? "unknown"}）`,
+      );
+    }
+  };
 
   return {
     extraction: textCapability(
@@ -841,6 +958,157 @@ export function createGeoProviderCapabilities(
             total: envelope.data.total ?? envelope.data.items.length,
             items: envelope.data.items,
           };
+        } catch (error) {
+          throw sanitizeGeoProviderError(error, secrets);
+        }
+      },
+
+      // ── 订单面（票 08）：仅网关模式。计费权威在网关（下单预扣冻结、
+      // 查单/回调驱动结转与退点），直连模式没有账号 token 也就没有计费
+      // 主体——下单/查单/订单操作一律拒绝，资源发现保持开放。
+      async placeOrder(kind, order) {
+        try {
+          if (!gatewayMode) {
+            throw new Error(
+              "distribution 下单需要网关模式（账号 admission 注入网关地址与账号 token）",
+            );
+          }
+          const response = await fetchImpl(
+            `${gatewayRoot}/gw/distribution/${kind}/order`,
+            {
+              method: "POST",
+              headers: {
+                Authorization: `Bearer ${bearerToken("distribution")}`,
+                "Content-Type": "application/json",
+                Accept: "application/json",
+              },
+              body: JSON.stringify({
+                sn: order.sn,
+                resourceId: order.resourceId,
+                title: order.title,
+                contentUrl: order.contentUrl,
+                ...(order.remark !== undefined ? { remark: order.remark } : {}),
+                ...(order.owner !== undefined ? { owner: order.owner } : {}),
+                ...(order.publishForm !== undefined
+                  ? { publishForm: order.publishForm }
+                  : {}),
+                ...(order.publishType !== undefined
+                  ? { publishType: order.publishType }
+                  : {}),
+                ...(order.accountRule !== undefined
+                  ? { accountRule: order.accountRule }
+                  : {}),
+              }),
+            },
+          );
+          if (!response.ok)
+            throw safeUpstreamFailure("distribution", response.status);
+          const payload = (await response.json()) as {
+            order?: Partial<GeoDistributionPlacedOrder>;
+          };
+          const placed = payload.order;
+          if (
+            !placed ||
+            typeof placed.sn !== "string" ||
+            typeof placed.points !== "number" ||
+            (placed.ledgerStatus !== "frozen" &&
+              placed.ledgerStatus !== "settled" &&
+              placed.ledgerStatus !== "refunded")
+          ) {
+            throw new Error("distribution 返回了无效响应");
+          }
+          return {
+            sn: placed.sn,
+            partnerSn:
+              typeof placed.partnerSn === "string" ? placed.partnerSn : null,
+            points: placed.points,
+            ledgerStatus: placed.ledgerStatus,
+          };
+        } catch (error) {
+          throw sanitizeGeoProviderError(error, secrets);
+        }
+      },
+
+      async queryOrders(kind, sns) {
+        try {
+          if (!gatewayMode) {
+            throw new Error(
+              "distribution 查单需要网关模式（账号 admission 注入网关地址与账号 token）",
+            );
+          }
+          const query = new URLSearchParams();
+          for (const sn of sns) query.append("sn", sn);
+          const response = await fetchImpl(
+            `${gatewayRoot}/gw/distribution/${kind}/order/query?${query}`,
+            {
+              headers: {
+                Accept: "application/json",
+                Authorization: `Bearer ${bearerToken("distribution")}`,
+              },
+            },
+          );
+          if (!response.ok)
+            throw safeUpstreamFailure("distribution", response.status);
+          const envelope = (await response.json()) as {
+            code?: number;
+            data?: unknown[];
+          };
+          if (envelope.code !== 200 || !Array.isArray(envelope.data)) {
+            throw new Error(
+              `distribution 返回业务错误（code ${envelope.code ?? "unknown"}）`,
+            );
+          }
+          return envelope.data
+            .filter((item): item is Record<string, unknown> => typeof item === "object" && item !== null)
+            .map((item) => ({
+              sn: typeof item.sn === "string" ? item.sn : "",
+              status: typeof item.status === "number" ? item.status : 0,
+              url: typeof item.url === "string" ? item.url : null,
+              screenshot:
+                typeof item.screenshot === "string" ? item.screenshot : null,
+              publishedAt:
+                typeof item.published_at === "string"
+                  ? item.published_at
+                  : null,
+              feedback:
+                item.feedback &&
+                typeof item.feedback === "object" &&
+                !Array.isArray(item.feedback)
+                  ? (item.feedback as Record<string, unknown>)
+                  : null,
+            }));
+        } catch (error) {
+          throw sanitizeGeoProviderError(error, secrets);
+        }
+      },
+
+      async urgeOrder(kind, sn) {
+        try {
+          await gatewayOrderAction(kind, "urge", { sn });
+        } catch (error) {
+          throw sanitizeGeoProviderError(error, secrets);
+        }
+      },
+
+      async cancelOrder(kind, sn, reason) {
+        try {
+          await gatewayOrderAction(kind, "cancel", { sn, reason });
+        } catch (error) {
+          throw sanitizeGeoProviderError(error, secrets);
+        }
+      },
+
+      async applyRefund(kind, sn, reason) {
+        try {
+          await gatewayOrderAction(kind, "apply-refund", { sn, reason });
+        } catch (error) {
+          throw sanitizeGeoProviderError(error, secrets);
+        }
+      },
+
+      async applyRepublish(kind, sn) {
+        try {
+          await gatewayOrderAction(kind, "apply-republish", { sn });
         } catch (error) {
           throw sanitizeGeoProviderError(error, secrets);
         }

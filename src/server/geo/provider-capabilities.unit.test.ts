@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   captureGeoProviderRuntimeSecrets,
   createGeoProviderCapabilities,
+  distributionOrderSn,
   sanitizeGeoProviderError,
   type GeoProviderRuntimeSecrets,
 } from "./provider-capabilities";
@@ -449,12 +450,183 @@ describe("GEO typed provider capabilities", () => {
     );
   });
 
-  it("keeps paid distribution submission outside the GEO provider port", () => {
+  it("exposes the ticket-08 order surface on the distribution port and requires gateway mode", async () => {
     const capabilities = createGeoProviderCapabilities({});
-    expect(Object.keys(capabilities.distribution)).toEqual([
-      "slot",
+    // 票 08：下单/查单/催稿/取消/申请退款/申请补发并入 distribution typed
+    // port；直连模式（无账号 token，即无计费主体）全部拒绝。
+    expect(Object.keys(capabilities.distribution).sort()).toEqual([
+      "applyRefund",
+      "applyRepublish",
+      "cancelOrder",
       "listResources",
+      "placeOrder",
+      "queryOrders",
+      "slot",
+      "urgeOrder",
     ]);
+    await expect(
+      capabilities.distribution.placeOrder("media", {
+        sn: "xj-order-0001-directmode1",
+        resourceId: 1,
+        title: "标题",
+        contentUrl: "https://cdn.example.test/a.html",
+      }),
+    ).rejects.toThrow(/网关模式/);
+    await expect(capabilities.distribution.queryOrders("media", ["sn-1"])).rejects.toThrow(
+      /网关模式/,
+    );
+
+    // sn 幂等键：执行项确定性派生，重试同 sn，≤64 且落在安全字符集。
+    const first = distributionOrderSn("exec-1", "item-1");
+    expect(distributionOrderSn("exec-1", "item-1")).toBe(first);
+    expect(distributionOrderSn("exec-1", "item-2")).not.toBe(first);
+    expect(distributionOrderSn("exec-2", "item-1")).not.toBe(first);
+    expect(first).toMatch(/^xj-[0-9a-f]{32}$/);
+  });
+
+  it("routes distribution order wire routes to the gateway with the account token (ticket 08)", async () => {
+    const calls: Array<{
+      url: string;
+      method: string;
+      headers: Record<string, string>;
+      body: string;
+    }> = [];
+    const gatewayFetch = vi.fn(
+      async (input: string | URL | Request, init?: RequestInit) => {
+        const request = new Request(input, init);
+        calls.push({
+          url: request.url,
+          method: request.method,
+          headers: Object.fromEntries(
+            [...request.headers].map(([k, v]) => [k.toLowerCase(), v]),
+          ),
+          body: await request.text(),
+        });
+        const url = request.url;
+        if (url.endsWith("/media/order") || url.endsWith("/we-media/order")) {
+          return jsonResponse({
+            order: {
+              sn: "xj-order-0001-gw-aaaa1111",
+              partnerSn: "99999999999999999999999999",
+              points: 1408,
+              ledgerStatus: "frozen",
+            },
+          });
+        }
+        if (url.includes("/order/query")) {
+          return jsonResponse({
+            code: 200,
+            data: [
+              {
+                sn: "xj-order-0001-gw-aaaa1111",
+                url: "https://news.example.com/a",
+                screenshot: "<img src=x>",
+                published_at: "2026-08-19T08:00:00Z",
+                status: 4,
+                feedback: null,
+              },
+            ],
+          });
+        }
+        if (url.includes("/order/")) {
+          return jsonResponse({ code: 200, message: "ok", data: true });
+        }
+        return jsonResponse({ code: 200, data: { total: 0, items: [] } });
+      },
+    );
+    const capabilities = createGeoProviderCapabilities(
+      {
+        gatewayBaseUrl: "https://gw.example.test",
+        accountAccessToken: "account-token-1",
+      },
+      { fetch: gatewayFetch as typeof fetch },
+    );
+
+    const sn = "xj-order-0001-gw-aaaa1111";
+    const placed = await capabilities.distribution.placeOrder("media", {
+      sn,
+      resourceId: 101,
+      title: "测试标题",
+      contentUrl: "https://cdn.example.test/geo/a.html",
+      remark: "加急",
+    });
+    expect(placed).toEqual({
+      sn,
+      partnerSn: "99999999999999999999999999",
+      points: 1408,
+      ledgerStatus: "frozen",
+    });
+    // 自媒体下单携带三元组。
+    await capabilities.distribution.placeOrder("we-media", {
+      sn: "xj-order-0002-gw-bbbb2222",
+      resourceId: 202,
+      title: "自媒体",
+      contentUrl: "https://cdn.example.test/geo/w.html",
+      publishForm: 1,
+      publishType: 1,
+      accountRule: 2,
+    });
+    const statuses = await capabilities.distribution.queryOrders("media", [
+      sn,
+      "xj-order-0002-gw-bbbb2222",
+    ]);
+    expect(statuses).toEqual([
+      {
+        sn,
+        status: 4,
+        url: "https://news.example.com/a",
+        screenshot: "<img src=x>",
+        publishedAt: "2026-08-19T08:00:00Z",
+        feedback: null,
+      },
+    ]);
+    await capabilities.distribution.urgeOrder("media", sn);
+    await capabilities.distribution.cancelOrder("media", sn, "排期变更");
+    await capabilities.distribution.applyRefund("media", sn, "内容修改");
+    await capabilities.distribution.applyRepublish("media", sn);
+
+    expect(calls.map((call) => `${call.method} ${call.url}`)).toEqual([
+      "POST https://gw.example.test/gw/distribution/media/order",
+      "POST https://gw.example.test/gw/distribution/we-media/order",
+      "GET https://gw.example.test/gw/distribution/media/order/query?sn=xj-order-0001-gw-aaaa1111&sn=xj-order-0002-gw-bbbb2222",
+      "POST https://gw.example.test/gw/distribution/media/order/urge",
+      "POST https://gw.example.test/gw/distribution/media/order/cancel",
+      "POST https://gw.example.test/gw/distribution/media/order/apply-refund",
+      "POST https://gw.example.test/gw/distribution/media/order/apply-republish",
+    ]);
+    for (const call of calls) {
+      expect(call.headers.authorization).toBe("Bearer account-token-1");
+    }
+    expect(JSON.parse(calls[0]!.body)).toEqual({
+      sn,
+      resourceId: 101,
+      title: "测试标题",
+      contentUrl: "https://cdn.example.test/geo/a.html",
+      remark: "加急",
+    });
+    expect(JSON.parse(calls[1]!.body)).toEqual({
+      sn: "xj-order-0002-gw-bbbb2222",
+      resourceId: 202,
+      title: "自媒体",
+      contentUrl: "https://cdn.example.test/geo/w.html",
+      publishForm: 1,
+      publishType: 1,
+      accountRule: 2,
+    });
+    expect(JSON.parse(calls[3]!.body)).toEqual({ sn });
+    expect(JSON.parse(calls[4]!.body)).toEqual({ sn, reason: "排期变更" });
+
+    // 网关业务错误信封（code != 200）与坏投影按类型化错误终止。
+    const badEnvelope = vi.fn(async () =>
+      jsonResponse({ code: 401, message: "订单不存在" }),
+    );
+    const badCaps = createGeoProviderCapabilities(
+      { gatewayBaseUrl: "https://gw.example.test", accountAccessToken: "t" },
+      { fetch: badEnvelope as typeof fetch },
+    );
+    await expect(
+      badCaps.distribution.queryOrders("media", [sn]),
+    ).rejects.toThrow(/业务错误/);
   });
 
   it("redacts literal secrets, bearer values and key-shaped fragments from failures", () => {

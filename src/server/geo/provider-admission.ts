@@ -320,6 +320,26 @@ function distributionCapability(
         work: () => capability.listResources(kind, page, size),
       });
     },
+    // 订单面（票 08）：计费权威在网关（下单预扣冻结、状态机结转/退点），
+    // 不走 Sidecar 的按单位 admission 计量，直通代理端点。
+    placeOrder(kind, order) {
+      return capability.placeOrder(kind, order);
+    },
+    queryOrders(kind, sns) {
+      return capability.queryOrders(kind, sns);
+    },
+    urgeOrder(kind, sn) {
+      return capability.urgeOrder(kind, sn);
+    },
+    cancelOrder(kind, sn, reason) {
+      return capability.cancelOrder(kind, sn, reason);
+    },
+    applyRefund(kind, sn, reason) {
+      return capability.applyRefund(kind, sn, reason);
+    },
+    applyRepublish(kind, sn) {
+      return capability.applyRepublish(kind, sn);
+    },
   };
 }
 

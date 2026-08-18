@@ -4,12 +4,13 @@ import type { SqlClient } from '../db/client';
 import type { AccountRow, LedgerEntryRow } from './types';
 import { AppError } from '../errors';
 
-export type LedgerKind = 'grant' | 'topup' | 'adjust' | 'consume';
+export type LedgerKind = 'grant' | 'topup' | 'adjust' | 'consume' | 'refund';
 
 /**
- * 账本唯一入账通道：改 balance 与写流水成对出现在同一事务。两条对外的
- * 入账路径都收口到这里——applyAccountLedgerDelta（充值/调点，走可用余额）
- * 与 settleFrozenPoints（permit 成功单位结转，动用冻结）。
+ * 账本唯一入账通道：改 balance 与写流水成对出现在同一事务。对外的入账
+ * 路径都收口到这里——applyAccountLedgerDelta（充值/调点，走可用余额）、
+ * settleFrozenPoints（permit 成功单位 / 发布订单结转，动用冻结）与
+ * refundSettledPoints（发布订单结转后退款，refund 正流水）。
  */
 function applyBalanceChange(
   db: SqlClient,
@@ -37,13 +38,23 @@ function applyBalanceChange(
   return updated;
 }
 
-/** 账号当前被 open permit 冻结的点数总和。 */
+/**
+ * 账号当前被 open permit 冻结的点数总和（票 08 起含发布订单冻结：ledger_status
+ * = 'frozen' 的订单预扣与 permit 预扣同属冻结口径，total = available + frozen
+ * 不变量同时覆盖两条冻结通道）。
+ */
 export function frozenPointsFor(db: SqlClient, accountId: string): number {
-  const row = db.get<{ frozen: number }>(
-    "SELECT COALESCE(SUM(frozen_remaining), 0) AS frozen FROM billing_permits WHERE account_id = ? AND status = 'open'",
-    [accountId],
-  );
-  return row?.frozen ?? 0;
+  const permitFrozen =
+    db.get<{ frozen: number }>(
+      "SELECT COALESCE(SUM(frozen_remaining), 0) AS frozen FROM billing_permits WHERE account_id = ? AND status = 'open'",
+      [accountId],
+    )?.frozen ?? 0;
+  const orderFrozen =
+    db.get<{ frozen: number }>(
+      "SELECT COALESCE(SUM(points), 0) AS frozen FROM publish_orders WHERE account_id = ? AND ledger_status = 'frozen'",
+      [accountId],
+    )?.frozen ?? 0;
+  return permitFrozen + orderFrozen;
 }
 
 /**
@@ -94,6 +105,24 @@ export function settleFrozenPoints(
   const account = deps.db.get<AccountRow>('SELECT * FROM accounts WHERE id = ?', [accountId]);
   if (!account) throw new AppError('account_not_found', '账号不存在。', 404);
   applyBalanceChange(deps.db, account, -charge, 'consume', note, nowIso);
+}
+
+/**
+ * 已结转发布订单退款（票 08）：订单先结转（发布中/已发布）后上游转
+ * 已退款/已取消/已拒稿时，以 refund 正流水原路回补，Σdelta == balance
+ * 不变量保持（consume 负流水与 refund 正流水成对，净额为零）。
+ * 冻结中订单的回补不走这里——冻结释放不动账面余额，也无流水。
+ */
+export function refundSettledPoints(
+  deps: BackendDeps,
+  accountId: string,
+  points: number,
+  note: string,
+): void {
+  const nowIso = new Date(deps.now()).toISOString();
+  const account = deps.db.get<AccountRow>('SELECT * FROM accounts WHERE id = ?', [accountId]);
+  if (!account) throw new AppError('account_not_found', '账号不存在。', 404);
+  applyBalanceChange(deps.db, account, points, 'refund', note, nowIso);
 }
 
 export function listLedgerEntries(

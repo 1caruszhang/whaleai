@@ -6,6 +6,7 @@ import { AppError } from '../errors';
 import { createAdminRoutes } from './admin-routes';
 import { createAuthRoutes } from './auth-routes';
 import { createBillingRoutes } from './billing-routes';
+import { createDistributionCallbackRoutes } from './distribution-callback-routes';
 import { createGatewayRoutes } from './gateway-routes';
 import { createProviderProxyRoutes } from './provider-proxy-routes';
 
@@ -41,6 +42,7 @@ export function createBackendApp(deps: BackendDeps): Hono<BackendEnv> {
   app.route('/', createAdminRoutes(deps));
   app.route('/', createGatewayRoutes(deps));
   app.route('/', createProviderProxyRoutes(deps));
+  app.route('/', createDistributionCallbackRoutes(deps));
 
   return app;
 }
