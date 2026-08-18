@@ -774,3 +774,56 @@ code {
   line-height: 1.35;
   white-space: normal;
 }
+
+/* ── GEO 效果页 scoped 深色看板主题 ──
+ * 用户拍板（2026-08-19）：品牌级「效果」页整体采用 js_ai GeoDemoDashboard
+ * 的深色科技感视觉。变量只挂在 .geo-dash-scope 子树上，不进入全局 Theme
+ * token 系统，也不响应全局 light/dark 切换——效果页是常驻深色的投影页。 */
+.geo-dash-scope {
+  --geo-dash-bg: #0e0e0f;
+  --geo-dash-bg-2: #131314;
+  --geo-dash-card: #1c1b1d;
+  --geo-dash-card-2: #201f21;
+  --geo-dash-border: rgba(255, 255, 255, 0.08);
+  --geo-dash-border-strong: rgba(255, 255, 255, 0.16);
+  --geo-dash-text: #e5e2e3;
+  --geo-dash-text-dim: #c6c5d8;
+  --geo-dash-text-mute: #8f8fa1;
+  --geo-dash-primary: #bec2ff; /* lavender */
+  --geo-dash-secondary: #50d8e9; /* cyan */
+  --geo-dash-coral: #ffb689; /* coral */
+  --geo-dash-success: #34d399;
+  --geo-dash-danger: #ff8f8f;
+  color: var(--geo-dash-text);
+}
+
+/* KPI 卡加载微光；一次性动画，尊重 reduced-motion。 */
+@keyframes geo-dash-shimmer {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+.geo-dash-shimmer {
+  animation: geo-dash-shimmer var(--duration-normal, 240ms) var(--ease-in-out, ease-out) backwards;
+}
+
+/* 曲线一次性描线动画：以路径实际长度为 dash 偏移。 */
+@keyframes geo-dash-curve-draw {
+  from { stroke-dashoffset: var(--geo-dash-curve-len); }
+  to { stroke-dashoffset: 0; }
+}
+
+.geo-dash-curve-draw {
+  stroke-dasharray: var(--geo-dash-curve-len);
+  animation: geo-dash-curve-draw 900ms var(--ease-in-out, ease-out) backwards;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .geo-dash-shimmer,
+  .geo-dash-curve-draw {
+    animation: none;
+  }
+  .geo-dash-curve-draw {
+    stroke-dasharray: none;
+  }
+}

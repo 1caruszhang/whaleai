@@ -232,10 +232,7 @@ export default function PublishAuthorizationGateCard({
     initialFingerprint: progressFingerprint(data.execution),
     fingerprintOf: progressFingerprint,
     fetchLatest: () =>
-      loadLatestPublishExecution(apiPost, {
-        workspaceId: data.execution.workspaceId,
-        sessionId: sessionId ?? "",
-      }),
+      loadLatestPublishExecution(data.execution.workspaceId),
     onChange: mergeRefreshed,
   });
   const identity = { workspaceId: execution.workspaceId, sessionId: sessionId ?? "" };

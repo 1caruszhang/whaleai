@@ -5,6 +5,7 @@ const mocks = vi.hoisted(() => ({ invoke: vi.fn() }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: mocks.invoke }));
 
 import {
+  loadLatestPublishExecution,
   loadPublishExecution,
   startPublishExecution,
   type PublishSchedulerApiPost,
@@ -40,5 +41,17 @@ describe("publishSchedulerClient", () => {
         input: { executionId: "execution-13", expectedRevision: 2 },
       },
     );
+  });
+
+  it("reads the latest execution over session-free Rust IPC", async () => {
+    mocks.invoke.mockReset();
+    mocks.invoke.mockResolvedValueOnce({ id: "execution-13" });
+
+    const execution = await loadLatestPublishExecution("brand-13");
+
+    expect(execution).toEqual({ id: "execution-13" });
+    expect(mocks.invoke).toHaveBeenCalledWith("cmd_publish_execution_latest_ui", {
+      workspaceId: "brand-13",
+    });
   });
 });

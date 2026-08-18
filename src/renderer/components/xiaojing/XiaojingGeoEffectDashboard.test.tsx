@@ -10,11 +10,12 @@ const mocks = vi.hoisted(() => ({
   engines: vi.fn(),
   latestBaseline: vi.fn(),
   latestPlan: vi.fn(),
+  sessionId: "session-19" as string | null,
 }));
 
 vi.mock("@/context/TabContext", () => ({
   useTabApi: () => ({ apiPost: mocks.apiPost }),
-  useTabState: () => ({ sessionId: "session-19" }),
+  useTabState: () => ({ sessionId: mocks.sessionId }),
 }));
 vi.mock("@/api/geoBaselineClient", () => ({
   loadGeoBaselineEngines: mocks.engines,
@@ -295,6 +296,7 @@ function planFixture(): PostPublishMonitorPlanProjection {
 
 describe("XiaojingGeoEffectDashboard", () => {
   beforeEach(() => {
+    mocks.sessionId = "session-19";
     mocks.apiPost.mockReset();
     mocks.engines.mockReset().mockResolvedValue([
       {
@@ -333,23 +335,25 @@ describe("XiaojingGeoEffectDashboard", () => {
     expect(screen.getByText(/基线：50%/)).toBeInTheDocument();
   });
 
-  it("maps per-question ranks and citations across runs in the matrix", async () => {
+  it("maps per-question hit rates and latest rank badges in the matrix", async () => {
     render(<XiaojingGeoEffectDashboard workspaceId="brand-19" />);
 
     const matrix = await screen.findByTestId("geo-effect-matrix");
-    expect(within(matrix).getAllByRole("row")).toHaveLength(3);
+    const rows = within(matrix).getAllByText(/小鲸科技靠谱吗？|哪家 GEO 工具值得选？|问题 3/);
+    expect(rows.length).toBeGreaterThan(0);
     expect(within(matrix).getByText("小鲸科技靠谱吗？")).toBeInTheDocument();
+    // q1 在两轮中均被提及（命中率 100%），最新一轮 TOP1。
     expect(within(matrix).getAllByText("TOP1").length).toBeGreaterThan(0);
     expect(within(matrix).getAllByText("TOP2").length).toBeGreaterThan(0);
-    expect(within(matrix).getAllByText("未进前三").length).toBeGreaterThan(0);
-    expect(within(matrix).getAllByText(/引用2/).length).toBeGreaterThan(0);
+    expect(within(matrix).getAllByText("100%").length).toBeGreaterThan(0);
   });
 
   it("shows the newest-first observation log with bounded raw evidence", async () => {
     render(<XiaojingGeoEffectDashboard workspaceId="brand-19" />);
 
     const log = await screen.findByTestId("geo-effect-log-run-2");
-    expect(within(log).getByText(/第2轮 · 部分成功/)).toBeInTheDocument();
+    expect(log).toHaveTextContent(/第2轮/);
+    expect(log).toHaveTextContent("部分成功");
     expect(log).toHaveTextContent("进入前三 2");
     expect(within(log).getByText(/第1名：小鲸科技/)).toBeInTheDocument();
   });
@@ -360,10 +364,11 @@ describe("XiaojingGeoEffectDashboard", () => {
     render(<XiaojingGeoEffectDashboard workspaceId="brand-19" />);
 
     const mention = await screen.findByTestId("geo-effect-kpi-mention");
-    expect(within(mention).getByText("暂无真实数据")).toBeInTheDocument();
+    expect(within(mention).getByText("—")).toBeInTheDocument();
     expect(
-      screen.getByText(/暂无真实曲线数据/),
+      screen.getByTestId("geo-effect-curve-empty"),
     ).toBeInTheDocument();
+    expect(screen.getByText(/暂无真实曲线数据/)).toBeInTheDocument();
     expect(screen.getByText(/暂无该引擎的真实复测记录/)).toBeInTheDocument();
     expect(screen.getByText(/尚未产生真实监测轮次/)).toBeInTheDocument();
   });
@@ -380,6 +385,20 @@ describe("XiaojingGeoEffectDashboard", () => {
     );
     await screen.findByTestId("geo-effect-kpi-mention");
     expect(mocks.latestBaseline).toHaveBeenCalledTimes(2);
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  // 2026-08-19 拍板：无会话时投影读取照常——看板渲染真实基线回退值，
+  // 只有引擎可用性探测被跳过，不出现错误横幅。
+  it("renders projection reads without an open session", async () => {
+    mocks.sessionId = null;
+    mocks.latestPlan.mockResolvedValue(null);
+    render(<XiaojingGeoEffectDashboard workspaceId="brand-19" />);
+
+    const mention = await screen.findByTestId("geo-effect-kpi-mention");
+    expect(within(mention).getByText("50%")).toBeInTheDocument();
+    expect(within(mention).getByText(/基线探测 2 题/)).toBeInTheDocument();
+    expect(mocks.engines).not.toHaveBeenCalled();
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 });

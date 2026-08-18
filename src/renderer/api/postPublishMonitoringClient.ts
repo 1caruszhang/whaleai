@@ -8,17 +8,21 @@ import type {
 } from "../../shared/geo/postPublishMonitoring";
 
 export function loadLatestPostPublishMonitor(
-  identity: { workspaceId: string; sessionId: string },
+  identity: { workspaceId: string; sessionId: string | null },
 ): Promise<PostPublishMonitorPlanProjection | null> {
-  return invoke("cmd_post_publish_monitor_latest_ui", identity);
+  return invoke("cmd_post_publish_monitor_latest_ui", {
+    workspaceId: identity.workspaceId,
+    sessionId: identity.sessionId ?? null,
+  });
 }
 
 export function loadPostPublishMonitor(
-  identity: { workspaceId: string; sessionId: string },
+  identity: { workspaceId: string; sessionId: string | null },
   planId: string,
 ): Promise<PostPublishMonitorPlanProjection> {
   return invoke("cmd_post_publish_monitor_get_ui", {
-    ...identity,
+    workspaceId: identity.workspaceId,
+    sessionId: identity.sessionId ?? null,
     input: { planId },
   });
 }

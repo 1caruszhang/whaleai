@@ -56,20 +56,22 @@ export default memo(function XiaojingGeoBaselinePanel({
   const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
-    if (!hasRealSession || !sessionId) {
-      setEngines([]);
-      setPool(null);
-      setBaseline(null);
-      return;
-    }
-    const identity = { workspaceId, sessionId };
     setStatus("loading");
     setError(null);
     try {
-      const [nextEngines, nextPool, nextBaseline] = await Promise.all([
+      // 最新基线是 Rust IPC 投影读取：效果页无会话时也照常展示真实结果；
+      // 引擎可用性与问题池属于会话控制面，仅在有真实会话时读取。
+      const nextBaseline = await loadLatestGeoBaseline(workspaceId);
+      if (!hasRealSession || !sessionId) {
+        setEngines([]);
+        setPool(null);
+        setBaseline(nextBaseline);
+        return;
+      }
+      const identity = { workspaceId, sessionId };
+      const [nextEngines, nextPool] = await Promise.all([
         loadGeoBaselineEngines(apiPost, identity),
         loadLatestQuestionPool(apiPost, identity),
-        loadLatestGeoBaseline(apiPost, identity),
       ]);
       setEngines(nextEngines);
       setSelectedEngines((current) => {
@@ -178,13 +180,13 @@ export default memo(function XiaojingGeoBaselinePanel({
   return (
     <section
       aria-label="优化前 GEO 基线"
-      className="mt-4 rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-3"
+      className="rounded-xl border border-[var(--geo-dash-border,var(--line))] bg-[var(--geo-dash-card,var(--paper-elevated))] p-3"
     >
       <div className="flex items-start gap-2">
-        <Radar className="mt-0.5 h-4 w-4 shrink-0 text-[var(--accent)]" />
+        <Radar className="mt-0.5 h-4 w-4 shrink-0 text-[var(--geo-dash-secondary,var(--accent))]" />
         <div>
-          <h3 className="text-sm font-medium">优化前检测</h3>
-          <p className="mt-1 text-xs leading-4 text-[var(--ink-muted)]">
+          <h3 className="text-sm font-medium text-[var(--geo-dash-text,var(--ink))]">优化前检测</h3>
+          <p className="mt-1 text-xs leading-4 text-[var(--geo-dash-text-mute,var(--ink-muted))]">
             对已确认问题逐题执行真实 AI 搜索，并保留可下钻原始回答。
           </p>
         </div>
@@ -192,8 +194,8 @@ export default memo(function XiaojingGeoBaselinePanel({
           <button
             type="button"
             onClick={() => void load()}
-            disabled={!hasRealSession || status !== "idle"}
-            className="ml-auto text-xs font-medium text-[var(--accent)] disabled:opacity-50"
+            disabled={status !== "idle"}
+            className="ml-auto text-xs font-medium text-[var(--geo-dash-secondary,var(--accent))] disabled:opacity-50"
           >
             刷新
           </button>
@@ -201,12 +203,12 @@ export default memo(function XiaojingGeoBaselinePanel({
       </div>
 
       {!hasRealSession ? (
-        <p className="mt-3 rounded-lg bg-[var(--paper-inset)] p-2 text-xs text-[var(--ink-muted)]">
-          请先建立真实 Session，再执行检测。
+        <p className="mt-3 rounded-lg bg-[var(--geo-dash-bg-2,var(--paper-inset))] p-2 text-xs leading-5 text-[var(--geo-dash-text-mute,var(--ink-muted))]">
+          基线结果已按真实数据展示；打开该品牌的会话后，才能选择引擎并执行检测与重试。
         </p>
       ) : available.length === 0 && status !== "loading" ? (
-        <div className="mt-3 rounded-lg bg-[var(--paper-inset)] p-2 text-xs leading-5 text-[var(--ink-muted)]">
-          <p className="font-medium text-[var(--ink)]">当前不可检测</p>
+        <div className="mt-3 rounded-lg bg-[var(--geo-dash-bg-2,var(--paper-inset))] p-2 text-xs leading-5 text-[var(--geo-dash-text-mute,var(--ink-muted))]">
+          <p className="font-medium text-[var(--geo-dash-text,var(--ink))]">当前不可检测</p>
           <p>{engines[0]?.unavailableReason ?? "没有可用的真实检测 Provider"}</p>
         </div>
       ) : !readOnly ? (
@@ -215,7 +217,7 @@ export default memo(function XiaojingGeoBaselinePanel({
             {engines.map((engine) => (
               <label
                 key={engine.id}
-                className="flex items-center gap-2 rounded-md border border-[var(--line)] px-2 py-1.5 text-xs"
+                className="flex items-center gap-2 rounded-md border border-[var(--geo-dash-border,var(--line))] px-2 py-1.5 text-xs text-[var(--geo-dash-text,var(--ink))]"
               >
                 <input
                   type="checkbox"
@@ -230,7 +232,7 @@ export default memo(function XiaojingGeoBaselinePanel({
                   }}
                 />
                 <span>{engine.label}</span>
-                <span className="ml-auto text-[var(--ink-subtle)]">
+                <span className="ml-auto text-[var(--geo-dash-text-mute,var(--ink-subtle))]">
                   {engine.available ? engine.snapshot.searchMode : "未配置"}
                 </span>
               </label>
@@ -238,7 +240,7 @@ export default memo(function XiaojingGeoBaselinePanel({
           </div>
 
           {!confirmedPool && status !== "loading" && (
-            <p className="mt-2 rounded-lg bg-[var(--paper-inset)] p-2 text-xs text-[var(--ink-muted)]">
+            <p className="mt-2 rounded-lg bg-[var(--geo-dash-bg-2,var(--paper-inset))] p-2 text-xs text-[var(--geo-dash-text-mute,var(--ink-muted))]">
               请先在会话中确认问题池，再启动优化前检测。
             </p>
           )}
@@ -253,39 +255,39 @@ export default memo(function XiaojingGeoBaselinePanel({
           </button>
         </>
       ) : (
-        <p className="mt-3 rounded-lg bg-[var(--paper-inset)] p-2 text-xs leading-5 text-[var(--ink-muted)]">
+        <p className="mt-3 rounded-lg bg-[var(--geo-dash-bg-2,var(--paper-inset))] p-2 text-xs leading-5 text-[var(--geo-dash-text-mute,var(--ink-muted))]">
           检测的引擎选择与启动在「效果」页或聊天中的确认卡片完成；这里只展示真实检测结果。
         </p>
       )}
 
       {error && (
-        <p className="mt-2 break-words rounded-lg bg-[var(--error)]/10 p-2 text-xs text-[var(--error)]">
+        <p className="mt-2 break-words rounded-lg bg-[var(--geo-dash-danger,var(--error))]/10 p-2 text-xs text-[var(--geo-dash-danger,var(--error))]">
           {error}
         </p>
       )}
 
       {!baseline && status === "idle" && (
-        <p className="mt-3 text-center text-xs text-[var(--ink-subtle)]">
+        <p className="mt-3 text-center text-xs text-[var(--geo-dash-text-mute,var(--ink-subtle))]">
           暂无真实检测数据
         </p>
       )}
 
       {baseline && (
         <div className="mt-3" role="region" aria-label="真实 GEO 基线结果">
-          <div className="flex flex-wrap gap-1 text-xs text-[var(--ink-muted)]">
-            <span className="rounded-full bg-[var(--paper-inset)] px-2 py-0.5">
+          <div className="flex flex-wrap gap-1 text-xs text-[var(--geo-dash-text-mute,var(--ink-muted))]">
+            <span className="rounded-full bg-[var(--geo-dash-bg-2,var(--paper-inset))] px-2 py-0.5">
               知识 v{baseline.knowledgeVersion}
             </span>
-            <span className="rounded-full bg-[var(--paper-inset)] px-2 py-0.5">
+            <span className="rounded-full bg-[var(--geo-dash-bg-2,var(--paper-inset))] px-2 py-0.5">
               问题池 v{baseline.questionPoolRevision}
             </span>
-            <span className="rounded-full bg-[var(--paper-inset)] px-2 py-0.5">
+            <span className="rounded-full bg-[var(--geo-dash-bg-2,var(--paper-inset))] px-2 py-0.5">
               {baseline.metrics.succeeded}/{baseline.metrics.total} 个真实结果
             </span>
           </div>
 
           {baseline.metrics.succeeded === 0 && (
-            <p className="mt-2 rounded-lg bg-[var(--paper-inset)] p-2 text-xs text-[var(--ink-muted)]">
+            <p className="mt-2 rounded-lg bg-[var(--geo-dash-bg-2,var(--paper-inset))] p-2 text-xs text-[var(--geo-dash-text-mute,var(--ink-muted))]">
               暂无真实检测数据。Provider 失败不会被计为成功，请查看下方诊断并逐项重试。
             </p>
           )}
@@ -295,12 +297,12 @@ export default memo(function XiaojingGeoBaselinePanel({
               <a
                 key={metric.label}
                 href={metric.ids[0] ? `#geo-evidence-${metric.ids[0]}` : undefined}
-                className="rounded-lg bg-[var(--paper-inset)] p-2 text-center"
+                className="rounded-lg bg-[var(--geo-dash-bg-2,var(--paper-inset))] p-2 text-center"
               >
-                <span className="block text-xs text-[var(--ink-muted)]">{metric.label}</span>
-                <span className="mt-0.5 block text-sm font-semibold text-[var(--ink)]">{metric.value}</span>
+                <span className="block text-xs text-[var(--geo-dash-text-mute,var(--ink-muted))]">{metric.label}</span>
+                <span className="mt-0.5 block text-sm font-semibold text-[var(--geo-dash-text,var(--ink))]">{metric.value}</span>
                 {metric.ids.length > 0 && (
-                  <span className="text-xs text-[var(--accent)]">查看 {metric.ids.length} 条证据</span>
+                  <span className="text-xs text-[var(--geo-dash-secondary,var(--accent))]">查看 {metric.ids.length} 条证据</span>
                 )}
               </a>
             ))}
@@ -311,13 +313,13 @@ export default memo(function XiaojingGeoBaselinePanel({
               <details
                 id={`geo-evidence-${unit.id}`}
                 key={unit.id}
-                className="rounded-lg border border-[var(--line)] p-2 text-xs"
+                className="rounded-lg border border-[var(--geo-dash-border,var(--line))] p-2 text-xs"
               >
                 <summary className="cursor-pointer list-none">
-                  <span className="font-medium text-[var(--ink)]">{unit.question}</span>
-                  <span className="ml-1 text-[var(--ink-subtle)]">· {unit.engineId}</span>
+                  <span className="font-medium text-[var(--geo-dash-text,var(--ink))]">{unit.question}</span>
+                  <span className="ml-1 text-[var(--geo-dash-text-mute,var(--ink-subtle))]">· {unit.engineId}</span>
                   <span
-                    className={`ml-1 ${unit.status === "failed" ? "text-[var(--error)]" : "text-[var(--accent)]"}`}
+                    className={`ml-1 ${unit.status === "failed" ? "text-[var(--geo-dash-danger,var(--error))]" : "text-[var(--geo-dash-secondary,var(--accent))]"}`}
                   >
                     {unit.status === "succeeded"
                       ? "成功"
@@ -327,9 +329,9 @@ export default memo(function XiaojingGeoBaselinePanel({
                   </span>
                 </summary>
                 {unit.status === "failed" ? (
-                  <div className="mt-2 rounded bg-[var(--error)]/10 p-2 text-[var(--error)]">
+                  <div className="mt-2 rounded bg-[var(--geo-dash-danger,var(--error))]/10 p-2 text-[var(--geo-dash-danger,var(--error))]">
                     <p>{unit.errorCode}: {unit.errorMessage}</p>
-                    {!readOnly && (
+                    {!readOnly && hasRealSession && (
                       <button
                         type="button"
                         onClick={() => void retry(unit.id)}
@@ -342,8 +344,8 @@ export default memo(function XiaojingGeoBaselinePanel({
                     )}
                   </div>
                 ) : unit.status === "succeeded" ? (
-                  <div className="mt-2 space-y-2 text-[var(--ink-muted)]">
-                    <p className="whitespace-pre-wrap break-words rounded bg-[var(--paper-inset)] p-2 text-[var(--ink)]">
+                  <div className="mt-2 space-y-2 text-[var(--geo-dash-text-mute,var(--ink-muted))]">
+                    <p className="whitespace-pre-wrap break-words rounded bg-[var(--geo-dash-bg-2,var(--paper-inset))] p-2 text-[var(--geo-dash-text,var(--ink))]">
                       {unit.rawAnswer}
                     </p>
                     <p>
@@ -355,7 +357,7 @@ export default memo(function XiaojingGeoBaselinePanel({
                       <ExternalLink
                         key={citation.url}
                         href={citation.url}
-                        className="flex items-center gap-1 break-all text-[var(--accent)]"
+                        className="flex items-center gap-1 break-all text-[var(--geo-dash-secondary,var(--accent))]"
                       >
                         <ExternalLinkIcon className="h-3 w-3 shrink-0" />
                         {citation.title || citation.url} · {citation.provenance}
@@ -364,7 +366,7 @@ export default memo(function XiaojingGeoBaselinePanel({
                   </div>
                 ) : null}
                 {unit.attempts.length > 1 && (
-                  <p className="mt-2 text-[var(--ink-subtle)]">
+                  <p className="mt-2 text-[var(--geo-dash-text-mute,var(--ink-subtle))]">
                     已保留 {unit.attempts.length} 次尝试记录
                   </p>
                 )}

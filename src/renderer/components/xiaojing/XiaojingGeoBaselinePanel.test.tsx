@@ -10,7 +10,7 @@ import type { QuestionPoolProjection } from "../../../shared/geo/questionPool";
 import XiaojingGeoBaselinePanel from "./XiaojingGeoBaselinePanel";
 
 const mocks = vi.hoisted(() => ({
-  sessionId: "session-09",
+  sessionId: "session-09" as string | null,
   apiPost: vi.fn(),
   engines: vi.fn(),
   latestPool: vi.fn(),
@@ -201,5 +201,27 @@ describe("XiaojingGeoBaselinePanel", () => {
       baselineId: "baseline-09",
       unitIds: ["unit-failed"],
     });
+  });
+
+  // 2026-08-19 拍板：无会话时基线结果照常渲染（Rust IPC 投影读取），
+  // 执行类交互（引擎选择/启动/重试）隐藏并提示先打开会话。
+  it("renders committed baseline results without an open session", async () => {
+    mocks.sessionId = null;
+    mocks.latestBaseline.mockResolvedValue(baseline());
+    render(<XiaojingGeoBaselinePanel workspaceId="brand-09" />);
+
+    const results = await screen.findByRole("region", { name: "真实 GEO 基线结果" });
+    expect(within(results).getByText("成都汽车音响哪家好？")).toBeInTheDocument();
+    expect(
+      screen.getByText(/打开该品牌的会话后，才能选择引擎并执行检测与重试/),
+    ).toBeInTheDocument();
+    expect(mocks.engines).not.toHaveBeenCalled();
+    expect(mocks.latestPool).not.toHaveBeenCalled();
+    expect(
+      screen.queryByRole("button", { name: "开始优化前检测" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "只重试此问题" }),
+    ).not.toBeInTheDocument();
   });
 });

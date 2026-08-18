@@ -1233,6 +1233,76 @@ impl BrandWorkspaceStore {
         read_plan(&connection, workspace_id, &request.plan_id, now_ms)
     }
 
+    /// Session-free projection reads for the WebView's brand-level 「效果」 page.
+    /// The latest query is workspace-wide; prepare/activate/retry keep their
+    /// brand_sessions existence gate because they record a source session.
+    pub fn latest_post_publish_monitor_plan_readonly(
+        &self,
+        workspace_id: &str,
+        now_ms: i64,
+    ) -> Result<Option<PostPublishMonitorPlanProjection>, String> {
+        let workspace = self.workspace(workspace_id)?;
+        let connection = open_database(&workspace)?;
+        let id = connection
+            .query_row(
+                "SELECT id FROM geo_post_publish_monitor_plans ORDER BY updated_at DESC,id DESC LIMIT 1",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|error| format!("read latest monitoring plan: {error}"))?;
+        id.map(|id| read_plan(&connection, workspace_id, &id, now_ms))
+            .transpose()
+    }
+
+    pub fn get_post_publish_monitor_plan_readonly(
+        &self,
+        workspace_id: &str,
+        plan_id: &str,
+        now_ms: i64,
+    ) -> Result<PostPublishMonitorPlanProjection, String> {
+        let workspace = self.workspace(workspace_id)?;
+        let connection = open_database(&workspace)?;
+        read_plan(&connection, workspace_id, plan_id, now_ms)
+    }
+
+    /// UI read dispatch: a provided session keeps the brand_sessions gate
+    /// (identical to the Sidecar-era behavior), a missing one falls back to
+    /// the session-free projection read for the no-open-session effect page.
+    pub fn latest_post_publish_monitor_plan_for_ui(
+        &self,
+        workspace_id: &str,
+        session_id: Option<&str>,
+        now_ms: i64,
+    ) -> Result<Option<PostPublishMonitorPlanProjection>, String> {
+        match session_id {
+            Some(session_id) => {
+                self.latest_post_publish_monitor_plan(workspace_id, session_id, now_ms)
+            }
+            None => self.latest_post_publish_monitor_plan_readonly(workspace_id, now_ms),
+        }
+    }
+
+    pub fn get_post_publish_monitor_plan_for_ui(
+        &self,
+        workspace_id: &str,
+        session_id: Option<&str>,
+        plan_id: &str,
+        now_ms: i64,
+    ) -> Result<PostPublishMonitorPlanProjection, String> {
+        match session_id {
+            Some(session_id) => self.get_post_publish_monitor_plan(
+                workspace_id,
+                session_id,
+                PostPublishMonitorGetRequest {
+                    plan_id: plan_id.to_string(),
+                },
+                now_ms,
+            ),
+            None => self.get_post_publish_monitor_plan_readonly(workspace_id, plan_id, now_ms),
+        }
+    }
+
     fn activate_post_publish_monitor_plan(
         &self,
         workspace_id: &str,
@@ -1408,12 +1478,12 @@ pub async fn cmd_post_publish_monitor_prepare_ui(
 #[allow(non_snake_case)]
 pub async fn cmd_post_publish_monitor_latest_ui(
     workspaceId: String,
-    sessionId: String,
+    sessionId: Option<String>,
 ) -> Result<Option<PostPublishMonitorPlanProjection>, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        super::production_store()?.latest_post_publish_monitor_plan(
+        super::production_store()?.latest_post_publish_monitor_plan_for_ui(
             &workspaceId,
-            &sessionId,
+            sessionId.as_deref(),
             Utc::now().timestamp_millis(),
         )
     })
@@ -1425,14 +1495,14 @@ pub async fn cmd_post_publish_monitor_latest_ui(
 #[allow(non_snake_case)]
 pub async fn cmd_post_publish_monitor_get_ui(
     workspaceId: String,
-    sessionId: String,
+    sessionId: Option<String>,
     input: PostPublishMonitorGetRequest,
 ) -> Result<PostPublishMonitorPlanProjection, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        super::production_store()?.get_post_publish_monitor_plan(
+        super::production_store()?.get_post_publish_monitor_plan_for_ui(
             &workspaceId,
-            &sessionId,
-            input,
+            sessionId.as_deref(),
+            &input.plan_id,
             Utc::now().timestamp_millis(),
         )
     })
@@ -2582,6 +2652,62 @@ mod tests {
             source_session_id: "session-14".to_string(),
             schedule_id: "managed-task-14".to_string(),
         }
+    }
+
+    #[test]
+    fn ui_plan_reads_fall_back_to_session_free_projection_reads() {
+        let (fixture, plan) = fixture(3);
+        // A committed session keeps the gate for wrong ids…
+        assert_eq!(
+            fixture
+                .store
+                .latest_post_publish_monitor_plan(
+                    &fixture.workspace.id,
+                    "never-committed-session",
+                    fixture.now_ms,
+                )
+                .unwrap_err(),
+            "post_publish_monitor_session_not_found"
+        );
+        // …while the UI dispatch without a session still reads the projection.
+        let latest = fixture
+            .store
+            .latest_post_publish_monitor_plan_for_ui(&fixture.workspace.id, None, fixture.now_ms)
+            .unwrap()
+            .unwrap();
+        assert_eq!(latest.id, plan.id);
+        assert_eq!(latest.status, plan.status);
+        let exact = fixture
+            .store
+            .get_post_publish_monitor_plan_for_ui(
+                &fixture.workspace.id,
+                None,
+                &plan.id,
+                fixture.now_ms,
+            )
+            .unwrap();
+        assert_eq!(exact.id, plan.id);
+        assert_eq!(
+            fixture
+                .store
+                .latest_post_publish_monitor_plan_for_ui(
+                    &fixture.workspace.id,
+                    Some("session-14"),
+                    fixture.now_ms,
+                )
+                .unwrap()
+                .unwrap()
+                .id,
+            plan.id
+        );
+        let empty_brand = fixture.store.create_workspace("空品牌", vec![]).unwrap();
+        assert_eq!(
+            fixture
+                .store
+                .latest_post_publish_monitor_plan_readonly(&empty_brand.id, fixture.now_ms)
+                .unwrap(),
+            None
+        );
     }
 
     #[derive(Default)]

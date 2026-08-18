@@ -1,5 +1,8 @@
 import {
   Activity,
+  ArrowDownRight,
+  ArrowUpRight,
+  Database,
   LineChart,
   Loader2,
   RefreshCcw,
@@ -7,10 +10,7 @@ import {
 } from "lucide-react";
 import { memo, useCallback, useEffect, useMemo, useState } from "react";
 
-import {
-  loadGeoBaselineEngines,
-  loadLatestGeoBaseline,
-} from "@/api/geoBaselineClient";
+import { loadGeoBaselineEngines, loadLatestGeoBaseline } from "@/api/geoBaselineClient";
 import { loadLatestPostPublishMonitor } from "@/api/postPublishMonitoringClient";
 import ExternalLink from "@/components/ExternalLink";
 import { useTabApi, useTabState } from "@/context/TabContext";
@@ -38,6 +38,12 @@ const LOG_RUN_LIMIT = 6;
 const LOG_PROBE_LIMIT = 3;
 const RAW_ANSWER_EXCERPT = 160;
 
+const ENGINE_LABELS: Record<string, string> = { doubao: "豆包" };
+
+function engineLabel(engineId: string): string {
+  return ENGINE_LABELS[engineId] ?? engineId;
+}
+
 function probeEvidence(
   unit: PostPublishMonitorUnitProjection,
 ): PostPublishBaselineEvidence | null {
@@ -53,7 +59,7 @@ function percentage(numerator: number, denominator: number): number | null {
 }
 
 function percentText(value: number | null): string {
-  return value === null ? "暂无真实数据" : `${value}%`;
+  return value === null ? "—" : `${value}%`;
 }
 
 /** Brand-mention rate over one engine's successful probes in one unit set. */
@@ -69,6 +75,18 @@ function unitMentionRate(
     (unit) => probeEvidence(unit)?.analysis.brandMentioned === true,
   ).length;
   return percentage(mentioned, probes.length);
+}
+
+/** Independent recommendation / citation rates from probe evidence. */
+function probeAnalysisRates(units: readonly PostPublishMonitorUnitProjection[]) {
+  const evidence = units
+    .map((unit) => probeEvidence(unit))
+    .filter((value): value is PostPublishBaselineEvidence => value !== null);
+  return {
+    probes: evidence.length,
+    recommended: evidence.filter((value) => value.analysis.brandRecommended).length,
+    cited: evidence.filter((value) => value.analysis.hasCitationEvidence).length,
+  };
 }
 
 function baselineMentionRate(
@@ -92,8 +110,55 @@ function rankLabel(
 ): string {
   if (evidence?.rankPosition) return `TOP${evidence.rankPosition}`;
   if (status === "failed") return "失败";
-  if (evidence) return "未进前三";
+  if (evidence?.analysis.brandMentioned) return "未进前三";
+  if (evidence) return "未提及";
   return "—";
+}
+
+/** js_ai-style rank badge tiers: TOP=coral, mentioned=lavender, else muted. */
+function rankTierClass(label: string): string {
+  if (label.startsWith("TOP")) {
+    return "bg-[rgba(255,182,137,0.16)] text-[var(--geo-dash-coral)]";
+  }
+  if (label === "未进前三") {
+    return "bg-[rgba(190,194,255,0.14)] text-[var(--geo-dash-primary)]";
+  }
+  if (label === "未提及" || label === "失败") {
+    return "bg-[rgba(143,143,161,0.12)] text-[var(--geo-dash-text-mute)]";
+  }
+  return "bg-[rgba(80,216,233,0.12)] text-[var(--geo-dash-secondary)]";
+}
+
+function DeltaBadge({ delta }: { delta: number | null }) {
+  if (delta === null) return null;
+  const direction = delta >= 0 ? "up" : "down";
+  const color =
+    direction === "up"
+      ? "var(--geo-dash-success)"
+      : "var(--geo-dash-secondary)";
+  return (
+    <span
+      data-testid="geo-effect-kpi-delta"
+      className="inline-flex items-center gap-0.5 text-xs font-semibold tabular-nums"
+      style={{ color }}
+    >
+      {direction === "up" ? (
+        <ArrowUpRight className="h-3 w-3" />
+      ) : (
+        <ArrowDownRight className="h-3 w-3" />
+      )}
+      {direction === "up" ? "+" : ""}
+      {delta}pp
+    </span>
+  );
+}
+
+interface KpiCardData {
+  key: string;
+  label: string;
+  value: string;
+  sub: string;
+  delta: number | null;
 }
 
 interface CurvePoint {
@@ -101,20 +166,25 @@ interface CurvePoint {
   rate: number | null;
 }
 
+/** 双线优化效果曲线：基线为灰虚线水平参考，各轮监测为渐变主线 + 面积；
+ * 几何沿用 js_ai GeoDemoDashboard 的 580×180 坐标系（x∈[50,540]）。 */
 function CurveSvg({
   baseRate,
   points,
+  testId = "geo-effect-curve",
 }: {
   baseRate: number | null;
   points: readonly CurvePoint[];
+  testId?: string;
 }) {
-  const step = points.length > 1 ? 480 / (points.length - 1) : 0;
+  const step = points.length > 1 ? 490 / (points.length - 1) : 0;
   const xAt = (index: number) => 50 + index * step;
   const yAt = (value: number) =>
     160 - (Math.max(0, Math.min(100, value)) / 100) * 130;
   const solid = points
     .map((point, index) => ({ ...point, x: xAt(index) }))
     .filter((point) => point.rate !== null);
+  const lastPoint = solid.length > 0 ? solid[solid.length - 1] : null;
   const linePath =
     solid.length > 1
       ? `M ${solid.map((p) => `${p.x.toFixed(1)} ${yAt(p.rate ?? 0).toFixed(1)}`).join(" L ")}`
@@ -126,7 +196,7 @@ function CurveSvg({
 
   return (
     <svg
-      data-testid="geo-effect-curve"
+      data-testid={testId}
       viewBox="0 0 580 180"
       className="mt-3 w-full"
       role="img"
@@ -134,8 +204,12 @@ function CurveSvg({
     >
       <defs>
         <linearGradient id="geoEffectArea" x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0%" stopColor="var(--accent)" stopOpacity="0.22" />
-          <stop offset="100%" stopColor="var(--accent)" stopOpacity="0" />
+          <stop offset="0%" stopColor="var(--geo-dash-primary)" stopOpacity="0.25" />
+          <stop offset="100%" stopColor="var(--geo-dash-secondary)" stopOpacity="0" />
+        </linearGradient>
+        <linearGradient id="geoEffectLine" x1="0" y1="0" x2="1" y2="0">
+          <stop offset="0%" stopColor="var(--geo-dash-primary)" />
+          <stop offset="100%" stopColor="var(--geo-dash-coral)" />
         </linearGradient>
       </defs>
       {[30, 95].map((y) => (
@@ -145,7 +219,7 @@ function CurveSvg({
           y1={y}
           x2="540"
           y2={y}
-          stroke="var(--line-subtle)"
+          stroke="rgba(255,255,255,0.03)"
           strokeWidth="1"
         />
       ))}
@@ -154,16 +228,16 @@ function CurveSvg({
         y1="160"
         x2="540"
         y2="160"
-        stroke="var(--line)"
+        stroke="rgba(255,255,255,0.08)"
         strokeWidth="1"
       />
-      <text x="8" y="34" fontSize="9" fill="var(--ink-subtle)">
+      <text x="8" y="34" fontSize="9" fill="var(--geo-dash-text-mute)">
         100%
       </text>
-      <text x="8" y="99" fontSize="9" fill="var(--ink-subtle)">
+      <text x="8" y="99" fontSize="9" fill="var(--geo-dash-text-mute)">
         50%
       </text>
-      <text x="8" y="163" fontSize="9" fill="var(--ink-subtle)">
+      <text x="8" y="163" fontSize="9" fill="var(--geo-dash-text-mute)">
         0%
       </text>
 
@@ -174,20 +248,22 @@ function CurveSvg({
           y1={yAt(baseRate)}
           x2="540"
           y2={yAt(baseRate)}
-          stroke="var(--ink-muted)"
+          stroke="var(--geo-dash-text-mute)"
           strokeWidth="1.5"
           strokeDasharray="4 4"
-          opacity="0.7"
+          opacity="0.6"
         />
       )}
       {areaPath && <path d={areaPath} fill="url(#geoEffectArea)" />}
       {linePath && (
         <path
           data-testid="geo-effect-curve-runs"
+          className="geo-dash-curve-draw"
+          style={{ ["--geo-dash-curve-len" as string]: "620" }}
           d={linePath}
           fill="none"
-          stroke="var(--accent)"
-          strokeWidth="2.5"
+          stroke="url(#geoEffectLine)"
+          strokeWidth="3.2"
           strokeLinecap="round"
           strokeLinejoin="round"
         />
@@ -197,20 +273,43 @@ function CurveSvg({
           key={point.ordinal}
           cx={point.x}
           cy={yAt(point.rate ?? 0)}
-          r="3.5"
-          fill="var(--paper-elevated)"
-          stroke="var(--accent)"
+          r="4"
+          fill="var(--geo-dash-bg)"
+          stroke="url(#geoEffectLine)"
           strokeWidth="2"
         />
       ))}
+      {lastPoint && (
+        <>
+          <circle
+            cx={lastPoint.x}
+            cy={yAt(lastPoint.rate ?? 0)}
+            r="10"
+            fill="none"
+            stroke="var(--geo-dash-coral)"
+            strokeWidth="1.5"
+            opacity="0.6"
+          />
+          <text
+            x={Math.min(lastPoint.x, 505)}
+            y={yAt(lastPoint.rate ?? 0) - 16}
+            textAnchor="middle"
+            fontSize="10"
+            fill="var(--geo-dash-coral)"
+            fontWeight="600"
+          >
+            最新
+          </text>
+        </>
+      )}
       {points.map((point, index) => (
         <text
           key={point.ordinal}
           x={xAt(index)}
-          y="175"
+          y="176"
           textAnchor="middle"
           fontSize="9"
-          fill="var(--ink-subtle)"
+          fill="var(--geo-dash-text-mute)"
         >
           第{point.ordinal}轮
         </text>
@@ -243,30 +342,33 @@ export default memo(function XiaojingGeoEffectDashboard({
 
   const load = useCallback(
     async (signal?: AbortSignal) => {
-      if (!identity) {
-        setEngines([]);
-        setBaseline(null);
-        setPlan(null);
-        return;
-      }
       setBusy(true);
       setError(null);
       try {
-        const [nextEngines, nextBaseline, nextPlan] = await Promise.all([
-          loadGeoBaselineEngines(apiPost, identity),
-          loadLatestGeoBaseline(apiPost, identity),
-          loadLatestPostPublishMonitor(identity),
+        // Projection reads ride the Rust IPC data plane: the real dashboard
+        // renders even before the brand has any open chat session. Only the
+        // engine-availability read needs the borrowed session sidecar.
+        const [nextBaseline, nextPlan] = await Promise.all([
+          loadLatestGeoBaseline(workspaceId),
+          loadLatestPostPublishMonitor({ workspaceId, sessionId }),
         ]);
+        const nextEngines = identity
+          ? await loadGeoBaselineEngines(apiPost, identity).catch(() => [])
+          : [];
         if (signal?.aborted) return;
         setEngines(nextEngines);
         setBaseline(nextBaseline);
         setPlan(nextPlan);
         setEngineId((current) => {
-          if (nextEngines.some((engine) => engine.id === current)) return current;
-          const fromPlan = nextPlan?.engineIds.find((id) =>
-            nextEngines.some((engine) => engine.id === id),
-          );
-          return fromPlan ?? nextEngines[0]?.id ?? "doubao";
+          const known = new Set<string>([
+            ...nextEngines.map((engine) => engine.id),
+            ...(nextPlan?.engineIds ?? []),
+            ...(nextBaseline?.providerSnapshots.map(
+              (snapshot) => snapshot.engineId,
+            ) ?? []),
+          ]);
+          if (known.has(current)) return current;
+          return nextEngines[0]?.id ?? nextPlan?.engineIds[0] ?? "doubao";
         });
       } catch (cause) {
         if (!signal?.aborted)
@@ -275,7 +377,7 @@ export default memo(function XiaojingGeoEffectDashboard({
         if (!signal?.aborted) setBusy(false);
       }
     },
-    [apiPost, identity],
+    [apiPost, identity, sessionId, workspaceId],
   );
 
   useEffect(() => {
@@ -294,11 +396,130 @@ export default memo(function XiaojingGeoEffectDashboard({
       .slice(-CURVE_RUN_LIMIT);
   }, [plan]);
 
-  const engineLabel =
-    engines.find((engine) => engine.id === engineId)?.label ?? engineId;
+  const selectedEngineLabel = engines.some((engine) => engine.id === engineId)
+    ? (engines.find((engine) => engine.id === engineId)?.label ?? engineLabel(engineId))
+    : engineLabel(engineId);
+
   const aggregate = plan?.latestRun
     ? aggregatePostPublishMonitorUnits(plan.latestRun.units)
     : null;
+  const latestRates = probeAnalysisRates(plan?.latestRun?.units ?? []);
+  // Previous run by ordinal powers the KPI delta badges (较上一轮).
+  const previousRun = useMemo(() => {
+    const latestOrdinal = plan?.latestRun?.ordinal;
+    if (latestOrdinal === undefined) return null;
+    return (
+      [...runs]
+        .filter((run) => run.ordinal < latestOrdinal)
+        .sort((left, right) => right.ordinal - left.ordinal)[0] ?? null
+    );
+  }, [plan?.latestRun?.ordinal, runs]);
+  const previousAggregate = previousRun
+    ? aggregatePostPublishMonitorUnits(previousRun.units)
+    : null;
+
+  const mentionRate = aggregate
+    ? percentage(aggregate.brandMentioned, aggregate.baselineProbes)
+    : null;
+  const previousMentionRate = previousAggregate
+    ? percentage(previousAggregate.brandMentioned, previousAggregate.baselineProbes)
+    : null;
+  const recommendRate = percentage(latestRates.recommended, latestRates.probes);
+  const citationRate = percentage(latestRates.cited, latestRates.probes);
+
+  const kpis: KpiCardData[] = useMemo(() => {
+    const hasMonitorProbes = (aggregate?.baselineProbes ?? 0) > 0;
+    return [
+      {
+        key: "mention",
+        label: "品牌出现率",
+        value: percentText(
+          mentionRate ?? baseline?.metrics.mentionRate ?? null,
+        ),
+        sub: hasMonitorProbes
+          ? `最新一轮 品牌出现 ${aggregate!.brandMentioned}/${aggregate!.baselineProbes} 题`
+          : baseline
+            ? `基线探测 ${baseline.metrics.succeeded} 题`
+            : "暂无监测复测",
+        delta:
+          mentionRate !== null && previousMentionRate !== null
+            ? mentionRate - previousMentionRate
+            : null,
+      },
+      {
+        key: "recommend",
+        label: "被推荐率",
+        value: percentText(
+          recommendRate ?? baseline?.metrics.recommendationRate ?? null,
+        ),
+        sub: hasMonitorProbes
+          ? `最新一轮 被推荐 ${latestRates.recommended}/${latestRates.probes} 题`
+          : baseline
+            ? "来自最新基线探测"
+            : "暂无监测复测",
+        delta: null,
+      },
+      {
+        key: "citation",
+        label: "引用率",
+        value: percentText(
+          citationRate ?? baseline?.metrics.citationRate ?? null,
+        ),
+        sub: hasMonitorProbes
+          ? `回答携带引用证据 ${latestRates.cited}/${latestRates.probes} 题`
+          : baseline
+            ? "来自最新基线探测"
+            : "暂无监测复测",
+        delta: null,
+      },
+      {
+        key: "top3",
+        label: "进入前三",
+        value:
+          aggregate && aggregate.baselineProbes > 0
+            ? `${aggregate.topThree} 题`
+            : "—",
+        sub: "按可解析的明确排名统计",
+        delta: null,
+      },
+      {
+        key: "indexing",
+        label: "收录率",
+        value: percentText(
+          aggregate
+            ? percentage(aggregate.indexedItems, aggregate.publishedItems)
+            : null,
+        ),
+        sub:
+          aggregate && aggregate.publishedItems > 0
+            ? `已收录 ${aggregate.indexedItems}/${aggregate.publishedItems} 项`
+            : "暂无可对照的已发布项",
+        delta: null,
+      },
+      {
+        key: "access",
+        label: "可访问率",
+        value: percentText(
+          aggregate
+            ? percentage(aggregate.accessibleItems, aggregate.accessSamples)
+            : null,
+        ),
+        sub:
+          aggregate && aggregate.accessSamples > 0
+            ? `可访问 ${aggregate.accessibleItems}/${aggregate.accessSamples} 项`
+            : "暂无发布页访问检测",
+        delta: null,
+      },
+    ];
+  }, [
+    aggregate,
+    baseline,
+    citationRate,
+    latestRates,
+    mentionRate,
+    previousMentionRate,
+    recommendRate,
+  ]);
 
   const curveBaseRate = baselineMentionRate(baseline, engineId);
   const curvePoints: CurvePoint[] = runs.map((run) => ({
@@ -316,18 +537,16 @@ export default memo(function XiaojingGeoEffectDashboard({
     return labels;
   }, [baseline]);
 
+  /** js_ai-style question rows: hit-rate bar + mono value + rank badge. */
   const matrixRows = useMemo(() => {
     const rows = new Map<
       string,
       {
         questionId: string;
         fallbackOrdinal: number;
-        cells: Array<{
-          runId: string;
-          ordinal: number;
-          rank: string;
-          cited: number;
-        }>;
+        mentionedRuns: number;
+        totalRuns: number;
+        latestRank: string;
       }
     >();
     let fallback = 0;
@@ -343,31 +562,28 @@ export default memo(function XiaojingGeoEffectDashboard({
           rows.set(questionId, {
             questionId,
             fallbackOrdinal: fallback,
-            cells: [],
+            mentionedRuns: 0,
+            totalRuns: 0,
+            latestRank: "—",
           });
         }
-        rows
-          .get(questionId)!
-          .cells.push({
-            runId: run.id,
-            ordinal: run.ordinal,
-            rank: rankLabel(evidence, unit.status),
-            cited: evidence?.citedArticleIds.length ?? 0,
-          });
+        const row = rows.get(questionId)!;
+        row.totalRuns += 1;
+        if (evidence?.analysis.brandMentioned) row.mentionedRuns += 1;
+        row.latestRank = rankLabel(evidence, unit.status);
       }
     }
     return [...rows.values()].sort((left, right) => {
       const leftLabel = questionLabels.get(left.questionId);
       const rightLabel = questionLabels.get(right.questionId);
-      if (leftLabel && rightLabel) {
-        const baselineOrder = baseline?.units.findIndex(
+      if (leftLabel && rightLabel && baseline) {
+        const leftOrder = baseline.units.findIndex(
           (unit) => unit.questionId === left.questionId,
         );
-        const rightOrder = baseline?.units.findIndex(
+        const rightOrder = baseline.units.findIndex(
           (unit) => unit.questionId === right.questionId,
         );
-        if (baselineOrder !== undefined && rightOrder !== undefined)
-          return baselineOrder - rightOrder;
+        if (leftOrder !== -1 && rightOrder !== -1) return leftOrder - rightOrder;
       }
       return left.fallbackOrdinal - right.fallbackOrdinal;
     });
@@ -382,261 +598,231 @@ export default memo(function XiaojingGeoEffectDashboard({
     <section
       aria-label="GEO 效果看板"
       data-testid="geo-effect-dashboard"
-      className="mt-4 overflow-hidden rounded-2xl border border-[var(--line)] bg-[var(--paper-elevated)]"
+      className="overflow-hidden rounded-2xl border border-[var(--geo-dash-border)] bg-[var(--geo-dash-card)]"
     >
-      <div className="flex items-center gap-2 border-b border-[var(--line-subtle)] px-4 py-3">
-        <TrendingUp className="h-4 w-4 text-[var(--accent)]" />
-        <h3 className="text-sm font-semibold">效果看板</h3>
-        <button
-          type="button"
-          aria-label="刷新效果看板"
-          onClick={() => void load()}
-          disabled={busy || !identity}
-          className="ml-auto flex h-7 w-7 items-center justify-center rounded-lg text-[var(--ink-muted)] hover:bg-[var(--hover-bg)] disabled:opacity-50"
-        >
-          <RefreshCcw
-            className={`h-3.5 w-3.5 ${busy ? "animate-spin" : ""}`}
-          />
-        </button>
-      </div>
-      <div className="space-y-3 p-4 text-xs">
-        <p className="leading-5 text-[var(--ink-muted)]">
-          全部数值来自真实基线探测与发布后监测证据，缺失时如实标注，不使用演示数据。
-        </p>
-
-        {!identity ? (
-          <p className="rounded-lg bg-[var(--paper-inset)] p-2 leading-5 text-[var(--ink-muted)]">
-            建立真实会话后，即可查看该品牌的效果数据。
+      <div className="flex flex-wrap items-start justify-between gap-3 border-b border-[var(--geo-dash-border)] px-5 py-4">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2">
+            <span className="relative flex h-2 w-2">
+              <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-[var(--geo-dash-secondary)] opacity-75" />
+              <span className="relative inline-flex h-2 w-2 rounded-full bg-[var(--geo-dash-secondary)]" />
+            </span>
+            <span className="text-xs font-semibold uppercase tracking-[0.18em] text-[var(--geo-dash-secondary)]">
+              GEO 效果监测
+            </span>
+          </div>
+          <h3 className="mt-2 flex items-center gap-2 text-sm font-semibold text-[var(--geo-dash-text)]">
+            <TrendingUp className="h-4 w-4 text-[var(--geo-dash-secondary)]" />
+            效果看板
+          </h3>
+          <p className="mt-1 text-xs leading-5 text-[var(--geo-dash-text-mute)]">
+            全部数值来自真实基线探测与发布后监测证据，缺失时如实标注，不使用演示数据。
           </p>
-        ) : (
-          <>
-            {error && (
-              <p
-                role="alert"
-                className="break-words rounded-lg bg-[var(--error-bg)] p-2 text-[var(--error)]"
+        </div>
+        <div className="flex items-center gap-3">
+          <span
+            data-testid="geo-effect-real-badge"
+            className="inline-flex items-center gap-1.5 rounded-full border border-[var(--geo-dash-border-strong)] bg-[var(--geo-dash-card-2)] px-3 py-1 text-xs font-medium text-[var(--geo-dash-coral)]"
+          >
+            <Database className="h-3 w-3" />
+            真实数据
+          </span>
+          <button
+            type="button"
+            aria-label="刷新效果看板"
+            onClick={() => void load()}
+            disabled={busy}
+            className="flex h-7 w-7 items-center justify-center rounded-lg border border-[var(--geo-dash-border-strong)] bg-[var(--geo-dash-card-2)] text-[var(--geo-dash-text-dim)] transition-colors hover:border-[var(--geo-dash-secondary)] hover:text-[var(--geo-dash-secondary)] disabled:opacity-50"
+          >
+            <RefreshCcw
+              className={`h-3.5 w-3.5 ${busy ? "animate-spin" : ""}`}
+            />
+          </button>
+        </div>
+      </div>
+
+      <div className="space-y-4 p-5 text-xs">
+        {error && (
+          <p
+            role="alert"
+            className="break-words rounded-lg border border-[var(--geo-dash-border)] bg-[var(--geo-dash-bg-2)] p-2 leading-5 text-[var(--geo-dash-danger)]"
+          >
+            效果数据读取失败：{error}
+          </p>
+        )}
+
+        {engines.length > 0 && (
+          <div className="flex flex-wrap items-center gap-2" aria-label="效果看板引擎">
+            <span className="text-[var(--geo-dash-text-mute)]">平台：</span>
+            {engines.map((engine) => (
+              <button
+                key={engine.id}
+                type="button"
+                aria-pressed={engine.id === engineId}
+                onClick={() => setEngineId(engine.id)}
+                className={`rounded border px-2.5 py-1 font-medium transition-colors ${
+                  engine.id === engineId
+                    ? "border-[var(--geo-dash-primary)] bg-[var(--geo-dash-primary)]/20 text-[var(--geo-dash-primary)]"
+                    : "border-transparent text-[var(--geo-dash-text-mute)] hover:text-[var(--geo-dash-text-dim)]"
+                }`}
               >
-                效果数据读取失败：{error}
-              </p>
-            )}
+                {engine.label}
+              </button>
+            ))}
+          </div>
+        )}
+        {engines.length === 0 && runs.length > 0 && (
+          <p className="leading-5 text-[var(--geo-dash-text-mute)]">
+            平台：{selectedEngineLabel}
+            <span className="ml-2">（可用性需打开品牌会话后探测）</span>
+          </p>
+        )}
 
-            {engines.length > 0 && (
-              <div className="flex flex-wrap items-center gap-1" aria-label="效果看板引擎">
-                {engines.map((engine) => (
-                  <button
-                    key={engine.id}
-                    type="button"
-                    aria-pressed={engine.id === engineId}
-                    onClick={() => setEngineId(engine.id)}
-                    className={`rounded-md border px-2 py-1 ${
-                      engine.id === engineId
-                        ? "border-[var(--accent)] bg-[var(--accent-warm-subtle)] text-[var(--accent)]"
-                        : "border-[var(--line)] text-[var(--ink-muted)]"
-                    }`}
-                  >
-                    {engine.label}
-                  </button>
-                ))}
-              </div>
-            )}
-
-            <div className="grid grid-cols-2 gap-2" data-testid="geo-effect-kpi-strip">
-              <article className="rounded-xl bg-[var(--paper)] p-3" data-testid="geo-effect-kpi-mention">
-                <p className="text-[var(--ink-muted)]">品牌出现率</p>
-                <p className="mt-1 text-base font-semibold tabular-nums text-[var(--ink)]">
-                  {percentText(
-                    aggregate
-                      ? percentage(aggregate.brandMentioned, aggregate.baselineProbes)
-                      : null,
-                  )}
-                </p>
-                <p className="mt-1 text-[var(--ink-subtle)]">
-                  {aggregate && aggregate.baselineProbes > 0
-                    ? `最新一轮 品牌出现 ${aggregate.brandMentioned}/${aggregate.baselineProbes} 题`
-                    : "暂无监测复测"}
-                </p>
-              </article>
-              <article className="rounded-xl bg-[var(--paper)] p-3" data-testid="geo-effect-kpi-top3">
-                <p className="text-[var(--ink-muted)]">进入前三</p>
-                <p className="mt-1 text-base font-semibold tabular-nums text-[var(--ink)]">
-                  {aggregate && aggregate.baselineProbes > 0
-                    ? `${aggregate.topThree} 题`
-                    : "暂无真实数据"}
-                </p>
-                <p className="mt-1 text-[var(--ink-subtle)]">按可解析的明确排名统计</p>
-              </article>
-              <article className="rounded-xl bg-[var(--paper)] p-3" data-testid="geo-effect-kpi-indexing">
-                <p className="text-[var(--ink-muted)]">收录率</p>
-                <p className="mt-1 text-base font-semibold tabular-nums text-[var(--ink)]">
-                  {percentText(
-                    aggregate
-                      ? percentage(aggregate.indexedItems, aggregate.publishedItems)
-                      : null,
-                  )}
-                </p>
-                <p className="mt-1 text-[var(--ink-subtle)]">
-                  {aggregate && aggregate.publishedItems > 0
-                    ? `已收录 ${aggregate.indexedItems}/${aggregate.publishedItems} 项`
-                    : "暂无可对照的已发布项"}
-                </p>
-              </article>
-              <article className="rounded-xl bg-[var(--paper)] p-3" data-testid="geo-effect-kpi-access">
-                <p className="text-[var(--ink-muted)]">可访问率</p>
-                <p className="mt-1 text-base font-semibold tabular-nums text-[var(--ink)]">
-                  {percentText(
-                    aggregate
-                      ? percentage(aggregate.accessibleItems, aggregate.accessSamples)
-                      : null,
-                  )}
-                </p>
-                <p className="mt-1 text-[var(--ink-subtle)]">
-                  {aggregate && aggregate.accessSamples > 0
-                    ? `可访问 ${aggregate.accessibleItems}/${aggregate.accessSamples} 项`
-                    : "暂无发布页访问检测"}
-                </p>
-              </article>
-            </div>
-
-            <section
-              aria-label="优化效果曲线"
-              className="rounded-xl bg-[var(--paper)] p-3"
+        <div
+          className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6"
+          data-testid="geo-effect-kpi-strip"
+        >
+          {kpis.map((kpi) => (
+            <article
+              key={kpi.key}
+              data-testid={`geo-effect-kpi-${kpi.key}`}
+              className="geo-dash-shimmer relative overflow-hidden rounded-xl border border-[var(--geo-dash-border)] bg-[var(--geo-dash-card-2)] p-4"
             >
-              <div className="flex items-center gap-2">
-                <LineChart className="h-3.5 w-3.5 text-[var(--accent)]" />
-                <h4 className="text-xs font-semibold">优化效果曲线</h4>
-                <span className="ml-auto text-[var(--ink-subtle)]">
-                  品牌出现率 · {engineLabel}
-                </span>
+              <div className="text-xs uppercase tracking-wide text-[var(--geo-dash-text-mute)]">
+                {kpi.label}
               </div>
-              <div className="mt-2 flex flex-wrap gap-3 text-[var(--ink-muted)]">
-                <span className="inline-flex items-center gap-1.5">
-                  <svg width="18" height="6" aria-hidden="true">
-                    <line
-                      x1="0"
-                      y1="3"
-                      x2="18"
-                      y2="3"
-                      stroke="var(--ink-muted)"
-                      strokeWidth="1.5"
-                      strokeDasharray="4 4"
-                    />
-                  </svg>
-                  基线：
-                  {curveBaseRate === null ? "暂无" : `${curveBaseRate}%`}
+              <div className="mt-2 flex items-baseline gap-2">
+                <span className="font-mono text-lg font-semibold tabular-nums text-[var(--geo-dash-text)]">
+                  {kpi.value}
                 </span>
-                <span className="inline-flex items-center gap-1.5">
-                  <span className="h-[3px] w-4 rounded-full bg-[var(--accent)]" />
-                  各轮监测
-                </span>
+                <DeltaBadge delta={kpi.delta} />
               </div>
-              {hasCurveData ? (
-                <CurveSvg baseRate={curveBaseRate} points={curvePoints} />
-              ) : (
-                <p className="mt-3 leading-5 text-[var(--ink-muted)]">
-                  暂无真实曲线数据。请先在上方完成基线探测；启用发布后监测后，每一轮复测都会成为曲线上的真实节点。
-                </p>
-              )}
-            </section>
+              <div className="mt-1 text-xs leading-4 text-[var(--geo-dash-text-mute)]">
+                {kpi.sub}
+              </div>
+            </article>
+          ))}
+        </div>
 
+        <div className="grid grid-cols-1 gap-4 lg:grid-cols-[1fr_360px]">
+          <section
+            aria-label="优化效果曲线"
+            className="rounded-xl border border-[var(--geo-dash-border)] bg-[var(--geo-dash-card-2)] p-5"
+          >
+            <div className="text-xs font-semibold uppercase tracking-[0.16em] text-[var(--geo-dash-secondary)]">
+              平台优化效果曲线
+            </div>
+            <h4 className="mt-1 flex items-center gap-2 text-sm font-semibold text-[var(--geo-dash-text)]">
+              <LineChart className="h-3.5 w-3.5 text-[var(--geo-dash-secondary)]" />
+              品牌出现率 · {selectedEngineLabel}
+            </h4>
+
+            <div className="mt-3 flex flex-wrap gap-5 text-xs">
+              <span className="inline-flex items-center gap-1.5 text-[var(--geo-dash-text-dim)]">
+                <svg width="18" height="6" aria-hidden="true">
+                  <line
+                    x1="0"
+                    y1="3"
+                    x2="18"
+                    y2="3"
+                    stroke="var(--geo-dash-text-mute)"
+                    strokeWidth="1.5"
+                    strokeDasharray="4 4"
+                  />
+                </svg>
+                基线：{curveBaseRate === null ? "暂无" : `${curveBaseRate}%`}
+              </span>
+              <span className="inline-flex items-center gap-1.5 text-[var(--geo-dash-text-dim)]">
+                <span className="h-[3px] w-4 rounded-full bg-[var(--geo-dash-coral)]" />
+                各轮监测
+              </span>
+            </div>
+            {hasCurveData ? (
+              <CurveSvg baseRate={curveBaseRate} points={curvePoints} />
+            ) : (
+              <div
+                data-testid="geo-effect-curve-empty"
+                className="mt-3 rounded-lg border border-dashed border-[var(--geo-dash-border-strong)] p-3"
+              >
+                <CurveSvg baseRate={null} points={[]} testId="geo-effect-curve-skeleton" />
+                <p className="mt-2 leading-5 text-[var(--geo-dash-text-mute)]">
+                  暂无真实曲线数据。请先在下方完成基线探测；启用发布后监测后，每一轮复测都会成为曲线上的真实节点。
+                </p>
+              </div>
+            )}
+          </section>
+
+          <div className="space-y-4">
             <section
               aria-label="问题排名矩阵"
-              className="rounded-xl bg-[var(--paper)] p-3"
+              className="rounded-xl border border-[var(--geo-dash-border)] bg-[var(--geo-dash-card-2)] p-5"
             >
-              <h4 className="text-xs font-semibold">问题排名矩阵</h4>
+              <div className="text-xs font-semibold uppercase tracking-[0.16em] text-[var(--geo-dash-secondary)]">
+                问题排名
+              </div>
+              <h4 className="mt-1 text-sm font-semibold text-[var(--geo-dash-text)]">
+                监测问题最新表现
+              </h4>
               {matrixRows.length === 0 ? (
-                <p className="mt-2 leading-5 text-[var(--ink-muted)]">
+                <p className="mt-3 leading-5 text-[var(--geo-dash-text-mute)]">
                   暂无该引擎的真实复测记录。
                 </p>
               ) : (
-                <div className="mt-2 overflow-x-auto">
-                  <table
-                    data-testid="geo-effect-matrix"
-                    className="w-full min-w-[240px] border-collapse text-left"
-                  >
-                    <thead>
-                      <tr className="text-[var(--ink-subtle)]">
-                        <th scope="col" className="py-1 pr-2 font-normal">
-                          问题
-                        </th>
-                        {runs.map((run) => (
-                          <th
-                            key={run.id}
-                            scope="col"
-                            className="py-1 pr-2 text-right font-normal"
+                <div data-testid="geo-effect-matrix" className="mt-3 space-y-2.5">
+                  {matrixRows.map((row) => {
+                    const hitRate = percentage(row.mentionedRuns, row.totalRuns);
+                    return (
+                      <div key={row.questionId} className="flex items-center gap-3">
+                        <span className="min-w-0 flex-1 truncate text-xs text-[var(--geo-dash-text-dim)]">
+                          {questionLabels.get(row.questionId) ??
+                            `问题 ${row.fallbackOrdinal}`}
+                        </span>
+                        <div className="flex items-center gap-2">
+                          <div className="hidden h-1.5 w-16 overflow-hidden rounded-full bg-[var(--geo-dash-bg-2)] sm:block">
+                            <div
+                              className="h-full rounded-full"
+                              style={{
+                                width: `${hitRate ?? 0}%`,
+                                background:
+                                  "linear-gradient(90deg, var(--geo-dash-primary), var(--geo-dash-coral))",
+                              }}
+                            />
+                          </div>
+                          <span className="w-10 text-right font-mono text-xs tabular-nums text-[var(--geo-dash-text)]">
+                            {hitRate === null ? "—" : `${hitRate}%`}
+                          </span>
+                          <span
+                            className={`w-[68px] shrink-0 rounded px-1.5 py-0.5 text-center text-xs font-semibold ${rankTierClass(row.latestRank)}`}
                           >
-                            第{run.ordinal}轮
-                          </th>
-                        ))}
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-[var(--line-subtle)]">
-                      {matrixRows.map((row) => (
-                        <tr key={row.questionId}>
-                          <th
-                            scope="row"
-                            className="max-w-[140px] truncate py-1.5 pr-2 font-normal text-[var(--ink)]"
-                          >
-                            {questionLabels.get(row.questionId) ??
-                              `问题 ${row.fallbackOrdinal}`}
-                          </th>
-                          {runs.map((run) => {
-                            const cell = row.cells.find(
-                              (candidate) => candidate.runId === run.id,
-                            );
-                            return (
-                              <td
-                                key={run.id}
-                                className="py-1.5 pr-2 text-right align-top"
-                              >
-                                {cell ? (
-                                  <span>
-                                    <span
-                                      className={`rounded px-1.5 py-0.5 font-semibold ${
-                                        cell.rank.startsWith("TOP")
-                                          ? "bg-[var(--accent-warm-subtle)] text-[var(--accent)]"
-                                          : "bg-[var(--paper-inset)] text-[var(--ink-muted)]"
-                                      }`}
-                                    >
-                                      {cell.rank}
-                                    </span>
-                                    {cell.cited > 0 && (
-                                      <span className="ml-1 text-[var(--ink-subtle)]">
-                                        引用{cell.cited}
-                                      </span>
-                                    )}
-                                  </span>
-                                ) : (
-                                  <span className="text-[var(--ink-subtle)]">
-                                    —
-                                  </span>
-                                )}
-                              </td>
-                            );
-                          })}
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
+                            {row.latestRank}
+                          </span>
+                        </div>
+                      </div>
+                    );
+                  })}
                 </div>
               )}
-              <p className="mt-2 leading-4 text-[var(--ink-subtle)]">
-                排名只统计回答中可明确解析的前三名；“未进前三”表示品牌被提及但无明确名次。
+              <p className="mt-3 text-xs leading-4 text-[var(--geo-dash-text-mute)]">
+                条形为该问题在监测轮次中的品牌出现率；徽章为最新一轮的可解析排名。
               </p>
             </section>
 
             <section
               aria-label="监测观测日志"
-              className="rounded-xl bg-[var(--paper)] p-3"
+              className="rounded-xl border border-[var(--geo-dash-border)] bg-[var(--geo-dash-card-2)] p-5"
             >
               <div className="flex items-center gap-2">
-                <Activity className="h-3.5 w-3.5 text-[var(--accent)]" />
-                <h4 className="text-xs font-semibold">监测观测日志</h4>
+                <Activity className="h-3.5 w-3.5 text-[var(--geo-dash-secondary)]" />
+                <span className="text-xs font-semibold uppercase tracking-[0.16em] text-[var(--geo-dash-secondary)]">
+                  监测观测日志
+                </span>
               </div>
               {logRuns.length === 0 ? (
-                <p className="mt-2 leading-5 text-[var(--ink-muted)]">
+                <p className="mt-3 leading-5 text-[var(--geo-dash-text-mute)]">
                   尚未产生真实监测轮次。启用发布后监测后，这里按轮次展示观测与原始证据。
                 </p>
               ) : (
-                <div className="mt-2 space-y-2">
+                <div className="mt-3 space-y-2">
                   {logRuns.map((run) => {
                     const summary = aggregatePostPublishMonitorUnits(run.units);
                     const probes = run.units
@@ -646,42 +832,46 @@ export default memo(function XiaojingGeoEffectDashboard({
                       <details
                         key={run.id}
                         data-testid={`geo-effect-log-run-${run.ordinal}`}
-                        className="rounded-lg border border-[var(--line-subtle)] p-2"
+                        className="rounded-lg border border-[var(--geo-dash-border)] bg-[var(--geo-dash-bg-2)] p-2"
                       >
                         <summary className="cursor-pointer list-none">
-                          第{run.ordinal}轮 ·{" "}
-                          {run.status === "succeeded"
-                            ? "完成"
-                            : run.status === "partial"
-                              ? "部分成功"
-                              : run.status === "failed"
-                                ? "失败"
-                                : "进行中"}
-                          <span className="ml-2 text-[var(--ink-subtle)]">
-                            品牌出现 {summary.brandMentioned}/{summary.baselineProbes} ·
+                          <span className="font-mono text-[var(--geo-dash-text-mute)]">
+                            [{new Date(run.scheduledFor).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })}]
+                          </span>{" "}
+                          <span className="font-medium text-[var(--geo-dash-primary)]">
+                            第{run.ordinal}轮
+                          </span>
+                          <span className="text-[var(--geo-dash-text-mute)]">
+                            {" "}
+                            ·{" "}
+                            {run.status === "succeeded"
+                              ? "完成"
+                              : run.status === "partial"
+                                ? "部分成功"
+                                : run.status === "failed"
+                                  ? "失败"
+                                  : "进行中"}
+                            · 品牌出现 {summary.brandMentioned}/{summary.baselineProbes} ·
                             进入前三 {summary.topThree} · 已收录 {summary.indexedItems}
                           </span>
                         </summary>
-                        <p className="mt-1 text-[var(--ink-subtle)]">
-                          计划时间 {run.scheduledFor}
-                        </p>
                         {probes.map((unit, index) => {
                           const evidence = probeEvidence(unit);
                           return (
                             <div
                               key={unit.id}
-                              className="mt-1 rounded bg-[var(--paper-inset)] p-1.5"
+                              className="mt-1 rounded bg-[var(--geo-dash-card)] p-1.5"
                             >
-                              <p className="text-[var(--ink)]">
+                              <p className="text-[var(--geo-dash-text)]">
                                 {questionLabels.get(evidence?.questionId ?? "") ??
                                   `复测问题 ${index + 1}`}
-                                <span className="ml-1 text-[var(--ink-muted)]">
+                                <span className="ml-1 text-[var(--geo-dash-text-mute)]">
                                   {rankLabel(evidence, unit.status)}
                                 </span>
                               </p>
                               {evidence && (
                                 <>
-                                  <p className="mt-1 whitespace-pre-wrap break-words leading-4 text-[var(--ink-secondary)]">
+                                  <p className="mt-1 whitespace-pre-wrap break-words leading-4 text-[var(--geo-dash-text-dim)]">
                                     {evidence.rawAnswer.length > RAW_ANSWER_EXCERPT
                                       ? `${evidence.rawAnswer.slice(0, RAW_ANSWER_EXCERPT)}…`
                                       : evidence.rawAnswer}
@@ -692,7 +882,7 @@ export default memo(function XiaojingGeoEffectDashboard({
                                       <ExternalLink
                                         key={url}
                                         href={url}
-                                        className="mt-1 block break-all text-[var(--accent)]"
+                                        className="mt-1 block break-all text-[var(--geo-dash-secondary)]"
                                       >
                                         {url}
                                       </ExternalLink>
@@ -703,7 +893,7 @@ export default memo(function XiaojingGeoEffectDashboard({
                           );
                         })}
                         {run.units.length > probes.length && (
-                          <p className="mt-1 text-[var(--ink-subtle)]">
+                          <p className="mt-1 text-[var(--geo-dash-text-mute)]">
                             另有 {run.units.length - probes.length} 个观测单元未展开。
                           </p>
                         )}
@@ -713,14 +903,14 @@ export default memo(function XiaojingGeoEffectDashboard({
                 </div>
               )}
             </section>
+          </div>
+        </div>
 
-            {busy && (
-              <p className="flex items-center gap-1 text-[var(--ink-muted)]">
-                <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                正在读取真实效果数据…
-              </p>
-            )}
-          </>
+        {busy && (
+          <p className="flex items-center gap-1 text-[var(--geo-dash-text-mute)]">
+            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            正在读取真实效果数据…
+          </p>
         )}
       </div>
     </section>

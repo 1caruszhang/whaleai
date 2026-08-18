@@ -250,6 +250,51 @@ impl BrandWorkspaceStore {
         read_geo_baseline(&connection, workspace_id, &request.baseline_id).map(Some)
     }
 
+    /// Session-free projection read for the WebView's brand-level 「效果」 page:
+    /// the query is workspace-wide, so an existence gate on `brand_sessions`
+    /// would only force users to open a chat session before viewing results.
+    pub fn latest_geo_baseline_readonly(
+        &self,
+        workspace_id: &str,
+    ) -> Result<Option<GeoBaselineProjection>, String> {
+        let workspace = self.workspace(workspace_id)?;
+        let connection = open_database(&workspace)?;
+        let baseline_id: Option<String> = connection
+            .query_row(
+                "SELECT id FROM geo_baselines ORDER BY updated_at DESC, id DESC LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|error| format!("read latest GEO baseline: {error}"))?;
+        baseline_id
+            .map(|id| read_geo_baseline(&connection, workspace_id, &id))
+            .transpose()
+    }
+
+    pub fn get_geo_baseline_readonly(
+        &self,
+        workspace_id: &str,
+        baseline_id: &str,
+    ) -> Result<Option<GeoBaselineProjection>, String> {
+        if baseline_id.trim().is_empty() {
+            return Err("geo_baseline_id_invalid".to_string());
+        }
+        let workspace = self.workspace(workspace_id)?;
+        let connection = open_database(&workspace)?;
+        let exists: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM geo_baselines WHERE id=?1",
+                [baseline_id],
+                |row| row.get(0),
+            )
+            .map_err(|error| format!("find exact GEO baseline: {error}"))?;
+        if exists == 0 {
+            return Ok(None);
+        }
+        read_geo_baseline(&connection, workspace_id, baseline_id).map(Some)
+    }
+
     pub fn prepare_geo_baseline(
         &self,
         request: GeoBaselinePrepareRequest,
@@ -1037,6 +1082,31 @@ fn metrics(units: &[GeoBaselineEvidenceUnit]) -> GeoBaselineMetrics {
     result
 }
 
+#[tauri::command]
+#[allow(non_snake_case)]
+pub async fn cmd_geo_baseline_latest_ui(
+    workspaceId: String,
+) -> Result<Option<GeoBaselineProjection>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        super::production_store()?.latest_geo_baseline_readonly(&workspaceId)
+    })
+    .await
+    .map_err(|error| format!("read latest GEO baseline failed: {error}"))?
+}
+
+#[tauri::command]
+#[allow(non_snake_case)]
+pub async fn cmd_geo_baseline_get_ui(
+    workspaceId: String,
+    input: GeoBaselineGetRequest,
+) -> Result<Option<GeoBaselineProjection>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        super::production_store()?.get_geo_baseline_readonly(&workspaceId, &input.baseline_id)
+    })
+    .await
+    .map_err(|error| format!("read GEO baseline failed: {error}"))?
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1237,6 +1307,73 @@ mod tests {
         assert_eq!(
             validate_finish(&request).unwrap_err(),
             "geo_baseline_success_evidence_required"
+        );
+    }
+
+    #[test]
+    fn readonly_projection_reads_do_not_require_a_session_row() {
+        let root = tempdir().unwrap();
+        let store = BrandWorkspaceStore::at(root.path().join("Xiaojing"));
+        let brand = store
+            .create_workspace("鲸跃汽车", vec!["汽车音响".into()])
+            .unwrap();
+        store
+            .commit_session(
+                &brand.id,
+                SessionCommit {
+                    id: "session-09".into(),
+                    title: "基线".into(),
+                    title_source: SessionTitleSource::User,
+                },
+            )
+            .unwrap();
+        seed_confirmed_pool(&brand);
+        let prepared = store
+            .prepare_geo_baseline(GeoBaselinePrepareRequest {
+                workspace_id: brand.id.clone(),
+                session_id: "session-09".into(),
+                question_pool_id: "pool-08".into(),
+                engine_ids: vec!["doubao".into()],
+                provider_snapshots: json!([snapshot()]),
+                idempotency_key: "baseline-request-11".into(),
+                policy_version: BASELINE_POLICY_VERSION.into(),
+            })
+            .unwrap();
+
+        // A committed session still gates the sidecar-facing read…
+        assert_eq!(
+            store
+                .latest_geo_baseline(
+                    &brand.id,
+                    "never-committed-session",
+                    GeoBaselineLatestRequest {}
+                )
+                .unwrap_err(),
+            "geo_baseline_session_not_committed"
+        );
+        // …while the WebView projection read stays available without one.
+        let latest = store
+            .latest_geo_baseline_readonly(&brand.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(latest.id, prepared.baseline.id);
+        assert_eq!(latest.workspace_id, brand.id);
+        let exact = store
+            .get_geo_baseline_readonly(&brand.id, &prepared.baseline.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(exact.id, prepared.baseline.id);
+        assert_eq!(
+            store
+                .get_geo_baseline_readonly(&brand.id, "missing-baseline")
+                .unwrap(),
+            None
+        );
+        assert!(store.get_geo_baseline_readonly(&brand.id, "  ").is_err());
+        let other_brand = store.create_workspace("另一品牌", vec![]).unwrap();
+        assert_eq!(
+            store.latest_geo_baseline_readonly(&other_brand.id).unwrap(),
+            None
         );
     }
 

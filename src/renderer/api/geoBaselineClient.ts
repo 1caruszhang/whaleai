@@ -1,3 +1,5 @@
+import { invoke } from "@tauri-apps/api/core";
+
 import type {
   GeoBaselineEngineAvailability,
   GeoBaselineEngineId,
@@ -38,18 +40,13 @@ export async function loadGeoBaselineEngines(
   return response.engines ?? [];
 }
 
-export async function loadLatestGeoBaseline(
-  apiPost: GeoBaselineApiPost,
-  identity: { workspaceId: string; sessionId: string },
+/** Baseline projection read stays on the Rust IPC data plane: the latest
+ *  query is workspace-wide, so the brand-level 「效果」 page can render real
+ *  results before any chat session of the brand is open. */
+export function loadLatestGeoBaseline(
+  workspaceId: string,
 ): Promise<GeoBaselineProjection | null> {
-  const response = await apiPost<GeoBaselineResponse>(
-    "/api/xiaojing/geo-baselines/latest",
-    identity,
-  );
-  if (!response.success) {
-    throw new Error(response.error ?? "geo_baseline_load_failed");
-  }
-  return response.baseline ?? null;
+  return invoke("cmd_geo_baseline_latest_ui", { workspaceId });
 }
 
 export function startGeoBaseline(
