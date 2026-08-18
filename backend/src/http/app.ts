@@ -5,6 +5,7 @@ import type { AccountRow } from '../domain/types';
 import { AppError } from '../errors';
 import { createAdminRoutes } from './admin-routes';
 import { createAuthRoutes } from './auth-routes';
+import { createBillingRoutes } from './billing-routes';
 
 export interface BackendEnv {
   Variables: {
@@ -22,7 +23,10 @@ export function createBackendApp(deps: BackendDeps): Hono<BackendEnv> {
 
   app.onError((error, c) => {
     if (error instanceof AppError) {
-      return c.json({ error: error.code, message: error.message }, error.status as ContentfulStatusCode);
+      return c.json(
+        { error: error.code, message: error.message, ...error.details },
+        error.status as ContentfulStatusCode,
+      );
     }
     console.error('[backend] unhandled error:', error);
     return c.json({ error: 'internal_error', message: '服务器内部错误。' }, 500);
@@ -31,6 +35,7 @@ export function createBackendApp(deps: BackendDeps): Hono<BackendEnv> {
   app.get('/healthz', c => c.json({ ok: true }));
 
   app.route('/', createAuthRoutes(deps));
+  app.route('/', createBillingRoutes(deps));
   app.route('/', createAdminRoutes(deps));
 
   return app;

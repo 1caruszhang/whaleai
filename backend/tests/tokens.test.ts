@@ -89,7 +89,7 @@ describe('migrations', () => {
     const db = openSqlDatabase(join(dir, 'migrate.sqlite'));
     try {
       const applied = migrateDatabase(db);
-      expect(applied).toEqual(['0001_accounts_sessions_ledger']);
+      expect(applied).toEqual(['0001_accounts_sessions_ledger', '0002_billing_permits']);
       expect(migrateDatabase(db)).toEqual([]);
 
       const tables = db
@@ -100,6 +100,8 @@ describe('migrations', () => {
         'auth_sessions',
         'refresh_tokens',
         'ledger_entries',
+        'billing_permits',
+        'permit_unit_reports',
         'schema_migrations',
       ]) {
         expect(tables).toContain(expected);

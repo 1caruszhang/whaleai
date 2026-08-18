@@ -112,3 +112,20 @@ export async function loginAccount(
 ): Promise<ApiResponse> {
   return await postJson(app, '/auth/login', { phone, password });
 }
+
+/** 建号 + 登录一步到位：返回可直接打 /billing/* 的账号 access token。 */
+export async function provisionLoggedInAccount(
+  app: Hono<BackendEnv>,
+  phone = '13800000001',
+  password = 'initial-pass-1',
+): Promise<{ adminToken: string; accountId: string; accessToken: string }> {
+  const { adminToken, accountId } = await provisionAccount(app, phone, password);
+  const login = await loginAccount(app, phone, password);
+  if (login.status !== 200) throw new Error(`login failed: ${JSON.stringify(login)}`);
+  return { adminToken, accountId, accessToken: str(login.body.accessToken) };
+}
+
+export function num(value: unknown): number {
+  if (typeof value !== 'number') throw new Error(`expected number, got: ${JSON.stringify(value)}`);
+  return value;
+}

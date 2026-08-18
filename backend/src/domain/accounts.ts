@@ -1,10 +1,11 @@
 import { randomUUID } from 'node:crypto';
 import type { BackendDeps } from '../deps';
 import type { SqlClient } from '../db/client';
+import type { AccountRow } from './types';
 import { AppError } from '../errors';
 import { hashPassword, verifyPassword } from '../auth/passwords';
 import { revokeAccountSessions, startSession, type StartedSession } from '../auth/sessions';
-import type { AccountRow } from './types';
+import { insertLedgerEntry } from './ledger';
 
 // 登录时手机号不存在的分支也做一次等代价 scrypt 校验，避免通过响应耗时枚举已注册手机号。
 let timingEqualizerHash: string | undefined;
@@ -31,16 +32,6 @@ export function accountProjection(account: AccountRow) {
     mustChangePassword: account.must_change_password === 1,
     points: account.balance,
   };
-}
-
-function insertLedgerEntry(
-  db: SqlClient,
-  input: { id: string; accountId: string; delta: number; balanceAfter: number; kind: string; note: string; createdAt: string },
-): void {
-  db.run(
-    'INSERT INTO ledger_entries (id, account_id, delta, balance_after, kind, note, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
-    [input.id, input.accountId, input.delta, input.balanceAfter, input.kind, input.note, input.createdAt],
-  );
 }
 
 /**

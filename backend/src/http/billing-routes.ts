@@ -1,0 +1,87 @@
+import { Hono } from 'hono';
+import { z } from 'zod';
+import type { BackendDeps } from '../deps';
+import type { BillingPermitRow } from '../domain/types';
+import { balanceSnapshot } from '../domain/ledger';
+import {
+  applyForPermit,
+  closePermit,
+  getPermit,
+  permitProjection,
+  reportPermitUnit,
+} from '../domain/permits';
+import { parseJsonBody } from './request';
+import { requireAccountAuth } from './auth-routes';
+import type { BackendEnv } from './app';
+
+/** permitId 是客户端生成的幂等键：uuid/短横线/冒号/下划线安全字符集。 */
+const permitIdSchema = z
+  .string()
+  .min(8, 'permitId 至少 8 字符')
+  .max(128)
+  .regex(/^[A-Za-z0-9:_-]+$/, 'permitId 只能包含字母数字与 : _ -');
+
+const applyPermitSchema = z.object({
+  permitId: permitIdSchema,
+  operation: z.string().min(1).max(64),
+  units: z.number().int().min(1).max(1000),
+  unitPrice: z.number().int().min(0).max(1_000_000),
+  basePrice: z.number().int().min(0).max(1_000_000).default(0),
+});
+
+const reportUnitSchema = z.object({
+  unit: z.number().int().min(0).max(1_000_000),
+  outcome: z.enum(['success', 'failure']),
+});
+
+export function createBillingRoutes(deps: BackendDeps) {
+  const routes = new Hono<BackendEnv>();
+  const requireAccount = requireAccountAuth(deps);
+
+  routes.get('/billing/balance', requireAccount, c => {
+    const account = c.get('account');
+    const openPermits = deps.db
+      .all<BillingPermitRow>(
+        "SELECT * FROM billing_permits WHERE account_id = ? AND status = 'open' ORDER BY created_at",
+        [account.id],
+      )
+      .map(permit => permitProjection(deps.db, permit));
+    return c.json({ balance: balanceSnapshot(deps.db, account), openPermits });
+  });
+
+  routes.post('/billing/permits', requireAccount, async c => {
+    const body = await parseJsonBody(c, applyPermitSchema);
+    const { permit, created } = applyForPermit(deps, c.get('account').id, {
+      permitId: body.permitId,
+      operation: body.operation,
+      units: body.units,
+      unitPrice: body.unitPrice,
+      basePrice: body.basePrice,
+    });
+    return c.json({ permit }, created ? 201 : 200);
+  });
+
+  routes.get('/billing/permits/:permitId', requireAccount, c => {
+    const permit = getPermit(deps, c.get('account').id, c.req.param('permitId'));
+    return c.json({ permit });
+  });
+
+  routes.post('/billing/permits/:permitId/report', requireAccount, async c => {
+    const body = await parseJsonBody(c, reportUnitSchema);
+    const permit = reportPermitUnit(
+      deps,
+      c.get('account').id,
+      c.req.param('permitId'),
+      body.unit,
+      body.outcome,
+    );
+    return c.json({ permit });
+  });
+
+  routes.post('/billing/permits/:permitId/close', requireAccount, c => {
+    const permit = closePermit(deps, c.get('account').id, c.req.param('permitId'));
+    return c.json({ permit });
+  });
+
+  return routes;
+}

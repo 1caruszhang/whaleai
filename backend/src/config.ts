@@ -16,6 +16,8 @@ export interface BackendConfig {
   adminTokenTtlSeconds: number;
   /** 开号赠送点数（内测期 500）。 */
   signupGrantPoints: number;
+  /** 每账号并发计费准入上限（open permit 数，规格决策为 2）。 */
+  maxConcurrentPermitsPerAccount: number;
 }
 
 export class MissingConfigError extends Error {
@@ -57,5 +59,6 @@ export function loadBackendConfig(env: Record<string, string | undefined>): Back
     refreshTokenTtlSeconds: readPositiveInt(env, 'REFRESH_TOKEN_TTL_SECONDS', THIRTY_DAYS_SECONDS),
     adminTokenTtlSeconds: readPositiveInt(env, 'ADMIN_TOKEN_TTL_SECONDS', 3600),
     signupGrantPoints: readPositiveInt(env, 'SIGNUP_GRANT_POINTS', 500),
+    maxConcurrentPermitsPerAccount: readPositiveInt(env, 'MAX_CONCURRENT_PERMITS_PER_ACCOUNT', 2),
   };
 }
