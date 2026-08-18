@@ -1,9 +1,9 @@
 # 小鲸同学后端单体（付费内测）
 
 Hono / TypeScript 单 monolith + SQLite：账号 API、计费核心（点数账本 + permit，
-票 03）、网关主 Agent 通道与对话隐藏额度（票 04）、超级媒介回调端点与 /admin
-运营台共用一个进程与一个数据库文件。后续计费网关代理（票 05）在此基础上扩展。
-部署形态为 Docker 单容器 + 宝塔 nginx 反代（票 12）。
+票 03）、网关主 Agent 通道与对话隐藏额度（票 04）、其余 Provider 代理与签名
+重签（票 05）、超级媒介回调端点与 /admin 运营台共用一个进程与一个数据库
+文件。部署形态为 Docker 单容器 + 宝塔 nginx 反代（票 12）。
 
 - 桌面应用（`src/`）与该服务完全隔离：独立 package.json、独立测试与
   typecheck，互不进入对方的构建产物。
@@ -26,7 +26,13 @@ npm run dev             # tsx watch，默认监听 0.0.0.0:8787
 |---|---|---|---|
 | `AUTH_SECRET` | ✔ | — | JWT HS256 签名 + refresh token 哈希胡椒（账本密钥），≥32 字符 |
 | `ADMIN_PASSWORD` | ✔ | — | /admin 运营登录密码 |
-| `DEEPSEEK_API_KEY` | ✔ | — | DeepSeek Anthropic 兼容上游密钥（主 Agent 通道，票 04），只经环境变量注入 |
+| `DEEPSEEK_API_KEY` | ✔ | — | DeepSeek 上游密钥（主 Agent 通道票 04 + extraction/reflection 代理票 05），只经环境变量注入 |
+| `ARK_API_KEY` | ✔ | — | 火山方舟 API Key（ARK chat/responses/embeddings 代理，票 05） |
+| `OSS_ACCESS_KEY_ID` | ✔ | — | 阿里云 OSS AccessKey ID（网关 V1 重签，私钥仅在服务器） |
+| `OSS_ACCESS_KEY_SECRET` | ✔ | — | 阿里云 OSS AccessKey Secret |
+| `OSS_BUCKET` | ✔ | — | OSS bucket |
+| `DISTRIBUTION_APP_ID` | ✔ | — | 超级媒介代理商 appid（网关 HMAC-SHA256 重签） |
+| `DISTRIBUTION_SECRET` | ✔ | — | 超级媒介签名 secret |
 | `DATABASE_PATH` | | `data/xiaojing-backend.sqlite` | SQLite 文件路径 |
 | `PORT` / `HOST` | | `8787` / `0.0.0.0` | 监听地址 |
 | `ACCESS_TOKEN_TTL_SECONDS` | | `7200` | 账号 JWT 有效期（规格 1–2h，取上限） |
@@ -35,15 +41,31 @@ npm run dev             # tsx watch，默认监听 0.0.0.0:8787
 | `SIGNUP_GRANT_POINTS` | | `500` | 开号赠送点数 |
 | `MAX_CONCURRENT_PERMITS_PER_ACCOUNT` | | `2` | 每账号并发计费准入上限（open permit 数） |
 | `DEEPSEEK_BASE_URL` | | `https://api.deepseek.com/anthropic` | DeepSeek Anthropic 兼容上游基地址 |
+| `DEEPSEEK_OPENAI_BASE_URL` | | `https://api.deepseek.com` | DeepSeek OpenAI 兼容上游基地址（extraction/reflection） |
+| `ARK_BASE_URL` | | `https://ark.cn-beijing.volces.com/api/v3` | 火山方舟 paygo 基地址 |
+| `ARK_EMBEDDING_API_KEY` | | 回落 `ARK_API_KEY` | ARK embedding 专用 key（与 sidecar 口径一致） |
+| `DOUBAO_SEARCH_API_KEY` | | 回落 `ARK_API_KEY` | 豆包搜索专用 key |
+| `DOUBAO_SEARCH_BASE_URL` | | `https://open.feedcoopapi.com` | 豆包搜索 HTTP API 基地址 |
+| `OSS_REGION` | | `oss-cn-chengdu` | OSS 地域（内网 endpoint 缺省由它推导） |
+| `OSS_INTERNAL_HOST` | | `{OSS_REGION}-internal.aliyuncs.com` | OSS 同地域内网 endpoint host |
+| `OSS_PUBLIC_BASE_URL` | | — | OSS 公网访问基地址（putHtml 返回 URL 优先用它拼，生产建议配置） |
+| `DISTRIBUTION_BASE_URL` | | `https://vip.chaojimeijie.com/api` | 超级媒介 API 基地址 |
 | `CHAT_HIDDEN_QUOTA_POINTS` | | `100` | 对话隐藏额度（点等值），用尽暂停对话、任意档位充值刷新 |
 | `CHAT_INPUT_CNY_PER_MTOK` | | `2` | 对话旁路计量：未命中缓存输入单价（元/百万 token，默认值为占位口径，生产按 DeepSeek 官网现价调整） |
 | `CHAT_INPUT_CACHE_HIT_CNY_PER_MTOK` | | `0.2` | 对话旁路计量：缓存命中输入单价（元/百万 token） |
 | `CHAT_OUTPUT_CNY_PER_MTOK` | | `3` | 对话旁路计量：输出单价（元/百万 token） |
 
-密钥红线：`AUTH_SECRET`、`ADMIN_PASSWORD` 与 `DEEPSEEK_API_KEY` 只从服务器
-环境变量进入，不写日志、不落库、不进构建产物；缺失时启动即失败
-（`src/config.ts`）。上游密钥只出现在网关对 DeepSeek 的请求头里；上游错误
-体回显密钥时由清洗层抹除后才回传客户端。
+密钥红线：`AUTH_SECRET`、`ADMIN_PASSWORD` 与全部上游密钥（`DEEPSEEK_API_KEY`、
+`ARK_API_KEY`、`ARK_EMBEDDING_API_KEY`、`DOUBAO_SEARCH_API_KEY`、OSS AK/SK、
+`DISTRIBUTION_APP_ID`/`DISTRIBUTION_SECRET`）只从服务器环境变量进入，不写日志、
+不落库、不进构建产物；缺失时启动即失败（`src/config.ts`）。上游密钥只出现在
+网关对上游的请求头/签名里；上游错误体回显密钥时由清洗层抹除后才回传客户端。
+
+**OSS 同地域内网直连**（票 05）：网关把 OSS putHtml 重签后投递到
+`https://{bucket}.{OSS_REGION}-internal.aliyuncs.com/{key}` 内网 endpoint
+（OSS V1 签名不含 Host，换内网 endpoint 不破坏签名）。**部署前提：ECS 与
+OSS bucket 必须同地域（成都，`oss-cn-chengdu`）**，否则内网域名不可解析；
+跨地域部署时用 `OSS_INTERNAL_HOST` 显式覆盖为公网或正确地域的 endpoint。
 
 **对话旁路计量折点口径**（票 04）：锚点 1 元 = 10 点；缓存写（cache
 creation）按未命中输入价计、缓存读按命中价计；折点内部以千分之一点
@@ -123,6 +145,44 @@ creation）按未命中输入价计、缓存读按命中价计；折点内部以
 旁路计量表只经 /admin 运营面暴露。
 
 错误体统一为 `{"error": "<code>", "message": "..."}`。
+
+## API（票 05 其余 Provider 代理与签名重签）
+
+主 Agent 通道（票 04）以外的全部 Provider 流量经网关代理：客户端只持账号
+token，上游密钥与签名身份全部在服务器侧。路径约定与 Sidecar 端点覆盖机制
+（票 01）对接——网关路径 = 上游路径：把 Sidecar 的
+`XIAOJING_ARK_PAYGO_BASE_URL` 指到 `<网关>/gw/ark`、
+`XIAOJING_DOUBAO_SEARCH_BASE_URL` 指到 `<网关>/gw/doubao-search`、
+`XIAOJING_DISTRIBUTION_BASE_URL` 指到 `<网关>/gw/distribution`，Sidecar 拼出的
+固定子路径原样落到下列路由（票 07 接线）；OSS 走 `PUT /gw/oss/{encodedObjectKey}`。
+
+| 方法与路径 | 上游 | 说明 |
+|---|---|---|
+| `POST /gw/deepseek/chat/completions` | DeepSeek OpenAI | extraction/reflection：body 全透传，鉴权头重写为服务器 DeepSeek key |
+| `POST /gw/ark/chat/completions` | ARK | generation / keyword-search（body 的 `enable_search:true` 原样透传），鉴权头重写为 ARK key |
+| `POST /gw/ark/responses` | ARK | probeQuestion：网关注入非标头 `ark-beta-doubao-app: true`，Responses body 全透传 |
+| `POST /gw/ark/embeddings/multimodal` | ARK | embedding：专用 key 缺省回落 ARK key（与 sidecar 口径一致） |
+| `POST /gw/doubao-search/search_api/web_search` | 豆包搜索 | searchSources 结构化召回：专用 key 缺省回落 ARK key |
+| `PUT /gw/oss/{encodedObjectKey}` | 阿里云 OSS（**同地域内网**） | putHtml：网关以服务器 AK/SK 按 OSS V1 HMAC-SHA1 重签（Host 不参与签名，换内网 endpoint 签名不变），URL 编码口径与 sidecar `encodeObjectKey` 一致；成功返回 `{url}`（配了 `OSS_PUBLIC_BASE_URL` 用公网拼，否则内网上游 URL） |
+| `GET /gw/distribution/media/resource`、`GET /gw/distribution/we-media/resource` | 超级媒介 | 资源读取：网关以服务器 appid/secret 按 HMAC-SHA256 展平算法重签；公共参数（appid/timestamp/algorithm/signature）全部由网关生成，客户端混入的签名参数一律忽略；`timestamp` 取网关时钟（10 位 unix 秒，上游 5 分钟时效恒新鲜）；业务参数仅 `page`（≥1，默认 1）与 `size`（1–200，默认 20） |
+
+旁路计量（票 05）：每次上游 2xx 的代理请求落一行
+`provider_usage_records`——LLM 流量记真实 token（OpenAI 系 usage 口径：
+`prompt_tokens`/`completion_tokens` 与 `input_tokens`/`output_tokens` 两族都
+识别；SSE 兜底分支按次数），OSS/超级媒介按次数。计量只作运营与火山/豆包/
+OSS 账单对账，不动 `ledger_entries`（Σdelta == balance 不变量）；计费扣点
+走 permit 通道（票 03/07）。
+
+签名移植对照（票 05 验收）：OSS V1 与超级媒介展平签名逐字节移植自 Sidecar
+现有 Node 实现（`src/server/geo/provider-capabilities.ts`，只读参照），
+`tests/provider-signing-parity.test.ts` 用 sidecar 真跑捕获的黄金向量锁定
+一致性（含路由级端到端：同输入经网关发出的 Authorization/query 与 sidecar
+逐字节相同）。
+
+安全模型（票 05 增量，同票 04）：上游密钥只在对上游请求头/签名出现；客户端
+账号 token 不转发上游；上游错误体先抹掉密钥/token 再回传；OSS 私钥
+（AccessKeySecret）与超级媒介 secret 不进任何日志、响应或数据库；
+`upstream_unavailable`（502）与 `invalid_object_key`（400）不带内部信息。
 
 安全模型要点：
 
@@ -233,7 +293,47 @@ curl -s -X POST $B/admin/ledger/topup -H 'content-type: application/json' \
 curl -s "$B/admin/accounts/<ACCOUNT_ID>/chat-usage?limit=50" -H "authorization: Bearer $ADMIN_TOKEN"
 ```
 
-## 数据表（迁移 `0001_accounts_sessions_ledger` + `0002_billing_permits` + `0003_ledger_entry_seq` + `0004_chat_usage_metering`）
+### curl 走查（票 05 Provider 代理验收口径）
+
+```bash
+B=http://127.0.0.1:8787
+ACCESS=<用户 accessToken>   # 走查上方登录流程取得
+
+# ① ARK chat/completions（keyword-search 的 enable_search / generation 同端点）
+curl -s -X POST $B/gw/ark/chat/completions -H "authorization: Bearer $ACCESS" \
+  -H 'content-type: application/json' \
+  -d '{"model":"doubao-seed-2-0-lite-260428","messages":[{"role":"user","content":"关键词"}],
+       "stream":false,"enable_search":true}'
+
+# ② probeQuestion：/responses（网关注入 ark-beta-doubao-app 头）
+curl -s -X POST $B/gw/ark/responses -H "authorization: Bearer $ACCESS" \
+  -H 'content-type: application/json' \
+  -d '{"model":"doubao-seed-2-0-lite-260428","input":[{"role":"user","content":"基线问题"}],
+       "stream":false,"tools":[{"type":"doubao_app","feature":{"ai_search":{"type":"enabled"}}}]}'
+
+# ③ embedding / 豆包搜索 searchSources / DeepSeek extraction
+curl -s -X POST $B/gw/ark/embeddings/multimodal -H "authorization: Bearer $ACCESS" \
+  -H 'content-type: application/json' \
+  -d '{"model":"ep-xxxx","input":[{"type":"text","text":"知识片段"}]}'
+curl -s -X POST $B/gw/doubao-search/search_api/web_search -H "authorization: Bearer $ACCESS" \
+  -H 'content-type: application/json' \
+  -d '{"Query":"竞品 品牌","Count":20,"SearchType":"web","NeedSummary":true}'
+curl -s -X POST $B/gw/deepseek/chat/completions -H "authorization: Bearer $ACCESS" \
+  -H 'content-type: application/json' \
+  -d '{"model":"deepseek-chat","messages":[{"role":"user","content":"材料"}],"stream":false}'
+
+# ④ OSS putHtml（网关重签 + 内网直连；objectKey 需 URL 编码，与 sidecar encodeObjectKey 同口径）
+curl -s -X PUT "$B/gw/oss/articles/2026/%E6%A0%87%E9%A2%98.html" \
+  -H "authorization: Bearer $ACCESS" -H 'content-type: text/html; charset=utf-8' \
+  --data-binary '<html><body>文章预览</body></html>'
+# → {"url":"https://<OSS_PUBLIC_BASE_URL>/articles/2026/%E6%A0%87%E9%A2%98.html"}
+
+# ⑤ 超级媒介资源读取（page/size 为仅有的业务参数；签名身份由网关生成）
+curl -s "$B/gw/distribution/media/resource?page=1&size=20" -H "authorization: Bearer $ACCESS"
+curl -s "$B/gw/distribution/we-media/resource?page=2&size=15" -H "authorization: Bearer $ACCESS"
+```
+
+## 数据表（迁移 `0001_accounts_sessions_ledger` + `0002_billing_permits` + `0003_ledger_entry_seq` + `0004_chat_usage_metering` + `0005_provider_usage_metering`）
 
 - `accounts`：手机号唯一、scrypt 哈希、`password_version`（JWT `pv` 对账）、
   `status`（active/disabled）、`must_change_password`、`balance`（账面总余额，
@@ -255,6 +355,11 @@ curl -s "$B/admin/accounts/<ACCOUNT_ID>/chat-usage?limit=50" -H "authorization: 
   （input/cache read/cache creation/output）与折点（`points_milli`），供运营
   与 DeepSeek 账单对账；免费对话无余额变动，不进 `ledger_entries`，账本
   Σdelta == balance 口径不被污染。
+- `provider_usage_records`（0005）：网关代理的每次 Provider 请求（上游 2xx）
+  一行——`provider`（deepseek/ark/doubao-search/oss/distribution）、`route`
+  稳定路由标签、token 用量（LLM；OSS/超级媒介记次数）。只作运营与上游账单
+  对账，不是余额变动，不进 `ledger_entries`；表中不含上游密钥、请求体或
+  账号 token。
 
 迁 PostgreSQL 路径：业务层只依赖 `SqlClient` 接口（`src/db/client.ts`），
 表结构用 ANSI 形态（TEXT 主键、ISO 时间戳、INTEGER 布尔），迁移 SQL 直接

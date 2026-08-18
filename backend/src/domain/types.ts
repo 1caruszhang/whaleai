@@ -91,3 +91,20 @@ export interface ChatUsageRecordRow {
   points_milli: number;
   created_at: string;
 }
+
+/**
+ * Provider 代理旁路计量记录（票 05）：网关代理的每次 Provider 请求（2xx）
+ * 一行。LLM 流量记真实 token；OSS/超级媒介等记次数（一行 = 一次）。
+ * 只作运营与上游账单对账，不是余额变动。
+ */
+export interface ProviderUsageRecordRow {
+  id: string;
+  account_id: string;
+  /** 'deepseek' | 'ark' | 'doubao-search' | 'oss' | 'distribution'。 */
+  provider: string;
+  /** 稳定路由标签，如 'ark.chat_completions' / 'oss.put_html'。 */
+  route: string;
+  input_tokens: number;
+  output_tokens: number;
+  created_at: string;
+}

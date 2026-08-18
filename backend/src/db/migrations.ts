@@ -131,6 +131,26 @@ export const MIGRATIONS: readonly Migration[] = [
       CREATE INDEX idx_chat_usage_records_account ON chat_usage_records(account_id, created_at);
     `,
   },
+  {
+    // 票 05：Provider 代理旁路计量。网关代理的每次 Provider 请求（2xx 成功）
+    // 落一行真实 token 用量（OpenAI 系 usage 口径；OSS/超级媒介无 token 则
+    // 记次数）供运营与火山/豆包/OSS 账单对账。与 chat_usage_records 同理：
+    // 计量不是余额变动，不进 ledger_entries（Σdelta == balance 不变量不被
+    // 污染）；计费扣点走 permit 通道（票 03/07），本表只做旁路对账。
+    name: '0005_provider_usage_metering',
+    sql: `
+      CREATE TABLE provider_usage_records (
+        id TEXT PRIMARY KEY,
+        account_id TEXT NOT NULL REFERENCES accounts(id),
+        provider TEXT NOT NULL,
+        route TEXT NOT NULL,
+        input_tokens INTEGER NOT NULL DEFAULT 0,
+        output_tokens INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX idx_provider_usage_records_account ON provider_usage_records(account_id, created_at);
+    `,
+  },
 ];
 
 /** 建表只经本 runner：幂等、每条迁移独立事务、记录进 schema_migrations。 */
