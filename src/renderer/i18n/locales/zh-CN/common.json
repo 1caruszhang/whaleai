@@ -59,7 +59,16 @@
     "invalidPhone": "请输入正确的 11 位手机号",
     "missingPassword": "请输入密码",
     "agreementRequired": "请先勾选同意《用户协议》与《隐私政策》",
-    "agreement": "我已阅读并同意《用户协议》与《隐私政策》",
+    "agreement": "我已阅读并同意《用户协议》《隐私政策》与《计费标准》",
+    "agreementPrefix": "我已阅读并同意",
+    "agreementSeparator": "",
+    "agreementJoiner": "与",
+    "complianceDocsSection": "合规文件",
+    "complianceDoc": {
+      "user-agreement": "《用户协议》",
+      "privacy-policy": "《隐私政策》",
+      "pricing-standard": "《计费标准》"
+    },
     "loginButton": "登 录",
     "loggingIn": "正在登录…",
     "graceExpiredNotice": "已超过 7 天未连接服务器，请重新联网登录后继续使用。",
