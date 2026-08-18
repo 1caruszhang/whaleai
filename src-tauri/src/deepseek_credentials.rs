@@ -10,6 +10,18 @@ use tauri::AppHandle;
 
 pub const SIDECAR_SECRET_ENV: &str = "XIAOJING_DEEPSEEK_API_KEY";
 pub(crate) const DEVELOPMENT_SECRET_ENV: &str = "DEEPSEEK_API_KEY";
+// DeepSeek 端点覆盖传输名（运营网关切流预留）：未注入时 Node 侧回落
+// 策略表固定默认值；release 构建不从环境读取（见 inject_into_sidecar）。
+pub(crate) const SIDECAR_ANTHROPIC_BASE_URL_ENV: &str = "XIAOJING_DEEPSEEK_ANTHROPIC_BASE_URL";
+pub(crate) const SIDECAR_OPENAI_BASE_URL_ENV: &str = "XIAOJING_DEEPSEEK_OPENAI_BASE_URL";
+pub(crate) const DEVELOPMENT_MAIN_AGENT_BASE_URL_ENV: &str = "DEEPSEEK_MAIN_AGENT_BASE_URL";
+pub(crate) const DEVELOPMENT_API_BASE_URL_ENV: &str = "DEEPSEEK_API_BASE_URL";
+pub(crate) const SIDECAR_URL_ENV_NAMES: &[&str] =
+    &[SIDECAR_ANTHROPIC_BASE_URL_ENV, SIDECAR_OPENAI_BASE_URL_ENV];
+pub(crate) const DEVELOPMENT_URL_ENV_NAMES: &[&str] = &[
+    DEVELOPMENT_MAIN_AGENT_BASE_URL_ENV,
+    DEVELOPMENT_API_BASE_URL_ENV,
+];
 #[cfg(windows)]
 const CREDENTIAL_TARGET: &str = "Xiaojing/DeepSeek/main-agent";
 
@@ -150,6 +162,25 @@ pub(crate) fn inject_into_sidecar(command: &mut std::process::Command) -> Result
         command.env_remove(SIDECAR_SECRET_ENV);
     }
     command.env_remove(DEVELOPMENT_SECRET_ENV);
+    for name in SIDECAR_URL_ENV_NAMES {
+        command.env_remove(name);
+    }
+    for name in DEVELOPMENT_URL_ENV_NAMES {
+        command.env_remove(name);
+    }
+    // 端点覆盖仅开发环境透传（校验同 geo 侧）；release 构建保持上方清除后的
+    // 缺省，伪造的父环境不能把带凭据的流量重定向到任意地址。
+    #[cfg(debug_assertions)]
+    crate::geo_provider_credentials::inject_debug_endpoint_overrides(
+        command,
+        &[
+            (
+                DEVELOPMENT_MAIN_AGENT_BASE_URL_ENV,
+                SIDECAR_ANTHROPIC_BASE_URL_ENV,
+            ),
+            (DEVELOPMENT_API_BASE_URL_ENV, SIDECAR_OPENAI_BASE_URL_ENV),
+        ],
+    );
     Ok(())
 }
 

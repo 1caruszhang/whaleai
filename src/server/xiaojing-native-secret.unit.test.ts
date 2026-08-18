@@ -1,0 +1,38 @@
+import { describe, expect, it, vi } from 'vitest';
+
+describe('Xiaojing native DeepSeek transport capture', () => {
+  it('captures and erases endpoint overrides alongside the secret', async () => {
+    vi.resetModules();
+    vi.stubEnv('XIAOJING_DEEPSEEK_API_KEY', ' deepseek-secret ');
+    vi.stubEnv('XIAOJING_DEEPSEEK_ANTHROPIC_BASE_URL', 'https://gw.example.test');
+    vi.stubEnv('XIAOJING_DEEPSEEK_OPENAI_BASE_URL', 'https://gw.example.test/openai');
+
+    const native = await import('./xiaojing-native-secret');
+
+    expect(native.resolveXiaojingDeepseekSecret()).toBe('deepseek-secret');
+    expect(native.resolveXiaojingDeepseekAnthropicBaseUrl()).toBe(
+      'https://gw.example.test',
+    );
+    expect(native.resolveXiaojingDeepseekOpenAiBaseUrl()).toBe(
+      'https://gw.example.test/openai',
+    );
+    // 传输变量在模块求值期即被删除：通用子进程与环境诊断观察不到。
+    expect(process.env.XIAOJING_DEEPSEEK_API_KEY).toBeUndefined();
+    expect(process.env.XIAOJING_DEEPSEEK_ANTHROPIC_BASE_URL).toBeUndefined();
+    expect(process.env.XIAOJING_DEEPSEEK_OPENAI_BASE_URL).toBeUndefined();
+    vi.unstubAllEnvs();
+  });
+
+  it('leaves overrides undefined when the transport is not injected', async () => {
+    vi.resetModules();
+    delete process.env.XIAOJING_DEEPSEEK_API_KEY;
+    delete process.env.XIAOJING_DEEPSEEK_ANTHROPIC_BASE_URL;
+    delete process.env.XIAOJING_DEEPSEEK_OPENAI_BASE_URL;
+
+    const native = await import('./xiaojing-native-secret');
+
+    expect(native.resolveXiaojingDeepseekSecret()).toBeUndefined();
+    expect(native.resolveXiaojingDeepseekAnthropicBaseUrl()).toBeUndefined();
+    expect(native.resolveXiaojingDeepseekOpenAiBaseUrl()).toBeUndefined();
+  });
+});

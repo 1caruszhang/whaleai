@@ -222,7 +222,7 @@ function textCapability(capability: GeoTextCapability): GeoTextCapability {
 function keywordCapability(
   capability: GeoKeywordSearchCapability,
 ): GeoKeywordSearchCapability {
-  return {
+  const wrapped: GeoKeywordSearchCapability = {
     slot: capability.slot,
     baselineEngines: () => capability.baselineEngines(),
     search(prompt, options) {
@@ -242,6 +242,19 @@ function keywordCapability(
       });
     },
   };
+  // 结构化召回与挖词同槽计量：旧能力注入未实现 searchSources 时保持缺省，
+  // 调用方（材料导入竞品腿）继续走回落路径。
+  const searchSources = capability.searchSources;
+  if (typeof searchSources === "function") {
+    wrapped.searchSources = (query, options) =>
+      currentAdmission().run({
+        slot: capability.slot,
+        unitKind: "search-sources",
+        signal: options?.signal,
+        work: () => searchSources.call(capability, query, options),
+      });
+  }
+  return wrapped;
 }
 
 function embeddingCapability(
