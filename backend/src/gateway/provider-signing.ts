@@ -1,4 +1,4 @@
-import { createHmac } from 'node:crypto';
+import { createHmac, timingSafeEqual } from 'node:crypto';
 import { AppError } from '../errors';
 
 /**
@@ -64,12 +64,41 @@ export function ossUpstreamUrl(bucket: string, host: string, encodedObjectKey: s
   return `https://${bucket}.${host}/${encodedObjectKey}`;
 }
 
+/**
+ * 超级媒介参数展平（票 08 深层形态，逐语义移植自官方 PHP flatten）：
+ * - 字典：键名升序，`key=展平(值)` 逐段裸连接（signature 键跳过）；
+ * - 列表：元素升序排序后逐元素展平裸连接（无 key= 前缀）；
+ * - 标量：字符串原样 / 数字十进制。
+ * 嵌套字典（如事件回调的 payload）逐层递归展平——请求签名与回调验签共用
+ * 同一展平语义。约束：标量只允许 string | number（PHP 布尔/空值的字符串化
+ * 语义不在本网关的任何参数面出现）。
+ */
+export type SupermediaSignValue =
+  | string
+  | number
+  | SupermediaSignValue[]
+  | { [key: string]: SupermediaSignValue };
+
+export function flattenSupermediaParamsDeep(value: SupermediaSignValue): string {
+  if (Array.isArray(value)) {
+    return value
+      .map(item => flattenSupermediaParamsDeep(item))
+      .sort()
+      .join('');
+  }
+  if (typeof value === 'object' && value !== null) {
+    return Object.keys(value)
+      .filter(key => key !== 'signature')
+      .sort()
+      .map(key => `${key}=${flattenSupermediaParamsDeep((value as Record<string, SupermediaSignValue>)[key])}`)
+      .join('');
+  }
+  return String(value);
+}
+
 /** 超级媒介参数展平：key 升序的 `key=value` 裸连接（无分隔符），与 sidecar 同。 */
 export function flattenSupermediaParams(params: Record<string, string | number>): string {
-  return Object.keys(params)
-    .sort()
-    .map(key => `${key}=${params[key]}`)
-    .join('');
+  return flattenSupermediaParamsDeep(params);
 }
 
 /** 展平串 → HMAC-SHA256 hex。 */
@@ -99,6 +128,79 @@ export function signSupermediaQuery(
     ...Object.fromEntries(Object.entries(params).map(([key, value]) => [key, String(value)])),
     signature,
   });
+}
+
+/**
+ * 列表参数版签名 query（票 08）：订单/资源查询的 `sn` / `id` 为列表参数，
+ * wire 形态用 PHP 惯例 `key[]=v1&key[]=v2`（上游为 PHP 服务，$_GET 解析
+ * 列表的标准形态）；签名按展平语义对「元素升序后裸连接」计算（列表无
+ * key= 前缀）。标量参数与 signSupermediaQuery 完全同构。
+ */
+export function signSupermediaQueryWithLists(
+  appid: string,
+  secret: string,
+  timestampSeconds: number,
+  businessParams: Record<string, string | number | readonly string[]>,
+): URLSearchParams {
+  const signParams: Record<string, SupermediaSignValue> = {
+    appid,
+    timestamp: timestampSeconds,
+    algorithm: 'sha256',
+    ...businessParams,
+  };
+  const signature = supermediaHmacSha256(secret, flattenSupermediaParamsDeep(signParams));
+  const query = new URLSearchParams();
+  query.set('appid', appid);
+  query.set('timestamp', String(timestampSeconds));
+  query.set('algorithm', 'sha256');
+  for (const [key, value] of Object.entries(businessParams)) {
+    if (Array.isArray(value)) {
+      for (const item of value) query.append(`${key}[]`, String(item));
+    } else {
+      query.set(key, String(value));
+    }
+  }
+  query.set('signature', signature);
+  return query;
+}
+
+/** 回调/请求验签失败原因（票 08 事件回调）：路由层据此映射 4xx。 */
+export type SupermediaVerifyFailure =
+  | 'bad_appid'
+  | 'bad_algorithm'
+  | 'stale_timestamp'
+  | 'bad_signature';
+
+/**
+ * 验证超级媒介回调参数（票 08）：appid 匹配本代理商、algorithm 仅支持
+ * sha256（本网关只按它计算）、timestamp 在 tolerance（上游声明 5 分钟）
+ * 内、HMAC-SHA256 签名逐字节相等（timingSafeEqual）。参数对象即回调
+ * 正文（含 event/payload 业务字段与公共参数），signature 键不参与展平。
+ */
+export function verifySupermediaSignature(input: {
+  secret: string;
+  expectedAppId: string;
+  nowSeconds: number;
+  toleranceSeconds: number;
+  params: Record<string, unknown>;
+}): SupermediaVerifyFailure | null {
+  const { params } = input;
+  const appid = typeof params.appid === 'string' ? params.appid : '';
+  if (appid !== input.expectedAppId) return 'bad_appid';
+  if (params.algorithm !== undefined && params.algorithm !== 'sha256') return 'bad_algorithm';
+  const timestamp = typeof params.timestamp === 'number' ? params.timestamp : Number.parseInt(String(params.timestamp), 10);
+  if (!Number.isInteger(timestamp) || Math.abs(input.nowSeconds - timestamp) > input.toleranceSeconds) {
+    return 'stale_timestamp';
+  }
+  const signature = typeof params.signature === 'string' ? params.signature : '';
+  if (!/^[0-9a-f]{64}$/i.test(signature)) return 'bad_signature';
+  const expected = supermediaHmacSha256(input.secret, flattenSupermediaParamsDeep(params as Record<string, SupermediaSignValue>));
+  const expectedBytes = Buffer.from(expected, 'utf8');
+  const actualBytes = Buffer.from(signature.toLowerCase(), 'utf8');
+  if (expectedBytes.length !== actualBytes.length || !timingSafeEqual(expectedBytes, actualBytes)) {
+    return 'bad_signature';
+  }
+  return null;
 }
 
 /** 路由层用：objectKey 非法（空/`..` 逃逸）的统一错误。 */

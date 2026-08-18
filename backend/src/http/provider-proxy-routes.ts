@@ -3,8 +3,22 @@ import type { Context } from 'hono';
 import type { ContentfulStatusCode } from 'hono/utils/http-status';
 import { z } from 'zod';
 import type { BackendDeps } from '../deps';
+import {
+  readDistributionResourceCache,
+  upsertDistributionResourceCache,
+} from '../domain/distribution-resources';
 import { recordProviderUsage, type ProviderUsageProvider } from '../domain/provider-usage';
+import {
+  applyPublishOrderStatus,
+  beginPublishOrder,
+  completePublishOrder,
+  failPublishOrder,
+  publishOrderProjection,
+  requireOwnedPublishOrder,
+} from '../domain/publish-orders';
+import type { PublishOrderKind } from '../domain/types';
 import { extractOpenAiUsage } from '../gateway/openai-usage';
+import { DistributionUpstream } from '../gateway/distribution-upstream';
 import {
   encodeOssObjectKey,
   invalidObjectKeyError,
@@ -17,7 +31,7 @@ import {
 import { sanitizedUpstreamErrorBody } from '../gateway/sanitize';
 import { AppError } from '../errors';
 import { requireAccountAuth } from './auth-routes';
-import { readBearerToken } from './request';
+import { parseJsonBody, readBearerToken } from './request';
 import type { BackendEnv } from './app';
 
 /**
@@ -33,8 +47,12 @@ import type { BackendEnv } from './app';
  * `XIAOJING_DOUBAO_SEARCH_BASE_URL` 指到 `<网关>/gw/doubao-search`、
  * `XIAOJING_DISTRIBUTION_BASE_URL` 指到 `<网关>/gw/distribution`，Sidecar
  * 拼出的固定子路径（/chat/completions、/responses、/embeddings/multimodal、
- * /search_api/web_search、/media/resource、/we-media/resource）原样落到本
- * 路由；OSS 走 `PUT /gw/oss/{encodedObjectKey}`（票 07 接线）。
+ * /search_api/web_search、/media/resource、/we-media/resource、
+ * /media|we-media/order 及其 /order/* 操作路径）原样落到本路由；OSS 走
+ * `PUT /gw/oss/{encodedObjectKey}`（票 07 接线）。票 08 增补订单面：
+ * 下单（服务器定价 + 预扣冻结 + sn 幂等）、查单（透传 + 状态机对账）、
+ * 催稿/取消/申请退款/申请补发（纯代理）；事件回调在
+ * distribution-callback-routes（入站端点，HMAC 验签，不走账号鉴权）。
  *
  * 红线（同票 04）：上游密钥只经环境变量进入、只出现在对上游的请求头/签名；
  * 客户端账号 token 绝不转发上游；错误正文经清洗；每请求（上游 2xx）旁路
@@ -289,6 +307,223 @@ export function createProviderProxyRoutes(deps: BackendDeps) {
   };
   routes.get('/gw/distribution/media/resource', requireAccount, distributionResource('media'));
   routes.get('/gw/distribution/we-media/resource', requireAccount, distributionResource('we-media'));
+
+  // ── 超级媒介订单（票 08）：下单/查单/催稿/取消/申请退款/申请补发 ─────
+  // 网关是发布订单的计费权威：下单前按服务器侧资源快照定价（媒介费×1.6
+  // → 点数向上取整）预扣冻结；查单与回调驱动订单状态机（结转/退点/保持
+  // 冻结）。业务参数经网关重签后投上游，客户端只带账号 token + 业务字段。
+  const upstream = new DistributionUpstream(deps, fetchImpl);
+  const distributionSecrets = () => [config.distributionSecret, config.distributionAppId];
+
+  const orderSnSchema = z
+    .string()
+    .min(8, 'sn 至少 8 字符')
+    .max(64, 'sn 最长 64 字符')
+    .regex(/^[A-Za-z0-9:_-]+$/, 'sn 只能包含字母数字与 : _ -');
+
+  const placeOrderSchema = z.object({
+    sn: orderSnSchema,
+    resourceId: z.number().int().min(1),
+    title: z.string().min(1).max(200),
+    contentUrl: z.string().url().max(2000),
+    remark: z.string().max(500).optional(),
+    owner: z.string().max(100).optional(),
+    publishForm: z.number().int().min(1).max(2).optional(),
+    publishType: z.number().int().min(1).max(3).optional(),
+    accountRule: z.number().int().min(2).max(3).optional(),
+  });
+
+  const snOnlySchema = z.object({ sn: orderSnSchema });
+  const snWithReasonSchema = z.object({ sn: orderSnSchema, reason: z.string().min(1).max(500) });
+
+  /** 账号 + kind 维度的订单所有权（不泄露他人 sn）。 */
+  const ownedOrder = (accountId: string, sn: string, kind: PublishOrderKind) =>
+    requireOwnedPublishOrder(deps.db, accountId, sn, kind);
+
+  const distributionOrderRoutes = (kind: PublishOrderKind) => {
+    const kindPath = kind === 'media' ? '/media' : '/we-media';
+
+    routes.post(`/gw/distribution${kindPath}/order`, requireAccount, async c => {
+      const account = c.get('account');
+      const body = await parseJsonBody(c, placeOrderSchema);
+      if (kind === 'we-media') {
+        if (body.publishForm === undefined || body.publishType === undefined || body.accountRule === undefined) {
+          throw new AppError(
+            'validation_error',
+            '自媒体订单必须携带 publishForm、publishType、accountRule。',
+            400,
+          );
+        }
+      }
+
+      // 定价权威在服务器：媒介价只取资源快照缓存（miss 回源上游并回填），
+      // 客户端不传价、传了也不看（与 permit 价目红线同源）。
+      let cached = readDistributionResourceCache(deps.db, kind, body.resourceId);
+      if (!cached) {
+        const fetched = await upstream.queryResource(kind, body.resourceId);
+        if (!fetched.ok) return await errorResponse(c, fetched.response, distributionSecrets());
+        if (!fetched.data) {
+          throw new AppError('resource_not_found', `渠道资源 ${body.resourceId} 不存在。`, 404);
+        }
+        const nowIso = new Date(deps.now()).toISOString();
+        upsertDistributionResourceCache(
+          deps.db,
+          {
+            kind,
+            resource_id: fetched.data.id,
+            name: fetched.data.name,
+            price_cents: fetched.data.priceCents,
+            status: fetched.data.status,
+          },
+          nowIso,
+        );
+        cached = readDistributionResourceCache(deps.db, kind, body.resourceId);
+        if (!cached) throw new AppError('internal_error', '资源快照回填后读取失败。', 500);
+      }
+
+      const begin = beginPublishOrder(deps, account.id, {
+        sn: body.sn,
+        kind,
+        resourceId: body.resourceId,
+        title: body.title,
+        contentUrl: body.contentUrl,
+        remark: body.remark,
+        owner: body.owner,
+        publishForm: body.publishForm,
+        publishType: body.publishType,
+        accountRule: body.accountRule,
+        mediaPriceCents: cached.price_cents,
+      });
+      // 幂等命中：上游已受理或在途，不触上游、不二次预扣。
+      if (begin.phase === 'replay_placed' || begin.phase === 'replay_pending') {
+        return c.json({ order: publishOrderProjection(begin.order), created: false });
+      }
+
+      const placement = await upstream.placeOrder(kind, {
+        sn: body.sn,
+        resourceId: body.resourceId,
+        title: body.title,
+        contentUrl: body.contentUrl,
+        remark: body.remark,
+        owner: body.owner,
+        publishForm: body.publishForm,
+        publishType: body.publishType,
+        accountRule: body.accountRule,
+      });
+      if (placement.ok) {
+        const completed = completePublishOrder(deps, body.sn, placement.data.partnerSn);
+        recordProviderUsage(deps, account.id, {
+          provider: 'distribution',
+          route: `distribution.${kind}_order`,
+        });
+        return c.json(
+          { order: publishOrderProjection(completed), created: begin.phase === 'created' },
+          begin.phase === 'created' ? 201 : 200,
+        );
+      }
+
+      // 下单失败：先对账查单——响应丢失但上游实际已受理的订单不得释放冻结
+      // 也不得重复提交；确认上游无此单才释放（placement=failed，可重试）。
+      const reconcile = await upstream.queryOrders(kind, [body.sn]);
+      if (!reconcile.ok) return await errorResponse(c, reconcile.response, distributionSecrets());
+      const found = reconcile.data.find(snapshot => snapshot.sn === body.sn);
+      if (found) {
+        completePublishOrder(deps, body.sn, null);
+        const applied = applyPublishOrderStatus(deps, {
+          sn: found.sn,
+          status: found.status,
+          url: found.url,
+          publishedAt: found.publishedAt,
+        });
+        recordProviderUsage(deps, account.id, {
+          provider: 'distribution',
+          route: `distribution.${kind}_order`,
+        });
+        const projection = applied ? publishOrderProjection(applied) : null;
+        return c.json({ order: projection, created: begin.phase === 'created' }, begin.phase === 'created' ? 201 : 200);
+      }
+      failPublishOrder(deps, body.sn);
+      return await errorResponse(c, placement.response, distributionSecrets());
+    });
+
+    routes.get(`/gw/distribution${kindPath}/order/query`, requireAccount, async c => {
+      const account = c.get('account');
+      const sns = c.req.queries('sn') ?? [];
+      if (sns.length === 0 || sns.length > 20) {
+        throw new AppError('validation_error', 'sn 必须是 1–20 个代理商订单号。', 400);
+      }
+      // 请求的 sn 必须全部归属本账号（防探询他人订单）。
+      for (const sn of sns) ownedOrder(account.id, sn, kind);
+
+      const result = await upstream.queryOrders(kind, sns);
+      if (!result.ok) return await errorResponse(c, result.response, distributionSecrets());
+      // 查单即对账：返回的订单状态直接驱动状态机（结转/退点/保持冻结）。
+      for (const snapshot of result.data) {
+        applyPublishOrderStatus(deps, {
+          sn: snapshot.sn,
+          status: snapshot.status,
+          url: snapshot.url,
+          publishedAt: snapshot.publishedAt,
+        });
+      }
+      recordProviderUsage(deps, account.id, {
+        provider: 'distribution',
+        route: `distribution.${kind}_order_query`,
+      });
+      // 透传上游 envelope（screenshot 为用户 HTML，仅过客户端展示栈，不入库）。
+      return c.body(result.text, 200, {
+        'content-type': 'application/json',
+      });
+    });
+
+    const orderAction = (
+      action: 'urge' | 'cancel' | 'apply-refund' | 'apply-republish',
+      schema: z.ZodType<{ sn: string; reason?: string }>,
+      extraGuard?: (c: GatewayContext) => void,
+    ) => {
+      return async (c: GatewayContext) => {
+        const account = c.get('account');
+        extraGuard?.(c);
+        const body = await parseJsonBody(c, schema);
+        ownedOrder(account.id, body.sn, kind);
+        const result = await upstream.orderAction(
+          kind,
+          action,
+          body.reason === undefined ? { sn: body.sn } : { sn: body.sn, reason: body.reason },
+        );
+        if (!result.ok) return await errorResponse(c, result.response, distributionSecrets());
+        recordProviderUsage(deps, account.id, {
+          provider: 'distribution',
+          route: `distribution.${kind}_order_${action.replace(/-/g, '_')}`,
+        });
+        return c.body(result.text, 200, { 'content-type': 'application/json' });
+      };
+    };
+
+    routes.post(`/gw/distribution${kindPath}/order/urge`, requireAccount, orderAction('urge', snOnlySchema));
+    routes.post(
+      `/gw/distribution${kindPath}/order/cancel`,
+      requireAccount,
+      orderAction('cancel', snWithReasonSchema),
+    );
+    routes.post(
+      `/gw/distribution${kindPath}/order/apply-refund`,
+      requireAccount,
+      orderAction('apply-refund', snWithReasonSchema),
+    );
+    // 申请补发仅新闻媒体订单支持（上游附录：补发为新闻媒体独有）。
+    routes.post(
+      `/gw/distribution${kindPath}/order/apply-republish`,
+      requireAccount,
+      orderAction('apply-republish', snOnlySchema, c => {
+        if (kind !== 'media') {
+          throw new AppError('action_not_supported', '申请补发仅支持新闻媒体订单。', 400);
+        }
+      }),
+    );
+  };
+  distributionOrderRoutes('media');
+  distributionOrderRoutes('we-media');
 
   return routes;
 }

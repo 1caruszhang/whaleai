@@ -195,6 +195,25 @@ function provider(): GeoDistributionCapability {
               },
             ],
     })),
+    // 订单面（票 08）在分发计划发现测试中不触达。
+    placeOrder: vi.fn(async () => {
+      throw new Error("not used");
+    }),
+    queryOrders: vi.fn(async () => {
+      throw new Error("not used");
+    }),
+    urgeOrder: vi.fn(async () => {
+      throw new Error("not used");
+    }),
+    cancelOrder: vi.fn(async () => {
+      throw new Error("not used");
+    }),
+    applyRefund: vi.fn(async () => {
+      throw new Error("not used");
+    }),
+    applyRepublish: vi.fn(async () => {
+      throw new Error("not used");
+    }),
   };
 }
 
@@ -306,6 +325,24 @@ describe("DistributionPlanningService", () => {
       slot: "distribution",
       listResources: vi.fn(async () => {
         throw new Error("distribution 能力尚未配置");
+      }),
+      placeOrder: vi.fn(async () => {
+        throw new Error("not used");
+      }),
+      queryOrders: vi.fn(async () => {
+        throw new Error("not used");
+      }),
+      urgeOrder: vi.fn(async () => {
+        throw new Error("not used");
+      }),
+      cancelOrder: vi.fn(async () => {
+        throw new Error("not used");
+      }),
+      applyRefund: vi.fn(async () => {
+        throw new Error("not used");
+      }),
+      applyRepublish: vi.fn(async () => {
+        throw new Error("not used");
       }),
     };
     const service = new DistributionPlanningService(

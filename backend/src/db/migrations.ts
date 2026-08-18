@@ -151,6 +151,60 @@ export const MIGRATIONS: readonly Migration[] = [
       CREATE INDEX idx_provider_usage_records_account ON provider_usage_records(account_id, created_at);
     `,
   },
+  {
+    // 票 08：发布订单状态机 + 渠道资源快照缓存。publish_orders 是订单
+    // 预扣/结转/退点的权威行：sn = 客户端生成的代理商订单号（幂等键，
+    // 与上游同键，≤64）；placement_status 跟踪下单三态（pending/
+    // placed/failed，failed 已释放冻结可安全重试）；ledger_status 三态
+    // （frozen/settled/refunded）驱动账本——frozen 计入账号冻结口径
+    // （total = available + frozen 不变量同时覆盖 permit 与订单两条
+    // 冻结通道），settled 落 consume 流水，refunded 原路回补（frozen
+    // 释放不动流水、settled 后退款落 refund 正流水）。closed_observed_at
+    // 为「已关闭(9)」观察标记（资金语义上线后核实，期间维持冻结）。
+    // media_price_cents 存下单时的上游权威媒介价（分），points =
+    // ceil(分 × 4 / 25)（媒介费×1.6 含 60% 服务费 × 1元=10点锚点，
+    // 向上取整）。distribution_resource_cache 为下单定价的渠道快照
+    // 缓存（价格权威在服务器：下单读缓存、miss 回源 resource/query，
+    // 资源变更回调刷新）。
+    name: '0006_publish_orders',
+    sql: `
+      CREATE TABLE publish_orders (
+        sn TEXT PRIMARY KEY,
+        account_id TEXT NOT NULL REFERENCES accounts(id),
+        kind TEXT NOT NULL,
+        resource_id INTEGER NOT NULL,
+        title TEXT NOT NULL,
+        content_url TEXT NOT NULL,
+        remark TEXT NOT NULL DEFAULT '',
+        owner TEXT NOT NULL DEFAULT '',
+        publish_form INTEGER,
+        publish_type INTEGER,
+        account_rule INTEGER,
+        media_price_cents INTEGER NOT NULL,
+        points INTEGER NOT NULL,
+        placement_status TEXT NOT NULL,
+        ledger_status TEXT NOT NULL,
+        partner_sn TEXT,
+        upstream_status INTEGER,
+        url TEXT,
+        published_at TEXT,
+        closed_observed_at TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE INDEX idx_publish_orders_account ON publish_orders(account_id, created_at);
+
+      CREATE TABLE distribution_resource_cache (
+        kind TEXT NOT NULL,
+        resource_id INTEGER NOT NULL,
+        name TEXT NOT NULL DEFAULT '',
+        price_cents INTEGER NOT NULL,
+        status INTEGER,
+        fetched_at TEXT NOT NULL,
+        PRIMARY KEY (kind, resource_id)
+      );
+    `,
+  },
 ];
 
 /** 建表只经本 runner：幂等、每条迁移独立事务、记录进 schema_migrations。 */

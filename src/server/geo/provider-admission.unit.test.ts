@@ -45,7 +45,16 @@ function baseCapabilities(
       embed: unavailable,
     },
     objectStorage: { slot: "object-storage", putHtml: unavailable },
-    distribution: { slot: "distribution", listResources: unavailable },
+    distribution: {
+      slot: "distribution",
+      listResources: unavailable,
+      placeOrder: unavailable,
+      queryOrders: unavailable,
+      urgeOrder: unavailable,
+      cancelOrder: unavailable,
+      applyRefund: unavailable,
+      applyRepublish: unavailable,
+    },
     ...overrides,
   };
 }
