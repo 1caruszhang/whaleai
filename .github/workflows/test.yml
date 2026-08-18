@@ -8,6 +8,11 @@ on:
 permissions:
   contents: read
 
+# Cancel superseded runs on the same ref to save CI minutes.
+concurrency:
+  group: test-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   javascript:
     runs-on: ubuntu-latest
@@ -25,10 +30,18 @@ jobs:
       - run: npm run lint
       - run: npm test
       - run: npm run build:server
+      # The production Vite build peaks past Node's ~2GB default heap during
+      # chunk rendering; keep the heap raised or this gate OOMs (see ab05f80,
+      # dropped once by the dfed6ad workflow rewrite).
       - run: npm run build:web
+        env:
+          NODE_OPTIONS: --max-old-space-size=4096
 
   rust:
     strategy:
+      # Keep the sibling OS running so cargo test/clippy results stay visible
+      # when one side fails an early gate (e.g. fmt).
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
