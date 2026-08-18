@@ -1,6 +1,7 @@
 import {
   Archive,
   ChevronDown,
+  Coins,
   Gauge,
   LayoutDashboard,
   Loader2,
@@ -9,8 +10,8 @@ import {
   MoreHorizontal,
   Pencil,
   Plus,
-  Settings,
   Trash2,
+  UserRound,
   X,
 } from 'lucide-react';
 import { memo, useCallback, useState } from 'react';
@@ -23,9 +24,12 @@ import type {
   BrandWorkspace,
   BrandWorkspaceDeletionPreview,
 } from '@/api/brandWorkspaceClient';
+import { maskPhone } from '@/utils/accountFormat';
 import type { SessionDeleteResult } from '@/api/tauriClient';
+import AccountPanelDialog from '@/components/account/AccountPanelDialog';
 import OverlayBackdrop from '@/components/OverlayBackdrop';
 import { useToastOptional } from '@/components/Toast';
+import { useAccountState } from '@/context/AccountContext';
 import { useCloseLayer } from '@/hooks/useCloseLayer';
 import xiaojingLogo from '@/assets/brand/xiaojing-logo.png';
 import type { BrandWorkspaceState } from '@/hooks/useBrandWorkspaces';
@@ -59,7 +63,6 @@ interface XiaojingSidebarProps {
   onRenameSession: (session: BrandSession, workspace: BrandWorkspace, title: string) => Promise<void>;
   onDeleteSession: (preview: BrandSessionDeletionPreview) => Promise<SessionDeleteResult>;
   onDeleteBrand: (preview: BrandWorkspaceDeletionPreview) => Promise<SessionDeleteResult>;
-  onOpenSettings: () => void;
   onOpenBrandArchive: () => void;
   onOpenBrandEffect: () => void;
 }
@@ -72,11 +75,12 @@ export default memo(function XiaojingSidebar({
   onRenameSession,
   onDeleteSession,
   onDeleteBrand,
-  onOpenSettings,
   onOpenBrandArchive,
   onOpenBrandEffect,
 }: XiaojingSidebarProps) {
   const { t, i18n } = useTranslation('common');
+  const account = useAccountState();
+  const [accountPanelOpen, setAccountPanelOpen] = useState(false);
   const resolvedTheme = useResolvedTheme();
   const themeLocale = i18n.resolvedLanguage === 'en-US' ? 'en-US' : 'zh-CN';
   const toast = useToastOptional();
@@ -319,12 +323,22 @@ export default memo(function XiaojingSidebar({
                 })}
         </div>
       </section>
+      {/* 票 06：左下角设置位改为「个人信息」入口——手机号/点数余额的只读
+          投影 + 充值引导 + 退出登录。 */}
       <div className="border-t border-[var(--line-subtle)] px-3 py-2">
-        <button type="button" onClick={onOpenSettings} className="flex w-full items-center gap-2 rounded-lg px-2 py-2 text-xs tracking-wide text-[var(--ink-subtle)] hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]">
-          <Settings className="h-3.5 w-3.5" />
-          <span className="flex-1 text-left">{t('xiaojingSidebar.footer')}</span>
+        <button type="button" onClick={() => setAccountPanelOpen(true)} aria-label={t('account.personalInfo')} className="flex w-full items-center gap-2 rounded-lg px-2 py-2 text-xs tracking-wide text-[var(--ink-subtle)] hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]">
+          <UserRound className="h-3.5 w-3.5 shrink-0" />
+          <span className="min-w-0 flex-1 truncate text-left">{maskPhone(account.phone)}</span>
+          {account.points !== null && (
+            <span className="flex shrink-0 items-center gap-1 rounded-full bg-[var(--accent-warm-subtle)] px-1.5 py-0.5 text-xs font-semibold tabular-nums text-[var(--accent)]">
+              <Coins className="h-3 w-3" />
+              {account.points}
+            </span>
+          )}
         </button>
       </div>
+
+      {accountPanelOpen && <AccountPanelDialog onClose={() => setAccountPanelOpen(false)} />}
 
       {createOpen && createPortal(
         <OverlayBackdrop onClose={closeCreateDialog} className="z-[200] p-4">

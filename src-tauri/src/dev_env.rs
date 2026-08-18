@@ -15,7 +15,8 @@ const REPO_DEV_ENV_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../.env");
 fn development_env_whitelist() -> Vec<&'static str> {
     let mut names: Vec<&'static str> =
         crate::geo_provider_credentials::DEVELOPMENT_SOURCE_ENV_NAMES.to_vec();
-    names.push(crate::deepseek_credentials::DEVELOPMENT_SECRET_ENV);
+    // 票 06：账号 admission 的网关地址开发覆盖（本地后端联调）。
+    names.push(crate::account_auth::DEVELOPMENT_GATEWAY_BASE_URL_ENV);
     names
 }
 
@@ -150,7 +151,7 @@ mod tests {
             "CHAOJIMEIJIE_APPID",
             "CHAOJIMEIJIE_SECRET",
             "CHAOJIMEIJIE_API_BASE_URL",
-            "DEEPSEEK_API_KEY",
+            "GATEWAY_BASE_URL",
         ];
         for name in expected {
             assert!(is_allowed_dev_env_key(name), "{name} 应在白名单内");
@@ -160,6 +161,7 @@ mod tests {
             "DEEPSEEK_MODEL",
             "ARK_BASE_URL",
             "DOUBAO_API_KEY",
+            "DEEPSEEK_API_KEY",
         ] {
             assert!(!is_allowed_dev_env_key(name), "{name} 不应进入白名单");
         }

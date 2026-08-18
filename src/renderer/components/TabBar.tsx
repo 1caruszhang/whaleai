@@ -295,9 +295,7 @@ export default memo(function TabBar({
                                       : tab.title);
                                 const subtitle = tab.workspacePath
                                     ? getFolderName(tab.workspacePath)
-                                    : tab.view === 'settings'
-                                      ? t('tabs.settings')
-                                      : t('tabs.welcome');
+                                    : t('tabs.welcome');
                                 const isActive = tab.id === activeTabId;
                                 return (
                                     <button

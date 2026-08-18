@@ -76,6 +76,9 @@ nix = { version = "0.29", default-features = false, features = ["signal"] }
 # U+F74F from the DOM value when the leak happens.
 # See tauri-apps/tauri#5685, tauri-apps/wry#769, tauri-apps/tauri#10194.
 [target.'cfg(target_os = "macos")'.dependencies]
+# Account login tokens live in the macOS Keychain (票 06 account owner).
+# Version 3.7 is already locked transitively via reqwest native-tls.
+security-framework = "3.7"
 objc2 = "0.6"
 objc2-foundation = { version = "0.3.2", features = ["NSString"] }
 objc2-web-kit = { version = "0.3.2", features = ["WKWebView", "block2"] }

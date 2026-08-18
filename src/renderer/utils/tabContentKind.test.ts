@@ -14,7 +14,6 @@ const tab = (view: Tab['view']): Tab => ({
 describe('focused tab content', () => {
   it('dispatches the complete product route table', () => {
     expect(tabContentKind(tab('welcome'), false)).toBe('welcome');
-    expect(tabContentKind(tab('settings'), false)).toBe('settings');
     expect(tabContentKind(tab('brand-archive'), false)).toBe('brand-archive');
     expect(tabContentKind(tab('brand-effect'), false)).toBe('brand-effect');
     expect(tabContentKind(tab('chat'), false)).toBe('chat');

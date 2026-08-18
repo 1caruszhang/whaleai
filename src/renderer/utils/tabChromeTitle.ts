@@ -7,8 +7,6 @@ export function getFixedTabChromeTitle(
   t: Translate,
 ): string | undefined {
   switch (view) {
-    case 'settings':
-      return t('tabs.settings');
     case 'welcome':
       return t('tabs.welcome');
     case 'brand-archive':

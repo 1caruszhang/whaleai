@@ -191,11 +191,11 @@ describe('TabBar', () => {
     });
 
     it('does not prefix fixed product tabs with workspace context', () => {
-        const settingsTab = { ...makeTab('tab-1', 'Ignored session title'), view: 'settings' as const };
-        renderTabBar({ tabs: [settingsTab] });
+        const archiveTab = { ...makeTab('tab-1', 'Ignored session title'), view: 'brand-archive' as const };
+        renderTabBar({ tabs: [archiveTab] });
 
         const tab = document.querySelector('[data-tab-id="tab-1"]') as HTMLElement;
-        expect(within(tab).getByText('设置')).toBeTruthy();
+        expect(within(tab).getByText('品牌档案')).toBeTruthy();
         expect(within(tab).queryByText('demo')).toBeNull();
         expect(tab.querySelector('[data-tab-title-divider]')).toBeNull();
     });
