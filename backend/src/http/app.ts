@@ -2,7 +2,9 @@ import { Hono } from 'hono';
 import type { ContentfulStatusCode } from 'hono/utils/http-status';
 import type { BackendDeps } from '../deps';
 import type { AccountRow } from '../domain/types';
+import { AdminLoginThrottle } from '../auth/admin-login-throttle';
 import { AppError } from '../errors';
+import { createAdminPageRoutes } from './admin-pages';
 import { createAdminRoutes } from './admin-routes';
 import { createAuthRoutes } from './auth-routes';
 import { createBillingRoutes } from './billing-routes';
@@ -37,9 +39,15 @@ export function createBackendApp(deps: BackendDeps): Hono<BackendEnv> {
 
   app.get('/healthz', c => c.json({ ok: true }));
 
+  // 运营密码登录节流（票 10）：JSON 登录与 SSR 登录共享同一进程内实例。
+  const adminThrottle = new AdminLoginThrottle(
+    deps.config.adminLoginThrottleUnitMs,
+    deps.config.adminLoginThrottleUnitMs * 20,
+  );
   app.route('/', createAuthRoutes(deps));
   app.route('/', createBillingRoutes(deps));
-  app.route('/', createAdminRoutes(deps));
+  app.route('/', createAdminRoutes(deps, adminThrottle));
+  app.route('/', createAdminPageRoutes(deps, adminThrottle));
   app.route('/', createGatewayRoutes(deps));
   app.route('/', createProviderProxyRoutes(deps));
   app.route('/', createDistributionCallbackRoutes(deps));

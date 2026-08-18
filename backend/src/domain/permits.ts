@@ -311,3 +311,20 @@ export function listOpenPermits(deps: BackendDeps, accountId: string): PermitPro
     )
     .map(permit => permitProjection(deps.db, permit));
 }
+
+/**
+ * 运营对账视图（票 10）：账号全部计费操作（open + settled，含 consume 扣点
+ * 口径），最新在前。created_at 同毫秒并列时以 id 打破平序（仅展示用途）。
+ */
+export function listPermitHistory(
+  deps: BackendDeps,
+  accountId: string,
+  limit: number,
+): PermitProjection[] {
+  return deps.db
+    .all<BillingPermitRow>(
+      'SELECT * FROM billing_permits WHERE account_id = ? ORDER BY created_at DESC, id DESC LIMIT ?',
+      [accountId, limit],
+    )
+    .map(permit => permitProjection(deps.db, permit));
+}

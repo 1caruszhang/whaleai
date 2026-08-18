@@ -1,4 +1,4 @@
-import { randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
+import { createHash, randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
 
 /**
  * 密码哈希用 Node 内置 scrypt（无原生编译依赖，Docker 镜像可保持精简）。
@@ -36,4 +36,14 @@ export function verifyPassword(password: string, stored: string): boolean {
   } catch {
     return false;
   }
+}
+
+/**
+ * 常数时间字符串相等比较（运营密码等明文凭证对照）：先哈希定长再
+ * timingSafeEqual，避免逐字节短路比较泄露前缀长度。
+ */
+export function timingSafeStringEqual(actual: string, expected: string): boolean {
+  const actualHash = createHash('sha256').update(actual).digest();
+  const expectedHash = createHash('sha256').update(expected).digest();
+  return timingSafeEqual(actualHash, expectedHash);
 }
