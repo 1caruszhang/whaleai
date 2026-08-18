@@ -6,20 +6,28 @@ import { AppError } from '../errors';
 
 export type LedgerKind = 'grant' | 'topup' | 'adjust' | 'consume';
 
-export function insertLedgerEntry(
+/**
+ * 账本唯一入账通道：改 balance 与写流水成对出现在同一事务。两条对外的
+ * 入账路径都收口到这里——applyAccountLedgerDelta（充值/调点，走可用余额）
+ * 与 settleFrozenPoints（permit 成功单位结转，动用冻结）。
+ */
+function applyBalanceChange(
   db: SqlClient,
-  input: { id: string; accountId: string; delta: number; balanceAfter: number; kind: LedgerKind; note: string; createdAt: string },
-): void {
+  account: AccountRow,
+  delta: number,
+  kind: LedgerKind,
+  note: string,
+  nowIso: string,
+): AccountRow {
+  const balanceAfter = account.balance + delta;
+  db.run('UPDATE accounts SET balance = ?, updated_at = ? WHERE id = ?', [balanceAfter, nowIso, account.id]);
   db.run(
     'INSERT INTO ledger_entries (id, account_id, delta, balance_after, kind, note, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
-    [input.id, input.accountId, input.delta, input.balanceAfter, input.kind, input.note, input.createdAt],
+    [randomUUID(), account.id, delta, balanceAfter, kind, note, nowIso],
   );
-}
-
-function loadAccount(db: SqlClient, accountId: string): AccountRow {
-  const account = db.get<AccountRow>('SELECT * FROM accounts WHERE id = ?', [accountId]);
-  if (!account) throw new AppError('account_not_found', '账号不存在。', 404);
-  return account;
+  const updated = db.get<AccountRow>('SELECT * FROM accounts WHERE id = ?', [account.id]);
+  if (!updated) throw new AppError('internal_error', '入账后读不到账号行。', 500);
+  return updated;
 }
 
 /** 账号当前被 open permit 冻结的点数总和。 */
@@ -41,39 +49,38 @@ export function balanceSnapshot(db: SqlClient, account: AccountRow) {
 }
 
 /**
- * 账本唯一入账通道：改 balance 与写流水必须成对出现在同一事务。负向变动
- * 只能动用未冻结余额（available），冻结中的点数只归 permit 结转/回补管。
+ * 充值/调点/赠送入账：正负皆可，但负向只能动用未冻结余额（冻结中的点数只
+ * 归 permit 结转/回补管）。note 落流水（调点必须带备注，由路由层 schema 强制）。
  */
 export function applyAccountLedgerDelta(
   deps: BackendDeps,
   accountId: string,
   delta: number,
-  kind: LedgerKind,
+  kind: 'grant' | 'topup' | 'adjust',
   note: string,
 ): AccountRow {
   const nowIso = new Date(deps.now()).toISOString();
   return deps.db.transaction(() => {
-    const account = loadAccount(deps.db, accountId);
-    if (delta < 0) {
-      const snapshot = balanceSnapshot(deps.db, account);
-      if (snapshot.available + delta < 0) {
-        throw new AppError('insufficient_balance', '可用点数不足，不能动用冻结中的点数。', 409);
-      }
+    const account = deps.db.get<AccountRow>('SELECT * FROM accounts WHERE id = ?', [accountId]);
+    if (!account) throw new AppError('account_not_found', '账号不存在。', 404);
+    if (delta < 0 && balanceSnapshot(deps.db, account).available + delta < 0) {
+      throw new AppError('insufficient_balance', '可用点数不足，不能动用冻结中的点数。', 409);
     }
-    const balanceAfter = account.balance + delta;
-    deps.db.run('UPDATE accounts SET balance = ?, updated_at = ? WHERE id = ?', [balanceAfter, nowIso, accountId]);
-    insertLedgerEntry(deps.db, {
-      id: randomUUID(),
-      accountId,
-      delta,
-      balanceAfter,
-      kind,
-      note,
-      createdAt: nowIso,
-    });
-    const updated = loadAccount(deps.db, accountId);
-    return updated;
+    return applyBalanceChange(deps.db, account, delta, kind, note, nowIso);
   });
+}
+
+/** permit 成功单位结转：点数已在冻结中，直接从账面划走并落 consume 流水。 */
+export function settleFrozenPoints(
+  deps: BackendDeps,
+  accountId: string,
+  charge: number,
+  note: string,
+): void {
+  const nowIso = new Date(deps.now()).toISOString();
+  const account = deps.db.get<AccountRow>('SELECT * FROM accounts WHERE id = ?', [accountId]);
+  if (!account) throw new AppError('account_not_found', '账号不存在。', 404);
+  applyBalanceChange(deps.db, account, -charge, 'consume', note, nowIso);
 }
 
 export function listLedgerEntries(

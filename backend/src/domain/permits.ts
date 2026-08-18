@@ -1,15 +1,10 @@
-import { randomUUID } from 'node:crypto';
 import type { BackendDeps } from '../deps';
 import type { SqlClient } from '../db/client';
 import { AppError } from '../errors';
-import { insertLedgerEntry } from './ledger';
-import {
-  isBillingOperation,
-  OPERATION_PRICES,
-  permitTotalPoints,
-  type BillingOperation,
-} from './pricing';
-import type { AccountRow, BillingPermitRow, PermitStatus, UnitOutcome } from './types';
+import { findAccountById } from './accounts';
+import { frozenPointsFor, settleFrozenPoints } from './ledger';
+import { isBillingOperation, OPERATION_PRICES } from './pricing';
+import type { BillingPermitRow, PermitStatus, UnitOutcome } from './types';
 
 export interface PermitApplyInput {
   permitId: string;
@@ -21,7 +16,7 @@ export interface PermitApplyInput {
 
 export interface PermitProjection {
   permitId: string;
-  operation: BillingOperation | string;
+  operation: string;
   units: number;
   unitPrice: number;
   basePrice: number;
@@ -38,6 +33,16 @@ export interface PermitProjection {
   settledAt: string | null;
 }
 
+export interface PermitApplyResult {
+  permit: PermitProjection;
+  /** false = 幂等重放（permitId 已存在且参数一致），未产生新预扣。 */
+  created: boolean;
+}
+
+function permitNotFound(): AppError {
+  return new AppError('permit_not_found', 'permit 不存在。', 404);
+}
+
 function loadPermit(db: SqlClient, permitId: string): BillingPermitRow | undefined {
   return db.get<BillingPermitRow>('SELECT * FROM billing_permits WHERE id = ?', [permitId]);
 }
@@ -45,10 +50,16 @@ function loadPermit(db: SqlClient, permitId: string): BillingPermitRow | undefin
 /** 跨账号访问 permit 一律 404，不泄露 permitId 是否存在于他人账号。 */
 function requireOwnedPermit(db: SqlClient, accountId: string, permitId: string): BillingPermitRow {
   const permit = loadPermit(db, permitId);
-  if (!permit || permit.account_id !== accountId) {
-    throw new AppError('permit_not_found', 'permit 不存在。', 404);
-  }
+  if (!permit || permit.account_id !== accountId) throw permitNotFound();
   return permit;
+}
+
+/** 结清：状态置 settled 并清零剩余冻结（未回报单位与未结转基础费全部回补）。 */
+function markPermitSettled(db: SqlClient, permitId: string, nowIso: string): void {
+  db.run(
+    "UPDATE billing_permits SET status = 'settled', settled_at = ?, frozen_remaining = 0 WHERE id = ?",
+    [nowIso, permitId],
+  );
 }
 
 function openPermitCount(db: SqlClient, accountId: string): number {
@@ -79,20 +90,20 @@ export function permitProjection(
 ): PermitProjection {
   const { succeeded, failed } = reportCounts(db, permit.id);
   const reported = succeeded + failed;
+  const totalPoints = permit.base_price + permit.unit_price * permit.units;
   // 结转口径：每个成功单位扣 unitPrice，基础费绑定首个成功单位（整体
-  // 全失败则随回补退回）；已结清 permit 的未回报单位按失败回补。
+  // 全失败则随回补退回，即「整体失败退全款」）；已结清 permit 的未回报
+  // 单位按失败回补。三口径恒等式：consumed + refunded + frozen == total。
   const consumedPoints =
     (succeeded > 0 ? permit.base_price : 0) + permit.unit_price * succeeded;
-  const refundedPoints =
-    permit.unit_price * failed +
-    (permit.status === 'settled' ? permit.unit_price * (permit.units - reported) : 0);
+  const refundedPoints = totalPoints - consumedPoints - permit.frozen_remaining;
   return {
     permitId: permit.id,
     operation: permit.operation,
     units: permit.units,
     unitPrice: permit.unit_price,
     basePrice: permit.base_price,
-    totalPoints: permit.base_price + permit.unit_price * permit.units,
+    totalPoints,
     status: permit.status,
     frozenPoints: permit.frozen_remaining,
     consumedPoints,
@@ -103,12 +114,6 @@ export function permitProjection(
     createdAt: permit.created_at,
     settledAt: permit.settled_at,
   };
-}
-
-export interface PermitApplyResult {
-  permit: PermitProjection;
-  /** false = 幂等重放（permitId 已存在且参数一致），未产生新预扣。 */
-  created: boolean;
 }
 
 /**
@@ -124,9 +129,7 @@ export function applyForPermit(
   return deps.db.transaction(() => {
     const existing = loadPermit(deps.db, input.permitId);
     if (existing) {
-      if (existing.account_id !== accountId) {
-        throw new AppError('permit_not_found', 'permit 不存在。', 404);
-      }
+      if (existing.account_id !== accountId) throw permitNotFound();
       const sameParams =
         existing.operation === input.operation &&
         existing.units === input.units &&
@@ -153,13 +156,6 @@ export function applyForPermit(
         400,
       );
     }
-    if (input.units < 1 || input.units > price.maxUnits) {
-      throw new AppError(
-        'invalid_units',
-        `units 超出范围：${input.operation} 允许 1–${price.maxUnits}。`,
-        400,
-      );
-    }
 
     const active = openPermitCount(deps.db, accountId);
     const limit = deps.config.maxConcurrentPermitsPerAccount;
@@ -172,21 +168,16 @@ export function applyForPermit(
       );
     }
 
-    const required = permitTotalPoints(price, input.units);
-    const account = deps.db.get<AccountRow>('SELECT * FROM accounts WHERE id = ?', [accountId]);
+    const required = price.base + price.perUnit * input.units;
+    const account = findAccountById(deps.db, accountId);
     if (!account) throw new AppError('account_not_found', '账号不存在。', 404);
-    const frozenRow = deps.db.get<{ frozen: number }>(
-      "SELECT COALESCE(SUM(frozen_remaining), 0) AS frozen FROM billing_permits WHERE account_id = ? AND status = 'open'",
-      [accountId],
-    );
-    const frozen = frozenRow?.frozen ?? 0;
-    const available = account.balance - frozen;
+    const available = account.balance - frozenPointsFor(deps.db, accountId);
     if (available < required) {
       throw new AppError(
         'insufficient_balance',
         `点数不足：本次需 ${required} 点，当前可用 ${available} 点，请充值后再试。`,
         402,
-        { required, available, frozen, total: account.balance },
+        { required, available, frozen: account.balance - available, total: account.balance },
       );
     }
 
@@ -242,22 +233,7 @@ export function reportPermitUnit(
     if (outcome === 'success') {
       const { succeeded } = reportCounts(deps.db, permitId);
       const charge = permit.unit_price + (succeeded === 0 ? permit.base_price : 0);
-      const account = deps.db.get<AccountRow>('SELECT * FROM accounts WHERE id = ?', [accountId]);
-      if (!account) throw new AppError('account_not_found', '账号不存在。', 404);
-      deps.db.run('UPDATE accounts SET balance = ?, updated_at = ? WHERE id = ?', [
-        account.balance - charge,
-        nowIso,
-        accountId,
-      ]);
-      insertLedgerEntry(deps.db, {
-        id: randomUUID(),
-        accountId,
-        delta: -charge,
-        balanceAfter: account.balance - charge,
-        kind: 'consume',
-        note: `${permit.operation} unit ${unit}`,
-        createdAt: nowIso,
-      });
+      settleFrozenPoints(deps, accountId, charge, `${permit.operation} unit ${unit}`);
       deps.db.run('UPDATE billing_permits SET frozen_remaining = frozen_remaining - ? WHERE id = ?', [
         charge,
         permitId,
@@ -278,12 +254,7 @@ export function reportPermitUnit(
       'SELECT COUNT(*) AS count FROM permit_unit_reports WHERE permit_id = ?',
       [permitId],
     )?.count ?? 0;
-    if (reported >= permit.units) {
-      deps.db.run("UPDATE billing_permits SET status = 'settled', settled_at = ?, frozen_remaining = 0 WHERE id = ?", [
-        nowIso,
-        permitId,
-      ]);
-    }
+    if (reported >= permit.units) markPermitSettled(deps.db, permitId, nowIso);
 
     const updated = loadPermit(deps.db, permitId);
     if (!updated) throw new AppError('internal_error', '回报后读取 permit 失败。', 500);
@@ -292,9 +263,9 @@ export function reportPermitUnit(
 }
 
 /**
- * 结清 permit（操作中止/收尾）：全部未回报单位视为失败，剩余冻结点数立即
- * 回补。已结清的 permit 重放 close 幂等。余额不受影响（结转已在逐单位回报
- * 时完成）。
+ * 结清 permit（操作中止/收尾）：全部未回报单位视为失败，剩余冻结点数（含
+ * 未结转基础费）立即回补。已结清的 permit 重放 close 幂等。余额不受影响
+ * （结转已在逐单位回报时完成）。
  */
 export function closePermit(
   deps: BackendDeps,
@@ -304,12 +275,7 @@ export function closePermit(
   const nowIso = new Date(deps.now()).toISOString();
   return deps.db.transaction(() => {
     const permit = requireOwnedPermit(deps.db, accountId, permitId);
-    if (permit.status === 'open') {
-      deps.db.run("UPDATE billing_permits SET status = 'settled', settled_at = ?, frozen_remaining = 0 WHERE id = ?", [
-        nowIso,
-        permitId,
-      ]);
-    }
+    if (permit.status === 'open') markPermitSettled(deps.db, permitId, nowIso);
     const updated = loadPermit(deps.db, permitId);
     if (!updated) throw new AppError('internal_error', '结清后读取 permit 失败。', 500);
     return permitProjection(deps.db, updated);
@@ -325,7 +291,12 @@ export function getPermit(
   return permitProjection(deps.db, permit);
 }
 
-/** 并发准入口径：账号当前 open permit 数与上限。 */
-export function permitAdmission(db: SqlClient, accountId: string, limit: number) {
-  return { active: openPermitCount(db, accountId), limit };
+/** 账号当前 open 的 permit（余额端点的冻结明细）。 */
+export function listOpenPermits(deps: BackendDeps, accountId: string): PermitProjection[] {
+  return deps.db
+    .all<BillingPermitRow>(
+      "SELECT * FROM billing_permits WHERE account_id = ? AND status = 'open' ORDER BY created_at",
+      [accountId],
+    )
+    .map(permit => permitProjection(deps.db, permit));
 }

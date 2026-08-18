@@ -5,7 +5,7 @@ import type { AccountRow } from './types';
 import { AppError } from '../errors';
 import { hashPassword, verifyPassword } from '../auth/passwords';
 import { revokeAccountSessions, startSession, type StartedSession } from '../auth/sessions';
-import { insertLedgerEntry } from './ledger';
+import { applyAccountLedgerDelta } from './ledger';
 
 // 登录时手机号不存在的分支也做一次等代价 scrypt 校验，避免通过响应耗时枚举已注册手机号。
 let timingEqualizerHash: string | undefined;
@@ -36,7 +36,7 @@ export function accountProjection(account: AccountRow) {
 
 /**
  * 运营建号：账号（首登必须改密）与开通赠送（默认 500 点）在同一事务落账，
- * 赠点有流水可查。余额变动只允许走「改 balance + 写流水」成对出现的路径。
+ * 赠点经账本入账通道产生 grant 流水。余额变动只走 ledger 模块的成对路径。
  */
 export function createAccountWithGrant(
   deps: BackendDeps,
@@ -49,18 +49,10 @@ export function createAccountWithGrant(
     deps.db.transaction(() => {
       deps.db.run(
         `INSERT INTO accounts (id, phone, password_hash, password_version, status, must_change_password, balance, created_at, updated_at)
-         VALUES (?, ?, ?, 1, 'active', 1, ?, ?, ?)`,
-        [accountId, input.phone, hashPassword(input.password), grant, nowIso, nowIso],
+         VALUES (?, ?, ?, 1, 'active', 1, 0, ?, ?)`,
+        [accountId, input.phone, hashPassword(input.password), nowIso, nowIso],
       );
-      insertLedgerEntry(deps.db, {
-        id: randomUUID(),
-        accountId,
-        delta: grant,
-        balanceAfter: grant,
-        kind: 'grant',
-        note: '开通赠送',
-        createdAt: nowIso,
-      });
+      applyAccountLedgerDelta(deps, accountId, grant, 'grant', '开通赠送');
     });
   } catch (error) {
     if (deps.db.isUniqueViolation(error)) {

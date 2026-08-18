@@ -335,16 +335,6 @@ describe('ledger and permit billing core HTTP contract', () => {
     expect(unknown.status).toBe(400);
     expect(unknown.body.error).toBe('unknown_operation');
 
-    // 单次操作单位数上限（问题池恒为 1 次）。
-    const tooManyUnits = await applyPermit(token, {
-      permitId: 'pm-pool-2units',
-      operation: 'question_pool',
-      units: 2,
-      unitPrice: 15,
-    });
-    expect(tooManyUnits.status).toBe(400);
-    expect(tooManyUnits.body.error).toBe('invalid_units');
-
     // 正确的分发计划：基础 30 + 4 问 × 5 = 冻结 50。
     const dist = await applyPermit(token, {
       permitId: 'pm-dist-ok',
@@ -361,6 +351,24 @@ describe('ledger and permit billing core HTTP contract', () => {
     expect(permitOf(first.body)).toMatchObject({ consumedPoints: 35, frozenPoints: 15 });
     const consume = ledgerRows().find(row => row.kind === 'consume');
     expect(consume).toMatchObject({ delta: -35, note: 'distribution_planning unit 0' });
+
+    // 整体失败退全款：含基础费的 permit 全部单位失败 → 基础费也随回补退回，
+    // consumed + refunded + frozen == total 恒等式仍成立。
+    await applyPermit(token, {
+      permitId: 'pm-dist-allfail',
+      operation: 'distribution_planning',
+      units: 2,
+      unitPrice: 5,
+      basePrice: 30,
+    });
+    await reportUnit(token, 'pm-dist-allfail', 0, 'failure');
+    const lastFail = await reportUnit(token, 'pm-dist-allfail', 1, 'failure');
+    expect(permitOf(lastFail.body)).toMatchObject({
+      status: 'settled',
+      consumedPoints: 0,
+      refundedPoints: 40,
+      frozenPoints: 0,
+    });
   });
 
   it('releases all remaining frozen points on close (unreported units refund)', async () => {

@@ -1,13 +1,12 @@
 import { Hono } from 'hono';
 import { z } from 'zod';
 import type { BackendDeps } from '../deps';
-import type { BillingPermitRow } from '../domain/types';
 import { balanceSnapshot } from '../domain/ledger';
 import {
   applyForPermit,
   closePermit,
   getPermit,
-  permitProjection,
+  listOpenPermits,
   reportPermitUnit,
 } from '../domain/permits';
 import { parseJsonBody } from './request';
@@ -40,13 +39,10 @@ export function createBillingRoutes(deps: BackendDeps) {
 
   routes.get('/billing/balance', requireAccount, c => {
     const account = c.get('account');
-    const openPermits = deps.db
-      .all<BillingPermitRow>(
-        "SELECT * FROM billing_permits WHERE account_id = ? AND status = 'open' ORDER BY created_at",
-        [account.id],
-      )
-      .map(permit => permitProjection(deps.db, permit));
-    return c.json({ balance: balanceSnapshot(deps.db, account), openPermits });
+    return c.json({
+      balance: balanceSnapshot(deps.db, account),
+      openPermits: listOpenPermits(deps, account.id),
+    });
   });
 
   routes.post('/billing/permits', requireAccount, async c => {
