@@ -58,10 +58,11 @@ jobs:
       - name: Prepare checked build resources
         shell: bash
         run: |
-          mkdir -p src-tauri/resources/claude-agent-sdk src-tauri/resources/sharp-runtime src-tauri/resources/nodejs
+          mkdir -p src-tauri/resources/claude-agent-sdk src-tauri/resources/sharp-runtime src-tauri/resources/nodejs src-tauri/resources/portable-git
           touch src-tauri/resources/claude-agent-sdk/.gitkeep
           touch src-tauri/resources/sharp-runtime/.gitkeep
           touch src-tauri/resources/nodejs/.gitkeep
+          touch src-tauri/resources/portable-git/.gitkeep
           npm run build:server
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
       - run: cargo test --manifest-path src-tauri/Cargo.toml
