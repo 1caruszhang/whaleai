@@ -35,7 +35,7 @@
 use serde::Serialize;
 use std::fs::{self, OpenOptions};
 use std::io::{BufWriter, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -251,8 +251,12 @@ fn get_logs_dir() -> PathBuf {
 /// Ensure logs directory exists
 fn ensure_logs_dir() -> std::io::Result<()> {
     let logs_dir = get_logs_dir();
+    ensure_logs_dir_in(&logs_dir)
+}
+
+fn ensure_logs_dir_in(logs_dir: &Path) -> std::io::Result<()> {
     if !logs_dir.exists() {
-        fs::create_dir_all(&logs_dir)?;
+        fs::create_dir_all(logs_dir)?;
     }
     Ok(())
 }
@@ -276,8 +280,12 @@ fn process_log_tag() -> &'static str {
 
 /// Get today's unified log file path
 fn get_log_file_path() -> PathBuf {
+    log_file_path_in(&get_logs_dir())
+}
+
+fn log_file_path_in(logs_dir: &Path) -> PathBuf {
     let today = chrono::Local::now().format("%Y-%m-%d").to_string();
-    get_logs_dir().join(format!("unified-{}-{}.log", today, process_log_tag()))
+    logs_dir.join(format!("unified-{}-{}.log", today, process_log_tag()))
 }
 
 // ── Buffered writer (Pattern 6 §6.3.3) ─────────────────────────────────
@@ -317,94 +325,106 @@ pub fn init_buffered_writer() {
     if WRITER_SENDER.get().is_some() {
         return;
     }
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(WRITER_CHANNEL_CAPACITY);
+    let (tx, rx) = tokio::sync::mpsc::channel::<String>(WRITER_CHANNEL_CAPACITY);
     if WRITER_SENDER.set(tx).is_err() {
         return;
     }
+    let logs_dir = get_logs_dir();
     tauri::async_runtime::spawn(async move {
-        // Open the current day's file. Re-open on day rollover.
-        let mut current_path = get_log_file_path();
-        let mut writer: Option<BufWriter<std::fs::File>> = None;
-        // Bytes already in the active file (seeded from disk on open) — used
-        // to bound the file without a stat per write (GD-1: 有界文件).
-        let mut bytes_written: u64 = 0;
-        let mut interval =
-            tokio::time::interval(std::time::Duration::from_millis(WRITER_FLUSH_INTERVAL_MS));
+        run_writer_loop(rx, logs_dir, PER_FILE_MAX_BYTES).await;
+    });
+}
 
-        loop {
-            tokio::select! {
-                maybe_line = rx.recv() => {
-                    let Some(line) = maybe_line else { break }; // channel closed
-                    let path = get_log_file_path();
-                    if writer.is_none() || path != current_path {
-                        if let Err(e) = ensure_logs_dir() {
-                            log::error!("Failed to create logs directory: {}", e);
-                            continue;
-                        }
-                        current_path = path.clone();
-                        bytes_written = std::fs::metadata(&current_path)
-                            .map(|meta| meta.len())
-                            .unwrap_or(0);
-                        writer = OpenOptions::new()
-                            .create(true)
-                            .append(true)
-                            .open(&current_path)
-                            .ok()
-                            .map(BufWriter::new);
+/// 缓冲写任务主体（GD-5 测试缝）：写入当日 pid+nonce 文件、跨日重开、
+/// 超过单文件上限即 flush+rename 轮转并重开，间隔 flush 与丢弃计数
+/// 逻辑不变。参数化目录与上限以便离线测试，不触碰真实用户目录。
+async fn run_writer_loop(
+    mut rx: tokio::sync::mpsc::Receiver<String>,
+    logs_dir: PathBuf,
+    max_bytes: u64,
+) {
+    // Open the current day's file. Re-open on day rollover.
+    let mut current_path = log_file_path_in(&logs_dir);
+    let mut writer: Option<BufWriter<std::fs::File>> = None;
+    // Bytes already in the active file (seeded from disk on open) — used
+    // to bound the file without a stat per write (GD-1: 有界文件).
+    let mut bytes_written: u64 = 0;
+    let mut interval =
+        tokio::time::interval(std::time::Duration::from_millis(WRITER_FLUSH_INTERVAL_MS));
+
+    loop {
+        tokio::select! {
+            maybe_line = rx.recv() => {
+                let Some(line) = maybe_line else { break }; // channel closed
+                let path = log_file_path_in(&logs_dir);
+                if writer.is_none() || path != current_path {
+                    if let Err(e) = ensure_logs_dir_in(&logs_dir) {
+                        log::error!("Failed to create logs directory: {}", e);
+                        continue;
                     }
-                    if let Some(w) = writer.as_mut() {
-                        if let Err(e) = w.write_all(line.as_bytes()) {
-                            log::error!("Failed to write to log file: {}", e);
-                        } else {
-                            bytes_written += line.len() as u64;
-                        }
-                    }
-                    if bytes_written > PER_FILE_MAX_BYTES {
-                        // Rotate: flush, rename to <name>.<timestamp>.log, reopen.
-                        if let Some(mut w) = writer.take() {
-                            let _ = w.flush();
-                        }
-                        let stamp = chrono::Local::now().format("%Y-%m-%dT%H-%M-%S%.3f");
-                        let rotated = current_path.with_extension(format!("{}.log", stamp));
-                        if let Err(e) = std::fs::rename(&current_path, &rotated) {
-                            log::error!("Failed to rotate unified log: {}", e);
-                        }
-                        writer = OpenOptions::new()
-                            .create(true)
-                            .append(true)
-                            .open(&current_path)
-                            .ok()
-                            .map(BufWriter::new);
-                        bytes_written = 0;
+                    current_path = path.clone();
+                    bytes_written = std::fs::metadata(&current_path)
+                        .map(|meta| meta.len())
+                        .unwrap_or(0);
+                    writer = OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(&current_path)
+                        .ok()
+                        .map(BufWriter::new);
+                }
+                if let Some(w) = writer.as_mut() {
+                    if let Err(e) = w.write_all(line.as_bytes()) {
+                        log::error!("Failed to write to log file: {}", e);
+                    } else {
+                        bytes_written += line.len() as u64;
                     }
                 }
-                _ = interval.tick() => {
-                    if let Some(w) = writer.as_mut() {
+                if bytes_written > max_bytes {
+                    // Rotate: flush, rename to <name>.<timestamp>.log, reopen.
+                    if let Some(mut w) = writer.take() {
                         let _ = w.flush();
                     }
-                    // Periodic drop-counter warning (Pattern 6 §6.3.5).
-                    let dropped = DROPPED.swap(0, Ordering::Relaxed);
-                    if dropped > 0 {
-                        let now = now_ms();
-                        let last = LAST_DROP_WARN_MS.load(Ordering::Relaxed);
-                        if now.saturating_sub(last) >= 60_000 {
-                            LAST_DROP_WARN_MS.store(now, Ordering::Relaxed);
-                            log::warn!(
-                                "[unified-logger] dropped {} log entries (writer queue saturated)",
-                                dropped
-                            );
-                        } else {
-                            // Re-add for the next interval so we don't lose count.
-                            DROPPED.fetch_add(dropped, Ordering::Relaxed);
-                        }
+                    let stamp = chrono::Local::now().format("%Y-%m-%dT%H-%M-%S%.3f");
+                    let rotated = current_path.with_extension(format!("{}.log", stamp));
+                    if let Err(e) = std::fs::rename(&current_path, &rotated) {
+                        log::error!("Failed to rotate unified log: {}", e);
+                    }
+                    writer = OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(&current_path)
+                        .ok()
+                        .map(BufWriter::new);
+                    bytes_written = 0;
+                }
+            }
+            _ = interval.tick() => {
+                if let Some(w) = writer.as_mut() {
+                    let _ = w.flush();
+                }
+                // Periodic drop-counter warning (Pattern 6 §6.3.5).
+                let dropped = DROPPED.swap(0, Ordering::Relaxed);
+                if dropped > 0 {
+                    let now = now_ms();
+                    let last = LAST_DROP_WARN_MS.load(Ordering::Relaxed);
+                    if now.saturating_sub(last) >= 60_000 {
+                        LAST_DROP_WARN_MS.store(now, Ordering::Relaxed);
+                        log::warn!(
+                            "[unified-logger] dropped {} log entries (writer queue saturated)",
+                            dropped
+                        );
+                    } else {
+                        // Re-add for the next interval so we don't lose count.
+                        DROPPED.fetch_add(dropped, Ordering::Relaxed);
                     }
                 }
             }
         }
-        if let Some(mut w) = writer {
-            let _ = w.flush();
-        }
-    });
+    }
+    if let Some(mut w) = writer {
+        let _ = w.flush();
+    }
 }
 
 /// Append a formatted line to the unified log file. Non-blocking: enqueues
@@ -831,5 +851,79 @@ mod per_process_file_tests {
     #[test]
     fn unified_log_file_name_is_stable_within_the_process() {
         assert_eq!(get_log_file_path(), get_log_file_path());
+    }
+}
+
+#[cfg(test)]
+mod writer_loop_tests {
+    use super::{log_file_path_in, run_writer_loop};
+    use std::path::PathBuf;
+
+    // GD-5：异步写任务的轮转环直接测试——临时目录 + 缩小上限驱动，
+    // 断言超限行触发 flush+rename、重开后新行落回当日文件。
+    #[tokio::test(flavor = "current_thread")]
+    async fn writer_loop_rotates_on_size_cap_and_reopens_same_day_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let logs_dir = dir.path().to_path_buf();
+        let (tx, rx) = tokio::sync::mpsc::channel::<String>(16);
+        let task = tokio::spawn(run_writer_loop(rx, logs_dir.clone(), 64));
+
+        let big_line = "x".repeat(100) + "\n";
+        tx.send(big_line.clone()).await.unwrap();
+        // 给写任务处理第一行（轮转在行内同步完成）。
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let small_line = "after-rotate\n".to_string();
+        tx.send(small_line.clone()).await.unwrap();
+        drop(tx);
+        task.await.unwrap();
+
+        let current = log_file_path_in(&logs_dir);
+        assert!(current.exists(), "current file reopened after rotation");
+        let current_content = std::fs::read_to_string(&current).unwrap();
+        assert_eq!(current_content, small_line);
+
+        let rotated: Vec<PathBuf> = std::fs::read_dir(&logs_dir)
+            .unwrap()
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .filter(|path| path != &current)
+            .collect();
+        assert_eq!(rotated.len(), 1, "exactly one rotated file");
+        let rotated_content = std::fs::read_to_string(&rotated[0]).unwrap();
+        assert_eq!(rotated_content, big_line);
+        let rotated_name = rotated[0]
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        assert!(
+            rotated_name.contains(&chrono::Local::now().format("%Y-%m-%d").to_string()),
+            "rotated name keeps the dated stem: {rotated_name}"
+        );
+    }
+
+    // 未超限时单文件持续追加，不产生轮转副本。
+    #[tokio::test(flavor = "current_thread")]
+    async fn writer_loop_appends_under_the_cap_without_rotation() {
+        let dir = tempfile::tempdir().unwrap();
+        let logs_dir = dir.path().to_path_buf();
+        let (tx, rx) = tokio::sync::mpsc::channel::<String>(16);
+        let task = tokio::spawn(run_writer_loop(rx, logs_dir.clone(), 1024));
+
+        tx.send("line-one\n".to_string()).await.unwrap();
+        tx.send("line-two\n".to_string()).await.unwrap();
+        drop(tx);
+        task.await.unwrap();
+
+        let current = log_file_path_in(&logs_dir);
+        assert_eq!(
+            std::fs::read_to_string(&current).unwrap(),
+            "line-one\nline-two\n"
+        );
+        assert_eq!(
+            std::fs::read_dir(&logs_dir).unwrap().count(),
+            1,
+            "no rotated copies under the cap"
+        );
     }
 }

@@ -21,7 +21,7 @@
 | `main-agent`     | DeepSeek `deepseek-v4-pro`，官方 Anthropic endpoint                 | high reasoning；沿 Ticket 04 Agent loop                                                              |
 | `extraction`     | DeepSeek `deepseek-chat`，Chat Completions                          | 非推理抽取，避免多字段 JSON 被长思考饿死                                                             |
 | `keyword-search` | ARK paygo `/api/v3/chat/completions`，`doubao-seed-2-0-lite-260428` | body `enable_search:true`；Agent Plan endpoint 不得替代                                              |
-| `generation`     | ARK paygo `/api/v3/chat/completions`                                | 默认 `doubao-seed-2-0-pro-260215`；标题规划 purpose 固定 `doubao-seed-2-0-mini-260428`，不增加第九槽位 |
+| `generation`     | ARK paygo `/api/v3/chat/completions`                                | 默认 `doubao-seed-2-0-pro-260215`；标题规划 purpose 固定 `doubao-seed-2-0-lite-260428`（mini 变体未在 paygo 开通，`/chat/completions` 404），不增加第九槽位 |
 | `reflection`     | DeepSeek `deepseek-v4-pro`，Chat Completions                        | 高推理审校；纯规则风控仍先执行                                                                       |
 | `embedding`      | ARK `/api/v3/embeddings/multimodal`，用户接入点 ID                  | `input:[{type:'text',text}]`；一次一段文本、单融合向量、2048 维、并发 2、额外重试 2 次（500/1000ms） |
 | `object-storage` | 阿里云 OSS virtual-hosted URL                                       | HTML `PUT`，OSS V1 HMAC-SHA1；正文不进入 Agent prompt                                                |

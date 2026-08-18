@@ -81,3 +81,56 @@ pub fn blocking_builder() -> reqwest::blocking::ClientBuilder {
     #[allow(clippy::disallowed_methods)]
     reqwest::blocking::Client::builder().no_proxy()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // GD-6②：唯一 localhost 客户端构造点的行为测试——用本地监听器验证
+    // json_client 的超时真实生效（证明构造点把 timeout 接进了 client），
+    // 请求成功路径返回对端原文。全程 127.0.0.1，不依赖外部网络。
+    #[tokio::test(flavor = "current_thread")]
+    async fn json_client_enforces_timeout_against_local_listener() {
+        // 必须用 tokio 异步 listener：current_thread 运行时里 std 的阻塞
+        // accept 会饿死客户端 future，超时定时器永远无法触发。
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        // 对端接受连接但按住不响应，直到测试结束。
+        let hold = std::sync::Arc::new(tokio::sync::Notify::new());
+        let hold_server = hold.clone();
+        let server = tokio::spawn(async move {
+            loop {
+                let Ok((stream, _)) = listener.accept().await else { break };
+                let notify = hold_server.clone();
+                tokio::spawn(async move {
+                    let _stream = stream;
+                    notify.notified().await;
+                });
+            }
+        });
+        let client = json_client(Duration::from_millis(150));
+        let started = std::time::Instant::now();
+        let outcome = client
+            .get(format!("http://127.0.0.1:{port}/hang"))
+            .send()
+            .await;
+        assert!(outcome.is_err(), "held connection must time out");
+        assert!(
+            started.elapsed() >= Duration::from_millis(120),
+            "timeout should come from the client, not an instant failure"
+        );
+        hold.notify_waiters();
+        server.abort();
+    }
+
+    #[test]
+    fn blocking_builder_builds_a_usable_localhost_client() {
+        let client = blocking_builder()
+            .timeout(Duration::from_millis(50))
+            .build()
+            .unwrap();
+        // 未监听的本地端口：立即连接拒绝（错误来自 localhost 语义而非代理）。
+        let outcome = client.get("http://127.0.0.1:1/").send();
+        assert!(outcome.is_err());
+    }
+}

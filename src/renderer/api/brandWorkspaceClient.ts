@@ -1,6 +1,22 @@
 import { invoke } from '@tauri-apps/api/core';
+
+import { isTauriEnvironment } from '@/utils/browserMock';
 import type { GeoSessionStatus } from '../../shared/geo/notification';
 import type { SessionDeleteResult } from './tauriClient';
+
+/**
+ * dev:web 浏览器模式没有 Tauri IPC（GD-10）：裸 invoke 会抛
+ * `Cannot read properties of undefined (reading 'invoke')` 并被当成
+ * 原文渲染进 UI。这里统一拒绝为可读错误，指明该面仅在桌面端可用。
+ */
+function workspaceInvoke<T>(command: string, args?: Record<string, unknown>): Promise<T> {
+  if (!isTauriEnvironment()) {
+    return Promise.reject(
+      new Error('品牌工作区仅在桌面端可用；当前是浏览器开发模式（dev:web），没有 Tauri IPC。'),
+    );
+  }
+  return invoke<T>(command, args);
+}
 
 export type BrandSessionTitleSource = 'default' | 'auto' | 'user';
 
@@ -49,18 +65,18 @@ export interface BrandSessionDeletionPreview {
 }
 
 export function bootstrapBrandWorkspaces(): Promise<BrandWorkspaceBootstrap> {
-  return invoke('cmd_brand_workspace_bootstrap');
+  return workspaceInvoke('cmd_brand_workspace_bootstrap');
 }
 
 export function createBrandWorkspace(
   name: string,
   productLines: string[],
 ): Promise<BrandWorkspace> {
-  return invoke('cmd_brand_workspace_create', { name, productLines });
+  return workspaceInvoke('cmd_brand_workspace_create', { name, productLines });
 }
 
 export function switchBrandWorkspace(workspaceId: string): Promise<BrandWorkspace> {
-  return invoke('cmd_brand_workspace_switch', { workspaceId });
+  return workspaceInvoke('cmd_brand_workspace_switch', { workspaceId });
 }
 
 export function commitBrandSession(
@@ -69,7 +85,7 @@ export function commitBrandSession(
   title: string,
   titleSource: BrandSessionTitleSource,
 ): Promise<BrandSession> {
-  return invoke('cmd_brand_session_commit', {
+  return workspaceInvoke('cmd_brand_session_commit', {
     workspaceId,
     sessionId,
     title,
@@ -81,7 +97,7 @@ export function listBrandSessions(
   workspaceId: string,
   includeArchived = false,
 ): Promise<BrandSession[]> {
-  return invoke('cmd_brand_session_list', { workspaceId, includeArchived });
+  return workspaceInvoke('cmd_brand_session_list', { workspaceId, includeArchived });
 }
 
 export function renameBrandSession(
@@ -89,7 +105,7 @@ export function renameBrandSession(
   sessionId: string,
   title: string,
 ): Promise<BrandSession> {
-  return invoke('cmd_brand_session_rename', { workspaceId, sessionId, title });
+  return workspaceInvoke('cmd_brand_session_rename', { workspaceId, sessionId, title });
 }
 
 export function archiveBrandSession(
@@ -97,14 +113,14 @@ export function archiveBrandSession(
   sessionId: string,
   archived: boolean,
 ): Promise<BrandSession> {
-  return invoke('cmd_brand_session_archive', { workspaceId, sessionId, archived });
+  return workspaceInvoke('cmd_brand_session_archive', { workspaceId, sessionId, archived });
 }
 
 export function previewBrandSessionDeletion(
   workspaceId: string,
   sessionId: string,
 ): Promise<BrandSessionDeletionPreview> {
-  return invoke('cmd_brand_session_delete_preview', { workspaceId, sessionId });
+  return workspaceInvoke('cmd_brand_session_delete_preview', { workspaceId, sessionId });
 }
 
 export interface BrandWorkspaceDeletionScope {
@@ -134,7 +150,7 @@ export interface BrandReleasableTab {
 export function previewBrandWorkspaceDeletion(
   workspaceId: string,
 ): Promise<BrandWorkspaceDeletionPreview> {
-  return invoke('cmd_brand_workspace_delete_preview', { workspaceId });
+  return workspaceInvoke('cmd_brand_workspace_delete_preview', { workspaceId });
 }
 
 function rejectionMessage(error: unknown): string | undefined {
@@ -147,7 +163,7 @@ export async function deleteBrandWorkspace(
   releasableTabs: readonly BrandReleasableTab[],
 ): Promise<SessionDeleteResult> {
   try {
-    return await invoke<SessionDeleteResult>('cmd_brand_workspace_delete', {
+    return await workspaceInvoke<SessionDeleteResult>('cmd_brand_workspace_delete', {
       workspaceId,
       confirmationToken,
       releasableTabs: [...releasableTabs],

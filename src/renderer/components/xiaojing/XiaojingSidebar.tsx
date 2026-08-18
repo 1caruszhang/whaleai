@@ -138,10 +138,14 @@ export default memo(function XiaojingSidebar({
         ? workspace
         : await switchWorkspace(workspace.id);
       await onOpenWorkspace(selected);
+    } catch (error) {
+      toast?.error(
+        error instanceof Error ? error.message : String(error),
+      );
     } finally {
       setBusy(false);
     }
-  }, [busy, currentWorkspace?.id, onOpenWorkspace, switchWorkspace]);
+  }, [busy, currentWorkspace?.id, onOpenWorkspace, switchWorkspace, toast]);
 
   const submitBrand = useCallback(async () => {
     if (!brandName.trim() || busy) return;
@@ -153,10 +157,15 @@ export default memo(function XiaojingSidebar({
       setCreateOpen(false);
       setBrandName('');
       await onOpenWorkspace(workspace);
+    } catch (error) {
+      // 创建失败留在对话框并给出可读反馈（GD-10：不再静默停留）。
+      toast?.error(
+        error instanceof Error ? error.message : String(error),
+      );
     } finally {
       setBusy(false);
     }
-  }, [brandName, busy, createWorkspace, onOpenWorkspace]);
+  }, [brandName, busy, createWorkspace, onOpenWorkspace, toast]);
 
   const submitRename = useCallback(async (session: BrandSession) => {
     if (!currentWorkspace || !renameValue.trim() || busy) return;

@@ -85,7 +85,7 @@ GitHub Actions 在通用 unit gate 之前单独执行该入口，使 js_ai 行�
 
 ## 模型、联网、Prompt 与并发
 
-模型路由顺序为显式阶段配置 → 阶段默认 pin → 当前 active model。`question_pool` 与 `title` pin 到 `volcengine / doubao-seed-2-0-mini-260428`，`draft` pin 到 `volcengine / doubao-seed-2-0-pro-260215`；pin 后只调用该模型，不走 failover。抽取默认 `deepseek-chat`。关键词挖掘单独走 Volcengine paygo `/api/v3`，以 body parameter `enable_search=true` 联网，不能误发到 agent-plan endpoint。
+模型路由顺序为显式阶段配置 → 阶段默认 pin → 当前 active model。`question_pool` 与 `title` pin 到 `volcengine / doubao-seed-2-0-lite-260428`（mini 变体未在 paygo 账号开通，`/chat/completions` 返回 404，故与关键词挖掘同走 lite 档），`draft` pin 到 `volcengine / doubao-seed-2-0-pro-260215`；pin 后只调用该模型，不走 failover。抽取默认 `deepseek-chat`。关键词挖掘单独走 Volcengine paygo `/api/v3`，以 body parameter `enable_search=true` 联网，不能误发到 agent-plan endpoint。
 
 Prompt 文字可以演进，但以下结构不能变：档案输出 14 字段及逐字段来源；关键词输出三类 JSON 和热度档且不含品牌名；Question 只含 text / recommended，不携带内容类型；主题合并覆盖每个输入问题；标题遵守五类 style、长度、品牌与 ranking 当前年份规则；正文输入已确认事实和类型模板，输出 plain Markdown 且不得残留 `【】`；全局召回输出 channel name / URL / topicNumbers，非法 topic number 只丢编号、不丢合法渠道。
 

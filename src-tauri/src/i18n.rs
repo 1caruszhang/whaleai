@@ -128,9 +128,8 @@ pub fn current_locale() -> SupportedLocale {
     effective_locale(current_ui_language())
 }
 
-fn persist_to_disk(value: UiLanguage) -> Result<(), String> {
-    let dir = crate::app_dirs::xiaojing_data_dir()
-        .ok_or_else(|| "[i18n] cannot resolve data dir".to_string())?;
+/// 写盘缝：测试以临时目录驱动，不触碰真实用户数据目录。
+fn persist_to_disk_in(dir: &std::path::Path, value: UiLanguage) -> Result<(), String> {
     let config_path = dir.join("config.json");
     crate::config_io::with_config_lock(&config_path, false, |cfg| {
         if !cfg.is_object() {
@@ -238,8 +237,19 @@ pub fn apply_ui_language(
     app: &AppHandle,
     value: UiLanguage,
 ) -> Result<UiLanguageChangedPayload, String> {
+    let dir = crate::app_dirs::xiaojing_data_dir()
+        .ok_or_else(|| "[i18n] cannot resolve data dir".to_string())?;
+    apply_ui_language_in(&dir, app, value)
+}
+
+/// 广播缝：写盘 + emit 的组合路径，测试以临时目录与 mock runtime 驱动（GD-6③）。
+fn apply_ui_language_in<R: tauri::Runtime>(
+    dir: &std::path::Path,
+    app: &tauri::AppHandle<R>,
+    value: UiLanguage,
+) -> Result<UiLanguageChangedPayload, String> {
     let _guard = lock_language_mirrors();
-    persist_to_disk(value)?;
+    persist_to_disk_in(dir, value)?;
     let payload = ui_language_payload(value);
     if let Err(e) = app.emit("ui-language-changed", &payload) {
         ulog_warn!("[i18n] emit failed: {e}");
@@ -321,5 +331,38 @@ mod tests {
             t("notification.sessionErrorBody", SupportedLocale::EnUs),
             "Please review the error details"
         );
+    }
+
+    // GD-6③：apply_ui_language 的写盘 + 广播组合路径，用临时目录与 mock
+    // AppHandle 驱动，不触碰真实用户数据目录。
+    #[test]
+    fn apply_ui_language_persists_under_config_lock_and_emits_payload() {
+        let app = tauri::test::mock_app();
+        let dir = tempfile::tempdir().unwrap();
+        let payload = apply_ui_language_in(dir.path(), app.handle(), UiLanguage::EnUs).unwrap();
+        assert_eq!(payload.ui_language, "en-US");
+        assert_eq!(payload.locale, "en-US");
+        // 写盘可回读：经同一 normalize 管道还原为已设语言。
+        assert_eq!(
+            read_ui_language_from(&dir.path().join("config.json")),
+            UiLanguage::EnUs
+        );
+        // 既有配置字段保留，不整文件覆写。
+        let raw = std::fs::read_to_string(dir.path().join("config.json")).unwrap();
+        let cfg: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(cfg["uiLanguage"], serde_json::json!("en-US"));
+    }
+
+    #[test]
+    fn apply_ui_language_write_failure_returns_before_emit() {
+        // 用一个文件充当 config 目录 → with_config_lock 无法创建锁文件，
+        // 写盘失败必须先于广播返回错误。
+        let app = tauri::test::mock_app();
+        let blocker = tempfile::tempdir().unwrap();
+        let file = blocker.path().join("not-a-dir");
+        std::fs::write(&file, b"occupied").unwrap();
+        let error = apply_ui_language_in(&file, app.handle(), UiLanguage::ZhCn)
+            .unwrap_err();
+        assert!(error.contains("[i18n]") || error.contains("config"), "{error}");
     }
 }

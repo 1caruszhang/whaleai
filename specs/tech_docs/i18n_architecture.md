@@ -4,9 +4,11 @@
 
 ## Authority
 
-`AppConfig.uiLanguage` 保存 `system | zh-CN | en-US`。Rust `i18n.rs` 在当前 Xiaojing `config.json` 上通过 `config_io` 锁内写入，并 emit `ui-language-changed`。Renderer `I18nLanguageSync` 读取该 projection 并切换 i18next。
+v1 产品决策：只有一种 authored 语言（zh-CN）。Renderer `XiaojingI18nSync`（`src/renderer/i18n/I18nLanguageSync.tsx`）在挂载时无条件固定 `zh-CN`（`document.documentElement.lang` + i18next `changeLanguage`）；Settings 没有语言选项，Renderer 也不监听 `ui-language-changed`，不存在可覆盖该事实的用户面。
 
-`system` 由 Rust `sys-locale` 解析；浏览器开发环境才使用 `navigator.languages` fallback。写盘失败时不广播成功状态。
+Rust `i18n.rs` 仍是**原生通知文案**的 locale owner：`current_locale()` 从 `Xiaojing local-data root/config.json` 读 `uiLanguage`（缺省 `system`，经 `sys-locale` 解析为受支持 locale，再兜底 zh-CN），`notification.rs` 用 `t()` 取短文案。写盘失败不广播成功状态。
+
+设置链路 `cmd_set_ui_language` / `apply_ui_language` / `cmd_sync_ui_language_from_config`（config 锁内写盘 + emit `ui-language-changed`）与 `cmd_get_ui_language_state` 是为未来多语保留的预留能力，v1 无 Renderer 消费者。启用多语时必须成对补齐：Renderer 事件监听替换 `XiaojingI18nSync` 的强制固定、Settings 语言选项、两端资源与 key parity 测试——只写盘不接 UI 视为未启用。
 
 ## Resources
 
