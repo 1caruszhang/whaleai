@@ -100,7 +100,9 @@ mod tests {
         let hold_server = hold.clone();
         let server = tokio::spawn(async move {
             loop {
-                let Ok((stream, _)) = listener.accept().await else { break };
+                let Ok((stream, _)) = listener.accept().await else {
+                    break;
+                };
                 let notify = hold_server.clone();
                 tokio::spawn(async move {
                     let _stream = stream;

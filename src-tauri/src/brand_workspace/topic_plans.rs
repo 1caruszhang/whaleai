@@ -204,12 +204,7 @@ pub(super) fn ensure_schema(connection: &Connection) -> Result<(), String> {
              );",
         )
         .map_err(|error| format!("initialize topic plan schema: {error}"))?;
-    super::ensure_column(
-        connection,
-        "geo_topic_plan_mutations",
-        "reason",
-        "TEXT",
-    )?;
+    super::ensure_column(connection, "geo_topic_plan_mutations", "reason", "TEXT")?;
     super::drop_brand_sessions_foreign_keys(
         connection,
         &[
@@ -1344,7 +1339,7 @@ mod tests {
                     preserved_item_ids: vec![],
                     actor_id: "desktop-user".to_string(),
                     model_attempts: serde_json::json!([]),
-                
+
                     reason: None,
                 }
             )
@@ -1374,7 +1369,7 @@ mod tests {
                     preserved_item_ids: vec![],
                     actor_id: "desktop-user".to_string(),
                     model_attempts: serde_json::json!([]),
-                
+
                     reason: None,
                 }
             )
@@ -1393,7 +1388,7 @@ mod tests {
                     preserved_item_ids: vec![],
                     actor_id: "geo-domain".to_string(),
                     model_attempts: serde_json::json!([]),
-                
+
                     reason: None,
                 }
             )
@@ -1414,7 +1409,7 @@ mod tests {
                     preserved_item_ids: vec![],
                     actor_id: "desktop-user".to_string(),
                     model_attempts: serde_json::json!([]),
-                
+
                     reason: None,
                 }
             )
@@ -1438,7 +1433,7 @@ mod tests {
                     preserved_item_ids: vec!["protected".to_string()],
                     actor_id: "geo-domain".to_string(),
                     model_attempts: serde_json::json!([]),
-                
+
                     reason: None,
                 }
             )
@@ -1462,7 +1457,7 @@ mod tests {
                     preserved_item_ids: vec!["protected".to_string()],
                     actor_id: "geo-domain".to_string(),
                     model_attempts: serde_json::json!([]),
-                
+
                     reason: None,
                 },
             )

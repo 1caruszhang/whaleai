@@ -543,9 +543,7 @@ impl BrandWorkspaceStore {
         Ok(materials
             .into_iter()
             .map(|material| {
-                let ids = candidate_ids
-                    .remove(&material.id)
-                    .unwrap_or_default();
+                let ids = candidate_ids.remove(&material.id).unwrap_or_default();
                 BrandMaterialListItem {
                     material,
                     candidate_ids: ids,
