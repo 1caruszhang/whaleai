@@ -55,6 +55,12 @@ export interface PublishChannelSnapshot {
   name: string;
   estimatedPriceCny: number;
   publishedRate: number;
+  /**
+   * 该渠道单笔订单的点数单价（票 09）：媒介价 ×1.6 → 点数向上取整，
+   * 由 Rust 在执行投影构建时按与网关 `publishOrderPoints` 同式的整数分
+   * 运算算好——renderer 只展示，不重复实现倍率。
+   */
+  pricePoints: number;
 }
 
 export interface PublishItemProjection {
@@ -102,6 +108,8 @@ export interface PublishExecutionProjection {
   status: PublishExecutionStatus;
   budgetCny: number;
   estimatedSpendCny: number;
+  /** 全部发布项的点数总价（票 09）：逐项 pricePoints 之和，服务端算好。 */
+  totalPricePoints: number;
   publishStartAt: string;
   irreversibleImpact: string;
   confirmationDigest: string;
@@ -146,4 +154,89 @@ export function publishExecutionCanStart(
   execution: PublishExecutionProjection,
 ): boolean {
   return execution.status === "confirmed";
+}
+
+// ---------------------------------------------------------------------------
+// 渠道订单状态投影（票 09）
+// ---------------------------------------------------------------------------
+
+/**
+ * 上游渠道订单状态码（超级媒介契约，与后端 `publish-orders` 状态机同源）：
+ * 1 待处理、2 已拒稿、3 发布中、4 已发布、5 已取消、6 退款中、7 已退款、
+ * 8 退款被拒、9 已关闭、10 补发中、11 已补发、12 已收录。
+ */
+export type PublishOrderUpstreamStatus =
+  | 1
+  | 2
+  | 3
+  | 4
+  | 5
+  | 6
+  | 7
+  | 8
+  | 9
+  | 10
+  | 11
+  | 12;
+
+/** 状态码 → 文案映射（超级媒介契约 1–12）。 */
+export const PUBLISH_ORDER_STATUS_LABEL: Record<
+  PublishOrderUpstreamStatus,
+  string
+> = {
+  1: "待处理",
+  2: "已拒稿",
+  3: "发布中",
+  4: "已发布",
+  5: "已取消",
+  6: "退款中",
+  7: "已退款",
+  8: "退款被拒",
+  9: "已关闭",
+  10: "补发中",
+  11: "已补发",
+  12: "已收录",
+};
+
+/**
+ * 是否为原路退点状态（后端 REFUND_STATUSES 同源）：已拒稿(2)、已取消(5)、
+ * 已退款(7)。进入这些状态时订单点数退回余额，UI 需联动余额刷新展示。
+ * 未知状态码（上游契约外的漂移）不判定退点，按需人工核对。
+ */
+export function publishOrderRefundsPoints(status: number | null): boolean {
+  return status === 2 || status === 5 || status === 7;
+}
+
+/**
+ * 订单是否仍在流转（客户端继续轮询查单投影）：未知（上游未返回，订单
+ * 可能尚未受理）、待处理(1)、发布中(3)、退款中(6)。
+ */
+export function publishOrderStatusActive(status: number | null): boolean {
+  return status === null || status === 1 || status === 3 || status === 6;
+}
+
+/** 用户可见的订单状态文案；颜色不是唯一载体，文案即状态。 */
+export function publishOrderStatusLabel(status: number | null): string {
+  if (status === null) return "订单尚未受理";
+  return (
+    PUBLISH_ORDER_STATUS_LABEL[status as PublishOrderUpstreamStatus] ??
+    `渠道状态 ${status}`
+  );
+}
+
+/**
+ * 单个发布项的渠道订单状态投影（票 09）：Sidecar 用执行项确定性派生的
+ * sn（`distributionOrderSn(executionId, itemId)`）查单后回给 renderer；
+ * 计费权威在网关，本投影只承载展示。`screenshot` 为渠道回传的用户来源
+ * HTML，仅经 renderer 现有 sanitize 栈渲染，绝不入持久层。
+ */
+export interface PublishOrderStatusEntry {
+  itemId: string;
+  sn: string;
+  kind: "media" | "we-media";
+  /** 渠道订单状态码（1–12 契约值原样透传）；上游未返回该 sn 时为 null。 */
+  status: number | null;
+  url: string | null;
+  screenshot: string | null;
+  publishedAt: string | null;
 }

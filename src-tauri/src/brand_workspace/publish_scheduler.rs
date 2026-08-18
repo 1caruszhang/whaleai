@@ -113,6 +113,10 @@ struct PublishChannelSnapshot {
     name: String,
     estimated_price_cny: f64,
     published_rate: f64,
+    /// 渠道单笔订单的点数单价（票 09）：服务端算好投影给 renderer，
+    /// 读取旧快照行时按 estimated_price_cny 重算回填，展示端不实现倍率。
+    #[serde(default)]
+    price_points: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -168,6 +172,8 @@ pub struct PublishExecutionProjection {
     status: String,
     budget_cny: f64,
     estimated_spend_cny: f64,
+    /// 全部发布项 price_points 之和（票 09）：投影时逐项累加，不落库。
+    total_price_points: i64,
     publish_start_at: String,
     irreversible_impact: &'static str,
     confirmation_digest: String,
@@ -283,6 +289,18 @@ fn external_request_sn(idempotency_key: &str) -> String {
         "publish-order-{}",
         &sha256_hex(idempotency_key.as_bytes())[..32]
     )
+}
+
+/// 渠道订单点数单价（票 09，与网关 `publishOrderPoints` 同式）：媒介价
+/// ×1.6 → 点数向上取整（1 元 = 10 点锚点）。以分为基的整数运算：
+/// ceil(分 × 1.6 × 10 / 100) = ceil(分 × 4 / 25)。例：¥88.00 → 1408 点。
+fn publish_channel_price_points(price_cny: f64) -> i64 {
+    if !price_cny.is_finite() || price_cny <= 0.0 {
+        return 0;
+    }
+    let cents = (price_cny * 100.0).round() as i64;
+    // ceil(a/b) = (a + b - 1) / b（正整数整除）。
+    (cents * 4 + 24) / 25
 }
 
 fn now_iso(now_ms: i64) -> String {
@@ -830,6 +848,7 @@ impl BrandWorkspaceStore {
                 name,
                 estimated_price_cny: price,
                 published_rate,
+                price_points: publish_channel_price_points(price),
             };
             let request_summary = PublishRequestSummary {
                 article_id: article_id.to_string(),
@@ -1605,6 +1624,8 @@ fn read_execution(
                     status: row.get(6)?,
                     budget_cny: row.get(7)?,
                     estimated_spend_cny: row.get(8)?,
+                    // 占位 0，条目装载后按逐项单价重算（见函数尾）。
+                    total_price_points: 0,
                     publish_start_at: row.get(9)?,
                     irreversible_impact: IRREVERSIBLE_IMPACT,
                     confirmation_digest: row.get(10)?,
@@ -1686,6 +1707,15 @@ fn read_execution(
         .map_err(|error| format!("read publish items: {error}"))?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| format!("collect publish items: {error}"))?;
+    // 票 09：单价在投影时按快照媒介价重算（同一确定性函数），旧快照行
+    // 缺字段也能得到权威点数；总价为逐项之和，不落库。
+    let mut total_price_points = 0_i64;
+    for item in &mut execution.items {
+        item.channel.price_points =
+            publish_channel_price_points(item.channel.estimated_price_cny);
+        total_price_points += item.channel.price_points;
+    }
+    execution.total_price_points = total_price_points;
     Ok(execution)
 }
 
@@ -3391,6 +3421,74 @@ mod tests {
         let updated = now_iso(fixture.now_ms + 1_000);
         connection.execute("INSERT INTO geo_operations (id,session_id,state,created_at) VALUES (?1,'session-13','distribution-plan-confirmed',?2)", params![operation_id, updated]).unwrap();
         connection.execute("INSERT INTO geo_distribution_plans (id,operation_id,created_by_session_id,article_operation_id,knowledge_version,policy_version,status,revision,discovery_claim_token,provider_snapshot_json,resource_snapshot_json,projection_json,created_at,updated_at,confirmed_at) VALUES (?1,?2,'session-13','article-operation-13',1,'fixture-policy','confirmed',6,NULL,'{}','[]',?3,?4,?4,?4)", params![plan_id, operation_id, projection.to_string(), updated]).unwrap();
+    }
+
+    #[test]
+    fn channel_price_points_matches_gateway_ceiling_formula() {
+        // 与网关 publishOrderPoints 同式：ceil(分 × 4 / 25)。
+        assert_eq!(publish_channel_price_points(88.0), 1408);
+        assert_eq!(publish_channel_price_points(12.34), 198);
+        // 整除边界不得多进一位：6.25 元 × 16 = 100 点恰好整除。
+        assert_eq!(publish_channel_price_points(6.25), 100);
+        // 最小可用单价向上取整到 1 点。
+        assert_eq!(publish_channel_price_points(0.01), 1);
+        assert_eq!(publish_channel_price_points(0.0), 0);
+        assert_eq!(publish_channel_price_points(-3.0), 0);
+        assert_eq!(publish_channel_price_points(f64::NAN), 0);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn execution_projection_carries_per_item_and_total_price_points() {
+        let _lock = ENV_LOCK.lock().await;
+        let _env = TestEnvironment::configured();
+        let fixture = setup_fixture(2, 60_000);
+        let execution = preview(&fixture);
+        // fixture 渠道价 ¥10.00 → 160 点、¥11.00 → 176 点；总价为逐项之和。
+        let expected: Vec<i64> = execution
+            .items
+            .iter()
+            .map(|item| publish_channel_price_points(item.channel.estimated_price_cny))
+            .collect();
+        assert_eq!(expected, vec![160, 176]);
+        for (item, points) in execution.items.iter().zip(expected.iter()) {
+            assert_eq!(item.channel.price_points, *points);
+        }
+        assert_eq!(execution.total_price_points, 336);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn legacy_channel_rows_without_price_points_still_project_points() {
+        let _lock = ENV_LOCK.lock().await;
+        let _env = TestEnvironment::configured();
+        let fixture = setup_fixture(1, 60_000);
+        let execution = preview(&fixture);
+        // 模拟票 09 之前落库的 channel_json（无 pricePoints 字段）：读取投影
+        // 时按媒介价重算回填，旧执行不因缺字段丢失单价与总价。
+        let connection = open_database(&fixture.workspace).unwrap();
+        let channel_json: String = connection
+            .query_row(
+                "SELECT channel_json FROM geo_publish_items WHERE execution_id=?1",
+                [&execution.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let mut legacy: Value = serde_json::from_str(&channel_json).unwrap();
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("pricePoints");
+        connection
+            .execute(
+                "UPDATE geo_publish_items SET channel_json=?1 WHERE execution_id=?2",
+                params![legacy.to_string(), execution.id],
+            )
+            .unwrap();
+        let reread = fixture
+            .store
+            .get_publish_execution(&fixture.workspace.id, "session-13", &execution.id)
+            .unwrap();
+        assert_eq!(reread.items[0].channel.price_points, 160);
+        assert_eq!(reread.total_price_points, 160);
     }
 
     #[tokio::test(flavor = "current_thread")]

@@ -2,6 +2,7 @@ import type {
   PublishExecutionConfirmInput,
   PublishExecutionProjection,
   PublishExecutionStartInput,
+  PublishOrderStatusEntry,
 } from "../../shared/geo/publishScheduler";
 import { invoke } from "@tauri-apps/api/core";
 
@@ -14,6 +15,12 @@ export type PublishSchedulerApiPost = <T>(
 interface PublishSchedulerResponse {
   success: boolean;
   execution?: PublishExecutionProjection | null;
+  error?: string;
+}
+
+interface PublishOrderStatusResponse {
+  success: boolean;
+  orders?: PublishOrderStatusEntry[];
   error?: string;
 }
 
@@ -63,5 +70,26 @@ export function startPublishExecution(
   return invoke<PublishExecutionProjection>("cmd_publish_execution_start_ui", {
     ...identity,
     input,
+  });
+}
+
+/**
+ * 订单状态投影（票 09）：经 Session Sidecar 查询网关订单（查单即对账，
+ * 计费权威在后端），renderer 只持展示投影。截图为渠道回传的用户来源
+ * HTML，消费方必须走现有 sanitize 栈渲染。
+ */
+export function loadPublishOrderStatuses(
+  apiPost: PublishSchedulerApiPost,
+  identity: { workspaceId: string; sessionId: string },
+  executionId: string,
+): Promise<PublishOrderStatusEntry[]> {
+  return apiPost<PublishOrderStatusResponse>(
+    "/api/xiaojing/publish-scheduler/orders",
+    { ...identity, executionId },
+  ).then((response) => {
+    if (!response.success || !response.orders) {
+      throw new Error(response.error ?? "publish_orders_unavailable");
+    }
+    return response.orders;
   });
 }

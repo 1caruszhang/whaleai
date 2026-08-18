@@ -64,6 +64,7 @@ const XIAOJING_POST_ROUTES = [
   '/api/xiaojing/publish-scheduler/latest',
   '/api/xiaojing/publish-scheduler/get',
   '/api/xiaojing/publish-scheduler/preview',
+  '/api/xiaojing/publish-scheduler/orders',
   '/api/xiaojing/geo-baselines/engines',
   '/api/xiaojing/geo-baselines/latest',
   '/api/xiaojing/geo-baselines/start',

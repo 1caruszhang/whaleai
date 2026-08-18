@@ -1,9 +1,10 @@
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type {
   PublishExecutionProjection,
   PublishItemProjection,
+  PublishOrderStatusEntry,
 } from "../../../shared/geo/publishScheduler";
 import PublishAuthorizationGateCard from "./PublishAuthorizationGateCard";
 
@@ -13,6 +14,10 @@ const mocks = vi.hoisted(() => ({
   start: vi.fn(),
   latest: vi.fn(),
   byId: vi.fn(),
+  orders: vi.fn(),
+  // 账号投影（票 06）：卡片只读余额与刷新动作；points 原地变更生效。
+  refresh: vi.fn(),
+  accountState: { points: 500 } as { points: number | null },
 }));
 
 vi.mock("@/context/TabContext", () => ({
@@ -20,11 +25,20 @@ vi.mock("@/context/TabContext", () => ({
   useTabState: () => ({ sessionId: mocks.sessionId }),
 }));
 
+vi.mock("@/context/AccountContext", async () => {
+  const { createContext } = await import("react");
+  return {
+    AccountApiContext: createContext({ refresh: mocks.refresh }),
+    AccountStateContext: createContext(mocks.accountState),
+  };
+});
+
 vi.mock("@/api/publishSchedulerClient", () => ({
   confirmPublishExecution: mocks.confirm,
   startPublishExecution: mocks.start,
   loadLatestPublishExecution: mocks.latest,
   loadPublishExecution: mocks.byId,
+  loadPublishOrderStatuses: mocks.orders,
 }));
 
 const item: PublishItemProjection = {
@@ -45,6 +59,8 @@ const item: PublishItemProjection = {
     name: "汽车产业观察",
     estimatedPriceCny: 142,
     publishedRate: 0,
+    // ¥142.00 × 1.6 → 2272 点（ceil(14200×4/25)）。
+    pricePoints: 2272,
   },
   scheduledAt: "2026-08-20T02:00:00Z",
   status: "pending",
@@ -88,6 +104,7 @@ function execution(
     status: "awaiting-confirmation",
     budgetCny: 1000,
     estimatedSpendCny: 142,
+    totalPricePoints: 2272,
     publishStartAt: "2026-08-20T02:00:00Z",
     irreversibleImpact: "将付费并向外部渠道发布，不可撤销。",
     confirmationDigest: "digest-1",
@@ -123,13 +140,38 @@ function renderCard(current: PublishExecutionProjection) {
   );
 }
 
+function orderEntry(
+  overrides: Partial<PublishOrderStatusEntry> = {},
+): PublishOrderStatusEntry {
+  return {
+    itemId: "item-1",
+    sn: "xj-order-sn-1",
+    kind: "media",
+    status: 3,
+    url: null,
+    screenshot: null,
+    publishedAt: null,
+    ...overrides,
+  };
+}
+
+const submittedItem: PublishItemProjection = {
+  ...item,
+  status: "submitted",
+  objectUrl: "https://oss.example/ops/exec-1/article-1.html",
+  externalOrderId: "SN-20260820-001",
+};
+
 describe("PublishAuthorizationGateCard", () => {
   beforeEach(() => {
     mocks.confirm.mockReset();
     mocks.start.mockReset();
     mocks.byId.mockReset();
-    // 待决期轮询拉不到新投影，卡片保持本地状态。
+    mocks.refresh.mockReset();
+    mocks.accountState.points = 500;
+    // 待决期轮询拉不到新投影，卡片保持本地状态；订单投影默认空列表。
     mocks.latest.mockReset().mockResolvedValue(null);
+    mocks.orders.mockReset().mockResolvedValue([]);
   });
 
   it("carries the server-bumped revision from confirm into start", async () => {
@@ -241,14 +283,7 @@ describe("PublishAuthorizationGateCard", () => {
       execution({
         status: "succeeded",
         revision: 9,
-        items: [
-          {
-            ...item,
-            status: "submitted",
-            objectUrl: "https://oss.example/ops/exec-1/article-1.html",
-            externalOrderId: "SN-20260820-002",
-          },
-        ],
+        items: [submittedItem],
       }),
     );
     const card = screen.getByRole("region", { name: "付费发布授权" });
@@ -256,7 +291,10 @@ describe("PublishAuthorizationGateCard", () => {
       within(card).getByText(/1 个发布项均已由超级媒介受理/),
     ).toBeInTheDocument();
     expect(within(card).getByText("订单已提交")).toBeInTheDocument();
-    expect(within(card).queryByRole("button", { name: "刷新发布状态" })).not.toBeInTheDocument();
+    // 票 09：执行终态后渠道状态仍会流转（退款/补发），保留手动刷新。
+    expect(
+      within(card).getByRole("button", { name: "刷新发布状态" }),
+    ).toBeInTheDocument();
   });
 
   it("keeps the irreversible confirm checkbox required before confirming", () => {
@@ -273,5 +311,120 @@ describe("PublishAuthorizationGateCard", () => {
     expect(
       within(card).getByRole("button", { name: "独立确认发布执行" }),
     ).toBeEnabled();
+  });
+
+  // ── 票 09：点数定价展示 ─────────────────────────────────────────────
+  it("shows per-channel point prices and the total without service-fee wording", () => {
+    renderCard(execution());
+    const card = screen.getByRole("region", { name: "付费发布授权" });
+
+    // ¥142.00 × 1.6 → 2272 点（服务端算好投影，卡片只展示）。
+    expect(within(card).getByText(/单价 2272 点/)).toBeInTheDocument();
+    expect(within(card).getByText(/合计 2272 点/)).toBeInTheDocument();
+    // 界面不出现「服务费」字样（含 60% 服务费不单列）。
+    expect(within(card).queryByText(/服务费/)).toBeNull();
+    expect(card.textContent ?? "").not.toContain("服务费");
+  });
+
+  // ── 票 09：订单列表、状态流转与发布链接 ─────────────────────────────
+  it("lists gateway order status with the publish link and follows transitions", async () => {
+    mocks.orders.mockResolvedValue([
+      orderEntry({ status: 3, url: "https://news.example/article-1" }),
+    ]);
+    renderCard(execution({ status: "running", revision: 4 }));
+    const card = screen.getByRole("region", { name: "付费发布授权" });
+
+    // 进入订单视图即拉一次首屏投影。
+    expect(await within(card).findByText("发布中")).toBeInTheDocument();
+    expect(
+      within(card).getByRole("link", { name: "发布链接" }),
+    ).toHaveAttribute("href", "https://news.example/article-1");
+
+    // 手动刷新后渠道状态推进为已发布。
+    mocks.orders.mockResolvedValue([
+      orderEntry({
+        status: 4,
+        url: "https://news.example/article-1",
+        publishedAt: "2026-08-21T08:30:00Z",
+      }),
+    ]);
+    mocks.byId.mockResolvedValue(execution({ status: "running", revision: 5 }));
+    fireEvent.click(within(card).getByRole("button", { name: "刷新发布状态" }));
+    expect(await within(card).findByText("已发布")).toBeInTheDocument();
+    expect(within(card).queryByText("发布中")).toBeNull();
+    await waitFor(() =>
+      expect(mocks.orders).toHaveBeenCalledWith(
+        expect.anything(),
+        { workspaceId: "brand-1", sessionId: "session-42" },
+        "exec-1",
+      ),
+    );
+  });
+
+  // ── 票 09：渠道回传截图经 sanitize 栈渲染 ───────────────────────────
+  it("renders the channel screenshot through the sanitize stack", async () => {
+    mocks.orders.mockResolvedValue([
+      orderEntry({
+        status: 4,
+        url: "https://news.example/article-1",
+        screenshot:
+          '<p>收录截图正文</p><script>alert("pwned")</script>' +
+          '<img src="https://cdn.example/shot.png" onerror="alert(1)">',
+      }),
+    ]);
+    renderCard(execution({ status: "succeeded", revision: 9, items: [submittedItem] }));
+    const card = screen.getByRole("region", { name: "付费发布授权" });
+
+    fireEvent.click(
+      await within(card).findByRole("button", { name: "查看渠道回传截图" }),
+    );
+    const shot = await within(card).findByText("收录截图正文");
+    expect(shot).toBeInTheDocument();
+    // 恶意脚本与事件处理器被清洗（DOM 层面不存在）。
+    expect(document.querySelector("script")).toBeNull();
+    const image = document.querySelector(
+      "[data-publish-order-screenshot] img",
+    );
+    expect(image?.getAttribute("src")).toBe("https://cdn.example/shot.png");
+    expect(image?.getAttribute("onerror")).toBeNull();
+  });
+
+  // ── 票 09：拒稿/取消/退款 → 对应状态 + 点数退回的余额变化 ───────────
+  it.each([
+    { status: 2 as const, label: "已拒稿" },
+    { status: 5 as const, label: "已取消" },
+    { status: 7 as const, label: "已退款" },
+  ])(
+    "shows the $label order with refunded points and a refreshed balance ($status)",
+    async ({ status, label }) => {
+      mocks.orders.mockResolvedValue([orderEntry({ status })]);
+      const { unmount } = renderCard(
+        execution({ status: "running", revision: 4, items: [submittedItem] }),
+      );
+      const card = screen.getByRole("region", { name: "付费发布授权" });
+
+      expect(await within(card).findByText(label)).toBeInTheDocument();
+      expect(
+        within(card).getByText(
+          "该订单点数已按原路退回 2272 点，当前余额 500 点。",
+        ),
+      ).toBeInTheDocument();
+      // 点数退回后联动刷新账号余额投影（票 06 权威在 Rust/网关）。
+      await waitFor(() => expect(mocks.refresh).toHaveBeenCalledTimes(1));
+      unmount();
+      cleanup();
+    },
+  );
+
+  it("does not refresh the balance for non-refund order states", async () => {
+    mocks.orders.mockResolvedValue([orderEntry({ status: 4 })]);
+    renderCard(execution({ status: "running", revision: 4, items: [submittedItem] }));
+    const card = screen.getByRole("region", { name: "付费发布授权" });
+
+    expect(await within(card).findByText("已发布")).toBeInTheDocument();
+    expect(mocks.refresh).not.toHaveBeenCalled();
+    expect(
+      within(card).queryByText(/已按原路退回/),
+    ).toBeNull();
   });
 });

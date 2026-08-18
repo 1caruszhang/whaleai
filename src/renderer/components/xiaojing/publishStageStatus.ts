@@ -40,6 +40,19 @@ export function orderStage(item: PublishItemProjection): PublishStageBadge {
   return { label: "订单未提交", tone: "pending" };
 }
 
+/**
+ * 渠道订单上游状态（票 09，1–12 契约值）的徽章色调。颜色不是唯一载体：
+ * 文案由 publishOrderStatusLabel 给出，这里只做辅助层级——已发布/补发
+ * 完成为完成态，发布中/退款中/补发中为流转态，拒稿/取消/退款被拒为
+ * 失败态，未受理与已退款/已关闭为中性态。
+ */
+export function orderStatusTone(status: number | null): PublishStageTone {
+  if (status === 4 || status === 11 || status === 12) return "done";
+  if (status === 3 || status === 6 || status === 10) return "active";
+  if (status === 2 || status === 5 || status === 8) return "failed";
+  return "pending";
+}
+
 /** 两段徽章渲染共用的样式映射。 */
 export const PUBLISH_STAGE_TONE_CLASS: Record<PublishStageTone, string> = {
   done: "bg-[var(--success)]/10 text-[var(--success)]",
