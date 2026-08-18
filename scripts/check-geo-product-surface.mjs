@@ -190,6 +190,9 @@ function rel(path) {
 
 function isExcluded(relativePath, name, isDirectory) {
   if (isDirectory && excludedDirectoryNames.has(name)) return true;
+  // npm lockfiles are generated artifacts; their third-party dependency
+  // metadata is not the product's own legal material.
+  if (name === 'package-lock.json') return true;
   if (excludedGeneratedFiles.has(relativePath)) return true;
   if (excludedRelativeRoots.some((root) => relativePath === root.slice(0, -1) || relativePath.startsWith(root))) return true;
   if (relativePath === '.env' || (relativePath.startsWith('.env.') && relativePath !== '.env.example')) return true;
