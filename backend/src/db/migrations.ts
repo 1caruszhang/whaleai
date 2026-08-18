@@ -61,6 +61,32 @@ export const MIGRATIONS: readonly Migration[] = [
       CREATE INDEX idx_ledger_entries_account ON ledger_entries(account_id, created_at);
     `,
   },
+  {
+    name: '0002_billing_permits',
+    sql: `
+      CREATE TABLE billing_permits (
+        id TEXT PRIMARY KEY,
+        account_id TEXT NOT NULL REFERENCES accounts(id),
+        operation TEXT NOT NULL,
+        units INTEGER NOT NULL,
+        unit_price INTEGER NOT NULL,
+        base_price INTEGER NOT NULL DEFAULT 0,
+        frozen_remaining INTEGER NOT NULL,
+        status TEXT NOT NULL DEFAULT 'open',
+        created_at TEXT NOT NULL,
+        settled_at TEXT
+      );
+      CREATE INDEX idx_billing_permits_account_status ON billing_permits(account_id, status);
+
+      CREATE TABLE permit_unit_reports (
+        permit_id TEXT NOT NULL REFERENCES billing_permits(id),
+        unit_index INTEGER NOT NULL,
+        outcome TEXT NOT NULL,
+        reported_at TEXT NOT NULL,
+        PRIMARY KEY (permit_id, unit_index)
+      );
+    `,
+  },
 ];
 
 /** 建表只经本 runner：幂等、每条迁移独立事务、记录进 schema_migrations。 */
