@@ -11,6 +11,8 @@ export interface AccountRow {
   balance: number;
   created_at: string;
   updated_at: string;
+  /** 对话隐藏额度累计（千分之一点，票 04）；topup 入账时清零。 */
+  chat_quota_used_milli: number;
 }
 
 export interface AuthSessionRow {
@@ -72,4 +74,20 @@ export interface PermitUnitReportRow {
   unit_index: number;
   outcome: UnitOutcome;
   reported_at: string;
+}
+
+/**
+ * 对话旁路计量记录（票 04）：网关每次 /v1/messages 调用的真实 token 用量
+ * 与折点（千分之一点）。只作运营与 DeepSeek 账单对账，不改点数余额。
+ */
+export interface ChatUsageRecordRow {
+  id: string;
+  account_id: string;
+  model: string;
+  input_tokens: number;
+  cache_read_tokens: number;
+  cache_creation_tokens: number;
+  output_tokens: number;
+  points_milli: number;
+  created_at: string;
 }

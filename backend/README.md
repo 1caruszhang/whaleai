@@ -1,9 +1,9 @@
 # 小鲸同学后端单体（付费内测）
 
 Hono / TypeScript 单 monolith + SQLite：账号 API、计费核心（点数账本 + permit，
-票 03）、超级媒介回调端点与 /admin 运营台共用一个进程与一个数据库文件。
-计费网关代理（票 04/05）在此基础上扩展。部署形态为 Docker 单容器 + 宝塔
-nginx 反代（票 12）。
+票 03）、网关主 Agent 通道与对话隐藏额度（票 04）、超级媒介回调端点与 /admin
+运营台共用一个进程与一个数据库文件。后续计费网关代理（票 05）在此基础上扩展。
+部署形态为 Docker 单容器 + 宝塔 nginx 反代（票 12）。
 
 - 桌面应用（`src/`）与该服务完全隔离：独立 package.json、独立测试与
   typecheck，互不进入对方的构建产物。
@@ -26,6 +26,7 @@ npm run dev             # tsx watch，默认监听 0.0.0.0:8787
 |---|---|---|---|
 | `AUTH_SECRET` | ✔ | — | JWT HS256 签名 + refresh token 哈希胡椒（账本密钥），≥32 字符 |
 | `ADMIN_PASSWORD` | ✔ | — | /admin 运营登录密码 |
+| `DEEPSEEK_API_KEY` | ✔ | — | DeepSeek Anthropic 兼容上游密钥（主 Agent 通道，票 04），只经环境变量注入 |
 | `DATABASE_PATH` | | `data/xiaojing-backend.sqlite` | SQLite 文件路径 |
 | `PORT` / `HOST` | | `8787` / `0.0.0.0` | 监听地址 |
 | `ACCESS_TOKEN_TTL_SECONDS` | | `7200` | 账号 JWT 有效期（规格 1–2h，取上限） |
@@ -33,9 +34,22 @@ npm run dev             # tsx watch，默认监听 0.0.0.0:8787
 | `ADMIN_TOKEN_TTL_SECONDS` | | `3600` | 运营 JWT 有效期 |
 | `SIGNUP_GRANT_POINTS` | | `500` | 开号赠送点数 |
 | `MAX_CONCURRENT_PERMITS_PER_ACCOUNT` | | `2` | 每账号并发计费准入上限（open permit 数） |
+| `DEEPSEEK_BASE_URL` | | `https://api.deepseek.com/anthropic` | DeepSeek Anthropic 兼容上游基地址 |
+| `CHAT_HIDDEN_QUOTA_POINTS` | | `100` | 对话隐藏额度（点等值），用尽暂停对话、任意档位充值刷新 |
+| `CHAT_INPUT_CNY_PER_MTOK` | | `2` | 对话旁路计量：未命中缓存输入单价（元/百万 token，默认值为占位口径，生产按 DeepSeek 官网现价调整） |
+| `CHAT_INPUT_CACHE_HIT_CNY_PER_MTOK` | | `0.2` | 对话旁路计量：缓存命中输入单价（元/百万 token） |
+| `CHAT_OUTPUT_CNY_PER_MTOK` | | `3` | 对话旁路计量：输出单价（元/百万 token） |
 
-密钥红线：`AUTH_SECRET` 与 `ADMIN_PASSWORD` 只从服务器环境变量进入，
-不写日志、不落库、不进构建产物；缺失时启动即失败（`src/config.ts`）。
+密钥红线：`AUTH_SECRET`、`ADMIN_PASSWORD` 与 `DEEPSEEK_API_KEY` 只从服务器
+环境变量进入，不写日志、不落库、不进构建产物；缺失时启动即失败
+（`src/config.ts`）。上游密钥只出现在网关对 DeepSeek 的请求头里；上游错误
+体回显密钥时由清洗层抹除后才回传客户端。
+
+**对话旁路计量折点口径**（票 04）：锚点 1 元 = 10 点；缓存写（cache
+creation）按未命中输入价计、缓存读按命中价计；折点内部以千分之一点
+（milli-point）整数累计，避免小额调用取整归零。三个单价环境变量的默认值
+（2 / 0.2 / 3 元每百万 token）是 **deepseek-chat 标价的占位口径**，DeepSeek
+调价或切换模型时改环境变量即可，无需改代码。
 
 ## API（票 02 账号核心）
 
@@ -79,6 +93,34 @@ npm run dev             # tsx watch，默认监听 0.0.0.0:8787
 流水变动（grant/topup/adjust/consume，Σdelta == balance 恒成立）；冻结
 不改变账面余额，`total = available + frozen` 任何路径不得打破；permit
 按账号隔离，跨账号访问一律 404。
+
+## API（票 04 网关主 Agent 通道与对话隐藏额度）
+
+主 Agent（Claude Agent SDK）经 env 注入 base URL + 账号 access token 指向
+网关的 Anthropic 兼容端点；SSE 流式、工具调用块、count_tokens 兜底全部
+透传至 DeepSeek 上游（禁缓冲、不吞事件），响应字节与直连上游等价。
+
+对话规则：对用户免费且不显示任何额度；余额为 0 拒绝对话（402
+`chat_balance_zero`）；每次调用的真实 token 用量旁路计量折点累计，每个
+充值周期内 100 点等值隐藏额度（默认，`CHAT_HIDDEN_QUOTA_POINTS`）用尽
+暂停对话（402 `chat_quota_exhausted`，文案同样引导充值，错误码与余额 0
+区分）；任意档位充值（topup）刷新额度立即恢复。剩余额度对客户端接口
+不可见——任何用户侧响应都不携带对话额度字段。
+
+| 方法与路径 | 鉴权 | 说明 |
+|---|---|---|
+| `POST /v1/messages` | Bearer（账号 JWT） | Anthropic Messages 兼容代理：请求体原样转发上游（注入 DeepSeek 密钥、剥除客户端凭证头），SSE 逐块透传；非流式 JSON 亦透传并旁路计量 |
+| `POST /v1/messages/count_tokens` | Bearer（账号 JWT） | count_tokens 兜底纯透传（非流式、不计量），共用对话闸门 |
+| `GET /admin/accounts/:accountId/chat-usage` | 运营 JWT | 旁路计量对账：按请求列 token 用量与折点（`records`，最新在前，`?limit=1..200` 默认 50）+ 本周期累计 `quotaUsedMilli` |
+
+网关错误码：`chat_balance_zero`（余额为 0）、`chat_quota_exhausted`
+（隐藏额度用尽）、`upstream_unavailable`（上游不可达，502）；上游返回
+错误时状态码照常透传、正文经密钥清洗。鉴权失败复用账号 JWT 语义
+（401 `invalid_token` / `token_expired` / `stale_token`，403 `account_disabled`）。
+
+安全模型（票 04 增量）：上游密钥只在对上游请求头出现；客户端账号 token
+不转发上游；上游错误体先抹掉密钥/token 再回传（保形 JSON 或通用兜底体）；
+旁路计量表只经 /admin 运营面暴露。
 
 错误体统一为 `{"error": "<code>", "message": "..."}`。
 
@@ -163,7 +205,35 @@ curl -s -X POST $B/billing/permits/pm-xxx/close -H "authorization: Bearer $ACCES
 curl -s "$B/admin/accounts/<ACCOUNT_ID>/ledger?limit=50" -H "authorization: Bearer $ADMIN_TOKEN"
 ```
 
-## 数据表（迁移 `0001_accounts_sessions_ledger` + `0002_billing_permits`）
+### curl 走查（票 04 网关主 Agent 通道验收口径）
+
+```bash
+B=http://127.0.0.1:8787
+ACCESS=<用户 accessToken>   # 走查上方登录流程取得
+ADMIN_TOKEN=<运营 adminToken>
+
+# ① 流式对话：SSE 逐块透传（工具调用块/ping 原样），Ctrl-C 中断
+curl -N -X POST $B/v1/messages -H "authorization: Bearer $ACCESS" \
+  -H 'content-type: application/json' -H 'anthropic-version: 2023-06-01' \
+  -d '{"model":"deepseek-chat","max_tokens":256,"stream":true,
+       "messages":[{"role":"user","content":"你好"}]}'
+
+# ② count_tokens 兜底
+curl -X POST $B/v1/messages/count_tokens -H "authorization: Bearer $ACCESS" \
+  -H 'content-type: application/json' \
+  -d '{"model":"deepseek-chat","messages":[{"role":"user","content":"你好"}]}'
+
+# ③ 余额为 0 / 隐藏额度用尽 → 402 chat_balance_zero / chat_quota_exhausted（文案均引导充值）；
+#    任意档位充值后对话立即恢复
+curl -s -X POST $B/admin/ledger/topup -H 'content-type: application/json' \
+  -H "authorization: Bearer $ADMIN_TOKEN" \
+  -d '{"accountId":"<ACCOUNT_ID>","points":2000,"note":"对公转账 ¥200"}'
+
+# ④ 运营旁路计量对账：每请求 token 用量与折点 + 本周期累计（千分点）
+curl -s "$B/admin/accounts/<ACCOUNT_ID>/chat-usage?limit=50" -H "authorization: Bearer $ADMIN_TOKEN"
+```
+
+## 数据表（迁移 `0001_accounts_sessions_ledger` + `0002_billing_permits` + `0003_ledger_entry_seq` + `0004_chat_usage_metering`）
 
 - `accounts`：手机号唯一、scrypt 哈希、`password_version`（JWT `pv` 对账）、
   `status`（active/disabled）、`must_change_password`、`balance`（账面总余额，
@@ -179,6 +249,12 @@ curl -s "$B/admin/accounts/<ACCOUNT_ID>/ledger?limit=50" -H "authorization: Bear
   open 计入账号并发准入（默认上限 2）。
 - `permit_unit_reports`：逐单位回报审计（permit+unit 主键、success/failure、
   回报时间），失败/未回报单位的回补不改账面余额故不进 ledger。
+- `accounts.chat_quota_used_milli`（0004）：本充值周期内的对话旁路计量累计
+  （千分之一点）；topup 入账事务清零（任意档位充值刷新对话额度）。
+- `chat_usage_records`（0004）：网关每次 `/v1/messages` 调用的真实 token 用量
+  （input/cache read/cache creation/output）与折点（`points_milli`），供运营
+  与 DeepSeek 账单对账；免费对话无余额变动，不进 `ledger_entries`，账本
+  Σdelta == balance 口径不被污染。
 
 迁 PostgreSQL 路径：业务层只依赖 `SqlClient` 接口（`src/db/client.ts`），
 表结构用 ANSI 形态（TEXT 主键、ISO 时间戳、INTEGER 布尔），迁移 SQL 直接

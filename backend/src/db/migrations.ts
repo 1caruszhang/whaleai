@@ -107,6 +107,30 @@ export const MIGRATIONS: readonly Migration[] = [
       DROP INDEX idx_ledger_entries_account;
     `,
   },
+  {
+    // 票 04：对话隐藏额度。accounts.chat_quota_used_milli 为本充值周期内的
+    // 旁路计量累计（千分之一点），由 topup 入账事务清零（任意档位充值刷新）；
+    // chat_usage_records 按请求落 token 用量与折点，供运营与 DeepSeek 账单
+    // 对账。免费对话无余额变动，故不进 ledger_entries（Σdelta == balance
+    // 的账本口径不被污染）。
+    name: '0004_chat_usage_metering',
+    sql: `
+      ALTER TABLE accounts ADD COLUMN chat_quota_used_milli INTEGER NOT NULL DEFAULT 0;
+
+      CREATE TABLE chat_usage_records (
+        id TEXT PRIMARY KEY,
+        account_id TEXT NOT NULL REFERENCES accounts(id),
+        model TEXT NOT NULL DEFAULT '',
+        input_tokens INTEGER NOT NULL DEFAULT 0,
+        cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+        cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+        output_tokens INTEGER NOT NULL DEFAULT 0,
+        points_milli INTEGER NOT NULL,
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX idx_chat_usage_records_account ON chat_usage_records(account_id, created_at);
+    `,
+  },
 ];
 
 /** 建表只经本 runner：幂等、每条迁移独立事务、记录进 schema_migrations。 */

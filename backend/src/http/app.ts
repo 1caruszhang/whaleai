@@ -6,6 +6,7 @@ import { AppError } from '../errors';
 import { createAdminRoutes } from './admin-routes';
 import { createAuthRoutes } from './auth-routes';
 import { createBillingRoutes } from './billing-routes';
+import { createGatewayRoutes } from './gateway-routes';
 
 export interface BackendEnv {
   Variables: {
@@ -37,6 +38,7 @@ export function createBackendApp(deps: BackendDeps): Hono<BackendEnv> {
   app.route('/', createAuthRoutes(deps));
   app.route('/', createBillingRoutes(deps));
   app.route('/', createAdminRoutes(deps));
+  app.route('/', createGatewayRoutes(deps));
 
   return app;
 }

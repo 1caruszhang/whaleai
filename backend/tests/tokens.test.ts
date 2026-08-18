@@ -93,6 +93,7 @@ describe('migrations', () => {
         '0001_accounts_sessions_ledger',
         '0002_billing_permits',
         '0003_ledger_entry_seq',
+        '0004_chat_usage_metering',
       ]);
       expect(migrateDatabase(db)).toEqual([]);
 
@@ -106,6 +107,7 @@ describe('migrations', () => {
         'ledger_entries',
         'billing_permits',
         'permit_unit_reports',
+        'chat_usage_records',
         'schema_migrations',
       ]) {
         expect(tables).toContain(expected);

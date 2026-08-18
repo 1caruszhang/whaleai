@@ -8,6 +8,7 @@ import { migrateDatabase } from '../src/db/migrations';
 import { createBackendApp, type BackendEnv } from '../src/http/app';
 
 export const TEST_ADMIN_PASSWORD = 'ops-password-123';
+export const TEST_DEEPSEEK_API_KEY = 'sk-test-deepseek-upstream-key';
 const TEST_AUTH_SECRET = 'unit-test-auth-secret-0123456789abcdef0123456789';
 
 export interface TestBackend {
@@ -20,17 +21,31 @@ export interface TestBackend {
 }
 
 export async function startTestBackend(
-  overrides?: { config?: Partial<BackendConfig>; initialNowMs?: number },
+  overrides?: {
+    config?: Partial<BackendConfig>;
+    initialNowMs?: number;
+    /** 网关上游 mock（票 04）：注入后 /v1/* 代理打到这里，不触真实网络。 */
+    fetch?: typeof globalThis.fetch;
+  },
 ): Promise<TestBackend> {
   const dir = await mkdtemp(join(tmpdir(), 'xiaojing-backend-test-'));
   const db = openSqlDatabase(join(dir, 'ledger.sqlite'));
   migrateDatabase(db);
   const config: BackendConfig = {
-    ...loadBackendConfig({ AUTH_SECRET: TEST_AUTH_SECRET, ADMIN_PASSWORD: TEST_ADMIN_PASSWORD }),
+    ...loadBackendConfig({
+      AUTH_SECRET: TEST_AUTH_SECRET,
+      ADMIN_PASSWORD: TEST_ADMIN_PASSWORD,
+      DEEPSEEK_API_KEY: TEST_DEEPSEEK_API_KEY,
+    }),
     ...overrides?.config,
   };
   let fakeNow: number | undefined = overrides?.initialNowMs;
-  const app = createBackendApp({ db, config, now: () => fakeNow ?? Date.now() });
+  const app = createBackendApp({
+    db,
+    config,
+    now: () => fakeNow ?? Date.now(),
+    ...(overrides?.fetch ? { fetchImpl: overrides.fetch } : {}),
+  });
   return {
     app,
     db,

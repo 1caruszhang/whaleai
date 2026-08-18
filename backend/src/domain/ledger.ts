@@ -58,6 +58,8 @@ export function balanceSnapshot(db: SqlClient, account: AccountRow) {
 /**
  * 充值/调点/赠送入账：正负皆可，但负向只能动用未冻结余额（冻结中的点数只
  * 归 permit 结转/回补管）。note 落流水（调点必须带备注，由路由层 schema 强制）。
+ * 任意档位充值（topup）同时刷新对话隐藏额度（票 04：旁路计量累计清零，
+ * 被暂停的对话立即恢复）；grant/adjust 不刷新——只有真充值刷新。
  */
 export function applyAccountLedgerDelta(
   deps: BackendDeps,
@@ -73,7 +75,11 @@ export function applyAccountLedgerDelta(
     if (delta < 0 && balanceSnapshot(deps.db, account).available + delta < 0) {
       throw new AppError('insufficient_balance', '可用点数不足，不能动用冻结中的点数。', 409);
     }
-    return applyBalanceChange(deps.db, account, delta, kind, note, nowIso);
+    const updated = applyBalanceChange(deps.db, account, delta, kind, note, nowIso);
+    if (kind === 'topup') {
+      deps.db.run('UPDATE accounts SET chat_quota_used_milli = 0 WHERE id = ?', [accountId]);
+    }
+    return updated;
   });
 }
 
