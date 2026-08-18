@@ -21,9 +21,16 @@ function applyBalanceChange(
 ): AccountRow {
   const balanceAfter = account.balance + delta;
   db.run('UPDATE accounts SET balance = ?, updated_at = ? WHERE id = ?', [balanceAfter, nowIso, account.id]);
+  // 账号内单调递增的落账序号：created_at 毫秒精度会同毫秒并列，seq 才是
+  // 「最新在前」的全序依据。调用方都在事务里，MAX+1 发号不会被并发穿透。
+  const nextSeq =
+    db.get<{ next: number }>(
+      'SELECT COALESCE(MAX(seq), 0) + 1 AS next FROM ledger_entries WHERE account_id = ?',
+      [account.id],
+    )?.next ?? 1;
   db.run(
-    'INSERT INTO ledger_entries (id, account_id, delta, balance_after, kind, note, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
-    [randomUUID(), account.id, delta, balanceAfter, kind, note, nowIso],
+    'INSERT INTO ledger_entries (id, account_id, seq, delta, balance_after, kind, note, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+    [randomUUID(), account.id, nextSeq, delta, balanceAfter, kind, note, nowIso],
   );
   const updated = db.get<AccountRow>('SELECT * FROM accounts WHERE id = ?', [account.id]);
   if (!updated) throw new AppError('internal_error', '入账后读不到账号行。', 500);
@@ -88,10 +95,10 @@ export function listLedgerEntries(
   accountId: string,
   limit: number,
 ): LedgerEntryRow[] {
-  // balance_after 作同毫秒平手裁决：单账号每笔 delta 非零，balance_after
-  // 沿插入链严格单调，比随机 id 稳定（同毫秒多笔时仍按真实落账顺序）。
+  // 最新在前：seq 为账号内插入序号（见 applyBalanceChange），倒排即严格的
+  // 逆落账顺序——created_at 同毫秒并列时也保持全序；时间戳只作展示字段。
   return db.all<LedgerEntryRow>(
-    'SELECT id, account_id, delta, balance_after, kind, note, created_at FROM ledger_entries WHERE account_id = ? ORDER BY created_at DESC, balance_after DESC LIMIT ?',
+    'SELECT id, account_id, delta, balance_after, kind, note, created_at FROM ledger_entries WHERE account_id = ? ORDER BY seq DESC LIMIT ?',
     [accountId, limit],
   );
 }

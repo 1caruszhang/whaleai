@@ -87,6 +87,26 @@ export const MIGRATIONS: readonly Migration[] = [
       );
     `,
   },
+  {
+    // 账本流水序号：created_at 同毫秒并列时它才是全序的落账顺序依据
+    // （毫秒精度的 ISO 时间戳 + 随机 uuid 都给不出插入顺序）。取值由
+    // applyBalanceChange 在写流水的同一事务里按账号 MAX(seq)+1 发号，
+    // 不用 SQLite 自增/rowid——本列是普通 INTEGER，PG 直读。存量行按
+    // (created_at, id) 定序回填：同毫秒旧行的真实插入顺序已不可考，
+    // id 只作确定性决胜，回填后新发号不再受影响。
+    name: '0003_ledger_entry_seq',
+    sql: `
+      ALTER TABLE ledger_entries ADD COLUMN seq INTEGER NOT NULL DEFAULT 0;
+      UPDATE ledger_entries AS entry
+      SET seq = numbered.rn
+      FROM (
+        SELECT id, ROW_NUMBER() OVER (ORDER BY created_at, id) AS rn FROM ledger_entries
+      ) AS numbered
+      WHERE entry.id = numbered.id;
+      CREATE UNIQUE INDEX idx_ledger_entries_account_seq ON ledger_entries(account_id, seq);
+      DROP INDEX idx_ledger_entries_account;
+    `,
+  },
 ];
 
 /** 建表只经本 runner：幂等、每条迁移独立事务、记录进 schema_migrations。 */
