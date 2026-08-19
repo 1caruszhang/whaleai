@@ -45,7 +45,7 @@
     },
     "webview2": {
       "version": "evergreen-bootstrapper-eb04ea38-2026-08-14",
-      "url": "https://msedge.sf.dl.delivery.mp.microsoft.com/filestreamingservice/files/eb04ea38-69c8-4b86-b65b-fd4c8469ae59/MicrosoftEdgeWebView2RuntimeInstallerX64.exe",
+      "url": "https://go.microsoft.com/fwlink/p/?LinkId=2124703",
       "sha256": "be695eb3732a94e181f008ab5cf6ee650f8644676e87f9e02b6ab0d02f2ea08e",
       "cacheFile": "MicrosoftEdgeWebview2Setup-eb04ea38.exe"
     }
@@ -130,7 +130,6 @@
     "claude-agent-sdk/claude.exe",
     "portable-git/bin/bash.exe",
     "portable-git/cmd/git.exe",
-    "portable-git/mingw64/bin/git.exe",
-    "windows-prerequisites/MicrosoftEdgeWebview2Setup.exe"
+    "portable-git/mingw64/bin/git.exe"
   ]
 }

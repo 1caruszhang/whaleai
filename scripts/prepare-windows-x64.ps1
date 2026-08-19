@@ -263,7 +263,9 @@ function Expand-NpmRuntimePackage {
     $archive = Get-VerifiedDownload -Spec $Spec -Label $Spec.name -HashKind "sri"
     $extractRoot = Join-Path $TemporaryRoot ([Guid]::NewGuid().ToString("N"))
     New-Item -ItemType Directory -Path $extractRoot -Force | Out-Null
-    & tar.exe -xzf $archive -C $extractRoot
+    # Use the Windows inbox bsdtar. A GNU tar earlier on PATH (for example a
+    # Git-bundled tar) misparses drive-letter paths like C:\... as remote hosts.
+    & "$env:SystemRoot\System32\tar.exe" -xzf $archive -C $extractRoot
     if ($LASTEXITCODE -ne 0) {
         throw "Verified npm archive extraction failed for $($Spec.name)."
     }
@@ -361,10 +363,43 @@ try {
     if ($LASTEXITCODE -ne 0) {
         throw "Verified PortableGit x64 extraction failed."
     }
+    # The 7-Zip self-extractor can return before its extraction child process
+    # has finished writing. Wait until the required entry points exist and the
+    # file count stays stable before staging the result.
+    $extractionMarkers = @("bin\bash.exe", "cmd\git.exe", "mingw64\bin\git.exe")
+    $extractionDeadline = [DateTime]::UtcNow.AddMinutes(10)
+    $lastFileCount = -1
+    $stablePolls = 0
+    while ([DateTime]::UtcNow -lt $extractionDeadline) {
+        $markersPresent = $true
+        foreach ($marker in $extractionMarkers) {
+            if (-not (Test-Path -LiteralPath (Join-Path $portableExtract $marker))) {
+                $markersPresent = $false
+                break
+            }
+        }
+        $fileCount = @(Get-ChildItem -LiteralPath $portableExtract -Recurse -Force -File).Count
+        if ($markersPresent -and $fileCount -gt 0 -and $fileCount -eq $lastFileCount) {
+            $stablePolls += 1
+            if ($stablePolls -ge 2) { break }
+        }
+        else {
+            $stablePolls = 0
+        }
+        $lastFileCount = $fileCount
+        Start-Sleep -Seconds 3
+    }
+    foreach ($marker in $extractionMarkers) {
+        if (-not (Test-Path -LiteralPath (Join-Path $portableExtract $marker))) {
+            throw "PortableGit x64 extraction did not produce $marker."
+        }
+    }
     Copy-DirectoryContents -Source $portableExtract -Destination $portableGitStage
 
     $webviewBootstrapper = Get-VerifiedDownload -Spec $manifest.downloads.webview2 -Label "WebView2 x64 bootstrapper"
-    Assert-PeX64 -Path $webviewBootstrapper -Label "WebView2 x64 bootstrapper"
+    # Microsoft's evergreen bootstrapper stub is a 32-bit PE that installs the
+    # x64 WebView2 runtime; the hash pin and Authenticode checks below are the
+    # admission contract for this prerequisite.
     Assert-AuthenticodeValid -Path $webviewBootstrapper -Label "WebView2 x64 bootstrapper"
     Copy-Item -LiteralPath $webviewBootstrapper -Destination (Join-Path $prerequisiteStage "MicrosoftEdgeWebview2Setup.exe")
 
@@ -403,7 +438,24 @@ try {
 }
 finally {
     if (Test-Path -LiteralPath $temporaryRoot) {
-        Remove-Item -LiteralPath $temporaryRoot -Recurse -Force
+        # Windows Remove-Item can race with just-closed extraction handles on
+        # deep directory trees (for example PortableGit tcl tzdata). Retry a
+        # few times, then leave the temp dir behind rather than failing an
+        # otherwise successful staging.
+        $deleted = $false
+        foreach ($attempt in 1..5) {
+            try {
+                Remove-Item -LiteralPath $temporaryRoot -Recurse -Force -ErrorAction Stop
+                $deleted = $true
+                break
+            }
+            catch {
+                Start-Sleep -Seconds 2
+            }
+        }
+        if (-not $deleted) {
+            Write-Warning "Temporary extraction root was left behind: $temporaryRoot"
+        }
     }
 }
 

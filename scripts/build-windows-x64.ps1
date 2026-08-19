@@ -208,7 +208,7 @@ Assert-ArtifactSignature -Path $MainExecutable -MustBeSigned ($Mode -eq "product
 Assert-ArtifactSignature -Path $installer -MustBeSigned ($Mode -eq "production-signed")
 
 New-Item -ItemType Directory -Path $ArtifactRoot -Force | Out-Null
-$version = (Get-Content -LiteralPath (Join-Path $ProjectDir "package.json") -Raw | ConvertFrom-Json).version
+$version = (Get-Content -LiteralPath (Join-Path $ProjectDir "package.json") -Raw -Encoding UTF8 | ConvertFrom-Json).version
 $label = if ($Mode -eq "production-signed") { "PRODUCTION-SIGNED" } else { "INTERNAL-UNSIGNED" }
 $candidateName = "Xiaojing_${version}_x64_${label}-setup.exe"
 $candidatePath = Join-Path $ArtifactRoot $candidateName

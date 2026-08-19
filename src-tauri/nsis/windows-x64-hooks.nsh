@@ -2,6 +2,11 @@
 ; The bootstrapper is a hash-verified bundle resource. Tauri's network-download
 ; mode stays disabled so a mutable URL can never enter the package unnoticed.
 
+; ${__FILEDIR__} inside a macro body expands at macro-insert time, when the
+; current file is the generated installer.nsi. Capture this hook's own
+; directory now, while the included file is being parsed.
+!define XIAOJING_HOOK_DIR "${__FILEDIR__}"
+
 !macro NSIS_HOOK_PREINSTALL
   ReadRegStr $4 HKLM "SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\${WEBVIEW2APPGUID}" "pv"
   ${If} $4 == ""
@@ -13,7 +18,7 @@
 
   ${If} $4 == ""
     InitPluginsDir
-    File "/oname=$PLUGINSDIR\MicrosoftEdgeWebview2Setup.exe" "${__FILEDIR__}\..\resources\windows-prerequisites\MicrosoftEdgeWebview2Setup.exe"
+    File "/oname=$PLUGINSDIR\MicrosoftEdgeWebview2Setup.exe" "${XIAOJING_HOOK_DIR}\..\resources\windows-prerequisites\MicrosoftEdgeWebview2Setup.exe"
     IfFileExists "$PLUGINSDIR\MicrosoftEdgeWebview2Setup.exe" 0 xiaojing_webview_missing
     DetailPrint "Installing the bundled Microsoft Edge WebView2 prerequisite..."
     ExecWait '"$PLUGINSDIR\MicrosoftEdgeWebview2Setup.exe" /silent /install' $1

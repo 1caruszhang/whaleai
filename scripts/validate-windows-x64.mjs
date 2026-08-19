@@ -232,7 +232,7 @@ export function collectStaticFailures(root = DEFAULT_ROOT) {
   const downloadHosts = {
     node: 'nodejs.org',
     portableGit: 'github.com',
-    webview2: 'msedge.sf.dl.delivery.mp.microsoft.com',
+    webview2: 'go.microsoft.com',
   };
   for (const [name, spec] of Object.entries(manifest.downloads)) {
     const source = new URL(spec.url);
@@ -349,8 +349,18 @@ export function collectStagingFailures(root = DEFAULT_ROOT) {
     addIf(failures, entry?.size === lstatSync(absolute).size, `staged file size mismatch: ${relativePath}`);
     const lowerParts = relativePath.split('/').map((part) => part.toLowerCase());
     addIf(failures, !lowerParts.some((pathPart) => NON_RUNTIME_NAME_PARTS.some((part) => pathPart.startsWith(part))), `staging contains forbidden non-runtime material: ${relativePath}`);
-    addIf(failures, !/(?:^|\/)(?:\.env(?:\.|$)|[^/]+\.(?:pem|pfx|p12|key))$/i.test(relativePath), `staging contains secret-shaped material: ${relativePath}`);
+    // Git for Windows ships public CA trust bundles as *.pem; they are not secrets.
+    const isPortableGitCaBundle = relativePath.startsWith('portable-git/') && /\.pem$/i.test(relativePath);
+    addIf(failures, !/(?:^|\/)(?:\.env(?:\.|$)|[^/]+\.(?:pem|pfx|p12|key))$/i.test(relativePath) || isPortableGitCaBundle, `staging contains secret-shaped material: ${relativePath}`);
     if (/\.(?:exe|dll|node)$/i.test(relativePath)) {
+      // Microsoft's evergreen WebView2 bootstrapper stub is a 32-bit PE that
+      // installs the x64 runtime; it is admitted by hash pin and Authenticode.
+      if (relativePath === 'windows-prerequisites/MicrosoftEdgeWebview2Setup.exe') continue;
+      // PortableGit ships a few 32-bit helper binaries (for example
+      // usr/libexec/getprocaddr32.exe). The archive is Authenticode-verified
+      // before extraction, and its entry points in requiredPeX64Paths are
+      // still x64-checked by the loop below.
+      if (relativePath.startsWith('portable-git/') && !manifest.requiredPeX64Paths.includes(relativePath)) continue;
       const machine = readPeMachine(readFileSync(absolute));
       addIf(failures, machine === PE_X64, `staged PE is not x64: ${relativePath}`);
     }
