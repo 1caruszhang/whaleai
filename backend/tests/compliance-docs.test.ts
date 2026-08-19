@@ -14,7 +14,8 @@ import { OPERATION_PRICES } from "../src/domain/pricing";
  *    且操作集合不缺不多，防止公示文件与服务端价目两处漂移；
  *  - 发布订单折算示例必须与 publishOrderPoints 的实现一致；
  *  - 《隐私政策》必须覆盖决策票 13 的全部要点（存储位置/本地数据/注销删除）；
- *  - 《用户协议（2026 年内测修订版）》必须入仓且保留修订记录（9 项工作单）。
+ *  - 《用户协议（2026 年正式版）》必须入仓且为定稿（法务复核后正式版，
+ *    不再携带修订记录；修订工作单的溯源见 git 历史）。
  *
  * 全部为本地文件读取 + 纯断言，不触网络（AGENTS.md 默认测试纪律）。
  */
@@ -25,7 +26,7 @@ const readDoc = (name: string): string =>
 
 const pricingDoc = readDoc("计费标准.md");
 const privacyDoc = readDoc("隐私政策.md");
-const agreementDoc = readDoc("用户协议（2026年内测修订版）.md");
+const agreementDoc = readDoc("用户协议（2026年正式版）.md");
 
 /** 解析《计费标准》固定价目表：行形如 `| 名称 | op_key | base | perUnit | ... |`。 */
 function parsePublishedPrices(
@@ -110,41 +111,17 @@ describe("《隐私政策》覆盖决策票 13 全部要点（票 11 验收项 3
   });
 });
 
-describe("《用户协议（2026 年内测修订版）》入仓与修订记录（票 11 验收项 4）", () => {
-  const appendixStart = agreementDoc.indexOf("修订记录");
-  const appendix = appendixStart >= 0 ? agreementDoc.slice(appendixStart) : "";
-
-  it("为内测修订版且包含修订记录附录", () => {
-    expect(agreementDoc).toContain("内测修订版");
-    expect(appendixStart).toBeGreaterThan(0);
-    expect(appendix).toContain("决策票 13");
+describe("《用户协议（2026 年正式版）》入仓与定稿（票 11 验收项 4；法务复核后正式定稿）", () => {
+  it("为正式版定稿：标记正式版且不再携带任何修订记录/草稿标注", () => {
+    expect(agreementDoc).toContain("2026 年·正式版");
+    expect(agreementDoc).toContain("经法务复核");
+    expect(agreementDoc).not.toContain("修订记录");
+    expect(agreementDoc).not.toContain("本条为修订");
+    expect(agreementDoc).not.toContain("本条为新增");
+    // 修订溯源移交 git 历史（定稿前的修订工作单版本见仓库历史），正文不再展示。
   });
 
-  it("修订记录逐条列出 9 项工作单（条款号与依据可溯源）", () => {
-    // 决策票 13 修订清单 1-9 对应的条款号锚点。
-    const clauseAnchors = [
-      "14.4", // 1 点数不设有效期
-      "19.4", // 2 未消耗可退款（含特别确认 35(2)）
-      "35(2)",
-      "10.1", // 3 不绑定设备
-      "11–13", // 4 会员条款限定产品线
-      "1.6", // 5 计费标准落地 + 点数定义
-      "14.3",
-      "20.2",
-      "27.1", // 6 隐私政策增补
-      "5.3", // 7 发布条款增补
-      "4.4", // 8 服务可用性增补
-      "4.2", // 9 商业用途修订
-    ];
-    for (const anchor of clauseAnchors) {
-      expect(appendix, `修订记录缺少条款号 ${anchor}`).toContain(anchor);
-    }
-    for (let item = 1; item <= 9; item++) {
-      expect(appendix).toContain(`决策票 13 修订项 ${item}`);
-    }
-  });
-
-  it("正文关键修订表述到位（无有效期/退款/多设备）", () => {
+  it("正文关键条款表述到位（无有效期/退款/多设备）", () => {
     expect(agreementDoc).toContain("不设有效期");
     expect(agreementDoc).toContain("未消耗的点数余额可向甲方申请退款");
     expect(agreementDoc).toContain("同一账号可在多台设备登录使用");
