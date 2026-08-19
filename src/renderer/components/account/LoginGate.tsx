@@ -6,6 +6,8 @@ import { useTranslation } from 'react-i18next';
 import xiaojingLogo from '@/assets/brand/xiaojing-logo.png';
 import { useAccountApi } from '@/context/AccountContext';
 import { useResolvedTheme } from '@/theme';
+import ComplianceDocViewer from './ComplianceDocViewer';
+import { complianceDocById, type ComplianceDoc, type ComplianceDocId } from './complianceDocs';
 
 const PHONE_PATTERN = /^1[3-9]\d{9}$/;
 
@@ -29,6 +31,7 @@ export function LoginScreen({
   const [acceptedAgreement, setAcceptedAgreement] = useState(agreementAccepted);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [viewingDoc, setViewingDoc] = useState<ComplianceDoc | null>(null);
 
   const submit = useCallback(async () => {
     if (busy) return;
@@ -112,16 +115,24 @@ export function LoginScreen({
             />
           </div>
         </label>
-        <label className="flex items-start gap-2 pt-1 text-xs leading-5 text-[var(--ink-secondary)]">
+        <div className="flex items-start gap-2 pt-1 text-xs leading-5 text-[var(--ink-secondary)]">
           <input
             type="checkbox"
+            aria-label={t('account.agreement')}
             checked={acceptedAgreement}
             onChange={(event) => setAcceptedAgreement(event.target.checked)}
             disabled={busy}
             className="mt-0.5 h-3.5 w-3.5 shrink-0 accent-[var(--accent)]"
           />
-          {t('account.agreement')}
-        </label>
+          <span>
+            {t('account.agreementPrefix')}
+            <ComplianceDocLink id="user-agreement" onOpen={setViewingDoc} />
+            {t('account.agreementSeparator')}
+            <ComplianceDocLink id="privacy-policy" onOpen={setViewingDoc} />
+            {t('account.agreementJoiner')}
+            <ComplianceDocLink id="pricing-standard" onOpen={setViewingDoc} />
+          </span>
+        </div>
         {error && (
           <p role="alert" className="rounded-lg border border-[var(--error)]/30 bg-[var(--error)]/10 px-3 py-2 text-xs leading-5 text-[var(--error)]">
             {error}
@@ -136,7 +147,31 @@ export function LoginScreen({
           {busy ? t('account.loggingIn') : t('account.loginButton')}
         </button>
       </form>
+      {viewingDoc && <ComplianceDocViewer doc={viewingDoc} onClose={() => setViewingDoc(null)} />}
     </LoginShell>
+  );
+}
+
+/**
+ * 首登勾选行内的合规文件链接（票 11）：打开只读全文查看器；type="button"
+ * 且不接触勾选状态，点链接不会误触发提交或改变同意勾选。
+ */
+function ComplianceDocLink({
+  id,
+  onOpen,
+}: {
+  id: ComplianceDocId;
+  onOpen: (doc: ComplianceDoc) => void;
+}) {
+  const { t } = useTranslation('common');
+  return (
+    <button
+      type="button"
+      onClick={() => onOpen(complianceDocById(id))}
+      className="font-medium text-[var(--accent)] underline underline-offset-2 hover:opacity-80"
+    >
+      {t(`account.complianceDoc.${id}`)}
+    </button>
   );
 }
 

@@ -29,14 +29,13 @@ import {
  *     ossRegion: 'oss-cn-chengdu',
  *     distributionAppId: 'test-appid-vector',
  *     distributionSecret: 'test-distribution-secret-vector',
- *   }, { fetch: mockFetch, now: () => new Date(FIXED_MS) });
+ *   }, { fetch: mockFetch, now: () => new Date(FIXED_UTC_STRING) });
  *   await caps.objectStorage.putHtml('articles/2026/标题 demo+plus.html', '<html><body>hello</body></html>');
  *   await caps.distribution.listResources('media', 2, 15);
  *
  * Sidecar 签名实现后续若改动，需重新跑 sidecar 实现刷新本文件向量。
  */
 
-const FIXED_MS = 1_787_117_340_000; // Date.parse('2026-08-19T05:29:00Z')
 const FIXED_UTC_STRING = 'Wed, 19 Aug 2026 05:29:00 GMT';
 const FIXED_TIMESTAMP_SECONDS = 1_787_117_340; // 10 位 unix 秒
 

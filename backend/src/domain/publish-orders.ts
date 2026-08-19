@@ -117,6 +117,18 @@ export function findPublishOrderBySn(db: SqlClient, sn: string): PublishOrderRow
   return db.get<PublishOrderRow>('SELECT * FROM publish_orders WHERE sn = ?', [sn]);
 }
 
+/** 运营对账视图（票 10）：账号全部发布订单，最新在前（展示用途平序）。 */
+export function listPublishOrdersForAccount(
+  db: SqlClient,
+  accountId: string,
+  limit: number,
+): PublishOrderRow[] {
+  return db.all<PublishOrderRow>(
+    'SELECT * FROM publish_orders WHERE account_id = ? ORDER BY created_at DESC, sn DESC LIMIT ?',
+    [accountId, limit],
+  );
+}
+
 /** 跨账号访问订单一律 404，不泄露 sn 是否存在于他人账号。 */
 export function requireOwnedPublishOrder(
   db: SqlClient,

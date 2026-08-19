@@ -1,4 +1,4 @@
-import { Coins, Loader2, LogOut, RefreshCw, X } from 'lucide-react';
+import { Coins, FileText, Loader2, LogOut, RefreshCw, X } from 'lucide-react';
 import { createPortal } from 'react-dom';
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -6,6 +6,8 @@ import { useTranslation } from 'react-i18next';
 import { formatGraceDeadline } from '@/utils/accountFormat';
 import OverlayBackdrop from '@/components/OverlayBackdrop';
 import { useAccountApi, useAccountState } from '@/context/AccountContext';
+import ComplianceDocViewer from './ComplianceDocViewer';
+import { COMPLIANCE_DOCS, type ComplianceDoc } from './complianceDocs';
 
 /**
  * 左下角设置 → 个人信息（票 06）：手机号 / 点数余额 / 充值引导（对公转账
@@ -18,6 +20,7 @@ export default function AccountPanelDialog({ onClose }: { onClose: () => void })
   const accountApi = useAccountApi();
   const [refreshing, setRefreshing] = useState(false);
   const [refreshError, setRefreshError] = useState<string | null>(null);
+  const [viewingDoc, setViewingDoc] = useState<ComplianceDoc | null>(null);
 
   const refresh = async () => {
     if (refreshing) return;
@@ -102,6 +105,23 @@ export default function AccountPanelDialog({ onClose }: { onClose: () => void })
           <p className="mt-1.5 text-xs leading-5 text-[var(--ink-muted)]">{t('account.rechargeBody')}</p>
         </div>
 
+        <div className="mt-3 rounded-xl border border-[var(--line)] bg-[var(--paper)] p-3">
+          <p className="text-xs font-semibold text-[var(--ink-secondary)]">{t('account.complianceDocsSection')}</p>
+          <div className="mt-1.5 space-y-0.5">
+            {COMPLIANCE_DOCS.map((doc) => (
+              <button
+                key={doc.id}
+                type="button"
+                onClick={() => setViewingDoc(doc)}
+                className="flex w-full items-center gap-1.5 rounded-lg px-1.5 py-1 text-left text-xs text-[var(--ink-secondary)] hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
+              >
+                <FileText className="h-3.5 w-3.5 shrink-0 text-[var(--ink-subtle)]" />
+                {doc.title}
+              </button>
+            ))}
+          </div>
+        </div>
+
         <div className="mt-5 flex justify-end">
           <button
             type="button"
@@ -113,6 +133,7 @@ export default function AccountPanelDialog({ onClose }: { onClose: () => void })
           </button>
         </div>
       </div>
+      {viewingDoc && <ComplianceDocViewer doc={viewingDoc} onClose={() => setViewingDoc(null)} />}
     </OverlayBackdrop>,
     document.body,
   );

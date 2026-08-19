@@ -3,7 +3,6 @@ import type { Context } from 'hono';
 import type { ContentfulStatusCode } from 'hono/utils/http-status';
 import type { BackendDeps } from '../deps';
 import { assertConversationAllowed, recordChatUsage } from '../domain/chat-usage';
-import type { AccountRow } from '../domain/types';
 import { extractUsageFromMessageJson, SseUsageTap } from '../gateway/anthropic-usage';
 import { sanitizedUpstreamErrorBody } from '../gateway/sanitize';
 import { AppError } from '../errors';

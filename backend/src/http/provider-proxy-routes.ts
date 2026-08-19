@@ -515,7 +515,7 @@ export function createProviderProxyRoutes(deps: BackendDeps) {
     routes.post(
       `/gw/distribution${kindPath}/order/apply-republish`,
       requireAccount,
-      orderAction('apply-republish', snOnlySchema, c => {
+      orderAction('apply-republish', snOnlySchema, () => {
         if (kind !== 'media') {
           throw new AppError('action_not_supported', '申请补发仅支持新闻媒体订单。', 400);
         }

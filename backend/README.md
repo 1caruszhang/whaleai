@@ -20,6 +20,21 @@ npm run dev             # tsx watch，默认监听 0.0.0.0:8787
 
 首次启动自动执行迁移（`schema_migrations` 记录进度，幂等）。
 
+## 部署（票 12）
+
+Docker 单容器 + 宝塔 nginx 反代 `api.jingshanai.com`；完整上线手册（含 env
+注入清单、SSL、升级/回滚、备份、密钥抽查）见
+[specs/guides/deploy-api-jingshanai.md](../specs/guides/deploy-api-jingshanai.md)。
+
+- `Dockerfile`：多阶段构建（esbuild 单文件 bundle，运行层无 node_modules、
+  非 root、HEALTHCHECK 打 `/healthz`）。密钥绝不入镜像层（`.dockerignore`
+  挡 `.env`/`data/`，并有容器侧抽查）。
+- `docker-compose.yml`：SQLite 数据卷 `xiaojing-data` 挂出、`env_file` 注入
+  环境变量、`restart: unless-stopped`、默认只绑 `127.0.0.1:8787`
+  （公网流量一律经反代）。
+- 本地容器级验证（构建→起容器→健康→合约冒烟→SSE 透传 mock→清理，占位
+  密钥不触公网）：`npm run verify:container`。
+
 ## 环境变量
 
 | 变量 | 必填 | 默认 | 说明 |
@@ -37,7 +52,9 @@ npm run dev             # tsx watch，默认监听 0.0.0.0:8787
 | `PORT` / `HOST` | | `8787` / `0.0.0.0` | 监听地址 |
 | `ACCESS_TOKEN_TTL_SECONDS` | | `7200` | 账号 JWT 有效期（规格 1–2h，取上限） |
 | `REFRESH_TOKEN_TTL_SECONDS` | | `2592000` | refresh 30 天滑动窗口 |
-| `ADMIN_TOKEN_TTL_SECONDS` | | `3600` | 运营 JWT 有效期 |
+| `ADMIN_TOKEN_TTL_SECONDS` | | `3600` | 运营 JWT 有效期（JSON Bearer 与 SSR 会话 cookie 共用） |
+| `ADMIN_LOGIN_THROTTLE_UNIT_MS` | | `500` | 运营密码错误登录节流步长：连续失败第 n 次延时 min(n×步长, 20×步长)，只延时不断锁 |
+| `ADMIN_MEDIA_POOL_LOW_BALANCE_CNY` | | `500` | /admin 媒介池低余额提醒阈值（元） |
 | `SIGNUP_GRANT_POINTS` | | `500` | 开号赠送点数 |
 | `MAX_CONCURRENT_PERMITS_PER_ACCOUNT` | | `2` | 每账号并发计费准入上限（open permit 数） |
 | `DEEPSEEK_BASE_URL` | | `https://api.deepseek.com/anthropic` | DeepSeek Anthropic 兼容上游基地址 |
@@ -195,6 +212,32 @@ OSS 账单对账，不动 `ledger_entries`（Σdelta == balance 不变量）；�
 - **密码**：Node 内置 scrypt（N=16384, r=8, p=1），登录对未知手机号做等
   代价校验防时序枚举。
 
+## 运营台（票 10 /admin SSR 页面）
+
+服务端渲染的运营管理页，运营全程不接触命令行。与 JSON 运营 API 并存：
+页面 GET 挂 `/admin` 与 `/admin/accounts/:accountId`，表单动作统一挂
+`/admin/ui/*`（与 JSON API 路径不重合）；写操作走表单 POST + 303（PRG）。
+
+| 方法与路径 | 鉴权 | 说明 |
+|---|---|---|
+| `GET /admin` | 会话 cookie | 未登录渲染登录页；已登录渲染仪表盘：媒介池余额卡（代理超级媒介 `GET /profile` 实测值，低于阈值提醒预存）+ 账号列表 + 建号表单（开通即赠点） |
+| `POST /admin/session` | — | 运营密码登录：签发运营 JWT 进 `HttpOnly;SameSite=Lax` cookie（`xiaojing_admin`，有效期同 `ADMIN_TOKEN_TTL_SECONDS`）；错误密码 401 + 递增延时节流（与 JSON 登录共享计数） |
+| `POST /admin/logout` | 会话 cookie | 清除会话 cookie（Max-Age=0） |
+| `POST /admin/ui/accounts` | 会话 cookie | 建号（手机号 + 初始密码 ≥8 位） |
+| `POST /admin/ui/accounts/:accountId/status` | 会话 cookie | 停用/启用；停用即时吊销账号全部会话（`revoked_reason=admin_disabled`），余额与流水不动 |
+| `POST /admin/ui/accounts/:accountId/topup` | 会话 cookie | 充值对账确认：金额（元，最小粒度 0.1 元 = 1 点）+ 来源备注同落 `topup` 流水（`充值 ¥X：备注`） |
+| `POST /admin/ui/accounts/:accountId/adjust` | 会话 cookie | 调点（正负整数 ≠0，备注必填），落 `adjust` 流水 |
+| `GET /admin/accounts/:accountId` | 会话 cookie | 账号对账页：余额三口径 + 点数流水 + 计费操作（permit 扣点口径）+ 发布订单 + Provider 计量 + 对话计量 |
+
+形态与安全：纯模板字符串渲染 + 统一 `esc()` 转义（手机号/备注等一切回显），
+零客户端 `<script>`、零新依赖、无独立前端工程；低余额阈值比较在服务端
+渲染时完成。会话凭证复用运营 JWT（audience 隔离：用户 access token 进
+cookie 无效）；`SameSite=Lax` 挡跨站表单 POST（CSRF 主要面）。/profile 代理
+复用票 05 展平签名栈（timestamp 取网关时钟）；上游失败时余额卡降级为
+「获取失败」，不阻断账号管理。`/profile` 余额字段上游文档未定案，现按
+`data.money` / `data.balance`（number 或十进制字符串）防御式解析，取不到
+有限数字按上游失败处理。
+
 ## curl 走查（验收口径）
 
 ```bash
@@ -339,7 +382,7 @@ curl -s "$B/gw/distribution/we-media/resource?page=2&size=15" -H "authorization:
   `status`（active/disabled）、`must_change_password`、`balance`（账面总余额，
   含冻结）。
 - `auth_sessions`：一次登录一个会话；30 天滑动 `expires_at`；吊销留
-  `revoked_reason`（logout / password_changed / refresh_reuse）。
+  `revoked_reason`（logout / password_changed / refresh_reuse / admin_disabled）。
 - `refresh_tokens`：哈希唯一、`consumed_at`/`replaced_by` 记录轮换链。
 - `ledger_entries`：点数流水（`delta` + `balance_after` 成对出现），
   kind ∈ grant / topup / adjust / consume；建号 `grant` 是第一条，
