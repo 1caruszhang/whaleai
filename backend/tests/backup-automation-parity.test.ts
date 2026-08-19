@@ -62,6 +62,9 @@ describe("备份自动化对表（票 15）", () => {
     expect(deployScript).toMatch(
       /grep -Eq '\^\[0-9A-Za-z\/\*,-\]\+\( \[0-9A-Za-z\/\*,-\]\+\)\{4\}\$'/,
     );
+    // cron 表达式含 `*`，ssh argv 直传会被远端 shell glob 展开（实测 `$2` 只剩
+    // 首字段）——必须 base64 后经环境变量进远端脚本解码。
+    expect(deployScript).toContain("XIAOJING_CRON_B64=");
     // 幂等口径：同名 cron 文件整覆写 + 属主/权限固定。
     expect(deployScript).toMatch(
       /printf '%s root %s\/backup-run\.sh >> %s\/backups\/backup\.log 2>&1\\n'/,

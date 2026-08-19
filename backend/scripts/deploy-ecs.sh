@@ -478,9 +478,15 @@ cmd_backup_install() {
   scp -o ServerAliveInterval=15 $SSH_OPTS_EXTRA "$script" "$wrapper" "$target:$SERVER_DIR/"
 
   log "安装 cron（${cron_spec} → ${BACKUP_CRON_FILE}）"
-  ssh_cmd "$target" bash -s -- "$SERVER_DIR" "$cron_spec" "$BACKUP_CRON_FILE" <<'REMOTE'
+  # cron 表达式含 `*`：作为 ssh argv 直传会被远端登录 shell 做 glob 展开
+  # （实测 `$2` 只剩首字段），base64 后经环境变量进远端脚本再解码。
+  local cron_b64
+  cron_b64=$(printf '%s' "$cron_spec" | base64 | tr -d '\n')
+  ssh_cmd "$target" "XIAOJING_CRON_B64=$cron_b64 bash -s -- $SERVER_DIR $BACKUP_CRON_FILE" <<'REMOTE'
 set -euo pipefail
-dir=$1 cron=$2 cron_file=$3
+dir=$1 cron_file=$2
+cron=$(printf '%s' "$XIAOJING_CRON_B64" | base64 -d)
+[ "$(printf '%s' "$cron" | wc -l | tr -d ' ')" = 0 ] || { echo "[error] cron 表达式解码异常（含换行）"; exit 11; }
 chmod 700 "$dir/backup-run.sh"
 printf '%s root %s/backup-run.sh >> %s/backups/backup.log 2>&1\n' "$cron" "$dir" "$dir" >"$cron_file"
 chown root:root "$cron_file"
