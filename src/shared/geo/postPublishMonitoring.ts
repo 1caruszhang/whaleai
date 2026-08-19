@@ -11,6 +11,7 @@ export const POST_PUBLISH_MONITOR_POLICY_VERSION =
 export type PostPublishMonitorPlanStatus =
   | "draft"
   | "active"
+  | "paused"
   | "completed"
   | "provisioning-failed";
 
@@ -144,7 +145,7 @@ export interface PostPublishMonitorPlanProjection {
   scheduleId?: string;
   runCount: number;
   nextRunAt?: string;
-  recoveryState: "ready" | "overdue" | "recovering" | "completed";
+  recoveryState: "ready" | "overdue" | "recovering" | "paused" | "completed";
   latestRun?: PostPublishMonitorRunProjection;
   /** Newest-first, bounded BrandWorkspace history (currently at most 20 runs). */
   recentRuns: PostPublishMonitorRunProjection[];

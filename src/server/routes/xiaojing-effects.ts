@@ -6,6 +6,7 @@ import type { PublishOrderStatusEntry } from '../../shared/geo/publishScheduler'
 import { createGeoDashboardPort, GeoDashboardService } from '../geo/dashboard';
 import {
   checkPublishedPageAccess,
+  MONITORING_PATROL_UNIT_POINTS,
   PostPublishBaselineProbeService,
   PostPublishInsufficientBalanceError,
   type PostPublishBaselineProbeInput,
@@ -693,6 +694,120 @@ export async function handleXiaojingEffectsRoute(
           error: message,
         },
         message.includes("identity_mismatch") ? 403 : rejected ? 400 : 502,
+      );
+    }
+  }
+
+  // 监测查单切网关（票 14）：Rust 监测 executor 的 publish-status /
+  // access-indexing 单元经本路由查订单状态——网关用服务器侧超级媒介
+  // 凭据 HMAC-SHA256 重签并按查单对账（结转/退点），sn 由本路由按
+  // `distributionOrderSn(executionId, itemId)` 派生（与票 08 下单同一
+  // 口径），请求体不接受 sn。结果回 typed 查单条目；查不到该 sn 时
+  // record 为 null（Rust 侧按可重试“尚未返回”处理）。
+  if (
+    pathname === "/api/xiaojing/post-publish-monitor/order-query" &&
+    request.method === "POST"
+  ) {
+    try {
+      const payload = (await request.json()) as {
+        workspaceId: string;
+        sessionId: string;
+        executionId: string;
+        itemId: string;
+        kind: string;
+      };
+      const runtimeSessionId = getRuntimeSessionIdForRequest();
+      const workspaceId = basename(resolve(workspacePath));
+      if (
+        payload.workspaceId !== workspaceId ||
+        payload.sessionId !== runtimeSessionId
+      ) {
+        return jsonResponse(
+          { success: false, error: "post_publish_monitor_identity_mismatch" },
+          403,
+        );
+      }
+      if (
+        typeof payload.executionId !== "string" ||
+        !payload.executionId ||
+        typeof payload.itemId !== "string" ||
+        !payload.itemId ||
+        (payload.kind !== "media" && payload.kind !== "we-media")
+      ) {
+        return jsonResponse(
+          { success: false, error: "post_publish_monitor_order_query_payload_invalid" },
+          400,
+        );
+      }
+      const kind = payload.kind;
+      const sn = distributionOrderSn(payload.executionId, payload.itemId);
+      const [record] = await getXiaojingGeoProviderCapabilities()
+        .distribution.queryOrders(kind, [sn]);
+      return jsonResponse({
+        success: true,
+        result: { sn, kind, record: record ?? null },
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return jsonResponse(
+        {
+          success: false,
+          error: message,
+        },
+        message.includes("identity_mismatch") ? 403 : 503,
+      );
+    }
+  }
+
+  // 监测计划恢复探测（票 14）：paused 计划在每个到期锚点先做只读余额
+  // 预检——可用余额 ≥ 单问巡检价即恢复巡检，否则保持暂停。绝不申请
+  // permit、不发起探测，零扣点。开发直连模式（无计费通道）返回
+  // configured=false，Rust 侧维持暂停。
+  if (
+    pathname === "/api/xiaojing/post-publish-monitor/balance" &&
+    request.method === "POST"
+  ) {
+    try {
+      const payload = (await request.json()) as {
+        workspaceId: string;
+        sessionId: string;
+      };
+      const runtimeSessionId = getRuntimeSessionIdForRequest();
+      const workspaceId = basename(resolve(workspacePath));
+      if (
+        payload.workspaceId !== workspaceId ||
+        payload.sessionId !== runtimeSessionId
+      ) {
+        return jsonResponse(
+          { success: false, error: "post_publish_monitor_identity_mismatch" },
+          403,
+        );
+      }
+      const channel = getXiaojingGeoBillingPermitChannel();
+      if (!channel) {
+        return jsonResponse({
+          success: true,
+          result: { configured: false, sufficient: false },
+        });
+      }
+      const balance = await channel.balance();
+      return jsonResponse({
+        success: true,
+        result: {
+          configured: true,
+          available: balance.available,
+          required: MONITORING_PATROL_UNIT_POINTS,
+          sufficient: balance.available >= MONITORING_PATROL_UNIT_POINTS,
+        },
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return jsonResponse(
+        {
+          success: false,
+          error: message,
+        },
+        message.includes("identity_mismatch") ? 403 : 503,
       );
     }
   }

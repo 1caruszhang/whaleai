@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -205,6 +205,42 @@ impl PostPublishMonitorPassHook for NoopPostPublishMonitorPassHook {
     }
 }
 
+type MonitorBalanceProbeFuture<'a> = Pin<Box<dyn Future<Output = Result<bool, String>> + Send + 'a>>;
+
+/// paused 计划的只读余额探测（票 14）：可用余额 ≥ 单问巡检价时返回
+/// true（恢复巡检）；不可判定（余额不足、直连模式未配置、Sidecar 不可
+/// 达）一律 false——保持暂停，绝不申请 permit、不扣点。
+trait PostPublishMonitorBalanceProbe: Send + Sync {
+    fn sufficient_for_patrol<'a>(
+        &'a self,
+        workspace: &'a BrandWorkspace,
+        context: &'a MonitorPlanContext,
+    ) -> MonitorBalanceProbeFuture<'a>;
+}
+
+struct ProductionPostPublishMonitorBalanceProbe;
+
+impl PostPublishMonitorBalanceProbe for ProductionPostPublishMonitorBalanceProbe {
+    fn sufficient_for_patrol<'a>(
+        &'a self,
+        workspace: &'a BrandWorkspace,
+        context: &'a MonitorPlanContext,
+    ) -> MonitorBalanceProbeFuture<'a> {
+        Box::pin(async move {
+            let result = monitor_sidecar_control_plane(
+                workspace,
+                &context.source_session_id,
+                &context.schedule_id,
+                "/api/xiaojing/post-publish-monitor/balance",
+                json!({}),
+            )
+            .await
+            .map_err(|failure| failure.message)?;
+            Ok(result.get("sufficient").and_then(Value::as_bool) == Some(true))
+        })
+    }
+}
+
 struct ProductionPostPublishMonitorScheduleCompletion;
 
 impl PostPublishMonitorScheduleCompletion for ProductionPostPublishMonitorScheduleCompletion {
@@ -296,10 +332,17 @@ fn real_published_page_target(
     Ok(parsed)
 }
 
-async fn query_supermedia_order(
-    payload: &Value,
+/// 监测查单（票 14 切网关）：Rust 经 Sidecar 控制面路由 → 网关
+/// `/gw/distribution/{kind}/order/query` 重签查单（网关按查单对账驱动结转/
+/// 退点）。sn 由 Sidecar 按 `distributionOrderSn(publishExecutionId,
+/// publishItemId)` 派生——与票 08 下单同口径，冻结的 `externalRequestSn`
+/// 只作审计引用，不参与查询；直连超级媒介凭据路径已随本票整体移除。
+async fn query_gateway_supermedia_order(
+    workspace: &BrandWorkspace,
+    unit: &ClaimedMonitorUnit,
 ) -> Result<SupermediaOrderObservation, MonitorProviderFailure> {
-    let channel_kind = payload
+    let channel_kind = unit
+        .payload
         .get("channelKind")
         .and_then(Value::as_str)
         .filter(|kind| matches!(*kind, "media" | "we-media"))
@@ -307,139 +350,76 @@ async fn query_supermedia_order(
             code: "publish-channel-invalid".to_string(),
             message: "冻结的发布渠道类型无效".to_string(),
             retryable: false,
-        })?;
-    let request_sn = payload
-        .get("externalRequestSn")
+        })?
+        .to_string();
+    let publish_item_id = unit
+        .payload
+        .get("publishItemId")
         .and_then(Value::as_str)
         .filter(|value| !value.trim().is_empty())
         .ok_or_else(|| MonitorProviderFailure {
-            code: "publish-request-reference-missing".to_string(),
-            message: "冻结的发布请求编号缺失".to_string(),
-            retryable: false,
-        })?;
-    let expected_order_id = payload
-        .get("externalOrderId")
-        .and_then(Value::as_str)
-        .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| MonitorProviderFailure {
-            code: "publish-order-reference-missing".to_string(),
-            message: "冻结的平台订单编号缺失".to_string(),
-            retryable: false,
-        })?;
-    let distribution = crate::geo_provider_credentials::load_monitoring_distribution_credential()
-        .map_err(|_| MonitorProviderFailure {
-            code: "distribution-credential-unavailable".to_string(),
-            message: "超级媒介查询凭据不可用".to_string(),
+            code: "publish-item-reference-missing".to_string(),
+            message: "冻结的发布项编号缺失".to_string(),
             retryable: false,
         })?
-        .ok_or_else(|| MonitorProviderFailure {
-            code: "distribution-unconfigured".to_string(),
-            message: "超级媒介查询凭据尚未配置".to_string(),
-            retryable: false,
-        })?;
-    let timestamp = Utc::now().timestamp();
-    let mut signed = BTreeMap::<String, String>::new();
-    signed.insert("algorithm".to_string(), "sha256".to_string());
-    signed.insert("appid".to_string(), distribution.app_id.clone());
-    signed.insert("sn".to_string(), request_sn.to_string());
-    signed.insert("timestamp".to_string(), timestamp.to_string());
-    let flattened = signed
-        .iter()
-        .map(|(key, value)| format!("{key}={value}"))
-        .collect::<String>();
-    let signature = crate::geo_provider_credentials::publish_hmac_sha256(
-        distribution.secret.as_bytes(),
-        flattened.as_bytes(),
+        .to_string();
+    let execution_id = monitor_publish_execution_id(workspace, &unit.plan_id)?;
+    let result = call_monitor_sidecar(
+        workspace,
+        unit,
+        "/api/xiaojing/post-publish-monitor/order-query",
+        json!({
+            "executionId": execution_id,
+            "itemId": publish_item_id,
+            "kind": channel_kind,
+        }),
     )
-    .iter()
-    .map(|byte| format!("{byte:02x}"))
-    .collect::<String>();
-    let mut url = url::Url::parse(&format!(
-        "{}{channel_path}",
-        distribution.base_url.trim_end_matches('/'),
-        channel_path = if channel_kind == "media" {
-            "/media/order/query"
-        } else {
-            "/we-media/order/query"
-        }
-    ))
-    .map_err(|_| MonitorProviderFailure {
-        code: "distribution-url-invalid".to_string(),
-        message: "超级媒介查询地址无效".to_string(),
-        retryable: false,
-    })?;
-    {
-        let mut query = url.query_pairs_mut();
-        for (key, value) in &signed {
-            query.append_pair(key, value);
-        }
-        query.append_pair("signature", &signature);
-    }
-    #[allow(clippy::disallowed_methods)]
-    let client = crate::proxy_config::build_client_with_proxy(
-        reqwest::Client::builder().timeout(Duration::from_secs(20)),
-    )
-    .map_err(|_| MonitorProviderFailure {
-        code: "distribution-client-unavailable".to_string(),
-        message: "超级媒介只读查询客户端不可用".to_string(),
+    .await?;
+    parse_gateway_order_observation(&result)
+}
+
+/// 计划冻结的发布执行 id 是网关 sn 派生口径的一半，权威在计划行而非
+/// 单元 payload。
+fn monitor_publish_execution_id(
+    workspace: &BrandWorkspace,
+    plan_id: &str,
+) -> Result<String, MonitorProviderFailure> {
+    let connection = open_database(workspace).map_err(|error| MonitorProviderFailure {
+        code: "monitor-evidence-store-unavailable".to_string(),
+        message: bounded_error(error),
         retryable: true,
     })?;
-    let response = client
-        .get(url)
-        .header("Accept", "application/json")
-        .send()
-        .await
-        .map_err(|_| MonitorProviderFailure {
-            code: "distribution-query-transport".to_string(),
-            message: "超级媒介只读订单查询连接失败".to_string(),
+    connection
+        .query_row(
+            "SELECT publish_execution_id FROM geo_post_publish_monitor_plans WHERE id=?1",
+            [plan_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|error| MonitorProviderFailure {
+            code: "monitor-evidence-read-failed".to_string(),
+            message: bounded_error(error),
             retryable: true,
-        })?;
-    let status = response.status();
-    let bytes = response.bytes().await.map_err(|_| MonitorProviderFailure {
-        code: "distribution-query-response-read".to_string(),
-        message: "超级媒介查询响应读取失败".to_string(),
-        retryable: true,
-    })?;
-    if bytes.len() > 256 * 1024 {
-        return Err(MonitorProviderFailure {
-            code: "distribution-query-response-too-large".to_string(),
-            message: "超级媒介查询响应超过安全上限".to_string(),
+        })?
+        .ok_or_else(|| MonitorProviderFailure {
+            code: "monitor-plan-reference-missing".to_string(),
+            message: "监测计划已不存在，无法派生查单 sn".to_string(),
             retryable: false,
-        });
-    }
-    let envelope: Value = serde_json::from_slice(&bytes).map_err(|_| MonitorProviderFailure {
-        code: "distribution-query-response-invalid".to_string(),
-        message: "超级媒介查询响应无法解析".to_string(),
-        retryable: true,
-    })?;
-    if !status.is_success() || envelope.get("code").and_then(Value::as_i64) != Some(200) {
-        return Err(MonitorProviderFailure {
-            code: format!("distribution-query-http-{}", status.as_u16()),
-            message: "超级媒介只读订单查询失败".to_string(),
-            retryable: status.is_server_error() || status.as_u16() == 429,
-        });
-    }
-    let record = envelope
-        .get("data")
-        .and_then(Value::as_array)
-        .and_then(|records| {
-            records.iter().find(|record| {
-                record.get("sn").and_then(Value::as_str) == Some(request_sn)
-                    || record.get("partner_sn").and_then(Value::as_str) == Some(expected_order_id)
-            })
         })
-        .cloned()
-        .ok_or_else(|| MonitorProviderFailure {
-            code: "distribution-order-unavailable".to_string(),
-            message: "超级媒介尚未返回该稳定发布项".to_string(),
-            retryable: true,
-        })?;
+}
+
+/// 把查单路由的 typed 结果映射为监测观察。record 为 null 表示网关尚未
+/// 观察到该 sn（可重试）；状态码缺失/未知沿用直连时代的错误语义。
+fn parse_gateway_order_observation(
+    result: &Value,
+) -> Result<SupermediaOrderObservation, MonitorProviderFailure> {
+    let record = result.get("record").cloned().unwrap_or(Value::Null);
     let status_code = record
         .get("status")
         .and_then(Value::as_i64)
         .ok_or_else(|| MonitorProviderFailure {
-            code: "distribution-order-status-missing".to_string(),
-            message: "超级媒介订单状态缺失".to_string(),
+            code: "distribution-order-unavailable".to_string(),
+            message: "超级媒介尚未返回该稳定发布项".to_string(),
             retryable: true,
         })?;
     let status = map_platform_status(status_code).ok_or_else(|| MonitorProviderFailure {
@@ -472,7 +452,7 @@ impl PostPublishMonitorProvider for ProductionPostPublishMonitorProvider {
         Box::pin(async move {
             match unit.kind.as_str() {
                 "publish-status" => {
-                    let observed = query_supermedia_order(&unit.payload).await?;
+                    let observed = query_gateway_supermedia_order(workspace, unit).await?;
                     Ok(json!({
                         "platformStatusCode": observed.status_code,
                         "platformStatus": observed.status,
@@ -483,7 +463,7 @@ impl PostPublishMonitorProvider for ProductionPostPublishMonitorProvider {
                     }))
                 }
                 "access-indexing" => {
-                    let observed = query_supermedia_order(&unit.payload).await?;
+                    let observed = query_gateway_supermedia_order(workspace, unit).await?;
                     let parsed = real_published_page_target(
                         observed.status,
                         observed.published_url.as_deref(),
@@ -517,7 +497,7 @@ impl PostPublishMonitorProvider for ProductionPostPublishMonitorProvider {
                         "accessible": true,
                         "indexingState": indexing_state_from_platform(
                             observed.status_code,
-                            observed.record.get("published_at").and_then(Value::as_str),
+                            observed.record.get("publishedAt").and_then(Value::as_str),
                             Utc::now().timestamp_millis(),
                         ),
                         "platformStatusCode": observed.status_code,
@@ -645,6 +625,26 @@ async fn call_monitor_sidecar(
     endpoint: &str,
     payload: Value,
 ) -> Result<Value, MonitorProviderFailure> {
+    monitor_sidecar_control_plane(
+        workspace,
+        &unit.source_session_id,
+        &unit.schedule_id,
+        endpoint,
+        payload,
+    )
+    .await
+}
+
+/// 附着 `GeoMonitor(schedule_id)` owner 的 Session Sidecar 控制面调用：
+/// 单元观察（baseline-probe/access-check/order-query）与 paused 计划的
+/// 只读余额探测共用。请求体统一注入 workspaceId/sessionId 身份。
+async fn monitor_sidecar_control_plane(
+    workspace: &BrandWorkspace,
+    source_session_id: &str,
+    schedule_id: &str,
+    endpoint: &str,
+    payload: Value,
+) -> Result<Value, MonitorProviderFailure> {
     let app = crate::logger::get_app_handle()
         .cloned()
         .ok_or_else(|| MonitorProviderFailure {
@@ -660,11 +660,11 @@ async fn call_monitor_sidecar(
             message: "Session Sidecar 管理器不可用".to_string(),
             retryable: true,
         })?;
-    let owner = crate::sidecar::SidecarOwner::GeoMonitor(unit.schedule_id.clone());
+    let owner = crate::sidecar::SidecarOwner::GeoMonitor(schedule_id.to_string());
     let ensure = crate::sidecar::ensure_session_sidecar_with_lifecycle(
         app.clone(),
         manager.clone(),
-        unit.source_session_id.clone(),
+        source_session_id.to_string(),
         workspace.root_path.clone(),
         owner.clone(),
     )
@@ -682,7 +682,7 @@ async fn call_monitor_sidecar(
         );
         body.insert(
             "sessionId".to_string(),
-            Value::String(unit.source_session_id.clone()),
+            Value::String(source_session_id.to_string()),
         );
         let client = crate::local_http::builder()
             .timeout(Duration::from_secs(180))
@@ -736,12 +736,11 @@ async fn call_monitor_sidecar(
             })
     }
     .await;
-    if let Err(error) =
-        crate::sidecar::release_session_sidecar(&manager, &unit.source_session_id, &owner)
+    if let Err(error) = crate::sidecar::release_session_sidecar(&manager, source_session_id, &owner)
     {
         crate::ulog_warn!(
             "[post-publish-monitor] release probe Sidecar owner schedule={}: {}",
-            unit.schedule_id,
+            schedule_id,
             bounded_error(error)
         );
     }
@@ -766,7 +765,7 @@ pub(super) fn ensure_schema(connection: &Connection) -> Result<(), String> {
                 end_conditions_json TEXT NOT NULL,
                 policy_version TEXT NOT NULL,
                 revision INTEGER NOT NULL,
-                status TEXT NOT NULL CHECK(status IN ('draft','active','completed','provisioning-failed')),
+                status TEXT NOT NULL CHECK(status IN ('draft','active','paused','completed','provisioning-failed')),
                 schedule_id TEXT,
                 run_count INTEGER NOT NULL DEFAULT 0,
                 next_run_at_ms INTEGER,
@@ -847,7 +846,84 @@ pub(super) fn ensure_schema(connection: &Connection) -> Result<(), String> {
              );",
         )
         .map_err(|error| format!("initialize post-publish monitoring schema: {error}"))?;
+    widen_monitor_plan_status_check(connection)?;
     super::drop_brand_sessions_foreign_keys(connection, &["geo_post_publish_monitor_plans"])
+}
+
+/// 票 14 为监测计划状态机加入 `paused`（余额不足自动暂停）。既有数据库
+/// 的 CHECK 约束不含该值，SQLite 无法就地修改 CHECK——沿用 brand_workspace
+/// 的表重建迁移（foreign_keys=OFF 包裹；索引随 DROP TABLE 消失，按
+/// sqlite_master 原文重建）。已含 `paused` 或尚未建表的库是幂等 no-op。
+fn widen_monitor_plan_status_check(connection: &Connection) -> Result<(), String> {
+    const LEGACY_STATUS_CHECK: &str = "('draft','active','completed','provisioning-failed')";
+    const WIDENED_STATUS_CHECK: &str =
+        "('draft','active','paused','completed','provisioning-failed')";
+    let table = "geo_post_publish_monitor_plans";
+    let existing: Option<String> = connection
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?1",
+            [table],
+            |row| row.get(0),
+        )
+        .map_err(|error| format!("inspect {table} status check: {error}"))?;
+    let Some(existing_sql) = existing else {
+        return Ok(());
+    };
+    if !existing_sql.contains(LEGACY_STATUS_CHECK) {
+        return Ok(());
+    }
+    let mut index_ddls: Vec<String> = Vec::new();
+    {
+        let mut statement = connection
+            .prepare(
+                "SELECT sql FROM sqlite_master
+                 WHERE type = 'index' AND tbl_name = ?1 AND sql IS NOT NULL",
+            )
+            .map_err(|error| format!("list {table} indexes: {error}"))?;
+        let mut rows = statement
+            .query([table])
+            .map_err(|error| format!("read {table} indexes: {error}"))?;
+        while let Some(row) = rows
+            .next()
+            .map_err(|error| format!("advance {table} index cursor: {error}"))?
+        {
+            index_ddls.push(
+                row.get(0)
+                    .map_err(|error| format!("read {table} index ddl: {error}"))?,
+            );
+        }
+    }
+    let rebuilt_sql = existing_sql.replace(LEGACY_STATUS_CHECK, WIDENED_STATUS_CHECK);
+    let renamed_sql = super::rename_table_in_ddl(
+        &rebuilt_sql,
+        table,
+        &format!("{table}__status_widened"),
+    )?;
+    connection
+        .execute_batch("PRAGMA foreign_keys = OFF;")
+        .map_err(|error| format!("unlock {table} status check rebuild: {error}"))?;
+    let rebuild = connection.execute_batch(&format!(
+        "BEGIN IMMEDIATE;
+         {renamed_sql};
+         INSERT INTO {table}__status_widened SELECT * FROM {table};
+         DROP TABLE {table};
+         ALTER TABLE {table}__status_widened RENAME TO {table};
+         {}
+         COMMIT;",
+        index_ddls
+            .iter()
+            .map(|ddl| format!("{ddl};"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    ));
+    let restored = connection.execute_batch("PRAGMA foreign_keys = ON;");
+    match (rebuild, restored) {
+        (Ok(()), Ok(())) => Ok(()),
+        (rebuild, _) => {
+            let _ = connection.execute_batch("ROLLBACK;");
+            rebuild.map_err(|error| format!("rebuild {table} with widened status check: {error}"))
+        }
+    }
 }
 
 fn digest(value: impl AsRef<[u8]>) -> String {
@@ -1430,7 +1506,7 @@ impl BrandWorkspaceStore {
                 .prepare(
                     "SELECT id,created_by_session_id,schedule_id
                      FROM geo_post_publish_monitor_plans
-                     WHERE status='active' AND schedule_id IS NOT NULL
+                     WHERE status IN ('active','paused') AND schedule_id IS NOT NULL
                      ORDER BY next_run_at_ms,id",
                 )
                 .map_err(|error| format!("prepare active GEO monitor schedules: {error}"))?;
@@ -1789,6 +1865,8 @@ fn read_plan(
     let latest_run = recent_runs.first().cloned();
     let recovery_state = if row.12 == "completed" {
         "completed"
+    } else if row.12 == "paused" {
+        "paused"
     } else if latest_run
         .as_ref()
         .is_some_and(|run| run.units.iter().any(|unit| unit.status == "running"))
@@ -2234,6 +2312,26 @@ fn settle_unit_failure(
             ],
         )
         .map_err(|error| format!("settle monitoring failure attempt: {error}"))?;
+    // 票 14 计划级暂停：sidecar 余额预检返回 insufficient_balance（402，
+    // 非重试）时整计划落 paused——跳过后续 wake 与全部单元工作，零扣点；
+    // 充值/余额恢复后由到期锚点的只读余额探测自动恢复。
+    if failure.code == "insufficient_balance" {
+        transaction
+            .execute(
+                "UPDATE geo_post_publish_monitor_plans
+                 SET status='paused',revision=revision+1,updated_at=?2
+                 WHERE id=?1 AND status='active'",
+                params![claim.plan_id, now_iso(now_ms)],
+            )
+            .map_err(|error| format!("pause monitoring plan: {error}"))?;
+        transaction
+            .execute(
+                "UPDATE geo_operations SET state='monitor-paused' WHERE id=(
+                    SELECT operation_id FROM geo_post_publish_monitor_plans WHERE id=?1)",
+                [&claim.plan_id],
+            )
+            .map_err(|error| format!("pause monitoring operation: {error}"))?;
+    }
     transaction
         .commit()
         .map_err(|error| format!("commit monitoring failure: {error}"))?;
@@ -2361,6 +2459,78 @@ fn monitor_plan_completed(workspace: &BrandWorkspace, plan_id: &str) -> Result<b
         .ok_or_else(|| "post_publish_monitor_plan_not_found".to_string())
 }
 
+/// paused 计划在到期锚点的处置（票 14）：余额已恢复则整计划回到 active
+/// （同一 schedule 继续巡检）；仍不足（或探测不可判定）则把锚点顺延一个
+/// 巡检间隔——每个锚点只探测一次，暂停期绝不创建 run、不 claim 单元。
+fn resume_or_defer_paused_monitor_plan(
+    workspace: &BrandWorkspace,
+    context: &MonitorPlanContext,
+    balance_sufficient: bool,
+    now_ms: i64,
+) -> Result<(), String> {
+    let mut connection = open_database(workspace)?;
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| format!("resume monitoring plan transaction: {error}"))?;
+    let row = transaction
+        .query_row(
+            "SELECT status,next_run_at_ms,interval_minutes
+             FROM geo_post_publish_monitor_plans WHERE id=?1",
+            [&context.plan_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<i64>>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|error| format!("read paused monitoring plan: {error}"))?;
+    let Some((status, next_run_at_ms, interval_minutes)) = row else {
+        return Ok(());
+    };
+    if status != "paused" {
+        return Ok(());
+    }
+    let now = now_iso(now_ms);
+    if balance_sufficient {
+        transaction
+            .execute(
+                "UPDATE geo_post_publish_monitor_plans
+                 SET status='active',revision=revision+1,updated_at=?2
+                 WHERE id=?1 AND status='paused'",
+                params![context.plan_id, now],
+            )
+            .map_err(|error| format!("resume monitoring plan: {error}"))?;
+        transaction
+            .execute(
+                "UPDATE geo_operations SET state='monitor-active' WHERE id=(
+                    SELECT operation_id FROM geo_post_publish_monitor_plans WHERE id=?1)",
+                [&context.plan_id],
+            )
+            .map_err(|error| format!("resume monitoring operation: {error}"))?;
+    } else {
+        let mut next_anchor =
+            next_run_at_ms.unwrap_or(now_ms).saturating_add(interval_minutes * 60_000);
+        while next_anchor <= now_ms {
+            next_anchor = next_anchor.saturating_add(interval_minutes * 60_000);
+        }
+        transaction
+            .execute(
+                "UPDATE geo_post_publish_monitor_plans
+                 SET next_run_at_ms=?2,revision=revision+1,updated_at=?3
+                 WHERE id=?1 AND status='paused'",
+                params![context.plan_id, next_anchor, now],
+            )
+            .map_err(|error| format!("defer paused monitoring anchor: {error}"))?;
+    }
+    transaction
+        .commit()
+        .map_err(|error| format!("commit paused monitoring resolution: {error}"))?;
+    Ok(())
+}
+
 /// Deterministic BrandWorkspace executor. Its private scheduler is the only
 /// timer authority and accepts exact persisted plan references.
 pub struct PostPublishMonitorExecutor {
@@ -2369,6 +2539,7 @@ pub struct PostPublishMonitorExecutor {
     schedule_completion: Arc<dyn PostPublishMonitorScheduleCompletion>,
     now: Arc<dyn Fn() -> i64 + Send + Sync>,
     after_pass: Arc<dyn PostPublishMonitorPassHook>,
+    balance_probe: Arc<dyn PostPublishMonitorBalanceProbe>,
     /// key -> another wake arrived while the current pass was active.
     active: Arc<Mutex<HashMap<String, bool>>>,
 }
@@ -2386,6 +2557,7 @@ impl PostPublishMonitorExecutor {
             schedule_completion,
             now,
             after_pass: Arc::new(NoopPostPublishMonitorPassHook),
+            balance_probe: Arc::new(ProductionPostPublishMonitorBalanceProbe),
             active: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -2393,6 +2565,12 @@ impl PostPublishMonitorExecutor {
     #[cfg(test)]
     fn with_after_pass_hook(mut self, hook: Arc<dyn PostPublishMonitorPassHook>) -> Self {
         self.after_pass = hook;
+        self
+    }
+
+    #[cfg(test)]
+    fn with_balance_probe(mut self, probe: Arc<dyn PostPublishMonitorBalanceProbe>) -> Self {
+        self.balance_probe = probe;
         self
     }
 
@@ -2448,6 +2626,7 @@ impl PostPublishMonitorExecutor {
         let workspace = self.store.workspace(&context.workspace_id)?;
         let now_ms = (self.now)();
         recover_expired_units(&workspace, &context.plan_id, now_ms)?;
+        self.resolve_paused_plan(&workspace, context, now_ms).await?;
         let _ = create_due_run(&workspace, context, now_ms)?;
         loop {
             let current = (self.now)();
@@ -2479,6 +2658,43 @@ impl PostPublishMonitorExecutor {
                 .complete(&context.schedule_id)
                 .await?;
         }
+        Ok(())
+    }
+
+    /// paused 计划的到期锚点处置：锚点未到直接跳过；到期先做只读余额
+    /// 探测，恢复则放行后续 create_due_run/claim，否则顺延锚点后本轮
+    /// 结束（计划保持 paused，run/claim 的 active 门挡住全部单元工作）。
+    async fn resolve_paused_plan(
+        &self,
+        workspace: &BrandWorkspace,
+        context: &MonitorPlanContext,
+        now_ms: i64,
+    ) -> Result<(), String> {
+        let (status, next_run_at_ms): (String, Option<i64>) = open_database(workspace)?
+            .query_row(
+                "SELECT status,next_run_at_ms FROM geo_post_publish_monitor_plans WHERE id=?1",
+                [&context.plan_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(|error| format!("read paused monitoring wake state: {error}"))?
+            .ok_or_else(|| "post_publish_monitor_plan_not_found".to_string())?;
+        if status != "paused" || next_run_at_ms.is_none_or(|anchor| anchor > now_ms) {
+            return Ok(());
+        }
+        let sufficient = self
+            .balance_probe
+            .sufficient_for_patrol(workspace, context)
+            .await
+            .inspect_err(|error| {
+                crate::ulog_warn!(
+                    "[post-publish-monitor] paused balance probe failed plan={}: {}",
+                    context.plan_id,
+                    bounded_error(error)
+                )
+            })
+            .unwrap_or(false);
+        resume_or_defer_paused_monitor_plan(workspace, context, sufficient, (self.now)())?;
         Ok(())
     }
 }
@@ -2543,10 +2759,12 @@ pub fn has_active_post_publish_monitor_for_session(session_id: &str) -> Result<b
     let store = super::production_store()?;
     for workspace in store.list_workspaces()? {
         let connection = open_database(&workspace)?;
+        // paused 计划仍持有持久 owner：余额探测与恢复后的巡检都要附着
+        // 来源 Session Sidecar，不能因暂停而释放进程。
         let found: bool = connection
             .query_row(
                 "SELECT EXISTS(SELECT 1 FROM geo_post_publish_monitor_plans
-                 WHERE created_by_session_id=?1 AND status='active')",
+                 WHERE created_by_session_id=?1 AND status IN ('active','paused'))",
                 [session_id],
                 |row| row.get(0),
             )
@@ -2562,7 +2780,7 @@ pub fn has_active_post_publish_monitor_for_session(session_id: &str) -> Result<b
 mod tests {
     use super::super::{SessionCommit, SessionTitleSource};
     use super::*;
-    use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
     use tempfile::tempdir;
 
     struct Fixture {
@@ -3206,5 +3424,279 @@ mod tests {
             )
             .unwrap();
         assert_eq!(run_count, 0);
+    }
+
+    #[test]
+    fn gateway_order_observation_maps_typed_gateway_records() {
+        // 网关时代订单：查单路由回 typed 条目（sn 为票 08 派生口径），
+        // 观察映射沿用平台状态机与发布页 URL 语义。
+        let matched = json!({
+            "sn": "xj-0123456789abcdef0123456789abcdef",
+            "status": 12,
+            "url": " https://publisher.example.test/article-14 ",
+            "screenshot": null,
+            "publishedAt": "2030-01-01T00:00:00Z",
+            "feedback": null,
+        });
+        let observed =
+            parse_gateway_order_observation(&json!({"record": matched.clone()})).unwrap();
+        assert_eq!(observed.status_code, 12);
+        assert_eq!(observed.status, "indexed");
+        assert_eq!(
+            observed.published_url.as_deref(),
+            Some("https://publisher.example.test/article-14")
+        );
+        assert_eq!(observed.record, matched);
+        // 网关尚未观察到该 sn：record 为 null → 可重试的“尚未返回”。
+        let missing = parse_gateway_order_observation(&json!({"record": null})).unwrap_err();
+        assert_eq!(missing.code, "distribution-order-unavailable");
+        assert!(missing.retryable);
+        let unknown = parse_gateway_order_observation(&json!({"record": {"status": 99}}))
+            .unwrap_err();
+        assert_eq!(unknown.code, "distribution-order-status-unknown");
+    }
+
+    /// 基线巡检按可开关的余额门失败一次（sidecar 402 insufficient_balance
+    /// 的 Rust 侧形态：非重试），恢复后成功——用于暂停/恢复流转。
+    struct PatrolGatedProvider {
+        calls: Mutex<Vec<String>>,
+        insufficient: AtomicBool,
+    }
+
+    impl PostPublishMonitorProvider for PatrolGatedProvider {
+        fn observe<'a>(
+            &'a self,
+            _workspace: &'a BrandWorkspace,
+            unit: &'a ClaimedMonitorUnit,
+        ) -> MonitorFuture<'a> {
+            Box::pin(async move {
+                self.calls.lock().unwrap().push(unit.kind.clone());
+                match unit.kind.as_str() {
+                    "publish-status" => Ok(json!({
+                        "platformStatusCode": 3,
+                        "platformStatus": "submitted",
+                        "externalOrderId": "platform-order-14",
+                        "externalRequestSn": "request-sn-14",
+                        "rawEvidence": {"status":3},
+                    })),
+                    "access-indexing" => Ok(json!({
+                        "url":"https://publisher.example.test/article-14",
+                        "httpStatus":200,
+                        "accessible":true,
+                        "indexingState":"unknown",
+                        "platformStatusCode":3,
+                        "rawEvidence":{"status":3},
+                    })),
+                    _ => {
+                        if self.insufficient.load(Ordering::SeqCst) {
+                            Err(MonitorProviderFailure {
+                                code: "insufficient_balance".to_string(),
+                                message: "点数不足：监测巡检需 5 点，当前可用 2 点".to_string(),
+                                retryable: false,
+                            })
+                        } else {
+                            Ok(json!({
+                                "questionId":"question-14","engineId":"doubao",
+                                "rawAnswer":"TOP 1：小鲸","rawEvidence":{"output":[]},
+                                "sourceProviderSnapshot":{"model":"a","configurationFingerprint":"a"},
+                                "providerSnapshot":{"model":"b","configurationFingerprint":"b"},
+                                "citations":[],"analysis":{"brandMentioned":true,"brandRecommended":true,"hasCitationEvidence":false},
+                                "rankPosition":1,"citedArticleIds":[],"citedUrls":[],
+                            }))
+                        }
+                    }
+                }
+            })
+        }
+    }
+
+    /// 可切换的余额探测：false = 仍不足/不可判定，true = 已充值恢复。
+    struct SwitchableBalanceProbe(AtomicBool);
+
+    impl PostPublishMonitorBalanceProbe for SwitchableBalanceProbe {
+        fn sufficient_for_patrol<'a>(
+            &'a self,
+            _workspace: &'a BrandWorkspace,
+            _context: &'a MonitorPlanContext,
+        ) -> MonitorBalanceProbeFuture<'a> {
+            Box::pin(async move { Ok(self.0.load(Ordering::SeqCst)) })
+        }
+    }
+
+    #[tokio::test]
+    async fn insufficient_balance_pauses_plan_persists_and_skips_later_wakes() {
+        let (fixture, plan) = fixture(9);
+        let first_due = fixture.now_ms + 15 * 60 * 1_000;
+        let clock = Arc::new(AtomicI64::new(first_due));
+        let provider = Arc::new(PatrolGatedProvider {
+            calls: Mutex::new(Vec::new()),
+            insufficient: AtomicBool::new(true),
+        });
+        let balance = Arc::new(SwitchableBalanceProbe(AtomicBool::new(false)));
+        let clock_for_executor = Arc::clone(&clock);
+        let executor = PostPublishMonitorExecutor::new(
+            fixture.store.clone(),
+            provider.clone(),
+            Arc::new(MockTaskCompletion::default()),
+            Arc::new(move || clock_for_executor.load(Ordering::SeqCst)),
+        )
+        .with_balance_probe(balance);
+        let monitor_context = context(&fixture, &plan.id);
+
+        // 首轮：查单/访问单元成功，巡检预检 402 → 单元非重试失败，计划落 paused。
+        executor.run_context(&monitor_context).await.unwrap();
+        assert_eq!(
+            provider.calls.lock().unwrap().as_slice(),
+            ["publish-status", "access-indexing", "baseline-probe"]
+        );
+        let paused = fixture
+            .store
+            .get_post_publish_monitor_plan(
+                &fixture.workspace.id,
+                "session-14",
+                PostPublishMonitorGetRequest { plan_id: plan.id.clone() },
+                first_due,
+            )
+            .unwrap();
+        assert_eq!(paused.status, "paused");
+        assert_eq!(paused.recovery_state, "paused");
+        // 中断轮按 partial 收尾，巡检单元恰好一次尝试（暂停后零新尝试）。
+        assert_eq!(paused.latest_run.as_ref().unwrap().status, "partial");
+
+        // 暂停中的扫描 tick（锚点未到）：不探测、不 claim、不产生任何调用。
+        clock.store(first_due + 60_000, Ordering::SeqCst);
+        executor.run_context(&monitor_context).await.unwrap();
+        assert_eq!(provider.calls.lock().unwrap().len(), 3);
+
+        // 到期锚点：只读余额预检仍不足 → 保持 paused、锚点顺延、零扣点
+        // （无 permit 即无扣费；这里以“零巡检尝试”钉住）。
+        clock.store(fixture.now_ms + 30 * 60 * 1_000, Ordering::SeqCst);
+        executor.run_context(&monitor_context).await.unwrap();
+        assert_eq!(provider.calls.lock().unwrap().len(), 3);
+        let still_paused = fixture
+            .store
+            .get_post_publish_monitor_plan(
+                &fixture.workspace.id,
+                "session-14",
+                PostPublishMonitorGetRequest { plan_id: plan.id.clone() },
+                clock.load(Ordering::SeqCst),
+            )
+            .unwrap();
+        assert_eq!(still_paused.status, "paused");
+        assert_eq!(still_paused.run_count, 1);
+        let connection = open_database(&fixture.workspace).unwrap();
+        let patrol_attempts: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM geo_post_publish_monitor_attempts
+                 WHERE unit_id IN (SELECT id FROM geo_post_publish_monitor_units
+                                   WHERE plan_id=?1 AND kind='baseline-probe')",
+                [&plan.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(patrol_attempts, 1);
+    }
+
+    #[tokio::test]
+    async fn recharged_balance_resumes_the_paused_plan_at_the_next_anchor() {
+        let (fixture, plan) = fixture(9);
+        let first_due = fixture.now_ms + 15 * 60 * 1_000;
+        let clock = Arc::new(AtomicI64::new(first_due));
+        let provider = Arc::new(PatrolGatedProvider {
+            calls: Mutex::new(Vec::new()),
+            insufficient: AtomicBool::new(true),
+        });
+        let balance = Arc::new(SwitchableBalanceProbe(AtomicBool::new(false)));
+        let clock_for_executor = Arc::clone(&clock);
+        let executor = PostPublishMonitorExecutor::new(
+            fixture.store.clone(),
+            provider.clone(),
+            Arc::new(MockTaskCompletion::default()),
+            Arc::new(move || clock_for_executor.load(Ordering::SeqCst)),
+        )
+        .with_balance_probe(balance.clone());
+        let monitor_context = context(&fixture, &plan.id);
+        executor.run_context(&monitor_context).await.unwrap();
+
+        // 锚点顺延到 +30m；充值（余额门恢复）后下一锚点自动恢复巡检。
+        clock.store(fixture.now_ms + 30 * 60 * 1_000, Ordering::SeqCst);
+        executor.run_context(&monitor_context).await.unwrap();
+        assert_eq!(provider.calls.lock().unwrap().len(), 3);
+
+        balance.0.store(true, Ordering::SeqCst);
+        provider.insufficient.store(false, Ordering::SeqCst);
+        clock.store(fixture.now_ms + 45 * 60 * 1_000 + 1_000, Ordering::SeqCst);
+        executor.run_context(&monitor_context).await.unwrap();
+
+        let resumed = fixture
+            .store
+            .get_post_publish_monitor_plan(
+                &fixture.workspace.id,
+                "session-14",
+                PostPublishMonitorGetRequest { plan_id: plan.id.clone() },
+                clock.load(Ordering::SeqCst),
+            )
+            .unwrap();
+        assert_eq!(resumed.status, "active");
+        assert_eq!(resumed.recovery_state, "ready");
+        assert_eq!(resumed.run_count, 2);
+        assert_eq!(provider.calls.lock().unwrap().len(), 6);
+        assert_eq!(resumed.latest_run.as_ref().unwrap().status, "succeeded");
+        let connection = open_database(&fixture.workspace).unwrap();
+        let operation_state: String = connection
+            .query_row(
+                "SELECT state FROM geo_operations WHERE id=?1",
+                [&resumed.operation_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(operation_state, "monitor-active");
+    }
+
+    #[test]
+    fn legacy_plan_status_check_is_rebuilt_to_accept_paused() {
+        let temp = tempdir().unwrap();
+        let connection = Connection::open(temp.path().join("legacy-monitor.sqlite")).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE geo_post_publish_monitor_plans (
+                    id TEXT PRIMARY KEY,
+                    status TEXT NOT NULL CHECK(status IN ('draft','active','completed','provisioning-failed')),
+                    revision INTEGER NOT NULL,
+                    next_run_at_ms INTEGER
+                 );
+                 CREATE INDEX geo_monitor_plan_latest
+                    ON geo_post_publish_monitor_plans(revision, id);
+                 INSERT INTO geo_post_publish_monitor_plans VALUES ('plan-legacy','active',3,100);",
+            )
+            .unwrap();
+        ensure_schema(&connection).unwrap();
+        // 行与索引在重建后原样保留，且新的 paused 状态可持久写入。
+        let (status, revision): (String, i64) = connection
+            .query_row(
+                "SELECT status,revision FROM geo_post_publish_monitor_plans WHERE id='plan-legacy'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((status.as_str(), revision), ("active", 3));
+        let index_present: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type='index' AND tbl_name='geo_post_publish_monitor_plans'
+                   AND name='geo_monitor_plan_latest'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(index_present, 1);
+        connection
+            .execute(
+                "UPDATE geo_post_publish_monitor_plans SET status='paused' WHERE id='plan-legacy'",
+                [],
+            )
+            .unwrap();
+        // 已含 widened CHECK 的库重复执行迁移是幂等 no-op。
+        widen_monitor_plan_status_check(&connection).unwrap();
     }
 }
