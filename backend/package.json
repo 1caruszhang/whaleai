@@ -11,6 +11,7 @@
     "start": "node --env-file-if-exists=.env --import tsx/esm src/index.ts",
     "build": "node scripts/bundle.mjs",
     "verify:container": "node scripts/verify-container.mjs",
+    "verify:backup": "node scripts/verify-backup.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run"
   },

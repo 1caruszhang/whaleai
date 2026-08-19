@@ -11,6 +11,10 @@
 #   ./backend/scripts/deploy-ecs.sh smoke <base-url>            # 只冒烟（http://127.0.0.1:8787 或 https://域名）
 #   ./backend/scripts/deploy-ecs.sh rollback <ssh目标> <TAG>    # 回滚到已 load 的旧 tag
 #   ./backend/scripts/deploy-ecs.sh status <ssh目标>            # 容器状态+健康+尾部日志
+#   ./backend/scripts/deploy-ecs.sh backup-install <ssh目标>    # 安装每日 SQLite 备份（脚本+cron，幂等可重复）
+#   ./backend/scripts/deploy-ecs.sh backup-run <ssh目标>        # 立即在服务器执行一次备份
+#   ./backend/scripts/deploy-ecs.sh backup-list <ssh目标>       # 查看备份文件与 cron 安装状态
+#   ./backend/scripts/deploy-ecs.sh backup-uninstall <ssh目标>  # 卸载备份 cron（保留脚本与历史备份）
 #
 # 约定：镜像 xiaojing-backend:<TAG>；服务器目录 /opt/xiaojing-api；密钥只写服务器
 # /opt/xiaojing-api/.env（600 权限），本脚本与镜像层永不接触真实密钥。
@@ -332,7 +336,8 @@ $(printf '\033[1;32m[deploy] 服务器侧完成（TAG=%s）\033[0m' "$tag")
   2. 宝塔：按 §4.1 建独立站点 + 申请 SSL；§4.2 nginx conf 必须含 proxy_buffering off
   3. 超级媒介资金池预存（/admin 余额卡依赖，阈值 ¥500 提醒）
   4. 公网冒烟：./backend/scripts/deploy-ecs.sh smoke https://api.jingshanai.com
-  5. 生产验收（真实建号/充值/计费冒烟）：runbook §7
+  5. 每日备份（推荐）：./backend/scripts/deploy-ecs.sh backup-install <ssh目标>
+  6. 生产验收（真实建号/充值/计费冒烟）：runbook §7
 回滚：./backend/scripts/deploy-ecs.sh rollback <ssh目标> <旧TAG>
 EOF
 }
@@ -444,8 +449,101 @@ cmd_env_check() {
   remote_env_check "$1"
 }
 
+# ── backup-install / backup-run / backup-list / backup-uninstall（票 15）─────
+# 机制：backup-sqlite.mjs 经 backup-run.sh 借当前 api 容器自己的镜像执行
+# （node:sqlite VACUUM INTO 在线热备，详见 runbook §5）；本组子命令只做
+# 脚本上传与 /etc/cron.d/xiaojing-backup 的安装/卸载，幂等可重复。
+BACKUP_CRON_FILE=/etc/cron.d/xiaojing-backup
+BACKUP_KEEP_DEFAULT=14
+
+cmd_backup_install() {
+  [ $# -ge 1 ] || die "用法：backup-install <ssh目标>"
+  local target=$1
+  local cron_spec=${XIAOJING_BACKUP_CRON:-"30 4 * * *"}
+  # cron 5 字段形状预检（远端再整文件覆写，天然幂等）。
+  [ "$(printf '%s' "$cron_spec" | wc -w)" = 5 ] || die "XIAOJING_BACKUP_CRON 必须是 5 字段 cron 表达式（收到：$cron_spec）"
+
+  local backend
+  backend=$(backend_dir)
+  local script="$backend/scripts/backup-sqlite.mjs" wrapper="$backend/scripts/backup-run.sh"
+  [ -f "$script" ] || die "缺少 $script"
+  [ -f "$wrapper" ] || die "缺少 $wrapper"
+
+  log "上传备份脚本 → $target:$SERVER_DIR"
+  ssh_cmd "$target" "mkdir -p $SERVER_DIR/backups && chmod 700 $SERVER_DIR/backups"
+  # shellcheck disable=SC2086
+  scp -o ServerAliveInterval=15 $SSH_OPTS_EXTRA "$script" "$wrapper" "$target:$SERVER_DIR/"
+
+  log "安装 cron（$cron_spec → $BACKUP_CRON_FILE）"
+  ssh_cmd "$target" bash -s -- "$SERVER_DIR" "$cron_spec" "$BACKUP_CRON_FILE" <<'REMOTE'
+set -euo pipefail
+dir=$1 cron=$2 cron_file=$3
+chmod 700 "$dir/backup-run.sh"
+printf '%s root %s/backup-run.sh >> %s/backups/backup.log 2>&1\n' "$cron" "$dir" "$dir" >"$cron_file"
+chown root:root "$cron_file"
+chmod 644 "$cron_file"
+# alinux/centos 系服务名是 crond，debian 系是 cron；都起不来只警告不失败
+# （脚本与 cron 文件已就位，人工 systemctl start 后即生效）。
+systemctl enable --now crond 2>/dev/null || systemctl enable --now cron 2>/dev/null \
+  || echo "[warn] 未能自动启用 crond/cron，请确认定时服务在运行"
+echo "CRON_INSTALLED: $(cat "$cron_file")"
+REMOTE
+
+  log "backup-install 完成：每日「${cron_spec}」备份 → $SERVER_DIR/backups（保留最近 ${BACKUP_KEEP_DEFAULT} 份）"
+  log "立即试跑一次：./backend/scripts/deploy-ecs.sh backup-run $target"
+}
+
+cmd_backup_run() {
+  [ $# -ge 1 ] || die "用法：backup-run <ssh目标>"
+  local target=$1
+  ssh_cmd "$target" bash -s -- "$SERVER_DIR" <<'REMOTE'
+set -euo pipefail
+dir=$1
+[ -f "$dir/backup-run.sh" ] || { echo "[error] 未安装备份脚本（先 backup-install）"; exit 10; }
+exec "$dir/backup-run.sh"
+REMOTE
+}
+
+cmd_backup_list() {
+  [ $# -ge 1 ] || die "用法：backup-list <ssh目标>"
+  local target=$1
+  ssh_cmd "$target" bash -s -- "$SERVER_DIR" "$BACKUP_CRON_FILE" <<'REMOTE'
+set -uo pipefail
+dir=$1 cron_file=$2
+echo "== cron（$cron_file）=="
+if [ -f "$cron_file" ]; then cat "$cron_file"; else echo "（未安装：deploy-ecs.sh backup-install）"; fi
+echo "== 备份文件（$dir/backups）=="
+count=$(ls "$dir/backups"/xiaojing-*.sqlite 2>/dev/null | wc -l | tr -d ' ')
+if [ "$count" = 0 ]; then
+  echo "（暂无备份文件：deploy-ecs.sh backup-run 立即执行一次）"
+else
+  ls -lh "$dir/backups"/xiaojing-*.sqlite
+  echo "共 ${count} 份"
+fi
+echo "== backup.log 尾部 =="
+tail -n 5 "$dir/backups/backup.log" 2>/dev/null || echo "（暂无日志）"
+REMOTE
+}
+
+cmd_backup_uninstall() {
+  [ $# -ge 1 ] || die "用法：backup-uninstall <ssh目标>"
+  local target=$1
+  log "卸载备份 cron（$BACKUP_CRON_FILE）"
+  ssh_cmd "$target" bash -s -- "$BACKUP_CRON_FILE" <<'REMOTE'
+set -uo pipefail
+cron_file=$1
+if [ -f "$cron_file" ]; then
+  rm -f "$cron_file"
+  echo "CRON_REMOVED"
+else
+  echo "CRON_ABSENT（本就未安装，幂等通过）"
+fi
+REMOTE
+  log "cron 已卸载；备份脚本与历史备份保留在 $SERVER_DIR（确认不再需要时手动清理）"
+}
+
 usage() {
-  sed -n '3,16p' "$0"
+  sed -n '5,17p' "$0"
   exit 1
 }
 
@@ -462,6 +560,10 @@ main() {
     smoke) cmd_smoke "$@" ;;
     rollback) cmd_rollback "$@" ;;
     status) cmd_status "$@" ;;
+    backup-install) cmd_backup_install "$@" ;;
+    backup-run) cmd_backup_run "$@" ;;
+    backup-list) cmd_backup_list "$@" ;;
+    backup-uninstall) cmd_backup_uninstall "$@" ;;
     *) usage ;;
   esac
 }

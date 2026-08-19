@@ -259,20 +259,81 @@ server {
   curl -s -o /dev/null -w '%{http_code}\n' https://api.jingshanai.com/admin   # 200
   ```
 
-## 5. 备份（SQLite 卷）
+## 5. 备份（SQLite 卷，每日自动化）
 
 数据全部在 named volume `xiaojing-data`（`/app/data/xiaojing-backend.sqlite` + WAL/SHM）。
-**一致性口径**：SQLite 开着 WAL，直接 cp 卷文件可能截到写中间态；用 sqlite3 在线备份
-（容器里没有 sqlite3 CLI，借一次性 alpine 容器 + 服务器 sqlite3，推荐前者）：
+
+### 5.1 自动化路径（票 15，推荐）
+
+`deploy-ecs.sh` 的 backup 子命令组（在开发机仓库检出目录执行）：
 
 ```bash
-# 方式一（推荐，不停机）：借一次性容器跑 sqlite3 .backup
-mkdir -p /opt/xiaojing-api/backups
+./backend/scripts/deploy-ecs.sh backup-install <ssh目标>    # 安装：上传脚本 + 安装 cron（幂等可重复）
+./backend/scripts/deploy-ecs.sh backup-run <ssh目标>        # 立即执行一次备份（与 cron 同一入口）
+./backend/scripts/deploy-ecs.sh backup-list <ssh目标>       # 查看备份文件清单、份数与 cron 状态
+./backend/scripts/deploy-ecs.sh backup-uninstall <ssh目标>  # 卸载 cron（脚本与历史备份保留）
+```
+
+机制（`backend/scripts/backup-sqlite.mjs` + `backup-run.sh`，安装后都在
+`/opt/xiaojing-api/`）：
+
+- **在线热备，不停机**：借当前 api 容器自己的镜像（node:24，已在服务器上，
+  无需额外拉取）执行 `node:sqlite` 的 `VACUUM INTO`——对源库取一致性快照
+  导出为独立单文件，避免直接 cp 卷文件截到 WAL 写中间态；WAL 中尚未
+  checkpoint 的数据也进快照。
+- **导出**：`/opt/xiaojing-api/backups/xiaojing-<YYYYMMDD-HHMMSS>.sqlite`（北京
+  时间命名），权限 600；目录 700。备份容器只挂载数据卷、输出目录与脚本本体
+  （ro），不挂 `.env`、不接触任何密钥。
+- **自校验**：每份备份落盘后立即 `PRAGMA integrity_check`，非 ok 即失败退出
+  （cron 日志可见）。
+- **保留窗口**：默认保留最近 14 份（`XIAOJING_BACKUP_KEEP`），窗口外自动清理；
+  只回收 `xiaojing-<日期>.sqlite` 命名的本脚本产物，手工整卷打包不碰。
+- **cron**：`/etc/cron.d/xiaojing-backup`，默认 `30 4 * * *`（每日 04:30；
+  `backup-install` 经 `XIAOJING_BACKUP_CRON` 覆盖，5 字段表达式）；同名文件
+  整覆写，重复安装幂等；日志追加在 `/opt/xiaojing-api/backups/backup.log`；
+  mkdir 目录锁防重叠执行。
+- **本地已演练**：`cd backend && npm run verify:backup` 覆盖「造数据 → 生产
+  同款备份 → 逐表行数一致 → 删卷回放 → 同 env 新容器数据完整可读 →
+  保留窗口」全链路（占位密钥、不触公网）。
+
+### 5.2 恢复（备份文件回放到数据卷）
+
+```bash
+cd /opt/xiaojing-api && docker compose stop api
+# 用服务器上已有的后端镜像回放（无需额外拉取；<日期> 换成 backup-list 里的文件名）
+image=$(docker inspect --format '{{.Config.Image}}' xiaojing-backend-api-1)
+docker run --rm --user 0:0 -v xiaojing-data:/data -v /opt/xiaojing-api/backups:/backup:ro \
+  --entrypoint sh "$image" -c '
+    rm -f /data/xiaojing-backend.sqlite-wal /data/xiaojing-backend.sqlite-shm
+    cp /backup/xiaojing-<日期>.sqlite /data/xiaojing-backend.sqlite
+    chown -R 1000:1000 /data && chmod 600 /data/xiaojing-backend.sqlite'
+docker compose start api && curl -s http://127.0.0.1:8787/healthz
+```
+
+要点：
+
+- `rm -f` 先清旧库残留的 `-wal`/`-shm`——新快照不带 WAL，混入旧库的 WAL
+  会让 SQLite 尝试把过期页重放到新库上。
+- `chown -R 1000:1000 /data` 必须覆盖**目录本体**：全新空卷挂到非镜像路径时
+  目录属主是 root，容器内 node 用户建不了 `-wal` 文件（启动报
+  `attempt to write a readonly database`，本地演练实测过）。
+- 恢复后核对：`/admin` 登录、抽查账号余额与流水；升级前回滚到旧代码时注意
+  第 6 节的迁移兼容说明。
+
+### 5.3 手工等价展开（排障用）
+
+自动化路径失灵时（docker 异常、镜像损坏），可退回一次性容器 + 服务器
+sqlite3 的手工口径——与自动化语义等价（在线一致性快照），只是不自动清理
+与自校验：
+
+```bash
+# 方式一（不停机）：借一次性 alpine 容器跑 sqlite3 .backup
+mkdir -p /opt/xiaojing-api/backups && chmod 700 /opt/xiaojing-api/backups
 docker run --rm -v xiaojing-data:/data -v /opt/xiaojing-api/backups:/backup alpine:3.20 \
   sh -c 'apk add --no-cache sqlite >/dev/null 2>&1 || apk add --no-cache sqlite-tools; \
          sqlite3 /data/xiaojing-backend.sqlite ".backup /backup/xiaojing-$(date +%Y%m%d-%H%M%S).sqlite"'
 
-# 方式二（升级窗口内，最稳妥）：停容器后整卷打包
+# 方式二（升级窗口内，最稳妥）：停容器后整卷打包（含 WAL，恢复时整目录回放）
 cd /opt/xiaojing-api && docker compose stop api
 docker run --rm -v xiaojing-data:/data -v /opt/xiaojing-api/backups:/backup alpine:3.20 \
   tar -czf /backup/xiaojing-full-$(date +%Y%m%d-%H%M%S).tar.gz -C /data .
@@ -282,12 +343,12 @@ docker compose start api
 ls -lh /opt/xiaojing-api/backups/
 ```
 
-恢复（整卷回放）：
+方式二的整卷恢复（对应打包口径）：
 
 ```bash
 cd /opt/xiaojing-api && docker compose stop api
-docker run --rm -v xiaojing-data:/data -v /opt/xiaojing-api/backups:/backup alpine:3.20 \
-  sh -c 'rm -f /data/* && tar -xzf /backup/xiaojing-full-<时间戳>.tar.gz -C /data'
+docker run --rm --user 0:0 -v xiaojing-data:/data -v /opt/xiaojing-api/backups:/backup alpine:3.20 \
+  sh -c 'rm -f /data/* && tar -xzf /backup/xiaojing-full-<时间戳>.tar.gz -C /data && chown -R 1000:1000 /data'
 docker compose start api
 ```
 
