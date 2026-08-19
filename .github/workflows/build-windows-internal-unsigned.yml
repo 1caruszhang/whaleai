@@ -1,0 +1,64 @@
+name: Build Windows internal-unsigned (manual)
+
+# 一键产出 INTERNAL-UNSIGNED Windows 安装包（票 13 候选）：
+#   手动触发 → GitHub windows-latest runner 按指南
+#   specs/guides/windows_x64_internal_beta.md 的固定输入构建 →
+#   产物（安装包 + candidate.json 含 SHA-256）上传为 Actions artifact。
+# Windows runner 按 2x 分钟计费，与 test-windows.yml 一致保持手动触发；
+# 构建脚本内置完整门禁（资源摘要校验 / 静态契约 / 类型检查 / lint）。
+# 产物仅供内测分发：私有仓库 artifact 下载需要仓库权限，不对外发布。
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-windows-internal-unsigned-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      # rustup 在 runner 上预装；rust-toolchain.toml 锁定版本，rustup show 负责装齐。
+      - name: Install pinned Rust toolchain and Windows target
+        run: |
+          rustup show
+          rustup target add x86_64-pc-windows-msvc
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install npm dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Prepare pinned Windows x64 resources (digest-checked)
+        shell: pwsh
+        run: .\scripts\prepare-windows-x64.ps1
+
+      # MSVC 环境（link.exe / dumpbin.exe）供 cargo 与 PE 依赖校验使用。
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Build internal-unsigned candidate (with full gates)
+        shell: pwsh
+        run: .\scripts\build-windows-x64.ps1 -Mode internal-unsigned
+
+      - name: Upload candidate artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: xiaojing-internal-unsigned
+          path: artifacts/windows-x64/internal-unsigned/
+          retention-days: 30
+          if-no-files-found: error
