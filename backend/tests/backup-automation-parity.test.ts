@@ -129,4 +129,20 @@ describe("备份自动化对表（票 15）", () => {
       "node scripts/verify-backup.mjs",
     );
   });
+
+  it("shell 脚本里 $var 不与全角字符相邻（macOS bash 3.2 运行时吞字节成未定义变量）", () => {
+    // bash 3.2（macOS 自带）在双引号内把 `$VAR）` 的多字节首字节吞进变量名，
+    // `set -u` 下报 unbound variable；`bash -n` 语法检查查不出。全量 ${VAR}。
+    for (const [name, source] of [
+      ["deploy-ecs.sh", deployScript],
+      ["backup-run.sh", backupRun],
+    ] as const) {
+      expect(
+        // 「非可打印 ASCII 且非空白」= 多字节首字节等危险相邻（不用 \x00 控制区
+        // 转义，eslint no-control-regex 会拦）。
+        source.match(/\$[A-Za-z_][A-Za-z0-9_]*[^\x20-\x7E\s]/g) ?? [],
+        `${name} 存在 $var 后紧跟全角字符的写法，改用 \${var}`,
+      ).toEqual([]);
+    }
+  });
 });

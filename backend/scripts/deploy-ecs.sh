@@ -461,7 +461,7 @@ cmd_backup_install() {
   local cron_spec=${XIAOJING_BACKUP_CRON:-"30 4 * * *"}
   # cron 5 字段形状 + 字符集预检（顺带挡掉换行/引号注入；远端再整文件覆写，天然幂等）。
   if ! printf '%s' "$cron_spec" | grep -Eq '^[0-9A-Za-z/*,-]+( [0-9A-Za-z/*,-]+){4}$'; then
-    die "XIAOJING_BACKUP_CRON 必须是 5 字段 cron 表达式（收到：$cron_spec）"
+    die "XIAOJING_BACKUP_CRON 必须是 5 字段 cron 表达式（收到：${cron_spec}）"
   fi
 
   local backend
@@ -477,7 +477,7 @@ cmd_backup_install() {
   # shellcheck disable=SC2086
   scp -o ServerAliveInterval=15 $SSH_OPTS_EXTRA "$script" "$wrapper" "$target:$SERVER_DIR/"
 
-  log "安装 cron（$cron_spec → $BACKUP_CRON_FILE）"
+  log "安装 cron（${cron_spec} → ${BACKUP_CRON_FILE}）"
   ssh_cmd "$target" bash -s -- "$SERVER_DIR" "$cron_spec" "$BACKUP_CRON_FILE" <<'REMOTE'
 set -euo pipefail
 dir=$1 cron=$2 cron_file=$3
@@ -513,7 +513,7 @@ cmd_backup_list() {
   ssh_cmd "$target" bash -s -- "$SERVER_DIR" "$BACKUP_CRON_FILE" <<'REMOTE'
 set -uo pipefail
 dir=$1 cron_file=$2
-echo "== cron（$cron_file）=="
+echo "== cron（${cron_file}）=="
 if [ -f "$cron_file" ]; then cat "$cron_file"; else echo "（未安装：deploy-ecs.sh backup-install）"; fi
 echo "== 备份文件（$dir/backups）=="
 count=$(ls "$dir/backups"/xiaojing-*.sqlite 2>/dev/null | wc -l | tr -d ' ')
@@ -531,7 +531,7 @@ REMOTE
 cmd_backup_uninstall() {
   [ $# -ge 1 ] || die "用法：backup-uninstall <ssh目标>"
   local target=$1
-  log "卸载备份 cron（$BACKUP_CRON_FILE）"
+  log "卸载备份 cron（${BACKUP_CRON_FILE}）"
   ssh_cmd "$target" bash -s -- "$BACKUP_CRON_FILE" <<'REMOTE'
 set -uo pipefail
 cron_file=$1
@@ -542,7 +542,7 @@ else
   echo "CRON_ABSENT（本就未安装，幂等通过）"
 fi
 REMOTE
-  log "cron 已卸载；备份脚本与历史备份保留在 $SERVER_DIR（确认不再需要时手动清理）"
+  log "cron 已卸载；备份脚本与历史备份保留在 ${SERVER_DIR}（确认不再需要时手动清理）"
 }
 
 usage() {

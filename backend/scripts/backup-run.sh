@@ -24,12 +24,12 @@ LOCK_DIR="$BACKUPS/.backup.lock.d"
 
 fail() { echo "[backup][error] $*" >&2; exit 1; }
 
-[ -f "$SCRIPT" ] || fail "缺少 $SCRIPT（先执行 deploy-ecs.sh backup-install）"
+[ -f "$SCRIPT" ] || fail "缺少 ${SCRIPT}（先执行 deploy-ecs.sh backup-install）"
 command -v docker >/dev/null 2>&1 || fail "本机没有 docker CLI"
 
 # 镜像取自当前容器（升级/回滚换 tag 后自动跟随，永远与数据卷同一版本）。
 if ! image=$(docker inspect --format '{{.Config.Image}}' "$API_CONTAINER" 2>/dev/null); then
-  fail "找不到容器 $API_CONTAINER（api 未启动？先 docker compose up -d）"
+  fail "找不到容器 ${API_CONTAINER}（api 未启动？先 docker compose up -d）"
 fi
 
 # DATABASE_PATH 跟随容器实际配置（默认 /app/data/xiaojing-backend.sqlite；
