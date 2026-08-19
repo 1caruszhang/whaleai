@@ -1,14 +1,14 @@
-//! GEO provider credential projection for the Rust-side publish path.
+//! GEO provider credential projection for the Rust-side monitoring path.
 //!
 //! 票 06 起客户端不再管理 Provider 凭据：配置 UI、Windows 凭据管理器写
 //! 入和 Sidecar admission 注入均已移除，账号态 admission 见
-//! `account_auth.rs`。本模块只保留确定性 PublishScheduler 与发布后监测
-//! 仍需要的直连凭据读取（Windows 既有凭据 + debug `.env` 兜底）与签名
-//! helper；票 08 把发布切到网关 port 后可整体移除。
+//! `account_auth.rs`。票 08 把发布执行器切到网关 port 后，本模块只剩
+//! 发布后监测（`post_publish_monitoring.rs` 的 publish-status 与
+//! access-indexing 单元）仍需要的超级媒介直连查询凭据与 HMAC-SHA256
+//! 签名 helper——监测切网关属后续票，切完本模块可整体移除。
 
 use serde::{Deserialize, Serialize};
-use sha1::{Digest, Sha1};
-use sha2::Sha256;
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
 const MAX_CREDENTIAL_BYTES: usize = 2_560;
@@ -105,7 +105,7 @@ fn validate_service_credential(
     for (key, value) in fields {
         let value = value.trim();
         if !value.is_empty() {
-            normalized.insert(key, value.to_string());
+            normalized.insert(key.to_string(), value.to_string());
         }
     }
     let required: &[&str] = match service {
@@ -277,30 +277,6 @@ fn config_value<'a>(credential: &'a ServiceCredential, key: &str) -> Option<&'a 
     credential.0.get(key).map(String::as_str)
 }
 
-fn hmac_sha1(key: &[u8], message: &[u8]) -> Vec<u8> {
-    const BLOCK: usize = 64;
-    let mut normalized = [0_u8; BLOCK];
-    if key.len() > BLOCK {
-        normalized[..20].copy_from_slice(&Sha1::digest(key));
-    } else {
-        normalized[..key.len()].copy_from_slice(key);
-    }
-    let mut inner_pad = [0x36_u8; BLOCK];
-    let mut outer_pad = [0x5c_u8; BLOCK];
-    for index in 0..BLOCK {
-        inner_pad[index] ^= normalized[index];
-        outer_pad[index] ^= normalized[index];
-    }
-    let mut inner = Sha1::new();
-    inner.update(inner_pad);
-    inner.update(message);
-    let inner_hash = inner.finalize();
-    let mut outer = Sha1::new();
-    outer.update(outer_pad);
-    outer.update(inner_hash);
-    outer.finalize().to_vec()
-}
-
 fn hmac_sha256(key: &[u8], message: &[u8]) -> Vec<u8> {
     const BLOCK: usize = 64;
     let mut normalized = [0_u8; BLOCK];
@@ -326,78 +302,43 @@ fn hmac_sha256(key: &[u8], message: &[u8]) -> Vec<u8> {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct PublishObjectStorageCredential {
-    pub access_key_id: String,
-    pub access_key_secret: String,
-    pub bucket: String,
-    pub region: String,
-    pub public_base_url: Option<String>,
-}
-
-#[derive(Clone, Debug)]
 pub(crate) struct PublishDistributionCredential {
     pub app_id: String,
     pub secret: String,
     pub base_url: String,
 }
 
-#[derive(Clone, Debug)]
-pub(crate) struct PublishProviderCredentials {
-    pub object_storage: Option<PublishObjectStorageCredential>,
-    pub distribution: Option<PublishDistributionCredential>,
-}
-
-/// Rust-only credential projection for the deterministic PublishScheduler.
-/// Callers must never serialize, log, persist, or send this value to a Sidecar.
-pub(crate) fn load_publish_provider_credentials() -> Result<PublishProviderCredentials, String> {
-    let (oss, _) = load_service(GeoProviderServiceId::ObjectStorage)?;
+/// 发布后监测的超级媒介直连查询凭据（Windows 既有凭据 + debug `.env`
+/// 兜底）。发布执行器已切网关 port（票 08），不再使用直连凭据；监测
+/// 切网关后本读取随之移除。Callers must never serialize, log, persist,
+/// or send this value to a Sidecar.
+pub(crate) fn load_monitoring_distribution_credential(
+) -> Result<Option<PublishDistributionCredential>, String> {
     let (distribution, _) = load_service(GeoProviderServiceId::Distribution)?;
-    let object_storage = oss
-        .as_ref()
-        .map(|value| {
-            Ok::<PublishObjectStorageCredential, String>(PublishObjectStorageCredential {
-                access_key_id: config_value(value, "accessKeyId")
-                    .ok_or("OSS AccessKey ID 未配置")?
-                    .to_string(),
-                access_key_secret: config_value(value, "accessKeySecret")
-                    .ok_or("OSS AccessKey Secret 未配置")?
-                    .to_string(),
-                bucket: config_value(value, "bucket")
-                    .ok_or("OSS Bucket 未配置")?
-                    .to_string(),
-                region: config_value(value, "region")
-                    .unwrap_or("oss-cn-beijing")
-                    .to_string(),
-                public_base_url: config_value(value, "publicBaseUrl").map(str::to_string),
-            })
-        })
-        .transpose()?;
-    let distribution = distribution
-        .as_ref()
-        .map(|value| {
-            Ok::<PublishDistributionCredential, String>(PublishDistributionCredential {
-                app_id: config_value(value, "appId")
-                    .ok_or("超级媒介 AppID 未配置")?
-                    .to_string(),
-                secret: config_value(value, "secret")
-                    .ok_or("超级媒介 Secret 未配置")?
-                    .to_string(),
-                base_url: config_value(value, "baseUrl")
-                    .unwrap_or(DISTRIBUTION_BASE_URL)
-                    .to_string(),
-            })
-        })
-        .transpose()?;
-    Ok(PublishProviderCredentials {
-        object_storage,
-        distribution,
+    let credential = distribution.as_ref();
+    let app_id = || {
+        credential
+            .and_then(|value| config_value(value, "appId"))
+            .map(str::to_string)
+    };
+    let secret = || {
+        credential
+            .and_then(|value| config_value(value, "secret"))
+            .map(str::to_string)
+    };
+    Ok(match (app_id(), secret()) {
+        (Some(app_id), Some(secret)) => Some(PublishDistributionCredential {
+            app_id,
+            secret,
+            base_url: credential
+                .and_then(|value| config_value(value, "baseUrl"))
+                .unwrap_or(DISTRIBUTION_BASE_URL)
+                .to_string(),
+        }),
+        (None, None) => None,
+        _ => return Err("超级媒介 AppID/Secret 配置不完整".to_string()),
     })
 }
-
-pub(crate) fn publish_hmac_sha1(key: &[u8], message: &[u8]) -> Vec<u8> {
-    hmac_sha1(key, message)
-}
-
 pub(crate) fn publish_hmac_sha256(key: &[u8], message: &[u8]) -> Vec<u8> {
     hmac_sha256(key, message)
 }
@@ -405,7 +346,6 @@ pub(crate) fn publish_hmac_sha256(key: &[u8], message: &[u8]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use base64::Engine as _;
 
     #[test]
     fn rejects_unknown_fields_and_missing_required_values() {
@@ -454,10 +394,6 @@ mod tests {
     #[test]
     fn hmac_implementations_match_standard_vectors() {
         let message = b"The quick brown fox jumps over the lazy dog";
-        assert_eq!(
-            base64::engine::general_purpose::STANDARD.encode(hmac_sha1(b"key", message)),
-            "3nybhbi3iqa8ino29wqQcBydtNk="
-        );
         assert_eq!(
             hmac_sha256(b"key", message)
                 .iter()

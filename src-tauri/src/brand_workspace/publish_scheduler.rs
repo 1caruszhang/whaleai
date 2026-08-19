@@ -1,4 +1,3 @@
-use std::collections::BTreeMap;
 use std::future::Future;
 use std::io::Read;
 use std::path::Path;
@@ -6,13 +5,13 @@ use std::pin::Pin;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-use base64::Engine as _;
 use chrono::{DateTime, SecondsFormat, Utc};
 use pulldown_cmark::{html, Options, Parser};
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+use tauri::Manager;
 use tokio::sync::Notify;
 use uuid::Uuid;
 
@@ -361,69 +360,59 @@ fn body_summary(bytes: &[u8]) -> String {
 #[derive(Debug, Clone)]
 struct PublishProviderExecutionContext {
     snapshot: PublishProviderSnapshot,
-    object_base_url: Option<String>,
 }
 
 #[cfg(test)]
 static PROVIDER_EXECUTION_CONTEXT_LOADS: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
-impl PublishProviderExecutionContext {
-    fn deterministic_object_url(&self, object_key: &str) -> Option<String> {
-        self.object_base_url
-            .as_ref()
-            .map(|base| format!("{}/{object_key}", base.trim_end_matches('/')))
+/// 票 08 起（网关 port 闭环）测试注入的网关 egress 身份：生产路径读
+/// `account_auth` 的账号会话事实，单测不能触碰真实 OS 凭据库。
+#[cfg(test)]
+static TEST_GATEWAY_EGRESS_BASE_URL: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+fn gateway_egress_base_url() -> Option<String> {
+    #[cfg(test)]
+    if let Some(base) = TEST_GATEWAY_EGRESS_BASE_URL
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone()
+    {
+        return Some(base);
     }
+    crate::account_auth::publish_egress_gateway_base_url()
 }
 
-/// Loads one Rust-only view of the publish configuration. The returned value
-/// deliberately contains only configuration fingerprints and the public OSS
-/// base URL; provider secrets are dropped with the local credential value and
-/// are never persisted in the execution snapshot.
+/// Loads one Rust-only view of the publish egress transport. 票 08 起发布
+/// 不再读直连 Provider 凭据：上传与下单都经 Session Sidecar 的网关 port
+/// （网关侧重签与计费），本快照冻结的是网关传输身份——账号会话在位与
+/// 网关基地址（均非密钥）。服务器侧 OSS/渠道配置对客户端不可见，指纹
+/// 只承诺「经同一网关执行」。
 fn configured_provider_execution_context() -> Result<PublishProviderExecutionContext, String> {
     #[cfg(test)]
     PROVIDER_EXECUTION_CONTEXT_LOADS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    let credentials = crate::geo_provider_credentials::load_publish_provider_credentials()?;
-    let object_fingerprint = credentials.object_storage.as_ref().map(|value| {
-        sha256_hex(format!(
-            "{}|{}|{}|{}|{}",
-            value.access_key_id,
-            value.access_key_secret,
-            value.bucket,
-            value.region,
-            value.public_base_url.as_deref().unwrap_or("")
-        ))
-    });
-    let distribution_fingerprint = credentials.distribution.as_ref().map(|value| {
-        sha256_hex(format!(
-            "{}|{}|{}",
-            value.app_id, value.secret, value.base_url
-        ))
-    });
-    let object_base_url = credentials.object_storage.as_ref().map(|value| {
-        value
-            .public_base_url
-            .clone()
-            .unwrap_or_else(|| format!("https://{}.{}.aliyuncs.com", value.bucket, value.region))
-            .trim_end_matches('/')
-            .to_string()
-    });
+    let gateway_base = gateway_egress_base_url();
+    let object_fingerprint = gateway_base
+        .as_deref()
+        .map(|base| sha256_hex(format!("gateway-publish-egress-v1|object-storage|{base}")));
+    let distribution_fingerprint = gateway_base
+        .as_deref()
+        .map(|base| sha256_hex(format!("gateway-publish-egress-v1|distribution|{base}")));
     Ok(PublishProviderExecutionContext {
         snapshot: PublishProviderSnapshot {
             object_storage: PublishProviderSlotSnapshot {
                 provider: "aliyun-oss".to_string(),
-                endpoint_family: "oss-v1-put".to_string(),
-                configured: credentials.object_storage.is_some(),
+                endpoint_family: "gateway-oss-put".to_string(),
+                configured: gateway_base.is_some(),
                 configuration_fingerprint: object_fingerprint,
             },
             distribution: PublishProviderSlotSnapshot {
                 provider: "超级媒介".to_string(),
-                endpoint_family: "chaojimeijie-order-api".to_string(),
-                configured: credentials.distribution.is_some(),
+                endpoint_family: "gateway-order-api".to_string(),
+                configured: gateway_base.is_some(),
                 configuration_fingerprint: distribution_fingerprint,
             },
         },
-        object_base_url,
     })
 }
 
@@ -435,13 +424,13 @@ fn unavailable_provider_snapshot() -> PublishProviderSnapshot {
     PublishProviderSnapshot {
         object_storage: PublishProviderSlotSnapshot {
             provider: "aliyun-oss".to_string(),
-            endpoint_family: "oss-v1-put".to_string(),
+            endpoint_family: "gateway-oss-put".to_string(),
             configured: false,
             configuration_fingerprint: None,
         },
         distribution: PublishProviderSlotSnapshot {
             provider: "超级媒介".to_string(),
-            endpoint_family: "chaojimeijie-order-api".to_string(),
+            endpoint_family: "gateway-order-api".to_string(),
             configured: false,
             configuration_fingerprint: None,
         },
@@ -823,16 +812,16 @@ impl BrandWorkspaceStore {
             let object_key = format!(
                 "articles/{workspace_id}/{article_id}/approved-v{approved_revision}-{approved_hash}.html"
             );
-            let planned_object_url = provider_context
-                .deterministic_object_url(&object_key)
-                .unwrap_or_else(|| format!("unconfigured://{object_key}"));
+            // 票 08 起：URL 由网关按服务器侧 OSS 公网基地址在上传时解析，
+            // 预览期冻结的是确定性对象键（见 payload_hash 的 content-key）。
+            let planned_object_url = format!("gateway-oss://{object_key}");
             let structural = if kind == "media" {
                 "media-order-v1".to_string()
             } else {
                 "publish_form=1|publish_type=1|account_rule=2".to_string()
             };
             let payload_hash = sha256_hex(format!(
-                "sn={external_request_sn}|kind={kind}|resource_id={resource_id}|title={title}|content={planned_object_url}|{structural}"
+                "sn={external_request_sn}|kind={kind}|resource_id={resource_id}|title={title}|content-key={object_key}|{structural}"
             ));
             let article = PublishArticleSnapshot {
                 article_id: article_id.to_string(),
@@ -1711,8 +1700,7 @@ fn read_execution(
     // 缺字段也能得到权威点数；总价为逐项之和，不落库。
     let mut total_price_points = 0_i64;
     for item in &mut execution.items {
-        item.channel.price_points =
-            publish_channel_price_points(item.channel.estimated_price_cny);
+        item.channel.price_points = publish_channel_price_points(item.channel.estimated_price_cny);
         total_price_points += item.channel.price_points;
     }
     execution.total_price_points = total_price_points;
@@ -1751,10 +1739,23 @@ fn insert_audit(
     Ok(())
 }
 
+/// Routing context for one publish egress call through the execution's source
+/// Session Sidecar（票 08：Provider 传输切网关 port）。Rust 传
+/// executionId + itemId，下单幂等 sn 由 Sidecar 按
+/// `distributionOrderSn(executionId, itemId)` 派生——sn 单一权威不在 Rust。
+#[derive(Debug, Clone)]
+pub(crate) struct PublishEgressRoute {
+    workspace_id: String,
+    workspace_root: std::path::PathBuf,
+    session_id: String,
+    execution_id: String,
+    item_id: String,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct PublishUploadRequest {
+    route: PublishEgressRoute,
     object_key: String,
-    content_type: &'static str,
     body: Vec<u8>,
     expected_configuration_fingerprint: String,
 }
@@ -1767,8 +1768,7 @@ pub(crate) struct PublishUploadReceipt {
 
 #[derive(Debug, Clone)]
 pub(crate) struct PublishOrderRequest {
-    external_request_sn: String,
-    payload_hash: String,
+    route: PublishEgressRoute,
     kind: String,
     resource_id: i64,
     title: String,
@@ -1802,6 +1802,236 @@ pub(crate) trait PublishProvider: Send + Sync {
     ) -> ProviderFuture<'a, PublishOrderReceipt>;
 }
 
+const PUBLISH_EGRESS_HTTP_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Why a localhost Sidecar egress call failed before producing a typed egress
+/// outcome envelope.
+#[derive(Debug)]
+enum SidecarCallFailure {
+    /// The request never left this machine (no app owner, Sidecar ensure
+    /// failed, client build or connection refused) — nothing was submitted.
+    Unreachable(String),
+    /// The request may have been delivered but no usable envelope came back
+    /// (timeout, non-success control-plane status, malformed envelope).
+    Indeterminate(String),
+}
+
+fn bounded_reason(value: String) -> String {
+    value.chars().take(300).collect()
+}
+
+/// Attach the execution's source Session Sidecar（`PublishExecutor` owner，
+/// 同监测调度器模式），POST the egress payload to its localhost control-plane
+/// route, then always release the owner. Only the typed `result` of a success
+/// envelope is returned; every other failure is classified into
+/// [`SidecarCallFailure`].
+async fn call_publish_egress_sidecar(
+    route: &PublishEgressRoute,
+    endpoint: &str,
+    payload: Value,
+) -> Result<Value, SidecarCallFailure> {
+    let app = crate::logger::get_app_handle().cloned().ok_or_else(|| {
+        SidecarCallFailure::Unreachable("应用生命周期 owner 尚未就绪".to_string())
+    })?;
+    let manager = app
+        .try_state::<crate::sidecar::ManagedSidecarManager>()
+        .map(|state| state.inner().clone())
+        .ok_or_else(|| {
+            SidecarCallFailure::Unreachable("Session Sidecar 管理器不可用".to_string())
+        })?;
+    let owner = crate::sidecar::SidecarOwner::PublishExecutor(route.execution_id.clone());
+    let ensure = crate::sidecar::ensure_session_sidecar_with_lifecycle(
+        app.clone(),
+        manager.clone(),
+        route.session_id.clone(),
+        route.workspace_root.clone(),
+        owner.clone(),
+    )
+    .await
+    .map_err(|error| {
+        SidecarCallFailure::Unreachable(bounded_reason(format!("Sidecar 附着失败：{error}")))
+    })?;
+    let request_result =
+        post_egress_envelope(ensure.port, endpoint, egress_body(route, payload)).await;
+    if let Err(error) = crate::sidecar::release_session_sidecar(&manager, &route.session_id, &owner)
+    {
+        crate::ulog_warn!(
+            "[publish-scheduler] release egress Sidecar owner execution={}: {}",
+            route.execution_id,
+            bounded_reason(error)
+        );
+    }
+    request_result
+}
+
+fn egress_body(route: &PublishEgressRoute, payload: Value) -> Value {
+    let mut body = payload.as_object().cloned().unwrap_or_default();
+    body.insert(
+        "workspaceId".to_string(),
+        Value::String(route.workspace_id.clone()),
+    );
+    body.insert(
+        "sessionId".to_string(),
+        Value::String(route.session_id.clone()),
+    );
+    Value::Object(body)
+}
+
+/// POST one egress payload to the already-attached Sidecar's localhost
+/// control-plane route and extract the typed `result` of a success envelope.
+/// Separated from the attach/release lifecycle so the transport mapping is
+/// deterministically testable against a local mock-sidecar listener.
+async fn post_egress_envelope(
+    port: u16,
+    endpoint: &str,
+    body: Value,
+) -> Result<Value, SidecarCallFailure> {
+    let client = crate::local_http::builder()
+        .timeout(PUBLISH_EGRESS_HTTP_TIMEOUT)
+        .build()
+        .map_err(|error| {
+            SidecarCallFailure::Unreachable(bounded_reason(format!("客户端构建失败：{error}")))
+        })?;
+    let response = client
+        .post(format!("http://127.0.0.1:{port}{endpoint}"))
+        .json(&body)
+        .send()
+        .await
+        .map_err(|error| {
+            if error.is_connect() || error.is_request() {
+                SidecarCallFailure::Unreachable(bounded_reason(error.to_string()))
+            } else {
+                SidecarCallFailure::Indeterminate(bounded_reason(error.to_string()))
+            }
+        })?;
+    let status = response.status();
+    let envelope = response
+        .json::<Value>()
+        .await
+        .map_err(|error| SidecarCallFailure::Indeterminate(bounded_reason(error.to_string())))?;
+    if !status.is_success() || envelope.get("success").and_then(Value::as_bool) != Some(true) {
+        return Err(SidecarCallFailure::Indeterminate(bounded_reason(format!(
+            "Sidecar 控制面响应失败（HTTP {}）",
+            status.as_u16()
+        ))));
+    }
+    envelope
+        .get("result")
+        .cloned()
+        .ok_or_else(|| SidecarCallFailure::Indeterminate("Sidecar 响应 result 缺失".to_string()))
+}
+
+fn egress_outcome_kind(value: &Value) -> Option<&'static str> {
+    value
+        .get("outcome")
+        .and_then(Value::as_str)
+        .and_then(|kind| match kind {
+            "success" => Some("success"),
+            "safe-retryable" => Some("safe-retryable"),
+            "non-retryable" => Some("non-retryable"),
+            "unknown" => Some("unknown"),
+            _ => None,
+        })
+}
+
+fn egress_failure_fields(value: &Value) -> (String, String) {
+    (
+        value
+            .get("code")
+            .and_then(Value::as_str)
+            .unwrap_or("egress-classification-missing")
+            .to_string(),
+        value
+            .get("reason")
+            .and_then(Value::as_str)
+            .unwrap_or("发布出口未返回失败详情")
+            .to_string(),
+    )
+}
+
+fn parse_upload_egress_result(value: &Value) -> PublishProviderOutcome<PublishUploadReceipt> {
+    match egress_outcome_kind(value) {
+        Some("success") => {
+            let object_url = value
+                .get("objectUrl")
+                .and_then(Value::as_str)
+                .filter(|url| !url.trim().is_empty());
+            let external_content_id = value
+                .get("externalContentId")
+                .and_then(Value::as_str)
+                .filter(|id| !id.trim().is_empty());
+            match (object_url, external_content_id) {
+                (Some(object_url), Some(external_content_id)) => {
+                    PublishProviderOutcome::Success(PublishUploadReceipt {
+                        object_url: object_url.to_string(),
+                        external_content_id: external_content_id.to_string(),
+                    })
+                }
+                _ => PublishProviderOutcome::SafeRetryable {
+                    code: "object-storage-response-invalid".to_string(),
+                    reason: "上传回执缺少对象 URL，可安全重试稳定对象键".to_string(),
+                },
+            }
+        }
+        Some("safe-retryable") | Some("non-retryable") | Some("unknown") => {
+            let (code, reason) = egress_failure_fields(value);
+            match egress_outcome_kind(value) {
+                Some("safe-retryable") => PublishProviderOutcome::SafeRetryable { code, reason },
+                Some("non-retryable") => PublishProviderOutcome::NonRetryable { code, reason },
+                _ => PublishProviderOutcome::Unknown { code, reason },
+            }
+        }
+        _ => PublishProviderOutcome::SafeRetryable {
+            code: "object-storage-response-invalid".to_string(),
+            reason: "上传出口响应不可解析，可安全重试稳定对象键".to_string(),
+        },
+    }
+}
+
+fn parse_order_egress_result(value: &Value) -> PublishProviderOutcome<PublishOrderReceipt> {
+    match egress_outcome_kind(value) {
+        Some("success") => {
+            let external_order_id = value
+                .get("externalOrderId")
+                .and_then(Value::as_str)
+                .filter(|id| !id.trim().is_empty());
+            match external_order_id {
+                Some(external_order_id) => PublishProviderOutcome::Success(PublishOrderReceipt {
+                    external_order_id: external_order_id.to_string(),
+                }),
+                None => PublishProviderOutcome::Unknown {
+                    code: "distribution-order-id-missing".to_string(),
+                    reason: "订单受理但未返回订单标识，必须人工核对".to_string(),
+                },
+            }
+        }
+        Some("safe-retryable") | Some("non-retryable") | Some("unknown") => {
+            let (code, reason) = egress_failure_fields(value);
+            match egress_outcome_kind(value) {
+                Some("safe-retryable") => PublishProviderOutcome::SafeRetryable { code, reason },
+                Some("non-retryable") => PublishProviderOutcome::NonRetryable { code, reason },
+                _ => PublishProviderOutcome::Unknown { code, reason },
+            }
+        }
+        _ => PublishProviderOutcome::Unknown {
+            code: "distribution-response-unknown".to_string(),
+            reason: "下单出口响应不可解析，必须人工核对".to_string(),
+        },
+    }
+}
+
+/// Immediately before each egress the production transport re-derives the
+/// gateway identity fingerprint; a change since claim blocks the request.
+fn current_gateway_fingerprint(endpoint_family: &str) -> Option<String> {
+    configured_provider_snapshot().ok().and_then(|snapshot| {
+        if endpoint_family == snapshot.object_storage.endpoint_family {
+            snapshot.object_storage.configuration_fingerprint
+        } else {
+            snapshot.distribution.configuration_fingerprint
+        }
+    })
+}
+
 #[derive(Debug, Default)]
 struct ProductionPublishProvider;
 
@@ -1811,102 +2041,43 @@ impl PublishProvider for ProductionPublishProvider {
         request: PublishUploadRequest,
     ) -> ProviderFuture<'a, PublishUploadReceipt> {
         Box::pin(async move {
-            let credentials =
-                match crate::geo_provider_credentials::load_publish_provider_credentials() {
-                    Ok(value) => value,
-                    Err(_) => {
-                        return PublishProviderOutcome::NonRetryable {
-                            code: "object-storage-credential-unavailable".to_string(),
-                            reason: "对象存储配置不可用".to_string(),
-                        }
-                    }
-                };
-            let Some(oss) = credentials.object_storage else {
-                return PublishProviderOutcome::NonRetryable {
-                    code: "object-storage-unconfigured".to_string(),
-                    reason: "对象存储尚未配置".to_string(),
-                };
-            };
-            let current_fingerprint = sha256_hex(format!(
-                "{}|{}|{}|{}|{}",
-                oss.access_key_id,
-                oss.access_key_secret,
-                oss.bucket,
-                oss.region,
-                oss.public_base_url.as_deref().unwrap_or("")
-            ));
-            if current_fingerprint != request.expected_configuration_fingerprint {
+            if current_gateway_fingerprint("gateway-oss-put")
+                != Some(request.expected_configuration_fingerprint.clone())
+            {
                 return PublishProviderOutcome::Unknown {
                     code: "object-storage-configuration-changed".to_string(),
-                    reason: "对象存储配置在执行前变化，禁止发出请求".to_string(),
+                    reason: "网关传输身份在执行前变化，禁止发出请求".to_string(),
                 };
             }
-            let date = Utc::now().to_rfc2822().replace("+0000", "GMT");
-            let string_to_sign = format!(
-                "PUT\n\n{}\n{}\n/{}/{}",
-                request.content_type, date, oss.bucket, request.object_key
-            );
-            let signature = base64::engine::general_purpose::STANDARD.encode(
-                crate::geo_provider_credentials::publish_hmac_sha1(
-                    oss.access_key_secret.as_bytes(),
-                    string_to_sign.as_bytes(),
-                ),
-            );
-            let url = format!(
-                "https://{}.{}.aliyuncs.com/{}",
-                oss.bucket, oss.region, request.object_key
-            );
-            #[allow(clippy::disallowed_methods)]
-            let client = match crate::proxy_config::build_client_with_proxy(
-                reqwest::Client::builder().timeout(Duration::from_secs(30)),
-            ) {
-                Ok(value) => value,
-                Err(_) => {
-                    return PublishProviderOutcome::SafeRetryable {
-                        code: "object-storage-client-unavailable".to_string(),
-                        reason: "对象存储客户端暂不可用".to_string(),
-                    }
-                }
-            };
-            let response = client
-                .put(&url)
-                .header("Date", date)
-                .header(
-                    "Authorization",
-                    format!("OSS {}:{signature}", oss.access_key_id),
-                )
-                .header("Content-Type", request.content_type)
-                .body(request.body)
-                .send()
-                .await;
-            match response {
-                Ok(response) if response.status().is_success() => {
-                    let base = oss
-                        .public_base_url
-                        .as_deref()
-                        .unwrap_or_else(|| url.trim_end_matches(&request.object_key))
-                        .trim_end_matches('/');
-                    PublishProviderOutcome::Success(PublishUploadReceipt {
-                        object_url: format!("{base}/{}", request.object_key),
-                        external_content_id: request.object_key,
-                    })
-                }
-                Ok(response)
-                    if response.status().as_u16() == 429 || response.status().is_server_error() =>
-                {
+            let payload = json!({
+                "executionId": request.route.execution_id,
+                "itemId": request.route.item_id,
+                "objectKey": request.object_key,
+                "html": String::from_utf8_lossy(&request.body),
+            });
+            match call_publish_egress_sidecar(
+                &request.route,
+                "/api/xiaojing/publish-scheduler/egress/upload",
+                payload,
+            )
+            .await
+            {
+                Ok(result) => parse_upload_egress_result(&result),
+                // Nothing left the machine and the object key is stable: a
+                // later claim can replay the same PUT.
+                Err(SidecarCallFailure::Unreachable(reason)) => {
                     PublishProviderOutcome::SafeRetryable {
-                        code: format!("object-storage-http-{}", response.status().as_u16()),
-                        reason: "对象存储暂时不可用，可安全重试稳定对象键".to_string(),
+                        code: "object-storage-sidecar-unavailable".to_string(),
+                        reason,
                     }
                 }
-                Ok(response) => PublishProviderOutcome::NonRetryable {
-                    code: format!("object-storage-http-{}", response.status().as_u16()),
-                    reason: "对象存储拒绝上传".to_string(),
-                },
-                Err(_) => PublishProviderOutcome::SafeRetryable {
-                    code: "object-storage-transport".to_string(),
-                    reason: "对象存储连接中断，可安全重试稳定对象键".to_string(),
-                },
+                // PUT may have been forwarded; stable-key PUT stays a safe retry.
+                Err(SidecarCallFailure::Indeterminate(reason)) => {
+                    PublishProviderOutcome::SafeRetryable {
+                        code: "object-storage-sidecar-transport".to_string(),
+                        reason,
+                    }
+                }
             }
         })
     }
@@ -1916,137 +2087,43 @@ impl PublishProvider for ProductionPublishProvider {
         request: PublishOrderRequest,
     ) -> ProviderFuture<'a, PublishOrderReceipt> {
         Box::pin(async move {
-            let credentials =
-                match crate::geo_provider_credentials::load_publish_provider_credentials() {
-                    Ok(value) => value,
-                    Err(_) => {
-                        return PublishProviderOutcome::NonRetryable {
-                            code: "distribution-credential-unavailable".to_string(),
-                            reason: "分发渠道配置不可用".to_string(),
-                        }
-                    }
-                };
-            let Some(distribution) = credentials.distribution else {
-                return PublishProviderOutcome::NonRetryable {
-                    code: "distribution-unconfigured".to_string(),
-                    reason: "分发渠道尚未配置".to_string(),
-                };
-            };
-            let current_fingerprint = sha256_hex(format!(
-                "{}|{}|{}",
-                distribution.app_id, distribution.secret, distribution.base_url
-            ));
-            if current_fingerprint != request.expected_configuration_fingerprint {
+            if current_gateway_fingerprint("gateway-order-api")
+                != Some(request.expected_configuration_fingerprint.clone())
+            {
                 return PublishProviderOutcome::Unknown {
                     code: "distribution-configuration-changed".to_string(),
-                    reason: "分发配置在执行前变化，禁止发出请求".to_string(),
+                    reason: "网关传输身份在执行前变化，禁止发出请求".to_string(),
                 };
             }
-            let timestamp = Utc::now().timestamp();
-            let mut fields = BTreeMap::<String, String>::new();
-            fields.insert("algorithm".to_string(), "sha256".to_string());
-            fields.insert("appid".to_string(), distribution.app_id.clone());
-            fields.insert("content".to_string(), request.content_url.clone());
-            fields.insert("resource_id".to_string(), request.resource_id.to_string());
-            fields.insert("sn".to_string(), request.external_request_sn.clone());
-            fields.insert("timestamp".to_string(), timestamp.to_string());
-            fields.insert("title".to_string(), request.title.clone());
-            if request.kind != "media" {
-                fields.insert("account_rule".to_string(), "2".to_string());
-                fields.insert("publish_form".to_string(), "1".to_string());
-                fields.insert("publish_type".to_string(), "1".to_string());
-            }
-            let flattened = fields
-                .iter()
-                .map(|(key, value)| format!("{key}={value}"))
-                .collect::<String>();
-            let signature = crate::geo_provider_credentials::publish_hmac_sha256(
-                distribution.secret.as_bytes(),
-                flattened.as_bytes(),
+            let payload = json!({
+                "executionId": request.route.execution_id,
+                "itemId": request.route.item_id,
+                "kind": request.kind,
+                "resourceId": request.resource_id,
+                "title": request.title,
+                "contentUrl": request.content_url,
+            });
+            match call_publish_egress_sidecar(
+                &request.route,
+                "/api/xiaojing/publish-scheduler/egress/order",
+                payload,
             )
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>();
-            fields.insert("signature".to_string(), signature);
-            let path = if request.kind == "media" {
-                "/media/order"
-            } else {
-                "/we-media/order"
-            };
-            #[allow(clippy::disallowed_methods)]
-            let client = match crate::proxy_config::build_client_with_proxy(
-                reqwest::Client::builder().timeout(Duration::from_secs(30)),
-            ) {
-                Ok(value) => value,
-                Err(_) => {
-                    return PublishProviderOutcome::NonRetryable {
-                        code: "distribution-client-unavailable".to_string(),
-                        reason: "分发渠道客户端不可用，尚未发出请求".to_string(),
+            .await
+            {
+                Ok(result) => parse_order_egress_result(&result),
+                // Order was never sent: a later claim can safely replay the sn.
+                Err(SidecarCallFailure::Unreachable(reason)) => {
+                    PublishProviderOutcome::SafeRetryable {
+                        code: "distribution-sidecar-unavailable".to_string(),
+                        reason,
                     }
                 }
-            };
-            let response = client
-                .post(format!(
-                    "{}{}",
-                    distribution.base_url.trim_end_matches('/'),
-                    path
-                ))
-                .form(&fields)
-                .send()
-                .await;
-            let response = match response {
-                Ok(value) => value,
-                Err(_) => {
-                    return PublishProviderOutcome::Unknown {
-                        code: "distribution-transport-unknown".to_string(),
-                        reason: "下单响应未知，可能已受理，必须人工核对".to_string(),
-                    }
-                }
-            };
-            let http_status = response.status();
-            let envelope = response.json::<Value>().await.ok();
-            if http_status.as_u16() == 429 {
-                return PublishProviderOutcome::SafeRetryable {
-                    code: "distribution-rate-limited".to_string(),
-                    reason: "渠道明确限流，尚未受理，可安全重试".to_string(),
-                };
+                // The order may have been placed — never auto-retry.
+                Err(SidecarCallFailure::Indeterminate(reason)) => PublishProviderOutcome::Unknown {
+                    code: "distribution-transport-unknown".to_string(),
+                    reason,
+                },
             }
-            if http_status.is_server_error() {
-                return PublishProviderOutcome::Unknown {
-                    code: format!("distribution-http-{}-unknown", http_status.as_u16()),
-                    reason: "渠道服务异常，受理结果未知，必须人工核对".to_string(),
-                };
-            }
-            let Some(envelope) = envelope else {
-                return PublishProviderOutcome::Unknown {
-                    code: "distribution-response-unknown".to_string(),
-                    reason: "渠道响应不可解析，必须人工核对".to_string(),
-                };
-            };
-            if envelope.get("code").and_then(Value::as_i64) != Some(200) {
-                return PublishProviderOutcome::NonRetryable {
-                    code: format!(
-                        "distribution-api-{}",
-                        envelope.get("code").and_then(Value::as_i64).unwrap_or(-1)
-                    ),
-                    reason: "渠道明确拒绝订单".to_string(),
-                };
-            }
-            let Some(order_id) = envelope
-                .get("data")
-                .and_then(|value| value.get("partner_sn"))
-                .and_then(Value::as_str)
-                .filter(|value| !value.trim().is_empty())
-            else {
-                return PublishProviderOutcome::Unknown {
-                    code: "distribution-order-id-missing".to_string(),
-                    reason: "渠道未返回订单标识，必须人工核对".to_string(),
-                };
-            };
-            let _ = request.payload_hash;
-            PublishProviderOutcome::Success(PublishOrderReceipt {
-                external_order_id: order_id.to_string(),
-            })
         })
     }
 }
@@ -2054,6 +2131,8 @@ impl PublishProvider for ProductionPublishProvider {
 #[derive(Debug)]
 struct ClaimedPublishItem {
     execution_id: String,
+    /// 执行的来源 Session：egress 借用它的 Sidecar owner 身份（票 08）。
+    source_session_id: String,
     item_id: String,
     claim_token: String,
     stage: &'static str,
@@ -2064,7 +2143,6 @@ struct ClaimedPublishItem {
     external_request_sn: String,
     payload_hash: String,
     object_key: String,
-    planned_object_url: String,
     object_url: Option<String>,
     attempts: i64,
     upload_attempts: i64,
@@ -2152,11 +2230,18 @@ impl PublishScheduler {
                 }
             };
             let html = render_article_html(&claim.article.title, &String::from_utf8_lossy(&body));
+            let route = PublishEgressRoute {
+                workspace_id: workspace.id.clone(),
+                workspace_root: workspace.root_path.clone(),
+                session_id: claim.source_session_id.clone(),
+                execution_id: claim.execution_id.clone(),
+                item_id: claim.item_id.clone(),
+            };
             let outcome = self
                 .provider
                 .upload(PublishUploadRequest {
+                    route,
                     object_key: claim.object_key.clone(),
-                    content_type: "text/html; charset=utf-8",
                     body: html.into_bytes(),
                     expected_configuration_fingerprint: claim
                         .provider_snapshot
@@ -2178,13 +2263,15 @@ impl PublishScheduler {
         } else {
             "publish_form=1|publish_type=1|account_rule=2".to_string()
         };
+        // 载荷哈希冻结的是确定性对象键（票 08）：URL 由网关在上传时解析，
+        // 提交前重算绑定同一键，防止同幂等键换内容下单。
         let actual_hash = sha256_hex(format!(
-            "sn={}|kind={}|resource_id={}|title={}|content={}|{}",
+            "sn={}|kind={}|resource_id={}|title={}|content-key={}|{}",
             claim.external_request_sn,
             claim.channel.kind,
             claim.channel.resource_id,
             claim.article.title,
-            object_url,
+            claim.object_key,
             structural
         ));
         if actual_hash != claim.payload_hash {
@@ -2197,11 +2284,17 @@ impl PublishScheduler {
             )?;
             return Ok(());
         }
+        let route = PublishEgressRoute {
+            workspace_id: workspace.id.clone(),
+            workspace_root: workspace.root_path.clone(),
+            session_id: claim.source_session_id.clone(),
+            execution_id: claim.execution_id.clone(),
+            item_id: claim.item_id.clone(),
+        };
         let outcome = self
             .provider
             .submit(PublishOrderRequest {
-                external_request_sn: claim.external_request_sn.clone(),
-                payload_hash: claim.payload_hash.clone(),
+                route,
                 kind: claim.channel.kind.clone(),
                 resource_id: claim.channel.resource_id,
                 title: claim.article.title.clone(),
@@ -2390,8 +2483,8 @@ fn claim_next_item(
                     item.channel_json, item.approved_body_path,
                     item.idempotency_key, COALESCE(item.external_request_sn, item.id),
                     item.payload_hash, item.object_key, item.object_url,
-                    item.attempts, item.upload_attempts, item.request_summary_json,
-                    execution.provider_snapshot_json
+                    item.attempts, item.upload_attempts,
+                    execution.provider_snapshot_json, execution.created_by_session_id
              FROM geo_publish_items item
              JOIN geo_publish_executions execution ON execution.id=item.execution_id
              WHERE execution.execution_started_at IS NOT NULL
@@ -2446,8 +2539,8 @@ fn claim_next_item(
         object_url,
         attempts,
         upload_attempts,
-        request_summary_json,
         provider_snapshot_json,
+        source_session_id,
     )) = row
     else {
         transaction
@@ -2497,10 +2590,9 @@ fn claim_next_item(
     transaction
         .commit()
         .map_err(|error| format!("commit publish item claim: {error}"))?;
-    let request_summary: PublishRequestSummary = serde_json::from_str(&request_summary_json)
-        .map_err(|_| "publish_request_summary_invalid".to_string())?;
     Ok(Some(ClaimedPublishItem {
         execution_id,
+        source_session_id,
         item_id,
         claim_token,
         stage,
@@ -2513,7 +2605,6 @@ fn claim_next_item(
         external_request_sn,
         payload_hash,
         object_key,
-        planned_object_url: request_summary.planned_object_url,
         object_url,
         attempts,
         upload_attempts,
@@ -2526,6 +2617,48 @@ fn retry_delay(attempt_after_failure: i64) -> Option<i64> {
     usize::try_from(attempt_after_failure - 1)
         .ok()
         .and_then(|index| RETRY_BACKOFF_MS.get(index).copied())
+}
+
+/// 解码 URL 路径分量的 `%XX` 转义（网关回传的对象 URL 以
+/// encodeURIComponent 逐段编码对象键，与 sidecar/网关 encodeObjectKey
+/// 口径一致）。不合法转义原样保留。
+fn percent_decode_path_component(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut decoded: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' && index + 2 < bytes.len() {
+            let hex = |byte: u8| match byte {
+                b'0'..=b'9' => byte - b'0',
+                b'a'..=b'f' => byte - b'a' + 10,
+                b'A'..=b'F' => byte - b'A' + 10,
+                _ => 0xff,
+            };
+            let high = hex(bytes[index + 1]);
+            let low = hex(bytes[index + 2]);
+            if high != 0xff && low != 0xff {
+                decoded.push(high << 4 | low);
+                index += 3;
+                continue;
+            }
+        }
+        decoded.push(bytes[index]);
+        index += 1;
+    }
+    String::from_utf8_lossy(&decoded).into_owned()
+}
+
+/// 上传回执的完整性检查（票 08）：网关按服务器侧 OSS 公网基地址解析 URL，
+/// 客户端冻结的权威事实是确定性对象键——回执 URL 的（解码后）路径必须
+/// 精确指向该键，否则订单 content 会指向未获授权的位置。
+fn receipt_url_points_at_object_key(object_url: &str, object_key: &str) -> bool {
+    let Ok(parsed) = url::Url::parse(object_url) else {
+        return false;
+    };
+    if !matches!(parsed.scheme(), "https" | "http") {
+        return false;
+    }
+    percent_decode_path_component(parsed.path().trim_start_matches('/')) == object_key
 }
 
 fn settle_upload(
@@ -2541,13 +2674,13 @@ fn settle_upload(
     let now = now_iso(now_ms);
     match outcome {
         PublishProviderOutcome::Success(receipt) => {
-            if receipt.object_url != claim.planned_object_url {
+            if !receipt_url_points_at_object_key(&receipt.object_url, &claim.object_key) {
                 transaction
                     .execute(
                         "UPDATE geo_publish_items SET status='reconciliation-required',
                          revision=revision+1, upload_attempts=upload_attempts+1,
                          failure_code='object-url-mismatch',
-                         failure_reason='对象存储返回 URL 与确认快照不一致', claim_token=NULL,
+                         failure_reason='上传返回 URL 不指向确认冻结的对象键', claim_token=NULL,
                          lease_until_ms=NULL, finished_at=?3
                          WHERE id=?1 AND status='uploading' AND claim_token=?2",
                         params![claim.item_id, claim.claim_token, now],
@@ -3173,42 +3306,38 @@ mod tests {
 
     static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-    struct TestEnvironment(Vec<(&'static str, Option<String>)>);
+    const TEST_GATEWAY_BASE: &str = "https://gateway.example.test";
+
+    /// 测试网关 egress 身份注入：生产路径读 `account_auth` 的账号会话
+    /// （OS 凭据库），单测不得触碰——沿既有确定性测试模式改为静态注入。
+    struct TestEnvironment(Option<String>);
 
     impl TestEnvironment {
         fn configured() -> Self {
-            let values = [
-                ("ALI_OSS_ACCESS_KEY_ID", "test-access-id"),
-                ("ALI_OSS_ACCESS_KEY_SECRET", "test-access-secret"),
-                ("ALI_OSS_BUCKET", "ticket-thirteen-bucket"),
-                ("ALI_OSS_REGION", "oss-cn-beijing"),
-                ("ALI_OSS_PUBLIC_BASE_URL", "https://cdn.example.test"),
-                ("CHAOJIMEIJIE_APPID", "test-app-id"),
-                ("CHAOJIMEIJIE_SECRET", "test-distribution-secret"),
-                (
-                    "CHAOJIMEIJIE_API_BASE_URL",
-                    "https://orders.example.test/api",
-                ),
-            ];
-            let previous = values
-                .iter()
-                .map(|(name, _)| (*name, std::env::var(name).ok()))
-                .collect();
-            for (name, value) in values {
-                std::env::set_var(name, value);
-            }
+            Self::with_base(TEST_GATEWAY_BASE)
+        }
+
+        fn with_base(base: &str) -> Self {
+            let previous = TEST_GATEWAY_EGRESS_BASE_URL
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .take();
+            set_test_gateway_base(Some(base));
             Self(previous)
         }
     }
 
+    fn set_test_gateway_base(base: Option<&str>) {
+        *TEST_GATEWAY_EGRESS_BASE_URL
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = base.map(str::to_string);
+    }
+
     impl Drop for TestEnvironment {
         fn drop(&mut self) {
-            for (name, value) in self.0.drain(..) {
-                match value {
-                    Some(value) => std::env::set_var(name, value),
-                    None => std::env::remove_var(name),
-                }
-            }
+            *TEST_GATEWAY_EGRESS_BASE_URL
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = self.0.take();
         }
     }
 
@@ -3217,6 +3346,7 @@ mod tests {
         uploads: StdMutex<Vec<PublishUploadRequest>>,
         submissions: StdMutex<Vec<PublishOrderRequest>>,
         submit_outcomes: StdMutex<VecDeque<PublishProviderOutcome<PublishOrderReceipt>>>,
+        upload_urls: StdMutex<VecDeque<String>>,
     }
 
     impl MockProvider {
@@ -3225,6 +3355,13 @@ mod tests {
         ) -> Self {
             Self {
                 submit_outcomes: StdMutex::new(outcomes.into()),
+                ..Self::default()
+            }
+        }
+
+        fn with_upload_urls(urls: Vec<String>) -> Self {
+            Self {
+                upload_urls: StdMutex::new(urls.into()),
                 ..Self::default()
             }
         }
@@ -3243,8 +3380,14 @@ mod tests {
             request: PublishUploadRequest,
         ) -> ProviderFuture<'a, PublishUploadReceipt> {
             Box::pin(async move {
+                let object_url = self
+                    .upload_urls
+                    .lock()
+                    .unwrap()
+                    .pop_front()
+                    .unwrap_or_else(|| format!("https://cdn.example.test/{}", request.object_key));
                 let receipt = PublishUploadReceipt {
-                    object_url: format!("https://cdn.example.test/{}", request.object_key),
+                    object_url,
                     external_content_id: request.object_key.clone(),
                 };
                 self.uploads.lock().unwrap().push(request);
@@ -3473,10 +3616,7 @@ mod tests {
             )
             .unwrap();
         let mut legacy: Value = serde_json::from_str(&channel_json).unwrap();
-        legacy
-            .as_object_mut()
-            .unwrap()
-            .remove("pricePoints");
+        legacy.as_object_mut().unwrap().remove("pricePoints");
         connection
             .execute(
                 "UPDATE geo_publish_items SET channel_json=?1 WHERE execution_id=?2",
@@ -3579,16 +3719,29 @@ mod tests {
         {
             let submissions = provider.submissions.lock().unwrap();
             let request = &submissions[0];
-            assert!(request.external_request_sn.len() <= 64);
+            // 载荷哈希冻结确定性对象键（票 08）：Rust 传 executionId+itemId，
+            // 幂等 sn 由 sidecar 派生，请求本身不再携带 sn。
+            let started_projection = fixture
+                .store
+                .get_publish_execution(&fixture.workspace.id, "session-b", &started.id)
+                .unwrap();
+            let item = &started_projection.items[0];
+            let structural = if request.kind == "media" {
+                "media-order-v1"
+            } else {
+                "publish_form=1|publish_type=1|account_rule=2"
+            };
+            assert_eq!(item.external_request_sn.len(), 46);
             assert_eq!(
-                request.payload_hash,
+                item.payload_hash,
                 sha256_hex(format!(
-                    "sn={}|kind={}|resource_id={}|title={}|content={}|media-order-v1",
-                    request.external_request_sn,
+                    "sn={}|kind={}|resource_id={}|title={}|content-key={}|{}",
+                    item.external_request_sn,
                     request.kind,
                     request.resource_id,
                     request.title,
-                    request.content_url
+                    item.object_key,
+                    structural
                 ))
             );
         }
@@ -3618,8 +3771,9 @@ mod tests {
             )
             .unwrap();
         assert!(!audit.contains(&fixture.body_marker));
-        assert!(!audit.contains("test-access-secret"));
-        assert!(!audit.contains("test-distribution-secret"));
+        // 网关 egress（票 08）：Rust 侧不再持有任何 Provider 凭据，审计里
+        // 也不应出现网关基地址等传输细节。
+        assert!(!audit.contains(TEST_GATEWAY_BASE));
         assert!(audit.contains("provider-order-13"));
     }
 
@@ -3805,7 +3959,9 @@ mod tests {
         let claim = claim_next_item(&fixture.workspace, fixture.now_ms)
             .unwrap()
             .unwrap();
-        std::env::set_var("ALI_OSS_ACCESS_KEY_SECRET", "rotated-before-egress");
+        // 网关身份在 claim 后被替换（开发期网关切换/账号会话换网关）：执行前
+        // 快照比对失败，零外发请求。
+        set_test_gateway_base(Some("https://rotated-gateway.example.test"));
         let provider = Arc::new(MockProvider::default());
         scheduler(
             &fixture,
@@ -3856,7 +4012,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn upload_receipt_is_settled_against_frozen_url_after_configuration_rotates() {
+    async fn upload_receipt_is_settled_against_frozen_object_key_after_configuration_rotates() {
         let _lock = ENV_LOCK.lock().await;
         let _env = TestEnvironment::configured();
         let fixture = setup_fixture(1, 0);
@@ -3864,21 +4020,20 @@ mod tests {
         let claim = claim_next_item(&fixture.workspace, fixture.now_ms)
             .unwrap()
             .unwrap();
-        let frozen_object_url = claim.planned_object_url.clone();
+        let frozen_object_key = claim.object_key.clone();
 
-        // Model a credential rotation after OSS accepted the frozen-A upload
-        // but before its receipt is durably settled. Settlement must not reload
-        // B and reinterpret a successful A receipt as a URL mismatch.
-        std::env::set_var(
-            "ALI_OSS_PUBLIC_BASE_URL",
-            "https://rotated-cdn.example.test",
-        );
+        // Model a gateway identity rotation after OSS accepted the frozen-A
+        // upload but before its receipt is durably settled. Settlement binds
+        // the frozen object key, not the transport identity — it must not
+        // reload the snapshot and reinterpret a successful A receipt.
+        set_test_gateway_base(Some("https://rotated-gateway.example.test"));
+        let settled_url = format!("https://cdn.example.test/{frozen_object_key}");
         settle_upload(
             &fixture.workspace,
             &claim,
             PublishProviderOutcome::Success(PublishUploadReceipt {
-                object_url: frozen_object_url.clone(),
-                external_content_id: "oss-version-a".to_string(),
+                object_url: settled_url.clone(),
+                external_content_id: frozen_object_key.clone(),
             }),
             fixture.now_ms,
         )
@@ -3892,7 +4047,7 @@ mod tests {
         assert_eq!(result.items[0].status, "uploaded");
         assert_eq!(
             result.items[0].object_url.as_deref(),
-            Some(frozen_object_url.as_str())
+            Some(settled_url.as_str())
         );
         assert_eq!(result.items[0].failure_code, None);
     }
@@ -3922,8 +4077,12 @@ mod tests {
             .configuration_fingerprint
             .is_some());
         for item in &execution.items {
-            let planned_url = &item.request_summary.planned_object_url;
-            assert!(planned_url.starts_with("https://cdn.example.test/articles/"));
+            // 预览冻结网关传输快照与确定性对象键（票 08）：URL 由网关在
+            // 上传时按服务器侧 OSS 公网基地址解析。
+            assert_eq!(
+                item.request_summary.planned_object_url,
+                format!("gateway-oss://{}", item.object_key)
+            );
             let structural = if item.channel.kind == "media" {
                 "media-order-v1"
             } else {
@@ -3932,12 +4091,12 @@ mod tests {
             assert_eq!(
                 item.payload_hash,
                 sha256_hex(format!(
-                    "sn={}|kind={}|resource_id={}|title={}|content={}|{}",
+                    "sn={}|kind={}|resource_id={}|title={}|content-key={}|{}",
                     item.external_request_sn,
                     item.channel.kind,
                     item.channel.resource_id,
                     item.article.title,
-                    planned_url,
+                    item.object_key,
                     structural
                 ))
             );
@@ -4198,6 +4357,267 @@ mod tests {
         assert_eq!(
             historical.items[0].external_order_id.as_deref(),
             Some("provider-order-13")
+        );
+    }
+
+    // ── 票 08：网关 egress 传输切换的确定性测试 ────────────────────────────
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn gateway_snapshot_tracks_admission_identity_and_fails_closed_without_it() {
+        let _lock = ENV_LOCK.lock().await;
+        let _env = TestEnvironment::configured();
+        let configured = configured_provider_snapshot().unwrap();
+        assert!(configured.object_storage.configured);
+        assert!(configured.distribution.configured);
+        assert_eq!(configured.object_storage.endpoint_family, "gateway-oss-put");
+        assert_eq!(configured.distribution.endpoint_family, "gateway-order-api");
+        let fingerprint = configured
+            .object_storage
+            .configuration_fingerprint
+            .clone()
+            .unwrap();
+
+        // 账号会话不在位（未登录/网关未注入）：快照 fail-closed，确认门拒绝。
+        set_test_gateway_base(None);
+        let unconfigured = configured_provider_snapshot().unwrap();
+        assert!(!unconfigured.object_storage.configured);
+        assert!(!unconfigured.distribution.configured);
+        assert_eq!(unconfigured.object_storage.configuration_fingerprint, None);
+
+        // 网关身份变化 = 快照变化：确认后的执行沿旧幂等键会被 reconciliation。
+        set_test_gateway_base(Some("https://other-gateway.example.test"));
+        let rotated = configured_provider_snapshot().unwrap();
+        assert_ne!(
+            rotated.object_storage.configuration_fingerprint,
+            Some(fingerprint)
+        );
+        assert_ne!(configured, rotated);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn production_provider_blocks_egress_when_gateway_identity_rotates() {
+        let _lock = ENV_LOCK.lock().await;
+        let _env = TestEnvironment::configured();
+        let route = PublishEgressRoute {
+            workspace_id: "workspace-13".to_string(),
+            workspace_root: std::path::PathBuf::from("/tmp/workspace-13"),
+            session_id: "session-13".to_string(),
+            execution_id: "execution-13".to_string(),
+            item_id: "item-13".to_string(),
+        };
+        let provider = ProductionPublishProvider;
+        // egress 前网关身份指纹与冻结值不一致：请求不发出（无需真实
+        // Sidecar——precheck 早于任何外发）。
+        set_test_gateway_base(Some("https://rotated-gateway.example.test"));
+        let upload_outcome = provider
+            .upload(PublishUploadRequest {
+                route: route.clone(),
+                object_key: "articles/a.html".to_string(),
+                body: b"<html></html>".to_vec(),
+                expected_configuration_fingerprint: sha256_hex(
+                    "gateway-publish-egress-v1|object-storage|https://gateway.example.test",
+                ),
+            })
+            .await;
+        assert!(matches!(
+            upload_outcome,
+            PublishProviderOutcome::Unknown { ref code, .. }
+                if code == "object-storage-configuration-changed"
+        ));
+        let submit_outcome = provider
+            .submit(PublishOrderRequest {
+                route,
+                kind: "media".to_string(),
+                resource_id: 8,
+                title: "标题".to_string(),
+                content_url: "https://cdn.example.test/articles/a.html".to_string(),
+                expected_configuration_fingerprint: sha256_hex(
+                    "gateway-publish-egress-v1|distribution|https://gateway.example.test",
+                ),
+            })
+            .await;
+        assert!(matches!(
+            submit_outcome,
+            PublishProviderOutcome::Unknown { ref code, .. }
+                if code == "distribution-configuration-changed"
+        ));
+    }
+
+    #[test]
+    fn mock_sidecar_envelopes_map_to_publish_outcomes() {
+        // 上传：成功回执 → Success；余额类/限流类/未知信封按三态透传。
+        let uploaded = parse_upload_egress_result(&json!({
+            "outcome": "success",
+            "objectUrl": "https://cdn.example.test/articles/a.html",
+            "externalContentId": "articles/a.html",
+        }));
+        assert!(matches!(
+            uploaded,
+            PublishProviderOutcome::Success(ref receipt)
+                if receipt.object_url == "https://cdn.example.test/articles/a.html"
+        ));
+        assert!(matches!(
+            parse_upload_egress_result(&json!({
+                "outcome": "safe-retryable",
+                "code": "object-storage-http-502",
+                "reason": "网关暂不可用",
+            })),
+            PublishProviderOutcome::SafeRetryable { ref code, .. }
+                if code == "object-storage-http-502"
+        ));
+        // 成功信封缺 URL：稳定键 PUT 可安全重试。
+        assert!(matches!(
+            parse_upload_egress_result(&json!({"outcome": "success"})),
+            PublishProviderOutcome::SafeRetryable { ref code, .. }
+                if code == "object-storage-response-invalid"
+        ));
+
+        // 下单：网关 402 余额不足 → NonRetryable（充值语义，绝不静默重试）。
+        let insufficient = parse_order_egress_result(&json!({
+            "outcome": "non-retryable",
+            "code": "distribution-insufficient-balance",
+            "reason": "点数不足：本次需 1408 点，当前可用 100 点，请充值后再试。",
+        }));
+        assert!(matches!(
+            insufficient,
+            PublishProviderOutcome::NonRetryable { ref code, ref reason }
+                if code == "distribution-insufficient-balance"
+                    && reason.contains("充值")
+        ));
+        // 受理但缺订单标识 → Unknown（人工核对，绝不自动重试）。
+        assert!(matches!(
+            parse_order_egress_result(&json!({"outcome": "success"})),
+            PublishProviderOutcome::Unknown { ref code, .. }
+                if code == "distribution-order-id-missing"
+        ));
+        // 信封形状不可识别 → Unknown。
+        assert!(matches!(
+            parse_order_egress_result(&json!({"outcome": "garbage"})),
+            PublishProviderOutcome::Unknown { ref code, .. }
+                if code == "distribution-response-unknown"
+        ));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn post_egress_envelope_classifies_mock_sidecar_control_plane_failures() {
+        let _lock = ENV_LOCK.lock().await;
+        // 本地 mock sidecar（确定性测试模式）：按序返回预设控制面响应。
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        #[allow(clippy::disallowed_methods)]
+        let server = tokio::spawn(async move {
+            let mut responses = VecDeque::from([
+                // 1) 正常成功信封。
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 122\r\n\r\n{\"success\":true,\"result\":{\"outcome\":\"success\",\"objectUrl\":\"https://cdn.example.test/a.html\",\"externalContentId\":\"a.html\"}}".to_string(),
+                // 2) 控制面非 2xx（egress 分类值只经 200 信封传递）。
+                "HTTP/1.1 500 Internal Server Error\r\ncontent-type: application/json\r\ncontent-length: 32\r\n\r\n{\"success\":false,\"error\":\"boom\"}".to_string(),
+                // 3) 200 但信封不可解析。
+                "HTTP/1.1 200 OK\r\ncontent-length: 5\r\n\r\nnotjson".to_string(),
+            ]);
+            while let Some(response) = responses.pop_front() {
+                let Ok((stream, _)) = listener.accept().await else {
+                    break;
+                };
+                let stream = stream;
+                let _ = stream.readable().await;
+                let mut scratch = [0_u8; 4096];
+                let _ = stream.try_read(&mut scratch);
+                let _ = stream.try_write(response.as_bytes());
+            }
+        });
+
+        let ok = post_egress_envelope(
+            port,
+            "/api/xiaojing/publish-scheduler/egress/upload",
+            json!({}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(ok["outcome"], "success");
+        assert!(matches!(
+            post_egress_envelope(
+                port,
+                "/api/xiaojing/publish-scheduler/egress/order",
+                json!({})
+            )
+            .await,
+            Err(SidecarCallFailure::Indeterminate(_))
+        ));
+        assert!(matches!(
+            post_egress_envelope(
+                port,
+                "/api/xiaojing/publish-scheduler/egress/order",
+                json!({})
+            )
+            .await,
+            Err(SidecarCallFailure::Indeterminate(_))
+        ));
+        // 未监听端口：连接被拒，请求从未离开本机 → Unreachable（下单可安全重试）。
+        let closed_port = {
+            let probe = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            probe.local_addr().unwrap().port()
+        };
+        assert!(matches!(
+            post_egress_envelope(
+                closed_port,
+                "/api/xiaojing/publish-scheduler/egress/order",
+                json!({})
+            )
+            .await,
+            Err(SidecarCallFailure::Unreachable(_))
+        ));
+        server.abort();
+    }
+
+    #[test]
+    fn receipt_url_must_point_at_the_frozen_object_key() {
+        assert!(receipt_url_points_at_object_key(
+            "https://cdn.example.test/articles/w-1/a-1/approved-v1-abc.html",
+            "articles/w-1/a-1/approved-v1-abc.html"
+        ));
+        // 逐段 percent-encoding（网关/ sidecar encodeObjectKey 口径）。
+        assert!(receipt_url_points_at_object_key(
+            "https://cdn.example.test/articles/w-1/a%20b/approved-v1-abc.html",
+            "articles/w-1/a b/approved-v1-abc.html"
+        ));
+        // 指向别的键 / 指向键的前缀 / 非 http(s) 一律拒绝。
+        assert!(!receipt_url_points_at_object_key(
+            "https://cdn.example.test/other/key.html",
+            "articles/w-1/a.html"
+        ));
+        assert!(!receipt_url_points_at_object_key(
+            "https://cdn.example.test/articles/w-1/a.html/extra",
+            "articles/w-1/a.html"
+        ));
+        assert!(!receipt_url_points_at_object_key(
+            "ftp://cdn.example.test/articles/w-1/a.html",
+            "articles/w-1/a.html"
+        ));
+        assert!(!receipt_url_points_at_object_key("not-a-url", "a.html"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn upload_receipt_pointing_elsewhere_requires_reconciliation() {
+        let _lock = ENV_LOCK.lock().await;
+        let _env = TestEnvironment::configured();
+        let fixture = setup_fixture(1, 0);
+        let started = confirm_start(&fixture, &preview(&fixture));
+        // mock sidecar 回执指向了别的对象：订单 content 不得指向未授权位置。
+        let provider = Arc::new(MockProvider::with_upload_urls(vec![
+            "https://attacker.example.test/other.html".to_string(),
+        ]));
+        scheduler(&fixture, provider, Arc::new(AtomicI64::new(fixture.now_ms)))
+            .tick_workspace(&fixture.workspace)
+            .await
+            .unwrap();
+        let result = fixture
+            .store
+            .get_publish_execution(&fixture.workspace.id, "session-b", &started.id)
+            .unwrap();
+        assert_eq!(result.status, "reconciliation-required");
+        assert_eq!(
+            result.items[0].failure_code.as_deref(),
+            Some("object-url-mismatch")
         );
     }
 }

@@ -28,13 +28,15 @@ export type PublishItemStatus =
 export interface PublishProviderSnapshot {
   objectStorage: {
     provider: "aliyun-oss";
-    endpointFamily: "oss-v1-put";
+    /** 票 08 起：发布 egress 经运营网关（服务器侧重签），不再直连 OSS。 */
+    endpointFamily: "gateway-oss-put";
     configured: boolean;
     configurationFingerprint: string | null;
   };
   distribution: {
     provider: "超级媒介";
-    endpointFamily: "chaojimeijie-order-api";
+    /** 票 08 起：下单经网关 port（服务器定价 + 预扣冻结 + sn 幂等）。 */
+    endpointFamily: "gateway-order-api";
     configured: boolean;
     configurationFingerprint: string | null;
   };

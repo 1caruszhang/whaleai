@@ -60,7 +60,6 @@ same-file = "1.0"
 trash = "5.2.3"
 image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "webp"] }
 sha2 = "0.10"
-sha1 = "0.10"
 url = "2"
 zip = { version = "2.4.2", default-features = false, features = ["deflate-zlib"] }
 
