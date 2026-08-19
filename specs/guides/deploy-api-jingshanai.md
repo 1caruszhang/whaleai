@@ -48,8 +48,9 @@ SQLite 账本（named volume xiaojing-data → /app/data）+ 上游（DeepSeek/A
 sudo mkdir -p /opt/xiaojing-api && cd /opt/xiaojing-api
 # 从仓库取三个部署文件（任选 git / scp；文件不入密钥，可进版本库）
 #   backend/Dockerfile  backend/docker-compose.yml
-scp dev-machine:whaleai/backend/Dockerfile .
-scp dev-machine:whaleai/backend/docker-compose.yml .
+#   `<仓库检出目录>` 指开发机上本仓库的 clone 目录名（按实际路径替换）
+scp dev-machine:<仓库检出目录>/backend/Dockerfile .
+scp dev-machine:<仓库检出目录>/backend/docker-compose.yml .
 chmod 600 /opt/xiaojing-api/docker-compose.yml   # 防误改；env 才是敏感文件
 ```
 
@@ -124,7 +125,7 @@ tag 约定：`日期-序号`（如 `20260819-1`），与 git commit 对应记录
 
 ```bash
 # 开发机（macOS）
-cd whaleai/backend
+cd <仓库检出目录>/backend
 docker build -t xiaojing-backend:20260819-1 .
 docker save xiaojing-backend:20260819-1 | gzip > /tmp/xiaojing-backend-20260819-1.tar.gz
 scp /tmp/xiaojing-backend-20260819-1.tar.gz root@8.137.194.137:/opt/xiaojing-api/
@@ -350,7 +351,7 @@ XIAOJING_IMAGE_TAG=<旧tag> docker compose up -d
   rm /tmp/xj-audit.tar
 
   # 4) 仓库侧（开发机）：git 里不应有 .env
-  git -C whaleai log --all --diff-filter=A --name-only -- '*.env' 'backend/.env*'
+  git -C <仓库检出目录> log --all --diff-filter=A --name-only -- '*.env' 'backend/.env*'
   ```
 
 ## 9. 故障速查
