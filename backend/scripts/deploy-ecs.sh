@@ -174,9 +174,18 @@ fi
 if command -v docker >/dev/null 2>&1; then
   echo "[error] docker CLI 存在但守护进程不可达（systemd 状态？）"; exit 4
 fi
-echo "[deploy] 安装 docker（Aliyun 镜像源）"
-curl -fsSL https://get.docker.com -o /tmp/get-docker.sh || { echo "[error] 下载 get-docker.sh 失败，请手动安装 docker"; exit 5; }
-sh /tmp/get-docker.sh --mirror Aliyun
+if grep -q 'ID="alinux"' /etc/os-release 2>/dev/null; then
+  # Alibaba Cloud Linux 3：get.docker.com 不支持（Unsupported distribution 'alinux'），
+  # 改走阿里云 docker-ce 镜像源的 CentOS 8 兼容路径（repo 文件自带 gpgkey）。
+  echo "[deploy] 安装 docker（Alibaba Cloud Linux → aliyun docker-ce el8 源）"
+  curl -fsSL https://mirrors.aliyun.com/docker-ce/linux/centos/docker-ce.repo -o /etc/yum.repos.d/docker-ce.repo
+  sed -i 's/$releasever/8/g' /etc/yum.repos.d/docker-ce.repo
+  dnf -q install -y docker-ce docker-compose-plugin
+else
+  echo "[deploy] 安装 docker（Aliyun 镜像源）"
+  curl -fsSL https://get.docker.com -o /tmp/get-docker.sh || { echo "[error] 下载 get-docker.sh 失败，请手动安装 docker"; exit 5; }
+  sh /tmp/get-docker.sh --mirror Aliyun
+fi
 systemctl enable --now docker
 docker compose version >/dev/null 2>&1 || { echo "[error] compose v2 插件缺失"; exit 3; }
 echo "docker 安装完成：$(docker --version)"
