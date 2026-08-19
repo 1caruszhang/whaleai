@@ -282,6 +282,11 @@ export function collectStaticFailures(root = DEFAULT_ROOT) {
   addIf(failures, signScript.includes('TimeStamperCertificate') && signScript.includes('SignerCertificate.Thumbprint'), 'signing wrapper must verify signer identity and timestamp');
   addIf(failures, guide.includes('均未执行') && guide.includes('Windows 10 22H2 x64') && guide.includes('Windows 11 x64'), 'Windows real-machine matrix must remain explicitly pending');
   addIf(failures, guide.includes('Unknown publisher') && guide.includes('SmartScreen'), 'internal guide must set unsigned-candidate expectations');
+  addIf(
+    failures,
+    guide.includes('商业化场景逐格矩阵') && guide.includes('C8 卸载后数据根完整保留') && guide.includes('artifacts/windows-x64/acceptance/'),
+    'ticket-13 commercial acceptance matrix and evidence archive must stay documented',
+  );
   addIf(failures, !existsSync(join(root, 'src-tauri/resources/vcruntime140.dll')) && !existsSync(join(root, 'src-tauri/resources/vcruntime140_1.dll')), 'stale VC runtime files must not be bundled');
   const stagingRecordExists = existsSync(join(root, 'src-tauri/resources', STAGING_RECORD));
   const partialWindowsStaging = ['portable-git', 'windows-prerequisites']
