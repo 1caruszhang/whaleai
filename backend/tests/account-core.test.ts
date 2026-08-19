@@ -300,6 +300,14 @@ describe('account core HTTP contract', () => {
     expect(health.status).toBe(200);
     expect(await health.json()).toEqual({ ok: true });
 
+    const root = await app.request('/');
+    expect(root.status).toBe(200);
+    expect(await root.json()).toEqual({
+      service: 'xiaojing-api',
+      admin: '/admin',
+      health: '/healthz',
+    });
+
     const badJson = await app.request('/auth/login', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
