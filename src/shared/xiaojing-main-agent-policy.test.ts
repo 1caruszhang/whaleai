@@ -11,7 +11,7 @@ describe('Xiaojing main Agent policy', () => {
     expect(XIAOJING_MAIN_AGENT).toMatchObject({
       providerId: 'deepseek',
       model: 'deepseek-v4-pro',
-      reasoningEffort: 'high',
+      reasoningEffort: 'medium',
     });
   });
 

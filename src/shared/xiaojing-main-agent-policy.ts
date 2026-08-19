@@ -7,13 +7,15 @@
 export const XIAOJING_MAIN_AGENT = {
   providerId: 'deepseek',
   model: 'deepseek-v4-pro',
-  reasoningEffort: 'high',
+  reasoningEffort: 'medium',
   // 'default' 保证每个工具调用都咨询 canUseTool 终审闸门；'auto' 把部分
   // 裁决交给 CLI 自动裁量，可能绕过闸门，不得用于本产品。
   permissionMode: 'default',
-  credentialEnv: 'XIAOJING_DEEPSEEK_API_KEY',
+  // 主 Agent 没有客户端凭据：鉴权唯一来源是账号 admission（网关地址 +
+  // access token，见 xiaojing-native-secret.ts）。DeepSeek 上游密钥只住
+  // 网关服务端；XIAOJING_DEEPSEEK_API_KEY 只是 GEO typed ports 的开发
+  // 直连来源，与主 Agent 无关。
   inferenceOrigin: 'https://api.deepseek.com',
-  anthropicBaseUrl: 'https://api.deepseek.com/anthropic',
   authType: 'auth_token',
   geoMcpServerId: 'xiaojing-geo',
   builtinTools: ['AskUserQuestion'] as const,

@@ -25,8 +25,6 @@ describe("GEO typed provider capabilities", () => {
       XIAOJING_DISTRIBUTION_SECRET: "distribution-secret",
       XIAOJING_ARK_PAYGO_BASE_URL: "https://gateway.example.test/api/v3",
       XIAOJING_DOUBAO_SEARCH_BASE_URL: "https://gateway.example.test/search",
-      XIAOJING_GATEWAY_BASE_URL: "https://gw.example.test",
-      XIAOJING_ACCOUNT_ACCESS_TOKEN: "account-access-token-secret",
     };
     expect(captureGeoProviderRuntimeSecrets(env)).toMatchObject({
       arkApiKey: "ark-secret",
@@ -37,10 +35,25 @@ describe("GEO typed provider capabilities", () => {
       distributionSecret: "distribution-secret",
       arkPaygoBaseUrl: "https://gateway.example.test/api/v3",
       doubaoSearchBaseUrl: "https://gateway.example.test/search",
-      gatewayBaseUrl: "https://gw.example.test",
-      accountAccessToken: "account-access-token-secret",
     });
     expect(env).toEqual({});
+  });
+
+  it("leaves the account admission transport to its xiaojing-native-secret owner", () => {
+    // 回归：账号 admission 双捕获曾产生模块加载顺序竞争——先求值者擦掉
+    // env，后到者丢网关模式（材料抽取报「extraction 能力尚未配置」）。
+    // 本函数必须既不读也不擦这两个传输名。
+    const env: NodeJS.ProcessEnv = {
+      XIAOJING_GATEWAY_BASE_URL: "https://gw.example.test",
+      XIAOJING_ACCOUNT_ACCESS_TOKEN: "account-access-token-secret",
+    };
+    const secrets = captureGeoProviderRuntimeSecrets(env);
+    expect(secrets.gatewayBaseUrl).toBeUndefined();
+    expect(secrets.accountAccessToken).toBeUndefined();
+    expect(env).toEqual({
+      XIAOJING_GATEWAY_BASE_URL: "https://gw.example.test",
+      XIAOJING_ACCOUNT_ACCESS_TOKEN: "account-access-token-secret",
+    });
   });
 
   it("routes every billed provider wire route to the gateway with the account token (ticket 07)", async () => {

@@ -39,7 +39,9 @@ export interface GeoProviderRuntimeSecrets {
    * 账号 admission（票 06/07）：Rust 注入的运营网关基地址与账号 access
    * token。两者齐备即网关模式——全部 Provider 流量经 /gw/* 代理（票 05
    * 路由），鉴权一律换账号 token，业务层与 wire shape 零改动；Provider
-   * 密钥不再进入 Sidecar。
+   * 密钥不再进入 Sidecar。捕获 owner 是 xiaojing-native-secret（与主
+   * Agent 共用一份）；本模块不直接读 env，由 provider-runtime 经
+   * resolver 合并，避免双捕获的加载顺序竞争。
    */
   gatewayBaseUrl?: string;
   accountAccessToken?: string;
@@ -250,14 +252,17 @@ const secretTransportEnvNames = [
   "XIAOJING_OSS_ACCESS_KEY_SECRET",
   "XIAOJING_DISTRIBUTION_APP_ID",
   "XIAOJING_DISTRIBUTION_SECRET",
-  // 账号 admission 传输名（票 06）：捕获后同样擦除，账号 token 不得
-  // 被后续子进程、环境诊断或 Agent 工具继承。
-  "XIAOJING_ACCOUNT_ACCESS_TOKEN",
+  // 账号 admission 传输名（XIAOJING_GATEWAY_BASE_URL /
+  // XIAOJING_ACCOUNT_ACCESS_TOKEN）不在此捕获：owner 是
+  // xiaojing-native-secret，provider-runtime 经 resolver 合并。
 ] as const;
 
 /**
  * Capture the one-shot Rust→Sidecar secret transport, then erase it before any
  * generic subprocess, environment diagnostic, or Agent tool can inherit it.
+ * 账号 admission（网关基地址 + access token）不在此捕获——owner 是
+ * xiaojing-native-secret（主 Agent 同用一份），双捕获会产生模块加载
+ * 顺序竞争；provider-runtime 经其 resolver 合并进本结构。
  */
 export function captureGeoProviderRuntimeSecrets(
   env: NodeJS.ProcessEnv = process.env,
@@ -279,8 +284,6 @@ export function captureGeoProviderRuntimeSecrets(
     distributionBaseUrl: read("XIAOJING_DISTRIBUTION_BASE_URL"),
     arkPaygoBaseUrl: read("XIAOJING_ARK_PAYGO_BASE_URL"),
     doubaoSearchBaseUrl: read("XIAOJING_DOUBAO_SEARCH_BASE_URL"),
-    gatewayBaseUrl: read("XIAOJING_GATEWAY_BASE_URL"),
-    accountAccessToken: read("XIAOJING_ACCOUNT_ACCESS_TOKEN"),
   };
   for (const name of [
     ...secretTransportEnvNames,
@@ -292,7 +295,6 @@ export function captureGeoProviderRuntimeSecrets(
     "XIAOJING_DISTRIBUTION_BASE_URL",
     "XIAOJING_ARK_PAYGO_BASE_URL",
     "XIAOJING_DOUBAO_SEARCH_BASE_URL",
-    "XIAOJING_GATEWAY_BASE_URL",
   ]) {
     delete env[name];
   }

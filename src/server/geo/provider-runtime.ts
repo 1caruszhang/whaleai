@@ -1,4 +1,4 @@
-import { resolveXiaojingDeepseekOpenAiBaseUrl, resolveXiaojingDeepseekSecret } from "../xiaojing-native-secret";
+import { resolveXiaojingAccountAccessToken, resolveXiaojingDeepseekOpenAiBaseUrl, resolveXiaojingDeepseekSecret, resolveXiaojingGatewayBaseUrl } from "../xiaojing-native-secret";
 import {
   createGatewayBillingPermitChannel,
   type GeoBillingPermitChannel,
@@ -19,6 +19,11 @@ import {
 const runtimeSecrets = captureGeoProviderRuntimeSecrets();
 runtimeSecrets.deepseekApiKey = resolveXiaojingDeepseekSecret();
 runtimeSecrets.deepseekOpenAiBaseUrl = resolveXiaojingDeepseekOpenAiBaseUrl();
+// 账号 admission 与主 Agent 共用一份捕获（xiaojing-native-secret 是其唯一
+// owner）：captureGeoProviderRuntimeSecrets 不再读这两个传输名，避免双
+// 捕获的模块加载顺序竞争（先求值者擦掉 env，后到者丢网关模式）。
+runtimeSecrets.gatewayBaseUrl = resolveXiaojingGatewayBaseUrl();
+runtimeSecrets.accountAccessToken = resolveXiaojingAccountAccessToken();
 
 let capabilities: GeoProviderCapabilities | undefined;
 

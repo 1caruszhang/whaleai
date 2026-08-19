@@ -36,10 +36,7 @@ import {
   messageAttachmentsFromImagePayloads,
   resolveImagePayloads,
 } from './utils/image-payload';
-import {
-  resolveXiaojingDeepseekAnthropicBaseUrl,
-  resolveXiaojingDeepseekSecret,
-} from './xiaojing-native-secret';
+import { resolveXiaojingMainAgentAuth } from './xiaojing-native-secret';
 
 type SessionCompletionTerminal = Readonly<{
   sessionId: string;
@@ -253,18 +250,16 @@ async function askUserQuestion(
 }
 
 function buildProviderEnv(): Record<string, string | undefined> {
-  const secret = resolveXiaojingDeepseekSecret();
+  const auth = resolveXiaojingMainAgentAuth();
   // 缺失时留空只服务于 initializeAgent 阶段的 configureXiaojingGeo；
   // runTurn 对缺失凭据 fail-fast，query 永远拿不到空 token。
   return {
     ...process.env,
-    // admission 注入的端点覆盖优先（运营网关切流预留），缺省回落策略表；
-    // 尾斜杠归一化与其余三个端点根一致，避免拼出 //v1/messages。
-    ANTHROPIC_BASE_URL: (
-      resolveXiaojingDeepseekAnthropicBaseUrl()
-        ?? XIAOJING_MAIN_AGENT.anthropicBaseUrl
-    ).replace(/\/+$/, ""),
-    ANTHROPIC_AUTH_TOKEN: secret ?? '',
+    // 票 07：主 Agent 只走网关 Anthropic 兼容代理（网关根即协议根，后端
+    // 挂 /v1/messages），账号 access token 作 Bearer。无直连回落。
+    // 尾斜杠归一化避免拼出 //v1/messages。
+    ANTHROPIC_BASE_URL: (auth?.baseUrl ?? '').replace(/\/+$/, ""),
+    ANTHROPIC_AUTH_TOKEN: auth?.token ?? '',
     ANTHROPIC_API_KEY: '',
     ANTHROPIC_DEFAULT_OPUS_MODEL: XIAOJING_MAIN_AGENT.model,
     ANTHROPIC_DEFAULT_SONNET_MODEL: XIAOJING_MAIN_AGENT.model,
@@ -305,7 +300,7 @@ async function runTurn(
 
   // 凭据在 Sidecar 出生时一次性捕获（xiaojing-native-secret.ts）；
   // 这里缺失即永远缺失，直接 fail-fast，不把失败推迟成 SDK 的隐晦 401。
-  if (!resolveXiaojingDeepseekSecret()) {
+  if (!resolveXiaojingMainAgentAuth()) {
     completionTerminal = {
       sessionId: currentSessionId,
       workspacePath: workspacePath,
@@ -313,8 +308,7 @@ async function runTurn(
       status: 'error',
     };
     broadcast('chat:agent-error', {
-      message:
-        'Main agent provider credential is missing. Configure the DeepSeek provider credential, then retry.',
+      message: '主 Agent 凭据缺失：请先登录账号，然后重试。',
     });
     setState('error');
     return;

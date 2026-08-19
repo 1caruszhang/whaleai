@@ -26,7 +26,8 @@ function assistantSdkMessage(uuid: string, text: string) {
 let testHome: string;
 let workspace: string;
 let originalHome: string | undefined;
-let credential: string | undefined;
+let originalGatewayBaseUrl: string | undefined;
+let originalAccountToken: string | undefined;
 let agentSession: typeof import('../agent-session');
 let store: typeof import('../SessionStore');
 let queryMock: ReturnType<typeof vi.fn>;
@@ -35,9 +36,12 @@ beforeAll(async () => {
   testHome = mkdtempSync(join(tmpdir(), 'xiaojing-terminal-turn-'));
   workspace = mkdtempSync(join(tmpdir(), 'xiaojing-terminal-ws-'));
   originalHome = process.env.HOME;
-  credential = process.env.XIAOJING_DEEPSEEK_API_KEY;
+  originalGatewayBaseUrl = process.env.XIAOJING_GATEWAY_BASE_URL;
+  originalAccountToken = process.env.XIAOJING_ACCOUNT_ACCESS_TOKEN;
   process.env.HOME = testHome;
-  process.env.XIAOJING_DEEPSEEK_API_KEY = 'test-credential';
+  // 主 Agent 只认账号 admission（网关 + access token），直连凭据已移除。
+  process.env.XIAOJING_GATEWAY_BASE_URL = 'https://gw.example.test';
+  process.env.XIAOJING_ACCOUNT_ACCESS_TOKEN = 'test-access-token';
   vi.resetModules();
   agentSession = await import('../agent-session');
   store = await import('../SessionStore');
@@ -46,8 +50,10 @@ beforeAll(async () => {
 
 afterAll(() => {
   process.env.HOME = originalHome;
-  if (credential === undefined) delete process.env.XIAOJING_DEEPSEEK_API_KEY;
-  else process.env.XIAOJING_DEEPSEEK_API_KEY = credential;
+  if (originalGatewayBaseUrl === undefined) delete process.env.XIAOJING_GATEWAY_BASE_URL;
+  else process.env.XIAOJING_GATEWAY_BASE_URL = originalGatewayBaseUrl;
+  if (originalAccountToken === undefined) delete process.env.XIAOJING_ACCOUNT_ACCESS_TOKEN;
+  else process.env.XIAOJING_ACCOUNT_ACCESS_TOKEN = originalAccountToken;
   rmSync(testHome, { recursive: true, force: true });
   rmSync(workspace, { recursive: true, force: true });
 });
