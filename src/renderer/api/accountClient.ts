@@ -66,6 +66,41 @@ export async function accountRefresh(): Promise<AccountState> {
   return invoke<AccountState>('cmd_account_refresh');
 }
 
+/** 点数明细的一条流水（Rust cmd_account_ledger 投影；summary 已由后端归一为中文）。 */
+export interface AccountLedgerEntry {
+  id: string;
+  delta: number;
+  balanceAfter: number;
+  kind: 'grant' | 'topup' | 'adjust' | 'consume' | 'refund';
+  summary: string;
+  createdAt: string;
+}
+
+const BROWSER_DEV_LEDGER_ENTRIES: AccountLedgerEntry[] = [
+  {
+    id: 'dev-ledger-2',
+    delta: -20,
+    balanceAfter: 480,
+    kind: 'consume',
+    summary: '材料导入',
+    createdAt: '2026-08-19T02:30:00.000Z',
+  },
+  {
+    id: 'dev-ledger-1',
+    delta: 500,
+    balanceAfter: 500,
+    kind: 'grant',
+    summary: '开通赠送',
+    createdAt: '2026-08-18T09:00:00.000Z',
+  },
+];
+
+/** 拉取最近 50 笔点数流水（在线命令；离线或未登录时 reject 用户可读错误）。 */
+export async function fetchAccountLedger(): Promise<AccountLedgerEntry[]> {
+  if (!isTauriEnvironment()) return BROWSER_DEV_LEDGER_ENTRIES;
+  return invoke<AccountLedgerEntry[]>('cmd_account_ledger');
+}
+
 export async function accountLogout(): Promise<AccountState> {
   return invoke<AccountState>('cmd_account_logout');
 }

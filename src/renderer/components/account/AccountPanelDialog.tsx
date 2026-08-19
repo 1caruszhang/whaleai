@@ -1,18 +1,20 @@
-import { Coins, FileText, Loader2, LogOut, RefreshCw, X } from 'lucide-react';
+import { Coins, FileText, Loader2, LogOut, ReceiptText, RefreshCw, X } from 'lucide-react';
 import { createPortal } from 'react-dom';
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
-import { formatGraceDeadline } from '@/utils/accountFormat';
+import { formatGraceDeadline, formatLedgerTime } from '@/utils/accountFormat';
 import OverlayBackdrop from '@/components/OverlayBackdrop';
 import { useAccountApi, useAccountState } from '@/context/AccountContext';
+import { fetchAccountLedger, type AccountLedgerEntry } from '@/api/accountClient';
 import ComplianceDocViewer from './ComplianceDocViewer';
 import { COMPLIANCE_DOCS, type ComplianceDoc } from './complianceDocs';
 
 /**
  * 左下角设置 → 个人信息（票 06）：手机号 / 点数余额 / 充值引导（对公转账
- * + 联系运营）/ 宽限状态 / 退出登录。只读展示 Rust 投影，不出现任何
- * 凭据或端口类信息。
+ * + 联系运营）/ 点数明细 / 宽限状态 / 退出登录。只读展示 Rust 投影，不出现
+ * 任何凭据或端口类信息。明细走 cmd_account_ledger 在线拉取（最近 50 笔），
+ * 本地不缓存账本。
  */
 export default function AccountPanelDialog({ onClose }: { onClose: () => void }) {
   const { t } = useTranslation('common');
@@ -21,6 +23,10 @@ export default function AccountPanelDialog({ onClose }: { onClose: () => void })
   const [refreshing, setRefreshing] = useState(false);
   const [refreshError, setRefreshError] = useState<string | null>(null);
   const [viewingDoc, setViewingDoc] = useState<ComplianceDoc | null>(null);
+  const [ledgerOpen, setLedgerOpen] = useState(false);
+  const [ledger, setLedger] = useState<AccountLedgerEntry[] | null>(null);
+  const [ledgerLoading, setLedgerLoading] = useState(false);
+  const [ledgerError, setLedgerError] = useState<string | null>(null);
 
   const refresh = async () => {
     if (refreshing) return;
@@ -29,6 +35,32 @@ export default function AccountPanelDialog({ onClose }: { onClose: () => void })
     const failure = await accountApi.refresh();
     setRefreshing(false);
     if (failure) setRefreshError(t('account.panelRefreshFailed'));
+  };
+
+  const loadLedger = async () => {
+    if (ledgerLoading) return;
+    setLedgerLoading(true);
+    setLedgerError(null);
+    try {
+      setLedger(await fetchAccountLedger());
+    } catch (error) {
+      setLedger(null);
+      setLedgerError(
+        typeof error === 'string' && error.trim() ? error : t('account.ledgerLoadFailed'),
+      );
+    } finally {
+      setLedgerLoading(false);
+    }
+  };
+
+  const toggleLedger = () => {
+    if (ledgerOpen) {
+      setLedgerOpen(false);
+      return;
+    }
+    setLedgerOpen(true);
+    // 首次展开时拉取；后续重开沿用已载结果，出错时允许重试。
+    if (ledger === null && !ledgerLoading) void loadLedger();
   };
 
   const logout = async () => {
@@ -83,6 +115,16 @@ export default function AccountPanelDialog({ onClose }: { onClose: () => void })
                 )}
                 {refreshing ? t('account.refreshing') : t('account.refreshButton')}
               </button>
+              <button
+                type="button"
+                onClick={toggleLedger}
+                aria-expanded={ledgerOpen}
+                aria-label={t('account.ledgerButton')}
+                className="flex items-center gap-1 rounded-lg border border-[var(--line)] px-2 py-1 text-xs text-[var(--ink-secondary)] hover:bg-[var(--hover-bg)]"
+              >
+                <ReceiptText className="h-3 w-3" />
+                {t('account.ledgerButton')}
+              </button>
             </dd>
           </div>
           {state.offlineGrace.deadlineAt !== null && (
@@ -98,6 +140,61 @@ export default function AccountPanelDialog({ onClose }: { onClose: () => void })
           <p role="alert" className="mt-2 rounded-lg border border-[var(--error)]/30 bg-[var(--error)]/10 px-3 py-2 text-xs text-[var(--error)]">
             {refreshError}
           </p>
+        )}
+
+        {ledgerOpen && (
+          <div className="mt-4 rounded-xl border border-[var(--line)] bg-[var(--paper)] p-3">
+            <p className="text-xs font-semibold text-[var(--ink-secondary)]">{t('account.ledgerTitle')}</p>
+            {ledgerLoading && (
+              <p className="mt-1.5 flex items-center gap-1.5 text-xs text-[var(--ink-muted)]">
+                <Loader2 className="h-3 w-3 animate-spin" />
+                {t('account.ledgerLoading')}
+              </p>
+            )}
+            {ledgerError && (
+              <div className="mt-1.5 flex items-center justify-between gap-2">
+                <p role="alert" className="text-xs text-[var(--error)]">{ledgerError}</p>
+                <button
+                  type="button"
+                  onClick={() => void loadLedger()}
+                  className="shrink-0 rounded-lg border border-[var(--line)] px-2 py-1 text-xs text-[var(--ink-secondary)] hover:bg-[var(--hover-bg)]"
+                >
+                  {t('account.ledgerRetry')}
+                </button>
+              </div>
+            )}
+            {ledger && !ledgerLoading && !ledgerError && (
+              ledger.length === 0 ? (
+                <p className="mt-1.5 text-xs text-[var(--ink-muted)]">{t('account.ledgerEmpty')}</p>
+              ) : (
+                <ul className="mt-1.5 max-h-56 space-y-1.5 overflow-y-auto pr-1">
+                  {ledger.map((entry) => (
+                    <li key={entry.id} className="flex items-start justify-between gap-3 text-xs">
+                      <div className="min-w-0">
+                        <p className="truncate text-[var(--ink)]">
+                          <span className="mr-1.5 rounded border border-[var(--line)] px-1 text-xs text-[var(--ink-muted)]">
+                            {t(`account.ledgerKind.${entry.kind}`, { defaultValue: entry.kind })}
+                          </span>
+                          {entry.summary}
+                        </p>
+                        <p className="mt-0.5 tabular-nums text-xs text-[var(--ink-subtle)]">
+                          {formatLedgerTime(entry.createdAt)}
+                        </p>
+                      </div>
+                      <div className="shrink-0 text-right tabular-nums">
+                        <p className={entry.delta >= 0 ? 'font-medium text-[var(--success)]' : 'font-medium text-[var(--ink)]'}>
+                          {entry.delta >= 0 ? `+${entry.delta}` : entry.delta}
+                        </p>
+                        <p className="mt-0.5 text-xs text-[var(--ink-subtle)]">
+                          {t('account.ledgerBalanceAfter', { balance: entry.balanceAfter })}
+                        </p>
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              )
+            )}
+          </div>
         )}
 
         <div className="mt-4 rounded-xl border border-[var(--line)] bg-[var(--paper)] p-3">

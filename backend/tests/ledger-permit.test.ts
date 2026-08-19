@@ -11,6 +11,7 @@ import {
   TEST_ADMIN_PASSWORD,
   type TestBackend,
 } from './helpers';
+import { ledgerEntrySummary } from '../src/domain/ledger';
 
 /**
  * 点数账本与 permit 计费核心 HTTP 合约（票 03 验收）：
@@ -520,5 +521,106 @@ describe('ledger and permit billing core HTTP contract', () => {
     expect(badId.body.error).toBe('validation_error');
     const missingFields = await applyPermit(ownerToken, { operation: 'question_pool' });
     expect(missingFields.status).toBe(400);
+  });
+});
+
+
+/**
+ * 用户端点数明细（GET /billing/ledger）：本账号最近 50 笔流水，最新在前；
+ * summary 由服务端归一为中文可读文案（内部英文 note 不上屏）；越权隔离
+ * 与 /billing/* 其他端点一致。
+ */
+describe('user-facing points ledger', () => {
+  let tb: TestBackend;
+
+  beforeEach(async () => {
+    tb = await startTestBackend();
+  });
+
+  afterEach(async () => {
+    await tb.cleanup();
+  });
+
+  it('returns the own account entries newest-first with readable summaries', async () => {
+    const { adminToken, accountId, accessToken: token } = await provisionLoggedInAccount(tb.app);
+
+    // grant +500（开通赠送）→ topup +2000 → consume -20（材料导入成功 1 份）。
+    await postJson(tb.app, '/admin/ledger/topup', {
+      accountId, points: 2000, note: '对公转账 ¥200（2026-08-19）',
+    }, adminToken);
+    await postJson(tb.app, '/billing/permits', {
+      permitId: 'pm-ledger-1', operation: 'material_import', units: 2,
+    }, token);
+    await postJson(tb.app, '/billing/permits/pm-ledger-1/report', { unit: 0, outcome: 'success' }, token);
+
+    const ledger = await getJson(tb.app, '/billing/ledger', token);
+    expect(ledger.status).toBe(200);
+    const entries = ledger.body.entries as Array<{
+      delta: number; balanceAfter: number; kind: string; summary: string; createdAt: string;
+    }>;
+    expect(entries.map(entry => [entry.kind, entry.delta, entry.summary])).toEqual([
+      ['consume', -20, '材料导入'],
+      ['topup', 2000, '对公转账 ¥200（2026-08-19）'],
+      ['grant', 500, '开通赠送'],
+    ]);
+    expect(entries[0].balanceAfter).toBe(2480);
+    expect(entries.every(entry => typeof entry.createdAt === 'string')).toBe(true);
+    // 内部英文 note 不得原样透出。
+    expect(entries.some(entry => entry.summary.includes('unit'))).toBe(false);
+  });
+
+  it('caps the list at the most recent 50 entries', async () => {
+    const { accountId, accessToken: token } = await provisionLoggedInAccount(tb.app);
+    for (let index = 0; index < 55; index += 1) {
+      // 直接落库比走 55 次 HTTP 调点更快；seq 由账本发号逻辑保证。
+      tb.db.run(
+        "INSERT INTO ledger_entries (id, account_id, seq, delta, balance_after, kind, note, created_at) VALUES (?, ?, ?, ?, ?, 'adjust', ?, ?)",
+        [`seed-${index}`, accountId, index + 2, 1, 501 + index, `调点 ${index}`, new Date().toISOString()],
+      );
+    }
+
+    const ledger = await getJson(tb.app, '/billing/ledger', token);
+    expect(ledger.status).toBe(200);
+    const entries = ledger.body.entries as Array<{ summary: string }>;
+    expect(entries).toHaveLength(50);
+    // 最新在前：第一条是最后一笔调点，grant +500 被截断出窗口。
+    expect(entries[0].summary).toBe('调点 54');
+    expect(entries.some(entry => entry.summary === '开通赠送')).toBe(false);
+  });
+
+  it('guards the endpoint like other /billing routes', async () => {
+    const { accessToken: token } = await provisionLoggedInAccount(tb.app);
+    expect((await getJson(tb.app, '/billing/ledger')).status).toBe(401);
+    const adminLogin = await postJson(tb.app, '/admin/login', { password: TEST_ADMIN_PASSWORD });
+    expect((await getJson(tb.app, '/billing/ledger', str(adminLogin.body.adminToken))).status).toBe(401);
+
+    // 流水按账号隔离：他人账号的流水不会混入。
+    await postJson(tb.app, '/billing/permits', {
+      permitId: 'pm-ledger-isolated', operation: 'question_pool', units: 1,
+    }, token);
+    await postJson(tb.app, '/billing/permits/pm-ledger-isolated/report', { unit: 0, outcome: 'success' }, token);
+    await provisionAccount(tb.app, '13800000009', 'initial-pass-9');
+    const other = await loginAccount(tb.app, '13800000009', 'initial-pass-9');
+    const otherLedger = await getJson(tb.app, '/billing/ledger', str(other.body.accessToken));
+    const otherEntries = otherLedger.body.entries as Array<{ kind: string }>;
+    expect(otherEntries.map(entry => entry.kind)).toEqual(['grant']);
+  });
+
+  it('normalizes internal note formats into Chinese summaries', () => {
+    expect(ledgerEntrySummary('consume', 'material_import unit 0')).toBe('材料导入');
+    expect(ledgerEntrySummary('consume', 'question_pool unit 0')).toBe('问题池生成');
+    expect(ledgerEntrySummary('consume', 'baseline_probe unit 3')).toBe('基线探测');
+    expect(ledgerEntrySummary('consume', 'topic_planning unit 0')).toBe('主题规划');
+    expect(ledgerEntrySummary('consume', 'topic_planning_regen unit 0')).toBe('主题规划（重生成）');
+    expect(ledgerEntrySummary('consume', 'article_generation unit 2')).toBe('文章生成');
+    expect(ledgerEntrySummary('consume', 'article_rewrite unit 1')).toBe('文章改写');
+    expect(ledgerEntrySummary('consume', 'distribution_planning unit 0')).toBe('分发计划');
+    expect(ledgerEntrySummary('consume', 'monitoring_patrol unit 7')).toBe('监测巡检');
+    expect(ledgerEntrySummary('consume', 'publish_order PO-2026-0001')).toBe('发布订单 PO-2026-0001');
+    expect(ledgerEntrySummary('refund', 'publish_order PO-2026-0001 refund')).toBe('发布订单 PO-2026-0001 退款');
+    // 运营手写中文备注原样透出；未知格式回落原始 note。
+    expect(ledgerEntrySummary('topup', '对公转账 ¥1000')).toBe('对公转账 ¥1000');
+    expect(ledgerEntrySummary('grant', '开通赠送')).toBe('开通赠送');
+    expect(ledgerEntrySummary('consume', 'legacy_unknown_format')).toBe('legacy_unknown_format');
   });
 });

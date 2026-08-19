@@ -118,6 +118,7 @@ creation）按未命中输入价计、缓存读按命中价计；折点内部以
 | 方法与路径 | 鉴权 | 说明 |
 |---|---|---|
 | `GET /billing/balance` | Bearer | 余额三口径 `{total, available, frozen}`（total = available + frozen）+ open permit 列表 |
+| `GET /billing/ledger` | Bearer | 本账号点数明细：最近 50 笔流水（最新在前），`summary` 已归一为中文可读文案（客户端点数明细入口） |
 | `POST /billing/permits` | Bearer | 申请 permit：`{permitId, operation, units, unitPrice, basePrice?}`；价目校验（400 `price_mismatch`）、并发准入（429 `concurrency_limit`）、余额不足（402 `insufficient_balance` 含 `required`/`available`）；幂等重放返回 200 |
 | `GET /billing/permits/:permitId` | Bearer | 查询 permit 状态（恢复/对账用） |
 | `POST /billing/permits/:permitId/report` | Bearer | 逐单位回报 `{unit, outcome}`；成功立即结转并落 `consume` 流水，失败立即回补冻结；同单位同结果重放幂等 |

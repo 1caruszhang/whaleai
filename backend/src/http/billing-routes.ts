@@ -1,7 +1,7 @@
 import { Hono } from 'hono';
 import { z } from 'zod';
 import type { BackendDeps } from '../deps';
-import { balanceSnapshot } from '../domain/ledger';
+import { balanceSnapshot, ledgerEntrySummary, listLedgerEntries } from '../domain/ledger';
 import {
   applyForPermit,
   closePermit,
@@ -45,6 +45,22 @@ export function createBillingRoutes(deps: BackendDeps) {
       balance: balanceSnapshot(deps.db, account),
       openPermits: listOpenPermits(deps, account.id),
     });
+  });
+
+  /**
+   * 用户端点数明细：本账号最近 50 笔流水，最新在前。summary 已归一为中文
+   * 可读文案（见 ledgerEntrySummary），客户端不做 note 解析。
+   */
+  routes.get('/billing/ledger', requireAccount, c => {
+    const entries = listLedgerEntries(deps.db, c.get('account').id, 50).map(entry => ({
+      id: entry.id,
+      delta: entry.delta,
+      balanceAfter: entry.balance_after,
+      kind: entry.kind,
+      summary: ledgerEntrySummary(entry.kind, entry.note),
+      createdAt: entry.created_at,
+    }));
+    return c.json({ entries });
   });
 
   routes.post('/billing/permits', requireAccount, async c => {

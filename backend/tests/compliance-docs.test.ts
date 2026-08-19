@@ -68,7 +68,7 @@ describe("《计费标准》与网关服务端价目对表（票 11 验收项 2�
 
   it("点数锚点、充值档位与赠送口径与规格一致（票 07 结算细则）", () => {
     expect(pricingDoc).toContain("1 元人民币 = 10 点");
-    expect(pricingDoc).toContain("¥200 / ¥500 / ¥1000");
+    expect(pricingDoc).toContain("¥1000 / ¥2000 / ¥5000");
     expect(pricingDoc).toContain("赠送 500 点");
     // 与 config.ts 默认 SIGNUP_GRANT_POINTS=500 对应；该值 env 可调，
     // 调整时需同步公示文件（pricing.ts 头注释的调价纪律同样适用）。

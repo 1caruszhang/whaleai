@@ -14,3 +14,10 @@ export function formatGraceDeadline(deadlineAt: number | null): string {
   if (deadlineAt === null) return '—';
   return new Date(deadlineAt * 1000).toLocaleString('zh-CN', { hour12: false });
 }
+
+/** 点数明细流水时间（ISO 串）的本地展示。 */
+export function formatLedgerTime(createdAt: string): string {
+  const time = new Date(createdAt);
+  if (Number.isNaN(time.getTime())) return createdAt;
+  return time.toLocaleString('zh-CN', { hour12: false });
+}

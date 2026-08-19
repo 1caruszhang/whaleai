@@ -129,11 +129,42 @@ export function listLedgerEntries(
   db: SqlClient,
   accountId: string,
   limit: number,
-): LedgerEntryRow[] {
-  // 最新在前：seq 为账号内插入序号（见 applyBalanceChange），倒排即严格的
+): LedgerEntryRow[] {  // 最新在前：seq 为账号内插入序号（见 applyBalanceChange），倒排即严格的
   // 逆落账顺序——created_at 同毫秒并列时也保持全序；时间戳只作展示字段。
   return db.all<LedgerEntryRow>(
     'SELECT id, account_id, delta, balance_after, kind, note, created_at FROM ledger_entries WHERE account_id = ? ORDER BY seq DESC LIMIT ?',
     [accountId, limit],
   );
+}
+
+/**
+ * 用户端流水的中文摘要（点数明细）：consume/refund 的 note 是内部英文格式
+ * （`{operation} unit {n}` / `publish_order {sn} [refund]`），这里归一为可读
+ * 文案；topup/adjust/grant 的 note 本就是运营中文备注，原样透出。未知操作
+ * 名回落原始 note，不阻断展示。
+ */
+const OPERATION_LABELS: Record<string, string> = {
+  material_import: '材料导入',
+  question_pool: '问题池生成',
+  baseline_probe: '基线探测',
+  topic_planning: '主题规划',
+  topic_planning_regen: '主题规划（重生成）',
+  article_generation: '文章生成',
+  article_rewrite: '文章改写',
+  distribution_planning: '分发计划',
+  monitoring_patrol: '监测巡检',
+};
+
+export function ledgerEntrySummary(kind: string, note: string): string {
+  if (kind === 'consume') {
+    const permitSettle = /^(\w+) unit \d+$/.exec(note);
+    if (permitSettle) return OPERATION_LABELS[permitSettle[1]] ?? note;
+  }
+  if (kind === 'consume' || kind === 'refund') {
+    const publishOrder = /^publish_order (\S+?)( refund)?$/.exec(note);
+    if (publishOrder) {
+      return publishOrder[2] ? `发布订单 ${publishOrder[1]} 退款` : `发布订单 ${publishOrder[1]}`;
+    }
+  }
+  return note;
 }

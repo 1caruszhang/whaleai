@@ -137,6 +137,7 @@ pub fn run() {
             account_auth::cmd_account_login,
             account_auth::cmd_account_change_password,
             account_auth::cmd_account_refresh,
+            account_auth::cmd_account_ledger,
             account_auth::cmd_account_logout,
             brand_workspace::cmd_brand_workspace_bootstrap,
             brand_workspace::cmd_brand_workspace_create,

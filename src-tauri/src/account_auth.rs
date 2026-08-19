@@ -712,6 +712,46 @@ pub async fn cmd_account_refresh() -> Result<AccountState, String> {
     current_state()
 }
 
+/// 点数明细的一条流水（GET /billing/ledger 的透传投影）。字段与后端响应
+/// 同形（camelCase），不含任何凭据；summary 已由后端归一为中文可读文案。
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountLedgerEntry {
+    id: String,
+    delta: i64,
+    balance_after: i64,
+    kind: String,
+    summary: String,
+    created_at: String,
+}
+
+/// 拉取本账号最近 50 笔点数流水。在线命令：离线/未登录直接报错，
+/// 不回放本地缓存（账本权威在服务端）。
+#[tauri::command]
+pub async fn cmd_account_ledger() -> Result<Vec<AccountLedgerEntry>, String> {
+    if platform::read()?.is_none() {
+        return Err("请先登录".to_string());
+    }
+    let client = gateway_client()?;
+    let response = call_authenticated(
+        &client,
+        reqwest::Method::GET,
+        "/billing/ledger",
+        serde_json::json!({}),
+    )
+    .await
+    .map_err(|error| error.message())?;
+    #[derive(Debug, Deserialize)]
+    struct LedgerWire {
+        entries: Vec<AccountLedgerEntry>,
+    }
+    let ledger: LedgerWire = response
+        .json()
+        .await
+        .map_err(|_| "服务器响应格式无效".to_string())?;
+    Ok(ledger.entries)
+}
+
 #[tauri::command]
 pub async fn cmd_account_logout() -> Result<AccountState, String> {
     if let Ok(Some(secret)) = platform::read() {
