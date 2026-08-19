@@ -24,6 +24,7 @@ import { withAbortSignal } from '../utils/cancellation';
 import { managementApi, managementApiBytes } from '../utils/management-api-client';
 import type { GeoBillingPermitPort } from './billing-permit';
 import type { KnowledgeAuthority, KnowledgeCandidate } from './knowledge-authority';
+import { GeoUpstreamHttpError } from './provider-capabilities';
 import type {
   GeoKeywordSearchCapability,
   GeoKeywordSearchSource,
@@ -116,6 +117,7 @@ export interface BrandMaterialPort {
   }): Promise<BrandMaterial>;
   get(materialId: string): Promise<BrandMaterial>;
   content(materialId: string): Promise<Uint8Array>;
+  delete(materialId: string): Promise<void>;
   begin(materialId: string): Promise<MaterialProcessingAttempt>;
   finish(input: {
     attemptId: string;
@@ -198,6 +200,11 @@ export class RustBrandMaterialPort implements BrandMaterialPort {
     const result = await managementApi('/api/brand-materials/get', 'POST', this.envelope({ materialId }));
     if (result.ok !== true) throw managementError(result);
     return result.material as BrandMaterial;
+  }
+
+  async delete(materialId: string): Promise<void> {
+    const result = await managementApi('/api/brand-materials/delete', 'POST', this.envelope({ materialId }));
+    if (result.ok !== true) throw managementError(result);
   }
 
   async content(materialId: string): Promise<Uint8Array> {
@@ -665,8 +672,25 @@ function errorCode(error: unknown): MaterialErrorCode {
     ?? 'material_processing_failed';
 }
 
+/**
+ * model_failed 的非密钥诊断：上游/网关 HTTP 状态与业务码（provider 层
+ * 出口已脱敏），用于区分限流/鉴权/上游故障。非类型化错误只记异常类名
+ * （如 TypeError/AbortError），自由文本 message 可能夹带请求细节，不进
+ * 日志。只进日志，不进返回值、数据库或 renderer。
+ */
+function upstreamFailureDiagnostic(error: unknown): Record<string, unknown> | undefined {
+  const cause = error instanceof Error ? error.cause : undefined;
+  if (cause instanceof GeoUpstreamHttpError) {
+    return { upstreamStatus: cause.status, upstreamErrorCode: cause.errorCode ?? null };
+  }
+  if (cause instanceof Error) {
+    return { upstreamError: cause.name };
+  }
+  return undefined;
+}
+
 export function materialLogProjection(input: {
-  operation: 'import-file' | 'import-text' | 'fetch-website' | 'parse' | 'extract' | 'propose-candidates' | 'retry';
+  operation: 'import-file' | 'import-text' | 'fetch-website' | 'parse' | 'extract' | 'propose-candidates' | 'retry' | 'delete';
   workspaceId: string;
   sessionId: string;
   materialId?: string;
@@ -1086,8 +1110,10 @@ export class MaterialImportService {
           { role: 'system', content: '只执行企业 Profile 结构化抽取；不要调用工具。' },
           { role: 'user', content: extractionPrompt(context, material, text) },
         ], { signal });
-      } catch {
-        throw new Error('model_failed');
+      } catch (cause) {
+        // 保留 cause 供 process() 的故障诊断日志提取非密钥字段
+        // （上游 HTTP 状态/网关业务码）；对外错误码仍是固定的 model_failed。
+        throw new Error('model_failed', { cause });
       }
       try {
         return parseProfileFacts(response, context);
@@ -1216,6 +1242,12 @@ export class MaterialImportService {
       };
     } catch (error) {
       const code = errorCode(error);
+      if (code === 'model_failed') {
+        const diagnostic = upstreamFailureDiagnostic(error);
+        if (diagnostic) {
+          console.log(`[materials] extract diagnostic ${JSON.stringify({ materialId, ...diagnostic })}`);
+        }
+      }
       await this.materialPort.finish({
         attemptId: attempt.id,
         materialId,

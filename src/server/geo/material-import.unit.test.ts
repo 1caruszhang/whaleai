@@ -78,6 +78,11 @@ class FakeMaterialPort implements BrandMaterialPort {
   }
   async get(id: string) { return this.materials.get(id) ?? material({ id }); }
   async content(id: string) { return this.bytes.get(id) ?? new TextEncoder().encode('公司全称：鲸跃科技'); }
+  async delete(id: string) {
+    this.trace.push(`delete:${id}`);
+    this.materials.delete(id);
+    this.bytes.delete(id);
+  }
   async begin(id: string) {
     this.trace.push(`begin:${id}`);
     const item = this.materials.get(id);

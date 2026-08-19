@@ -56,6 +56,8 @@ Renderer 对处理中行每 3s 轮询 `/api/xiaojing/materials/status`（带 `ma
 
 原文件写入当前品牌 `<BrandWorkspace>/materials/<material-id>.<ext>`。`brand_materials` 仅记录应用内相对路径、显示名、类型、字节数、SHA-256、安全来源投影、状态、尝试次数和固定错误码；不记录原始本机路径。`brand_material_processing` 逐次记录单份材料的 attempt、Session、候选 ID、状态和固定错误码。临时文件在同目录写完并 `sync_all` 后 rename，DB 失败则删除已复制文件。
 
+材料删除有两个入口：材料请求卡条目上的「移除」按钮（`POST /api/xiaojing/materials/delete`）与 Agent 的 `delete_brand_material` 工具（按 materialId 或精确显示名解析，重名/无匹配时返回本 Session 材料列表让用户选择，不猜）。删除语义（Rust `delete_brand_material` 单事务）：删材料行（attempts 随 FK 级联）、未决候选（awaiting-confirmation/conflict/rejected，先摘 `knowledge_candidate_revisions` 与 `knowledge_decisions` 的无级联外键引用）与磁盘文件；已采纳进确认知识的候选（adopted/kept-current/split-scope）作为裁决历史保留，`knowledge_current_facts` 不动。`processing` 中的材料拒绝删除（`material_processing_active`），文件缺失不阻断删除。
+
 官网来源入库前删除 query 与 fragment。粘贴/抓取正文和解析文本不会进入普通日志；KnowledgeAuthority 的 material raw-input 也只保存材料 ID、字段和 provenance 标识，证据正文只保留在原材料与该候选需要的最小 excerpt 中。
 
 ## 官网网络护栏

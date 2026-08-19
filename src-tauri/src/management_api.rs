@@ -143,6 +143,10 @@ pub async fn start_management_api() -> Result<u16, String> {
         )
         .route("/api/brand-materials/get", post(brand_material_get_handler))
         .route(
+            "/api/brand-materials/delete",
+            post(brand_material_delete_handler),
+        )
+        .route(
             "/api/brand-materials/list",
             post(brand_material_list_handler),
         )
@@ -1068,6 +1072,25 @@ async fn brand_material_get_handler(
         &request.payload.material_id,
     ) {
         Ok(material) => Json(serde_json::json!({ "ok": true, "material": material })),
+        Err(error) => Json(serde_json::json!({ "ok": false, "error": error })),
+    }
+}
+
+// 删除材料本体（行 + 文件 + 未决候选）；已被采纳的候选与确认知识不动。
+async fn brand_material_delete_handler(
+    headers: HeaderMap,
+    Json(request): Json<BrandKnowledgeEnvelope<BrandMaterialPayload>>,
+) -> Json<serde_json::Value> {
+    let store = match validate_brand_knowledge_request(&headers, &request) {
+        Ok(store) => store,
+        Err(error) => return Json(error),
+    };
+    match store.delete_brand_material(
+        &request.workspace_id,
+        &request.session_id,
+        &request.payload.material_id,
+    ) {
+        Ok(()) => Json(serde_json::json!({ "ok": true })),
         Err(error) => Json(serde_json::json!({ "ok": false, "error": error })),
     }
 }

@@ -221,9 +221,13 @@ function knowledgeAuthority() {
   });
 }
 
-function materialImportService(): MaterialImportService {
+function materialIdentity(): { workspaceId: string; sessionId: string } {
   if (!context.workspace) throw new Error('Brand materials require an explicit workspace identity');
-  const identity = { workspaceId: basename(context.workspace), sessionId: context.sessionId };
+  return { workspaceId: basename(context.workspace), sessionId: context.sessionId };
+}
+
+function materialImportService(): MaterialImportService {
+  const identity = materialIdentity();
   const capabilities = getXiaojingGeoProviderCapabilities();
   return new MaterialImportService(
     identity,
@@ -235,6 +239,10 @@ function materialImportService(): MaterialImportService {
     undefined,
     getXiaojingGeoBillingPermitChannel(),
   );
+}
+
+function brandMaterialPort() {
+  return createBrandMaterialPort(materialIdentity());
 }
 
 // 题库/主题服务与 index.ts 的 HTTP 路由共用同一构造；这里按 Session 缓存实例，
@@ -339,7 +347,7 @@ async function recordMaterialImportedMilestone(result: MaterialProcessResult): P
  * 工具发起的导入失败在 sidecar 日志中没有任何时间线（只存在于 SQLite）。
  */
 function logMaterialTool(
-  operation: 'import-text' | 'fetch-website' | 'retry',
+  operation: 'import-text' | 'fetch-website' | 'retry' | 'delete',
   status: 'started' | 'completed' | 'failed',
   payload: { materialId?: string; errorCode?: string } = {},
 ): void {
@@ -694,6 +702,68 @@ export async function createXiaojingGeoServer() {
           return {
             content: [{ type: 'text' as const, text: materialCandidatesToolText(result) }],
           };
+        },
+        { alwaysLoad: true },
+      ),
+      tool(
+        'delete_brand_material',
+        "Delete one imported brand material of this session: the stored original, its file and its pending knowledge candidates are removed; knowledge facts the user already confirmed are never touched. Call it when the user asks to delete or discard an uploaded material (e.g. wrong file uploaded, to be replaced by a new one). Identify it by materialId when known, otherwise by exact displayName (the file/material name the user mentions). Name lookup covers this session's 20 most recent materials; when the name matches nothing or matches several, the result lists them — ask the user to pick, never guess. A material still being processed cannot be deleted; tell the user to wait for its extraction to finish or fail, then retry. After a successful delete, confirm the removal and, when the user wants a replacement, surface the material request card via request_brand_material.",
+        {
+          materialId: z.string().min(1).max(200).optional()
+            .describe('The material id when known (from an import result or a previous list).'),
+          displayName: z.string().min(1).max(180).optional()
+            .describe('Exact material display name (e.g. the original file name) when materialId is unknown.'),
+        },
+        async (input) => {
+          const respond = (payload: Record<string, unknown>) => ({
+            content: [{ type: 'text' as const, text: JSON.stringify(payload) }],
+          });
+          let materialId = input.materialId;
+          try {
+            const port = brandMaterialPort();
+            if (!materialId) {
+              if (!input.displayName) {
+                return respond({
+                  kind: 'material-delete',
+                  ok: false,
+                  error: 'material_identity_required',
+                  hint: 'Pass materialId, or the exact displayName of the material to delete.',
+                });
+              }
+              const items = await port.list({ limit: 20 });
+              const matches = items.filter((item) => item.material.displayName === input.displayName);
+              if (matches.length !== 1) {
+                return respond({
+                  kind: 'material-delete',
+                  ok: false,
+                  error: matches.length === 0 ? 'material_not_found' : 'material_name_ambiguous',
+                  materials: items.map((item) => ({
+                    materialId: item.material.id,
+                    displayName: item.material.displayName,
+                    status: item.material.status,
+                  })),
+                  hint: 'Ask the user which one to delete, then retry with its materialId.',
+                });
+              }
+              materialId = matches[0].material.id;
+            }
+            await port.delete(materialId);
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            logMaterialTool('delete', 'failed', { materialId, errorCode: message });
+            return respond({
+              kind: 'material-delete',
+              ok: false,
+              error: message,
+              hint: message.includes('material_processing_active')
+                ? 'This material is still being processed; wait for its extraction to finish or fail, then retry the delete.'
+                : message.includes('material_not_found')
+                  ? 'No such material in this brand workspace; it may already be deleted.'
+                  : 'Delete was refused; relay the error to the user.',
+            });
+          }
+          logMaterialTool('delete', 'completed', { materialId });
+          return respond({ kind: 'material-delete', ok: true, materialId });
         },
         { alwaysLoad: true },
       ),

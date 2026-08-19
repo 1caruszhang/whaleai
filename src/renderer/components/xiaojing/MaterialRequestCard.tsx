@@ -6,12 +6,14 @@ import {
   Link,
   Loader2,
   RotateCcw,
+  Trash2,
   XCircle,
 } from 'lucide-react';
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import {
   fetchBrandMaterialStatuses,
+  deleteBrandMaterial,
   importBrandMaterialFiles,
   importBrandMaterialText,
   importBrandMaterialWebsite,
@@ -310,6 +312,26 @@ export default memo(function MaterialRequestCard({ data }: MaterialRequestCardPr
     }
   }, [apiPost, canSubmit, identity, replaceRow]);
 
+  // 移除材料：删除本体（行 + 文件 + 未决候选）后同步摘掉卡片上该材料的
+  // 行与它的知识确认卡；已采纳进确认知识的裁决历史不受影响。
+  const removeOne = useCallback(async (row: MaterialRow) => {
+    if (!identity || !row.materialId) return;
+    try {
+      await deleteBrandMaterial(apiPost, identity, row.materialId);
+      const materialId = row.materialId;
+      setRows((current) => current.filter((existing) => existing.key !== row.key));
+      setCards((current) => current.filter((card) => card.material?.id !== materialId));
+    } catch (error) {
+      // 服务端业务失败带固定码（如 material_processing_active）原样展示；
+      // 传输层失败（代理/网络）收敛为 material_request_failed。
+      const message = error instanceof Error ? error.message : '';
+      replaceRow(row.key, {
+        status: 'failed',
+        errorCode: message.startsWith('material_') ? message : 'material_request_failed',
+      });
+    }
+  }, [apiPost, identity, replaceRow]);
+
   return (
     <section
       aria-label="品牌材料导入"
@@ -435,6 +457,17 @@ export default memo(function MaterialRequestCard({ data }: MaterialRequestCardPr
                       <RotateCcw className="h-3.5 w-3.5" />仅重试此项
                     </button>
                   )}
+                {row.status !== 'processing' && row.materialId && (
+                  <button
+                    type="button"
+                    onClick={() => { void removeOne(row); }}
+                    disabled={!identity}
+                    aria-label={`移除 ${row.label}`}
+                    className="flex shrink-0 items-center gap-1 rounded-md px-2 py-1.5 text-sm font-medium text-[var(--ink-muted)] hover:bg-[var(--paper-elevated)] hover:text-[var(--error)] disabled:opacity-50"
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />移除
+                  </button>
+                )}
               </div>
             </article>
           ))}

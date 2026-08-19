@@ -79,6 +79,18 @@ export function retryBrandMaterial(
   ).then(requireResult).then((started) => started.entries);
 }
 
+/** 删除材料本体（行 + 文件 + 未决候选）；已采纳进确认知识的裁决历史不动。 */
+export async function deleteBrandMaterial(
+  apiPost: TabApiPost,
+  identity: { workspaceId: string; sessionId: string },
+  materialId: string,
+): Promise<void> {
+  await apiPost<MaterialResponse<{ materialId: string }>>(
+    '/api/xiaojing/materials/delete',
+    { ...identity, materialId },
+  ).then(requireResult);
+}
+
 /**
  * 状态轮询/会话恢复。`materialIds` 提供时只查指定材料（处理中行的周期
  * 轮询）；缺省返回本 Session 最近材料（挂载时重建确认卡与在途行）。

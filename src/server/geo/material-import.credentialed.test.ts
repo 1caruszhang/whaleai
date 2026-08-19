@@ -68,6 +68,9 @@ class SmokeMaterialPort implements BrandMaterialPort {
   async content() {
     return new TextEncoder().encode(SMOKE_MATERIAL_TEXT);
   }
+  async delete() {
+    // 冒烟路径不删除材料。
+  }
   async begin() {
     return { id: "attempt-smoke-1", materialId: "material-smoke-1", attemptNumber: 1 };
   }

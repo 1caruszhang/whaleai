@@ -497,5 +497,39 @@ export async function handleXiaojingKnowledgeRoute(
     }
   }
 
+  if (pathname === '/api/xiaojing/materials/delete' && request.method === 'POST') {
+    try {
+      const payload = await request.json() as {
+        workspaceId: string;
+        sessionId: string;
+        materialId: string;
+      };
+      const runtimeSessionId = getRuntimeSessionIdForRequest();
+      const workspaceId = basename(resolve(workspacePath));
+      if (payload.workspaceId !== workspaceId
+        || payload.sessionId !== runtimeSessionId) {
+        return jsonResponse({ success: false, error: 'material_identity_mismatch' }, 403);
+      }
+      const identity = { workspaceId, sessionId: runtimeSessionId };
+      await createBrandMaterialPort(identity).delete(payload.materialId);
+      logMaterial({
+        operation: 'delete', workspaceId, sessionId: runtimeSessionId,
+        materialId: payload.materialId, status: 'completed',
+      });
+      return jsonResponse({ success: true, result: { materialId: payload.materialId } });
+    } catch (error) {
+      logMaterial({
+        operation: 'delete', workspaceId: basename(resolve(workspacePath)),
+        sessionId: getRuntimeSessionIdForRequest(), status: 'failed', error,
+      });
+      // 固定码（material_processing_active / material_not_found 等）透传给
+      // 渲染层：「处理中稍后再删」与真失败必须在 UI 上可区分。
+      const message = error instanceof Error ? error.message : '';
+      const code = MATERIAL_ERROR_CODES.find((candidate) => message.includes(candidate))
+        ?? 'material_delete_failed';
+      return jsonResponse({ success: false, error: code }, 400);
+    }
+  }
+
   return null;
 }

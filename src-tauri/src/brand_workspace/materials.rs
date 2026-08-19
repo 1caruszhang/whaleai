@@ -460,6 +460,69 @@ impl BrandWorkspaceStore {
         read_material(&connection, &workspace.id, &finish.material_id)
     }
 
+    /// 删除材料本体：行（processing attempts 随 FK 级联）、未决候选
+    /// （awaiting-confirmation/conflict/rejected）与磁盘文件一并清除；
+    /// 已被采纳进确认知识的候选（adopted/kept-current/split-scope）作为裁决
+    /// 历史保留，确认知识不动。processing 中的材料拒绝删除（抽取队列还在
+    /// 持有它）；文件缺失不阻断删除（行与候选仍清除）。
+    pub fn delete_brand_material(
+        &self,
+        workspace_id: &str,
+        session_id: &str,
+        material_id: &str,
+    ) -> Result<(), String> {
+        let workspace = self.workspace(workspace_id)?;
+        let mut connection = open_database(&workspace)?;
+        require_committed_session(&connection, session_id)?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|_| "material_delete_failed".to_string())?;
+        let material = read_material(&transaction, &workspace.id, material_id)?;
+        if material.status == "processing" {
+            return Err("material_processing_active".to_string());
+        }
+        // 未决候选先摘掉引用它们的裁决记录与修改历史（两张表都是无级联的
+        // 外键），再删候选本体；knowledge_fact_sources 的 candidate_id 是
+        // 无约束文本，已采纳事实的证据链不动。
+        transaction
+            .execute(
+                "DELETE FROM knowledge_candidate_revisions
+                 WHERE candidate_id IN (
+                     SELECT id FROM knowledge_fact_candidates
+                     WHERE material_id=?1 AND status IN ('awaiting-confirmation','conflict','rejected'))",
+                [material_id],
+            )
+            .map_err(|_| "material_delete_failed".to_string())?;
+        transaction
+            .execute(
+                "DELETE FROM knowledge_decisions
+                 WHERE candidate_id IN (
+                     SELECT id FROM knowledge_fact_candidates
+                     WHERE material_id=?1 AND status IN ('awaiting-confirmation','conflict','rejected'))",
+                [material_id],
+            )
+            .map_err(|_| "material_delete_failed".to_string())?;
+        transaction
+            .execute(
+                "DELETE FROM knowledge_fact_candidates
+                 WHERE material_id=?1 AND status IN ('awaiting-confirmation','conflict','rejected')",
+                [material_id],
+            )
+            .map_err(|_| "material_delete_failed".to_string())?;
+        transaction
+            .execute("DELETE FROM brand_materials WHERE id=?1", [material_id])
+            .map_err(|_| "material_delete_failed".to_string())?;
+        transaction
+            .commit()
+            .map_err(|_| "material_delete_failed".to_string())?;
+        // 文件在事务提交后删：与导入方向相反（导入是 DB 失败删文件）；文件
+        // 缺失视为已删，幂等收尾。
+        if let Ok(path) = resolve_material_path(&workspace, &material.relative_path) {
+            let _ = fs::remove_file(path);
+        }
+        Ok(())
+    }
+
     /// 本 Session 导入的材料及其候选 ID：供 Sidecar 状态轮询与前端会话
     /// 恢复重建确认卡。`material_ids` 提供时按请求顺序返回存在的材料
     /// （仍限定本 Session 导入）；否则按 `updated_at` 倒序取最近 `limit`
@@ -1059,5 +1122,116 @@ mod tests {
         assert_eq!(polled.len(), 1);
         assert_eq!(polled[0].material.id, first.id);
         assert_eq!(polled[0].candidate_ids, vec!["candidate-1".to_string()]);
+    }
+
+    #[test]
+    fn delete_removes_material_file_and_pending_candidates_but_keeps_adopted() {
+        let (_root, store, workspace, session_id) = fixture();
+        let material = store
+            .import_brand_text(ImportBrandTextRequest {
+                workspace_id: workspace.id.clone(),
+                session_id: session_id.clone(),
+                input_kind: "pasted-text".to_string(),
+                display_name: "粘贴资料.txt".to_string(),
+                text: "鲸跃科技资料".to_string(),
+                source_url: None,
+            })
+            .expect("import");
+        let file_path = workspace.root_path.join(&material.relative_path);
+        assert!(file_path.exists());
+
+        // 一条未决候选 + 一条已采纳候选（裁决历史）。
+        let connection = open_database(&workspace).expect("db");
+        let now = Utc::now().to_rfc3339();
+        connection
+            .execute(
+                "INSERT INTO knowledge_raw_inputs (id, session_id, input_text, origin, intent, created_at)
+                 VALUES ('raw-del-1', ?1, 'material:test', 'model-inferred', 'knowledge-update', ?2)",
+                params![session_id, now],
+            )
+            .unwrap();
+        for (id, status) in [("cand-pending", "awaiting-confirmation"), ("cand-adopted", "adopted")]
+        {
+            connection
+                .execute(
+                    "INSERT INTO knowledge_fact_candidates
+                        (id,raw_input_id,session_id,subject,predicate,scope_json,fact_key,
+                         value_json,normalized_value_json,material_id,excerpt,confidence,
+                         profile_provenance,origin,intent,status,base_version,proposed_at,resolved_at)
+                     VALUES (?1,'raw-del-1',?2,'鲸跃','enterprise-profile.industry','{}',?1,
+                             '\"汽车\"','\"汽车\"',?3,'摘录',1.0,'extracted','model-inferred',
+                             'knowledge-update',?4,0,?5,?5)",
+                    params![id, session_id, material.id, status, now],
+                )
+                .unwrap();
+        }
+
+        store
+            .delete_brand_material(&workspace.id, &session_id, &material.id)
+            .expect("delete");
+
+        assert_eq!(
+            store
+                .brand_material(&workspace.id, &session_id, &material.id)
+                .expect_err("gone"),
+            "material_not_found"
+        );
+        assert!(!file_path.exists());
+        // 已采纳候选（裁决历史）保留，未决候选清除。
+        let kept: Vec<String> = connection
+            .prepare("SELECT status FROM knowledge_fact_candidates WHERE material_id=?1")
+            .unwrap()
+            .query_map([&material.id], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<Vec<String>, _>>()
+            .unwrap();
+        assert_eq!(kept, vec!["adopted".to_string()]);
+        // processing attempts 随 FK 级联清零。
+        let attempts: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM brand_material_processing WHERE material_id=?1",
+                [&material.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(attempts, 0);
+    }
+
+    #[test]
+    fn delete_rejects_inflight_processing_and_unknown_material() {
+        let (_root, store, workspace, session_id) = fixture();
+        let material = store
+            .import_brand_text(ImportBrandTextRequest {
+                workspace_id: workspace.id.clone(),
+                session_id: session_id.clone(),
+                input_kind: "pasted-text".to_string(),
+                display_name: "粘贴资料.txt".to_string(),
+                text: "鲸跃科技资料".to_string(),
+                source_url: None,
+            })
+            .expect("import");
+        assert_eq!(
+            store
+                .delete_brand_material(&workspace.id, &session_id, "missing")
+                .expect_err("unknown"),
+            "material_not_found"
+        );
+        store
+            .begin_material_processing(&workspace.id, &session_id, &material.id)
+            .expect("begin");
+        assert_eq!(
+            store
+                .delete_brand_material(&workspace.id, &session_id, &material.id)
+                .expect_err("processing"),
+            "material_processing_active"
+        );
+        // 处理中的材料未被误删。
+        assert_eq!(
+            store
+                .brand_material(&workspace.id, &session_id, &material.id)
+                .expect("material")
+                .status,
+            "processing"
+        );
     }
 }

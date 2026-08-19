@@ -13,6 +13,7 @@ const mocks = vi.hoisted(() => ({
   importText: vi.fn(),
   importWebsite: vi.fn(),
   retry: vi.fn(),
+  deleteMaterial: vi.fn(),
   fetchStatuses: vi.fn(),
 }));
 
@@ -45,6 +46,7 @@ vi.mock('@/api/brandMaterialClient', async (importOriginal) => {
     importBrandMaterialText: mocks.importText,
     importBrandMaterialWebsite: mocks.importWebsite,
     retryBrandMaterial: mocks.retry,
+    deleteBrandMaterial: mocks.deleteMaterial,
     fetchBrandMaterialStatuses: mocks.fetchStatuses,
   };
 });
@@ -135,6 +137,7 @@ describe('MaterialRequestCard', () => {
       mocks.importText,
       mocks.importWebsite,
       mocks.retry,
+      mocks.deleteMaterial,
       mocks.fetchStatuses,
     ]) mock.mockReset();
     // 默认恢复查询返回空；个别用例按需覆盖。
@@ -328,6 +331,60 @@ describe('MaterialRequestCard', () => {
     expect(screen.getByRole('button', { name: '保存并抽取粘贴资料' })).toBeDisabled();
     expect(screen.getByRole('button', { name: '保存并抽取官网资料' })).toBeDisabled();
     expect(mocks.fetchStatuses).not.toHaveBeenCalled();
+  });
+
+  it('removes one material with its pending candidates from the card', async () => {
+    vi.useFakeTimers();
+    mocks.open.mockResolvedValue(['C:\\selected\\wrong.pdf']);
+    mocks.importFiles.mockResolvedValue([started('material-wrong', 'file')]);
+    mocks.deleteMaterial.mockResolvedValue(undefined);
+    renderRequestCard();
+
+    fireEvent.click(screen.getByRole('button', { name: '选择文件' }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+
+    // 抽取成功出确认卡后出现「移除」；点击删除本体并摘掉行与确认卡。
+    mocks.fetchStatuses.mockResolvedValue([
+      statusEntry({ id: 'material-wrong', displayName: 'wrong.pdf', status: 'awaiting-confirmation', candidateCount: 1 }),
+    ]);
+    await act(async () => { await vi.advanceTimersByTimeAsync(3000); });
+    const results = screen.getByRole('region', { name: '材料处理结果' });
+    const removeButton = within(results).getByRole('button', { name: '移除 wrong.pdf' });
+    fireEvent.click(removeButton);
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+
+    expect(mocks.deleteMaterial).toHaveBeenCalledWith(
+      mocks.apiPost,
+      { workspaceId: 'brand-07', sessionId: 'session-07' },
+      'material-wrong',
+    );
+    expect(screen.queryByRole('region', { name: '材料处理结果' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('region', { name: '待确认知识候选' })).not.toBeInTheDocument();
+  });
+
+  it('surfaces a delete failure without dropping the row', async () => {
+    vi.useFakeTimers();
+    mocks.importText.mockResolvedValue([started('material-stuck', 'pasted-text')]);
+    mocks.deleteMaterial.mockRejectedValue(new Error('material_processing_active'));
+    renderRequestCard();
+
+    fireEvent.change(screen.getByPlaceholderText('粘贴企业介绍、产品资料或品牌事实'), {
+      target: { value: '公司全称：鲸跃科技' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: '保存并抽取粘贴资料' }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    mocks.fetchStatuses.mockResolvedValue([
+      statusEntry({ id: 'material-stuck', status: 'failed', lastErrorCode: 'model_failed' }),
+    ]);
+    await act(async () => { await vi.advanceTimersByTimeAsync(3000); });
+
+    const results = screen.getByRole('region', { name: '材料处理结果' });
+    fireEvent.click(within(results).getByRole('button', { name: '移除 粘贴资料' }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+
+    // 删除失败：行保留并透传服务端固定码（处理中稍后再删），材料本体仍在。
+    expect(within(results).getByText('处理失败：material_processing_active')).toBeInTheDocument();
+    expect(within(results).getByRole('button', { name: '移除 粘贴资料' })).toBeInTheDocument();
   });
 
   it('reopens the form from the header toggle after a successful submit collapses it', async () => {
