@@ -549,6 +549,27 @@ impl BrandWorkspaceStore {
         read_execution(&connection, workspace_id, execution_id)
     }
 
+    /// Session-free projection read for the WebView's brand-level 「效果」 page:
+    /// the latest query is workspace-wide, so the brand_sessions existence gate
+    /// only forces users to open a chat session before viewing results.
+    pub fn latest_publish_execution_readonly(
+        &self,
+        workspace_id: &str,
+    ) -> Result<Option<PublishExecutionProjection>, String> {
+        let workspace = self.workspace(workspace_id)?;
+        let connection = open_database(&workspace)?;
+        let id = connection
+            .query_row(
+                "SELECT id FROM geo_publish_executions ORDER BY updated_at DESC, id DESC LIMIT 1",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|error| format!("read latest publish execution: {error}"))?;
+        id.map(|id| read_execution(&connection, workspace_id, &id))
+            .transpose()
+    }
+
     pub fn prepare_publish_execution(
         &self,
         workspace_id: &str,
@@ -3050,6 +3071,20 @@ pub async fn cmd_publish_execution_confirm_ui(
     .map_err(|error| format!("publish confirmation task failed: {error}"))?
 }
 
+/// Session-free latest-execution read for the brand-level 「效果」 page; only
+/// paid confirm/start/retry stay session-scoped.
+#[tauri::command]
+#[allow(non_snake_case)]
+pub async fn cmd_publish_execution_latest_ui(
+    workspaceId: String,
+) -> Result<Option<PublishExecutionProjection>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        super::production_store()?.latest_publish_execution_readonly(&workspaceId)
+    })
+    .await
+    .map_err(|error| format!("read latest publish execution failed: {error}"))?
+}
+
 #[tauri::command]
 #[allow(non_snake_case)]
 pub async fn cmd_publish_execution_start_ui(
@@ -3356,6 +3391,37 @@ mod tests {
         let updated = now_iso(fixture.now_ms + 1_000);
         connection.execute("INSERT INTO geo_operations (id,session_id,state,created_at) VALUES (?1,'session-13','distribution-plan-confirmed',?2)", params![operation_id, updated]).unwrap();
         connection.execute("INSERT INTO geo_distribution_plans (id,operation_id,created_by_session_id,article_operation_id,knowledge_version,policy_version,status,revision,discovery_claim_token,provider_snapshot_json,resource_snapshot_json,projection_json,created_at,updated_at,confirmed_at) VALUES (?1,?2,'session-13','article-operation-13',1,'fixture-policy','confirmed',6,NULL,'{}','[]',?3,?4,?4,?4)", params![plan_id, operation_id, projection.to_string(), updated]).unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn readonly_latest_execution_read_does_not_require_a_session_row() {
+        let _lock = ENV_LOCK.lock().await;
+        let _env = TestEnvironment::configured();
+        let fixture = setup_fixture(1, 60_000);
+        let empty_brand = fixture.store.create_workspace("空品牌", vec![]).unwrap();
+        assert!(fixture
+            .store
+            .latest_publish_execution_readonly(&empty_brand.id)
+            .unwrap()
+            .is_none());
+        let execution = preview(&fixture);
+        // A committed session still gates the sidecar-facing read…
+        assert_eq!(
+            fixture
+                .store
+                .latest_publish_execution(&fixture.workspace.id, "never-committed-session")
+                .unwrap_err(),
+            "publish_scheduler_session_not_found"
+        );
+        // …while the WebView projection read stays available without one.
+        let latest = fixture
+            .store
+            .latest_publish_execution_readonly(&fixture.workspace.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(latest.id, execution.id);
+        assert_eq!(latest.workspace_id, execution.workspace_id);
+        assert_eq!(latest.items.len(), execution.items.len());
     }
 
     #[tokio::test(flavor = "current_thread")]

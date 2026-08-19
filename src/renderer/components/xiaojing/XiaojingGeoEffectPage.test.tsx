@@ -91,7 +91,7 @@ describe("XiaojingGeoEffectPage", () => {
     );
 
     expect(
-      screen.getByText(/先在左侧选择品牌，即可按需执行基线探测/),
+      screen.getByText(/先在左侧选择品牌，即可查看真实效果看板/),
     ).toBeInTheDocument();
     expect(
       document.querySelector('[data-xiaojing-geo-effect="empty"]'),
@@ -101,9 +101,9 @@ describe("XiaojingGeoEffectPage", () => {
     ).not.toBeInTheDocument();
   });
 
-  // 票 31：三面板控制面借用已打开聊天 Tab 的 Session——没有可借用会话时
-  // 如实引导先打开会话，不挂载面板、不伪造数据。
-  it("guides to open a brand session when no chat tab of the brand is open", () => {
+  // 2026-08-19 拍板：无会话时页面照常渲染三面板（投影读取走 Rust IPC），
+  // 只以顶部提示条引导打开会话——不再整页替换为引导卡。
+  it("renders the effect panels with a session banner when no chat tab of the brand is open", () => {
     const onOpenBrandSession = vi.fn();
     render(
       <XiaojingGeoEffectPage
@@ -114,21 +114,24 @@ describe("XiaojingGeoEffectPage", () => {
     );
 
     expect(
-      screen.getByRole("heading", { name: "先打开该品牌的会话" }),
+      screen.getByRole("region", { name: "需要品牌会话" }),
     ).toBeInTheDocument();
     expect(
-      screen.queryByRole("region", { name: "基线面板桩" }),
-    ).not.toBeInTheDocument();
+      screen.getByText(/看板与监测结果已按真实数据显示/),
+    ).toBeInTheDocument();
     expect(
-      screen.queryByRole("region", { name: "看板面板桩" }),
-    ).not.toBeInTheDocument();
+      screen.getByRole("region", { name: "基线面板桩" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("region", { name: "看板面板桩" }),
+    ).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "打开品牌会话" }));
     expect(onOpenBrandSession).toHaveBeenCalledTimes(1);
   });
 
-  // 票 31：整页承载三面板且交互保留——基线与监测面板不得是 readOnly 挂载，
-  // 看板保持只读汇总。
+  // 票 31 + 2026-08-19：整页承载三面板且交互保留——基线与监测面板不得是
+  // readOnly 挂载，看板保持只读汇总并置顶。
   it("hosts the three effect panels interactively for the current brand", () => {
     render(
       <XiaojingGeoEffectPage
@@ -138,7 +141,9 @@ describe("XiaojingGeoEffectPage", () => {
       />,
     );
 
-    expect(screen.getByText(/看板只汇总真实证据/)).toBeInTheDocument();
+    expect(
+      screen.queryByRole("region", { name: "需要品牌会话" }),
+    ).not.toBeInTheDocument();
     expect(
       screen.getByRole("region", { name: "基线面板桩" }),
     ).toBeInTheDocument();

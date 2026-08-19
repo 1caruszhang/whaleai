@@ -5,13 +5,14 @@ import type { PostPublishMonitorPlanProjection } from "../../../shared/geo/postP
 import XiaojingPostPublishMonitoringPanel from "./XiaojingPostPublishMonitoringPanel";
 
 const mocks = vi.hoisted(() => ({
+  sessionId: "session-14" as string | null,
   apiPost: vi.fn(), latest: vi.fn(), get: vi.fn(), prepare: vi.fn(), activate: vi.fn(), retry: vi.fn(),
   latestPublish: vi.fn(), latestBaseline: vi.fn(),
 }));
 
 vi.mock("@/context/TabContext", () => ({
   useTabApi: () => ({ apiPost: mocks.apiPost }),
-  useTabState: () => ({ sessionId: "session-14" }),
+  useTabState: () => ({ sessionId: mocks.sessionId }),
 }));
 vi.mock("@/api/postPublishMonitoringClient", () => ({
   loadLatestPostPublishMonitor: mocks.latest,
@@ -65,7 +66,10 @@ function activePlan(): PostPublishMonitorPlanProjection {
 
 describe("XiaojingPostPublishMonitoringPanel", () => {
   beforeEach(() => {
-    Object.values(mocks).forEach((mock) => mock.mockReset());
+    Object.values(mocks).forEach((value) => {
+      if (typeof value === "function") value.mockReset();
+    });
+    mocks.sessionId = "session-14";
     mocks.latest.mockResolvedValue(activePlan());
     mocks.get.mockResolvedValue({ ...activePlan(), id: "monitor-plan-exact" });
     mocks.latestPublish.mockResolvedValue({ id: "publish-exec-13" });
@@ -155,5 +159,27 @@ describe("XiaojingPostPublishMonitoringPanel", () => {
       { workspaceId: "brand-14", sessionId: "session-14" },
       expect.objectContaining({ engineIds: ["doubao"] }),
     ));
+  });
+
+  // 2026-08-19 拍板：无会话时监测计划与 run 照常渲染（Rust IPC 投影读取，
+  // sessionId 传 null），配置/启用/重试隐藏并提示先打开会话。
+  it("renders committed monitor results without an open session", async () => {
+    mocks.sessionId = null;
+    render(<XiaojingPostPublishMonitoringPanel workspaceId="brand-14" />);
+
+    const panel = await screen.findByRole("region", { name: "发布后 GEO 监测" });
+    expect(mocks.latest).toHaveBeenCalledWith(
+      { workspaceId: "brand-14", sessionId: null },
+    );
+    expect(within(panel).getByText(/时间序列 Run #2/)).toBeInTheDocument();
+    expect(
+      within(panel).getByText(/打开该品牌的会话后，才能配置、启用监测/),
+    ).toBeInTheDocument();
+    expect(
+      within(panel).queryByRole("button", { name: "仅重试此单元" }),
+    ).not.toBeInTheDocument();
+    expect(
+      within(panel).queryByRole("button", { name: "以明确新计划变更配置" }),
+    ).not.toBeInTheDocument();
   });
 });

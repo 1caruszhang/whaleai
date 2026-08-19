@@ -54,13 +54,22 @@ describe("XiaojingGeoEffectPanel", () => {
     mocks.dashboardProps.mockReset();
   });
 
-  it("composes on-demand baseline, monitor management, and the real dashboard", () => {
+  // 2026-08-19 拍板：看板置顶，监测与基线面板随其后。
+  it("composes the dashboard first, then monitor management and on-demand baseline", () => {
     render(<XiaojingGeoEffectPanel workspaceId="brand-19" />);
 
-    expect(screen.getByText(/基线探测按需执行/)).toBeInTheDocument();
-    expect(screen.getByRole("region", { name: "基线面板桩" })).toBeInTheDocument();
-    expect(screen.getByRole("region", { name: "监测面板桩" })).toBeInTheDocument();
-    expect(screen.getByRole("region", { name: "看板面板桩" })).toBeInTheDocument();
+    const dashboard = screen.getByRole("region", { name: "看板面板桩" });
+    const monitor = screen.getByRole("region", { name: "监测面板桩" });
+    const baseline = screen.getByRole("region", { name: "基线面板桩" });
+    expect(dashboard).toBeInTheDocument();
+    expect(monitor).toBeInTheDocument();
+    expect(baseline).toBeInTheDocument();
+    expect(
+      dashboard.compareDocumentPosition(monitor) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(
+      monitor.compareDocumentPosition(baseline) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
     expect(mocks.baselineProps).toHaveBeenCalledWith(
       expect.objectContaining({ workspaceId: "brand-19" }),
     );

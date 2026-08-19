@@ -111,6 +111,8 @@ GEO 能力只通过固定 typed ports 暴露：主 Agent、抽取、关键词检
 
 主聊天是唯一 Agent 入口。品牌工作台是同一窗口内的只读产物视图，不创建新的执行器概念。需要用户决策的知识确认、计划确认、批准、付费发布和安全重试必须由结构化 UI 触发；模型不能代替确认。左侧栏「品牌档案」与「效果」是品牌级整页入口：品牌档案只读展示知识版本史与产物血缘；按需基线探测、监测计划的显式启用门与真实效果看板都从「效果」进入。监测调度 owner 仍留在 BrandWorkspace，该入口只做只读展示与显式启用。
 
+「效果」页的数据通道按读写拆分（2026-08-19 拍板）：真实投影读取（最新基线 `cmd_geo_baseline_latest_ui`、监测计划 latest/get `cmd_post_publish_monitor_*_ui` 可选 sessionId、最新发布执行 `cmd_publish_execution_latest_ui`）走 Rust IPC 免会话直读——这些查询本就是 workspace 级，不要求借用聊天 Tab 的 Session；基线探测执行、引擎可用性读取和监测 prepare/activate/retry 等执行类控制面仍借用该品牌已打开聊天 Tab 的 Session Sidecar owner 身份，未打开会话时以提示条引导，不新建第二个 Agent 入口。
+
 桌面通知只针对主聊天完成和 GEO 监测告警。点击通知通过精确 Session/BrandWorkspace/operation identity 深链，不提供模糊的全局跳转。
 
 ## 构建与运行基础设施

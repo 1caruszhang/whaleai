@@ -75,7 +75,7 @@ export default memo(function XiaojingPublishSchedulerPanel({
     let active = true;
     void (executionId
       ? loadPublishExecution(apiPost, identity, executionId)
-      : loadLatestPublishExecution(apiPost, identity))
+      : loadLatestPublishExecution(workspaceId))
       .then((value) => {
         if (!active) return;
         setError(null);
@@ -89,7 +89,7 @@ export default memo(function XiaojingPublishSchedulerPanel({
     return () => {
       active = false;
     };
-  }, [apiPost, executionId, identity, refreshKey]);
+  }, [apiPost, executionId, identity, refreshKey, workspaceId]);
 
   return (
     <section

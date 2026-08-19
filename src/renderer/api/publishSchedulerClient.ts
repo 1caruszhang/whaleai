@@ -26,18 +26,13 @@ function requireExecution(
   return response.execution;
 }
 
-export async function loadLatestPublishExecution(
-  apiPost: PublishSchedulerApiPost,
-  identity: { workspaceId: string; sessionId: string },
+/** Latest-execution read stays on the Rust IPC data plane: the query is
+ *  workspace-wide, so the brand-level 「效果」 page can show the monitoring
+ *  freeze source before any chat session of the brand is open. */
+export function loadLatestPublishExecution(
+  workspaceId: string,
 ): Promise<PublishExecutionProjection | null> {
-  const response = await apiPost<PublishSchedulerResponse>(
-    "/api/xiaojing/publish-scheduler/latest",
-    identity,
-  );
-  if (!response.success) {
-    throw new Error(response.error ?? "publish_execution_latest_failed");
-  }
-  return response.execution ?? null;
+  return invoke("cmd_publish_execution_latest_ui", { workspaceId });
 }
 
 export function loadPublishExecution(

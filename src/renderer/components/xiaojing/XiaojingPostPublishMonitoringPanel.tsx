@@ -11,7 +11,7 @@ import {
   retryPostPublishMonitorUnit,
 } from "@/api/postPublishMonitoringClient";
 import { loadLatestPublishExecution } from "@/api/publishSchedulerClient";
-import { useTabApi, useTabState } from "@/context/TabContext";
+import { useTabState } from "@/context/TabContext";
 import { isPendingSessionId } from "../../../shared/constants";
 import type { GeoBaselineEngineId } from "../../../shared/geo/baseline";
 import {
@@ -24,7 +24,7 @@ interface Props {
   workspaceId: string;
   /** 精确读取的监测计划 id（通知深链落点）；缺省时读取 latest。 */
   planId?: string;
-  /** 工作台只读挂载：仅展示监测结果，配置/启用/重试交互只出现在聊天卡片。 */
+  /** 工作台只读挂载：仅展示监测结果，配置/启用/重试交互只出现在效果页与聊天卡片。 */
   readOnly?: boolean;
   /** Re-runs the initial load (effects entry linkage after a new baseline). */
   refreshKey?: number;
@@ -39,7 +39,6 @@ const UNIT_LABEL: Record<PostPublishMonitorUnitProjection["kind"], string> = {
 };
 
 export default memo(function XiaojingPostPublishMonitoringPanel({ workspaceId, planId, readOnly = false, refreshKey = 0, onPlanMutated }: Props) {
-  const { apiPost } = useTabApi();
   const { sessionId } = useTabState();
   const identity = useMemo(
     () => sessionId && !isPendingSessionId(sessionId) ? { workspaceId, sessionId } : null,
@@ -57,16 +56,17 @@ export default memo(function XiaojingPostPublishMonitoringPanel({ workspaceId, p
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!identity) return;
     let active = true;
     setBusy(true);
     setError(null);
+    // 计划与冻结来源都是 Rust IPC 投影读取：效果页无会话时也照常展示；
+    // sessionId 仅在会话存在时随读传递，保持与既有门控行为一致。
     void Promise.all([
       planId
-        ? loadPostPublishMonitor(identity, planId)
-        : loadLatestPostPublishMonitor(identity),
-      loadLatestPublishExecution(apiPost, identity),
-      loadLatestGeoBaseline(apiPost, identity),
+        ? loadPostPublishMonitor({ workspaceId, sessionId }, planId)
+        : loadLatestPostPublishMonitor({ workspaceId, sessionId }),
+      loadLatestPublishExecution(workspaceId),
+      loadLatestGeoBaseline(workspaceId),
     ])
       .then(([latestPlan, execution, baseline]) => {
         if (!active) return;
@@ -87,20 +87,20 @@ export default memo(function XiaojingPostPublishMonitoringPanel({ workspaceId, p
       .catch((cause) => active && setError(cause instanceof Error ? cause.message : String(cause)))
       .finally(() => active && setBusy(false));
     return () => { active = false; };
-  }, [apiPost, identity, planId, refreshKey]);
+  }, [planId, refreshKey, sessionId, workspaceId]);
 
   const refresh = useCallback(async () => {
-    if (!identity || !plan || busy) return;
+    if (!plan || busy) return;
     setBusy(true);
     setError(null);
     try {
-      setPlan(await loadPostPublishMonitor(identity, plan.id));
+      setPlan(await loadPostPublishMonitor({ workspaceId, sessionId }, plan.id));
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
       setBusy(false);
     }
-  }, [busy, identity, plan]);
+  }, [busy, plan, sessionId, workspaceId]);
 
   const prepare = useCallback(async () => {
     if (!identity || !publishExecutionId || !baselineId || engineIds.length === 0 || busy) return;
@@ -169,29 +169,30 @@ export default memo(function XiaojingPostPublishMonitoringPanel({ workspaceId, p
   // 票 32：通知深链按精确计划 id 读取——该计划已完成（终态），其最新
   // 时间序列 run 即告警对应的监测结果，标出定位记号。
   const located = !!plan && !!planId && plan.id === planId;
+  const interactive = !readOnly && !!identity;
 
   return (
     <section
       aria-label="发布后 GEO 监测"
       data-geo-monitor-located={located || undefined}
-      className="mt-4 overflow-hidden rounded-2xl border border-[var(--line)] bg-[var(--paper-elevated)]"
+      className="rounded-2xl border border-[var(--geo-dash-border,var(--line))] bg-[var(--geo-dash-card,var(--paper-elevated))]"
     >
-      <div className="flex items-center gap-2 border-b border-[var(--line-subtle)] px-4 py-3">
-        <Activity className="h-4 w-4 text-[var(--accent)]" />
-        <h3 className="text-sm font-semibold">发布后监测</h3>
-        {plan && <span className="ml-auto text-xs text-[var(--ink-muted)]">{plan.status} · {plan.recoveryState}</span>}
+      <div className="flex items-center gap-2 border-b border-[var(--geo-dash-border,var(--line-subtle))] px-4 py-3">
+        <Activity className="h-4 w-4 text-[var(--geo-dash-secondary,var(--accent))]" />
+        <h3 className="text-sm font-semibold text-[var(--geo-dash-text,var(--ink))]">发布后监测</h3>
+        {plan && <span className="ml-auto text-xs text-[var(--geo-dash-text-mute,var(--ink-muted))]">{plan.status} · {plan.recoveryState}</span>}
       </div>
       <div className="space-y-3 p-4 text-xs">
-        <p className="leading-5 text-[var(--ink-muted)]">
+        <p className="leading-5 text-[var(--geo-dash-text-mute,var(--ink-muted))]">
           仅监测已由确定性发布提交成功的稳定发布项。应用退出时本地监测暂停；重启后显示待恢复或逾期，并按固定策略继续。
         </p>
         {plan && (
-          <p className="leading-5 text-[var(--ink-muted)]">
+          <p className="leading-5 text-[var(--geo-dash-text-mute,var(--ink-muted))]">
             来源 Operation {plan.sourceOperationId} · 每 {plan.intervalMinutes} 分钟 · 目标引擎 {plan.engineIds.join("、")}
           </p>
         )}
-        {!readOnly && editing && (
-          <div className="space-y-3 rounded-xl border border-[var(--line)] bg-[var(--paper-inset)] p-3">
+        {interactive && editing && (
+          <div className="space-y-3 rounded-xl border border-[var(--geo-dash-border,var(--line))] bg-[var(--geo-dash-bg-2,var(--paper-inset))] p-3">
             <p>冻结来源：发布执行 {publishExecutionId ?? "无可用执行"}</p>
             <p>冻结 Baseline：{baselineId ?? "无可用基线"}</p>
             <fieldset className="space-y-1" aria-label="目标引擎">
@@ -205,11 +206,11 @@ export default memo(function XiaojingPostPublishMonitoringPanel({ workspaceId, p
                 />
                 豆包
               </label>
-              <label className="flex items-center gap-2 text-[var(--ink-muted)]">
+              <label className="flex items-center gap-2 text-[var(--geo-dash-text-mute,var(--ink-muted))]">
                 <input aria-label="其他引擎（当前不可用）" type="checkbox" disabled />
                 其他引擎（当前不可用）
               </label>
-              {engineIds.length === 0 && <p className="text-[var(--danger)]">至少选择一个可用目标引擎</p>}
+              {engineIds.length === 0 && <p className="text-[var(--geo-dash-danger,var(--danger))]">至少选择一个可用目标引擎</p>}
             </fieldset>
             <label className="block">频率
               <CustomSelect
@@ -226,76 +227,78 @@ export default memo(function XiaojingPostPublishMonitoringPanel({ workspaceId, p
               />
             </label>
             <label className="block">最多运行次数
-              <input aria-label="监测最多运行次数" type="number" min={1} max={10000} value={maxRuns} onChange={(event) => setMaxRuns(Number(event.target.value))} className="mt-1 w-full rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] p-2" />
+              <input aria-label="监测最多运行次数" type="number" min={1} max={10000} value={maxRuns} onChange={(event) => setMaxRuns(Number(event.target.value))} className="mt-1 w-full rounded-lg border border-[var(--geo-dash-border,var(--line))] bg-[var(--geo-dash-card,var(--paper-elevated))] p-2" />
             </label>
             <label className="block">可选截止时间
-              <input aria-label="监测截止时间" type="datetime-local" value={deadline} onChange={(event) => setDeadline(event.target.value)} className="mt-1 w-full rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] p-2" />
+              <input aria-label="监测截止时间" type="datetime-local" value={deadline} onChange={(event) => setDeadline(event.target.value)} className="mt-1 w-full rounded-lg border border-[var(--geo-dash-border,var(--line))] bg-[var(--geo-dash-card,var(--paper-elevated))] p-2" />
             </label>
-            <button type="button" disabled={busy || !identity || !publishExecutionId || !baselineId || engineIds.length === 0 || maxRuns < 1} onClick={() => void prepare()} className="rounded-lg border border-[var(--line)] px-3 py-2 disabled:opacity-50">{plan?.status === "draft" && !newPlan ? "保存 draft revision" : "创建新监测计划"}</button>
+            <button type="button" disabled={busy || !identity || !publishExecutionId || !baselineId || engineIds.length === 0 || maxRuns < 1} onClick={() => void prepare()} className="rounded-lg border border-[var(--geo-dash-border,var(--line))] px-3 py-2 disabled:opacity-50">{plan?.status === "draft" && !newPlan ? "保存 draft revision" : "创建新监测计划"}</button>
           </div>
         )}
-        {!readOnly && plan?.status === "draft" && !newPlan && (
-          <button type="button" disabled={busy} onClick={() => void activate()} className="w-full rounded-lg bg-[var(--button-primary-bg)] px-3 py-2 font-medium text-[var(--button-primary-fg)] disabled:opacity-50">启用确定性监测</button>
+        {interactive && plan?.status === "draft" && !newPlan && (
+          <button type="button" disabled={busy} onClick={() => void activate()} className="w-full rounded-lg bg-[var(--button-primary-bg)] px-3 py-2 font-medium text-[var(--button-primary-text)] disabled:opacity-50">启用确定性监测</button>
         )}
-        {readOnly && editing && (
-          <p className="leading-5 text-[var(--ink-muted)]">
-            监测计划的配置与启用在聊天中的确认卡片里完成；这里只展示监测结果。
+        {!interactive && (
+          <p className="leading-5 text-[var(--geo-dash-text-mute,var(--ink-muted))]">
+            {identity
+              ? "监测计划的配置与启用在聊天中的确认卡片里完成；这里只展示监测结果。"
+              : "监测结果已按真实数据展示；打开该品牌的会话后，才能配置、启用监测或重试失败单元。"}
           </p>
         )}
-        {!readOnly && plan && plan.status !== "draft" && !newPlan && (
+        {interactive && plan && plan.status !== "draft" && !newPlan && (
           <div className="flex gap-2">
-            <button type="button" aria-label="刷新监测状态" disabled={busy} onClick={() => void refresh()} className="inline-flex items-center gap-1 rounded-lg border border-[var(--line)] px-2 py-1.5"><RefreshCcw className="h-3.5 w-3.5" />刷新</button>
-            <button type="button" disabled={busy} onClick={() => setNewPlan(true)} className="rounded-lg border border-[var(--line)] px-2 py-1.5">以明确新计划变更配置</button>
+            <button type="button" aria-label="刷新监测状态" disabled={busy} onClick={() => void refresh()} className="inline-flex items-center gap-1 rounded-lg border border-[var(--geo-dash-border,var(--line))] px-2 py-1.5"><RefreshCcw className="h-3.5 w-3.5" />刷新</button>
+            <button type="button" disabled={busy} onClick={() => setNewPlan(true)} className="rounded-lg border border-[var(--geo-dash-border,var(--line))] px-2 py-1.5">以明确新计划变更配置</button>
           </div>
         )}
         {plan?.latestRun && (
           <div
-            className={`rounded-xl border p-3 ${located ? "border-[var(--accent)]/60" : "border-[var(--line)]"}`}
+            className={`rounded-xl border p-3 ${located ? "border-[var(--geo-dash-coral,var(--accent))]/60" : "border-[var(--geo-dash-border,var(--line))]"}`}
             data-geo-monitor-run-located={located || undefined}
           >
-            <p className="font-medium">
+            <p className="font-medium text-[var(--geo-dash-text,var(--ink))]">
               时间序列 Run #{plan.latestRun.ordinal} · {plan.latestRun.status}
               {located && (
-                <span className="ml-2 rounded-full bg-[var(--accent-warm-subtle)] px-2 py-0.5 text-xs font-medium text-[var(--accent)]">
+                <span className="ml-2 rounded-full bg-[rgba(255,182,137,0.16)] px-2 py-0.5 text-xs font-medium text-[var(--geo-dash-coral,var(--accent))]">
                   通知定位
                 </span>
               )}
             </p>
-            <p className="mt-2 text-[var(--ink-muted)]">已发布 {aggregate.publishedItems} · 可访问 {aggregate.accessibleItems} · 已收录 {aggregate.indexedItems} · 品牌出现 {aggregate.brandMentioned}/{aggregate.baselineProbes} · TOP3 {aggregate.topThree}</p>
+            <p className="mt-2 text-[var(--geo-dash-text-mute,var(--ink-muted))]">已发布 {aggregate.publishedItems} · 可访问 {aggregate.accessibleItems} · 已收录 {aggregate.indexedItems} · 品牌出现 {aggregate.brandMentioned}/{aggregate.baselineProbes} · TOP3 {aggregate.topThree}</p>
             {units.map((unit) => (
-              <article key={unit.id} className="mt-2 rounded-lg bg-[var(--paper-inset)] p-2">
-                <div className="flex items-center justify-between gap-2"><strong>{UNIT_LABEL[unit.kind]}</strong><span>{unit.status} · attempt {unit.attemptNumber}</span></div>
-                {unit.questionId && <p className="mt-1">问题 {unit.questionId} · {unit.engineId}</p>}
+              <article key={unit.id} className="mt-2 rounded-lg bg-[var(--geo-dash-bg-2,var(--paper-inset))] p-2">
+                <div className="flex items-center justify-between gap-2"><strong className="text-[var(--geo-dash-text,var(--ink))]">{UNIT_LABEL[unit.kind]}</strong><span className="text-[var(--geo-dash-text-mute,var(--ink-muted))]">{unit.status} · attempt {unit.attemptNumber}</span></div>
+                {unit.questionId && <p className="mt-1 text-[var(--geo-dash-text-mute,var(--ink-muted))]">问题 {unit.questionId} · {unit.engineId}</p>}
                 {unit.evidence && "platformStatus" in unit.evidence && (
-                  <p className="mt-1">平台 {unit.evidence.platformStatus}（code {unit.evidence.platformStatusCode}）{unit.evidence.publishedUrl ? ` · ${unit.evidence.publishedUrl}` : ""}</p>
+                  <p className="mt-1 text-[var(--geo-dash-text-mute,var(--ink-muted))]">平台 {unit.evidence.platformStatus}（code {unit.evidence.platformStatusCode}）{unit.evidence.publishedUrl ? ` · ${unit.evidence.publishedUrl}` : ""}</p>
                 )}
                 {unit.evidence && "accessible" in unit.evidence && (
-                  <p className="mt-1">发布页 {unit.evidence.accessible ? "可访问" : "不可访问"} · 收录 {unit.evidence.indexingState} · {unit.evidence.url}</p>
+                  <p className="mt-1 text-[var(--geo-dash-text-mute,var(--ink-muted))]">发布页 {unit.evidence.accessible ? "可访问" : "不可访问"} · 收录 {unit.evidence.indexingState} · {unit.evidence.url}</p>
                 )}
                 {unit.evidence && "rawAnswer" in unit.evidence && (
                   <div className="mt-1">
-                    <p>品牌出现 {unit.evidence.analysis.brandMentioned ? "是" : "否"} · 排名 {unit.evidence.rankPosition ? `TOP${unit.evidence.rankPosition}` : "不可解析"}</p>
-                    {unit.evidence.citedArticleIds.length > 0 && <p>引用文章：{unit.evidence.citedArticleIds.join("、")}</p>}
-                    {unit.evidence.citedUrls.length > 0 && <p>引用 URL：{unit.evidence.citedUrls.join("、")}</p>}
+                    <p className="text-[var(--geo-dash-text,var(--ink))]">品牌出现 {unit.evidence.analysis.brandMentioned ? "是" : "否"} · 排名 {unit.evidence.rankPosition ? `TOP${unit.evidence.rankPosition}` : "不可解析"}</p>
+                    {unit.evidence.citedArticleIds.length > 0 && <p className="text-[var(--geo-dash-text-mute,var(--ink-muted))]">引用文章：{unit.evidence.citedArticleIds.join("、")}</p>}
+                    {unit.evidence.citedUrls.length > 0 && <p className="text-[var(--geo-dash-text-mute,var(--ink-muted))]">引用 URL：{unit.evidence.citedUrls.join("、")}</p>}
                   </div>
                 )}
-                {unit.observedAt && <p className="mt-1 text-[var(--ink-muted)]">观察于 {new Date(unit.observedAt).toLocaleString()}</p>}
-                {unit.errorMessage && <p className="mt-1 text-[var(--danger)]">{unit.errorCode}：{unit.errorMessage}</p>}
-                {unit.status === "failed" && !readOnly && (
-                  <button type="button" disabled={busy} onClick={() => void retry(unit)} className="mt-2 inline-flex items-center gap-1 rounded border border-[var(--line)] px-2 py-1"><RotateCcw className="h-3 w-3" />仅重试此单元</button>
+                {unit.observedAt && <p className="mt-1 text-[var(--geo-dash-text-mute,var(--ink-muted))]">观察于 {new Date(unit.observedAt).toLocaleString()}</p>}
+                {unit.errorMessage && <p className="mt-1 text-[var(--geo-dash-danger,var(--danger))]">{unit.errorCode}：{unit.errorMessage}</p>}
+                {unit.status === "failed" && interactive && (
+                  <button type="button" disabled={busy} onClick={() => void retry(unit)} className="mt-2 inline-flex items-center gap-1 rounded border border-[var(--geo-dash-border,var(--line))] px-2 py-1"><RotateCcw className="h-3 w-3" />仅重试此单元</button>
                 )}
               </article>
             ))}
           </div>
         )}
         {plan && plan.recentRuns.length > 0 && (
-          <div aria-label="最近监测历史" className="rounded-xl border border-[var(--line)] p-3">
-            <p className="font-medium">最近监测历史（最多 20 次）</p>
+          <div aria-label="最近监测历史" className="rounded-xl border border-[var(--geo-dash-border,var(--line))] p-3">
+            <p className="font-medium text-[var(--geo-dash-text,var(--ink))]">最近监测历史（最多 20 次）</p>
             <div className="mt-2 space-y-1">
               {plan.recentRuns.map((run) => {
                 const summary = aggregatePostPublishMonitorUnits(run.units);
                 return (
-                  <p key={run.id}>
+                  <p key={run.id} className="text-[var(--geo-dash-text-mute,var(--ink-muted))]">
                     Run #{run.ordinal} · {run.status} · 已发布 {summary.publishedItems} · 可访问 {summary.accessibleItems} · 已收录 {summary.indexedItems} · 品牌出现 {summary.brandMentioned}/{summary.baselineProbes}
                   </p>
                 );
@@ -303,8 +306,8 @@ export default memo(function XiaojingPostPublishMonitoringPanel({ workspaceId, p
             </div>
           </div>
         )}
-        {busy && <p className="flex items-center gap-1 text-[var(--ink-muted)]"><Loader2 className="h-3.5 w-3.5 animate-spin" />处理中…</p>}
-        {error && <p className="rounded-lg bg-[var(--danger-bg)] p-2 text-[var(--danger)]">{error}</p>}
+        {busy && <p className="flex items-center gap-1 text-[var(--geo-dash-text-mute,var(--ink-muted))]"><Loader2 className="h-3.5 w-3.5 animate-spin" />处理中…</p>}
+        {error && <p className="rounded-lg bg-[var(--geo-dash-danger,var(--danger))]/10 p-2 text-[var(--geo-dash-danger,var(--danger))]">{error}</p>}
       </div>
     </section>
   );
