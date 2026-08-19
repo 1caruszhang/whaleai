@@ -39,6 +39,11 @@ export function createBackendApp(deps: BackendDeps): Hono<BackendEnv> {
 
   app.get('/healthz', c => c.json({ ok: true }));
 
+  // 服务根路径自述：这是 API 后端，没有落地页；运营入口在 /admin。
+  app.get('/', c =>
+    c.json({ service: 'xiaojing-api', admin: '/admin', health: '/healthz' }),
+  );
+
   // 运营密码登录节流（票 10）：JSON 登录与 SSR 登录共享同一进程内实例。
   const adminThrottle = new AdminLoginThrottle(
     deps.config.adminLoginThrottleUnitMs,
