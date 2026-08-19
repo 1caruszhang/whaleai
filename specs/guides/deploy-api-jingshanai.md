@@ -115,6 +115,14 @@ sudo chmod 600 /opt/xiaojing-api/.env
 
 ## 2. 镜像分发（二选一）
 
+> 自动化路径：`backend/scripts/deploy-ecs.sh` 把方式 B 的构建（linux/amd64
+> cross-build）、导出、scp（含 sha256 校验）、服务器 docker 安装检测、镜像 load、
+> `.env` 引导与完整性预检、compose 启动、健康等待与只读冒烟串成幂等子命令
+> （`check-local` / `package` / `deploy` / `up` / `env-check` / `smoke` /
+> `rollback` / `status`），并内置 Docker Desktop 钩子规避。首次部署推荐
+> `check-local` → `package` → `deploy <ssh目标>`；本节与 §3 的手工命令是
+> 其等价展开，供排障与审计。
+
 | 方式 | 命令 | 取舍 |
 |---|---|---|
 | A. registry（推荐长期） | 开发机 `docker build -t <registry>/xiaojing-backend:<tag> backend/ && docker push ...`；服务器 `docker pull` | 可追溯、可回滚到任意历史 tag；需要自建/购买 registry（国内网络下公网 registry 可能慢） |
