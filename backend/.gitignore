@@ -1,2 +1,5 @@
 # 本地运行产生的 SQLite 数据目录（真实数据不入库）
 data/
+
+# 部署 bundle 产物（npm run build；docker 构建产物不入仓）
+dist/

@@ -1,0 +1,35 @@
+# 小鲸同学后端生产 compose（票 12 部署形态：Docker 单容器 + SQLite 卷）。
+#
+# 本文件与镜像层都不携带任何密钥——真实值只在两处：
+#   1. 服务器上的 env 文件（默认 /opt/xiaojing-api/.env，XIAOJING_ENV_FILE 覆盖）；
+#   2. 镜像 tag（XIAOJING_IMAGE_TAG，升级/回滚 = 换 tag，见部署 runbook）。
+# 服务器部署与宝塔反代步骤：specs/guides/deploy-api-jingshanai.md
+# 本地容器级验证（构建镜像→起容器→健康检查→合约冒烟→SSE 透传→清理）：
+#   npm run verify:container
+
+name: xiaojing-backend
+
+services:
+  api:
+    # 服务器上镜像经 docker load / pull 注入同名 tag 后，compose 不会重建；
+    # 本地开发才会用到该 build 上下文。
+    build: .
+    image: xiaojing-backend:${XIAOJING_IMAGE_TAG:-local}
+    env_file:
+      # 占位：服务器上指向真实 env 文件路径；默认读取 compose 同目录 .env。
+      - ${XIAOJING_ENV_FILE:-.env}
+    ports:
+      # 默认只绑回环——公网流量一律经宝塔 nginx 反代（独立站点，见 runbook）。
+      # 临时需要公网直连时设 XIAOJING_BIND=:8787（验证完务必改回）。
+      - "${XIAOJING_BIND:-127.0.0.1:8787}:8787"
+    volumes:
+      # SQLite 账本与全部业务数据（备份对象，见 runbook 备份节）。
+      - xiaojing-data:/app/data
+    restart: unless-stopped
+    # macOS Docker Desktop 自带该别名；Linux 上补一条 host-gateway 映射，
+    # 本地验证脚本借此把 mock 上游指回宿主机。
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+volumes:
+  xiaojing-data:

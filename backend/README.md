@@ -20,6 +20,21 @@ npm run dev             # tsx watch，默认监听 0.0.0.0:8787
 
 首次启动自动执行迁移（`schema_migrations` 记录进度，幂等）。
 
+## 部署（票 12）
+
+Docker 单容器 + 宝塔 nginx 反代 `api.jingshanai.com`；完整上线手册（含 env
+注入清单、SSL、升级/回滚、备份、密钥抽查）见
+[specs/guides/deploy-api-jingshanai.md](../specs/guides/deploy-api-jingshanai.md)。
+
+- `Dockerfile`：多阶段构建（esbuild 单文件 bundle，运行层无 node_modules、
+  非 root、HEALTHCHECK 打 `/healthz`）。密钥绝不入镜像层（`.dockerignore`
+  挡 `.env`/`data/`，并有容器侧抽查）。
+- `docker-compose.yml`：SQLite 数据卷 `xiaojing-data` 挂出、`env_file` 注入
+  环境变量、`restart: unless-stopped`、默认只绑 `127.0.0.1:8787`
+  （公网流量一律经反代）。
+- 本地容器级验证（构建→起容器→健康→合约冒烟→SSE 透传 mock→清理，占位
+  密钥不触公网）：`npm run verify:container`。
+
 ## 环境变量
 
 | 变量 | 必填 | 默认 | 说明 |
