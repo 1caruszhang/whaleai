@@ -53,6 +53,19 @@ describe('JWT issuance and verification', () => {
     );
     const late = await verifyAccessToken(SECRET, token);
     expect(late).toEqual({ ok: false, reason: 'expired' });
+    // 注入校验时钟（nowMs）：签发与校验同源时，即便真实时间已越过
+    // 「假时钟锚点 + TTL」也仍有效——固定假时钟的 HTTP 合约测试依赖这一点
+    // （回归：jose 默认按真实墙钟校验 exp，曾让票 08/05 用例在真实时间
+    // 越过锚点后整批 token_expired）。
+    const longTtl = await signAccessToken(
+      SECRET,
+      { accountId: 'acc-1', sessionId: 'ses-1', passwordVersion: 1 },
+      3600,
+      PAST,
+    );
+    expect((await verifyAccessToken(SECRET, longTtl, PAST + 3_000_000)).ok).toBe(true);
+    expect((await verifyAccessToken(SECRET, longTtl, PAST + 3_600_000)).ok).toBe(false);
+    expect((await verifyAdminToken(SECRET, await signAdminToken(SECRET, 3600, PAST), PAST + 3_600_000)).ok).toBe(false);
   });
 
   it('keeps admin and account audiences from crossing over', async () => {
