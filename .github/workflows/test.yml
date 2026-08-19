@@ -37,23 +37,22 @@ jobs:
         env:
           NODE_OPTIONS: --max-old-space-size=4096
 
+  # Linux-only automatic gate. The Windows rust leg bills at 2x minutes and
+  # only compiles (test execution lives here), so it moved to the manual
+  # `test-windows.yml` workflow — run it before producing a Windows candidate.
   rust:
-    strategy:
-      # Keep the sibling OS running so cargo test/clippy results stay visible
-      # when one side fails an early gate (e.g. fmt).
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest]
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 24
           cache: npm
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
       - run: npm ci --ignore-scripts
       - name: Linux system dependencies
-        if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
       - name: Prepare checked build resources
         shell: bash
@@ -65,11 +64,5 @@ jobs:
           touch src-tauri/resources/portable-git/.gitkeep
           npm run build:server
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
-      # The Windows test binary links WebView2 loader entry points a headless
-      # runner cannot resolve (STATUS_ENTRYPOINT_NOT_FOUND), so only compile
-      # the test targets there; test execution is covered by the Linux leg.
-      - run: cargo test --manifest-path src-tauri/Cargo.toml --no-run
-        if: runner.os == 'Windows'
       - run: cargo test --manifest-path src-tauri/Cargo.toml
-        if: runner.os == 'Linux'
       - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
