@@ -191,6 +191,19 @@ export default memo(function XiaojingPostPublishMonitoringPanel({ workspaceId, p
             来源 Operation {plan.sourceOperationId} · 每 {plan.intervalMinutes} 分钟 · 目标引擎 {plan.engineIds.join("、")}
           </p>
         )}
+        {plan?.status === "paused" && (
+          <div
+            role="alert"
+            aria-label="监测已暂停（余额不足）"
+            data-geo-monitor-paused
+            className="rounded-xl border border-[var(--geo-dash-coral,var(--accent))]/50 bg-[rgba(255,182,137,0.10)] p-3"
+          >
+            <p className="font-medium text-[var(--geo-dash-coral,var(--accent))]">已暂停（余额不足），充值后恢复</p>
+            <p className="mt-1 leading-5 text-[var(--geo-dash-text-mute,var(--ink-muted))]">
+              点数余额低于单次巡检价，监测已自动暂停且不再扣点；充值到账后下一轮巡检自动恢复，无需重新启用。
+            </p>
+          </div>
+        )}
         {interactive && editing && (
           <div className="space-y-3 rounded-xl border border-[var(--geo-dash-border,var(--line))] bg-[var(--geo-dash-bg-2,var(--paper-inset))] p-3">
             <p>冻结来源：发布执行 {publishExecutionId ?? "无可用执行"}</p>
@@ -284,7 +297,7 @@ export default memo(function XiaojingPostPublishMonitoringPanel({ workspaceId, p
                 )}
                 {unit.observedAt && <p className="mt-1 text-[var(--geo-dash-text-mute,var(--ink-muted))]">观察于 {new Date(unit.observedAt).toLocaleString()}</p>}
                 {unit.errorMessage && <p className="mt-1 text-[var(--geo-dash-danger,var(--danger))]">{unit.errorCode}：{unit.errorMessage}</p>}
-                {unit.status === "failed" && interactive && (
+                {unit.status === "failed" && interactive && plan.status !== "paused" && (
                   <button type="button" disabled={busy} onClick={() => void retry(unit)} className="mt-2 inline-flex items-center gap-1 rounded border border-[var(--geo-dash-border,var(--line))] px-2 py-1"><RotateCcw className="h-3 w-3" />仅重试此单元</button>
                 )}
               </article>

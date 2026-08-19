@@ -182,4 +182,18 @@ describe("XiaojingPostPublishMonitoringPanel", () => {
       within(panel).queryByRole("button", { name: "以明确新计划变更配置" }),
     ).not.toBeInTheDocument();
   });
+
+  // 票 14：余额不足 → 计划落 paused，面板横幅提示暂停原因与充值后自动
+  // 恢复；暂停期不提供单单元重试（服务端 active 门会拒绝）。
+  it("shows the paused-for-balance banner with recovery hint and hides unit retries", async () => {
+    const paused = { ...activePlan(), status: "paused", recoveryState: "paused" } as PostPublishMonitorPlanProjection;
+    mocks.latest.mockResolvedValue(paused);
+    render(<XiaojingPostPublishMonitoringPanel workspaceId="brand-14" />);
+
+    const panel = await screen.findByRole("region", { name: "发布后 GEO 监测" });
+    const banner = within(panel).getByRole("alert", { name: "监测已暂停（余额不足）" });
+    expect(banner).toHaveTextContent("已暂停（余额不足），充值后恢复");
+    expect(banner).toHaveTextContent(/充值到账后下一轮巡检自动恢复，无需重新启用/);
+    expect(within(panel).queryByRole("button", { name: "仅重试此单元" })).not.toBeInTheDocument();
+  });
 });

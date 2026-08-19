@@ -8,12 +8,12 @@
 
 ## Owner 与边界
 
-- 票 06（commercial-beta）起客户端不再管理 Provider 凭据：原设置页、八个凭据命令、CredMan 写入与 Sidecar 凭据注入均已移除，`deepseek_credentials.rs` 删除。票 08 闭环后确定性 PublishScheduler 的上传/下单全部经 Sidecar 网关 port（`publish-egress.ts` 分类三态，`/api/xiaojing/publish-scheduler/egress/*` 路由），`geo_provider_credentials.rs` 只剩发布后监测直连查单仍需要的超级媒介凭据读取与 HMAC-SHA256 签名 helper（Windows 既有 CredMan 凭据 + dev `.env` 兜底），监测切网关后整体移除。账号登录态（登录 token 存 OS 凭据库、7 天断网宽限、renderer 只拿无 token 投影）由 `src-tauri/src/account_auth.rs` 拥有；Sidecar admission 现在注入 `XIAOJING_GATEWAY_BASE_URL` + `XIAOJING_ACCOUNT_ACCESS_TOKEN`（网关流量消费在票 07 接线），旧 `XIAOJING_*` 凭据传输名在所有生成路径无条件清除。
+- 票 06（commercial-beta）起客户端不再管理 Provider 凭据：原设置页、八个凭据命令、CredMan 写入与 Sidecar 凭据注入均已移除，`deepseek_credentials.rs` 删除。票 08 闭环后确定性 PublishScheduler 的上传/下单、票 14 后发布后监测查单全部经 Sidecar 网关 port（`publish-egress.ts` 分类三态、`/api/xiaojing/publish-scheduler/egress/*` 与 `/api/xiaojing/post-publish-monitor/order-query` 路由，sn 均按 `distributionOrderSn(executionId, itemId)` 派生），`geo_provider_credentials.rs` 的直连超级媒介凭据读取与 HMAC-SHA256 签名 helper 已随之整体移除——该模块现只承载子进程环境清洗名单（`SIDECAR_ENV_NAMES` / `DEVELOPMENT_SOURCE_ENV_NAMES`）与 `account_auth` 复用的网关地址覆盖校验。账号登录态（登录 token 存 OS 凭据库、7 天断网宽限、renderer 只拿无 token 投影）由 `src-tauri/src/account_auth.rs` 拥有；Sidecar admission 现在注入 `XIAOJING_GATEWAY_BASE_URL` + `XIAOJING_ACCOUNT_ACCESS_TOKEN`（网关流量消费在票 07 接线），旧 `XIAOJING_*` 凭据传输名在所有生成路径无条件清除。
 - 凭据不是 `BrandWorkspace` 数据。品牌知识、产物、订单与观测仍显式绑定各自 workspace；能力复用不允许引入进程级 Active Project。
 - Rust 只在已确认的品牌 Session Sidecar 出生时通过一次性 `XIAOJING_*` 环境传输注入服务配置。Node `provider-runtime.ts` 在组合 `xiaojing-geo` MCP 时立即捕获并删除传输变量；Renderer、config、品牌数据库、Session transcript 与工具结果都拿不到明文。
 - Provider 端点覆盖走同一 admission 传输（`XIAOJING_ARK_PAYGO_BASE_URL`、`XIAOJING_DOUBAO_SEARCH_BASE_URL`、`XIAOJING_DEEPSEEK_OPENAI_BASE_URL`，主 Agent SDK 根为 `XIAOJING_DEEPSEEK_ANTHROPIC_BASE_URL`）：未注入时逐字节回落 `providerCapabilities.ts` 固定默认值，注入时只替换 host 根、路径与 wire shape 不变，业务层零感知。这些变量非密钥但同样在 Sidecar 出生时捕获删除；Rust 在所有生成路径无条件清除（含非品牌 Sidecar），release 构建不从环境注入端点——伪造父环境不能把带凭据的流量重定向到任意地址。
 - Node GEO 业务只能依赖 `provider-capabilities.ts` 的 `GeoTextCapability`、`GeoKeywordSearchCapability`、`GeoEmbeddingCapability`、`GeoObjectStorageCapability`、`GeoDistributionCapability`。业务步骤不得读取 `process.env`、Rust credential DTO 或通用 Provider DTO。
-- `GeoDistributionCapability` 当前只开放资源池读取；付费订单提交仍必须由后续 `PublishScheduler` 在用户确认后拥有，不能通过模型能力口绕过。
+- `GeoDistributionCapability` 开放资源池读取与网关订单面（下单/查单/催稿/取消/退款/补发，票 08 起仅网关模式）；订单提交只能由 `PublishScheduler`（用户确认后）与发布后监测查单（只读）经 Sidecar 网关路由触达，不能通过模型能力口绕过。
 
 ## 固定槽位与路由
 
