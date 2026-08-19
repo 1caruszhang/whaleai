@@ -6,7 +6,7 @@
  * `backend/tests/compliance-docs.test.ts` 对表校验兜底。
  */
 
-import agreementDoc from "../../../../docs/compliance/用户协议（2026年内测修订版）.md?raw";
+import agreementDoc from "../../../../docs/compliance/用户协议（2026年正式版）.md?raw";
 import pricingDoc from "../../../../docs/compliance/计费标准.md?raw";
 import privacyDoc from "../../../../docs/compliance/隐私政策.md?raw";
 
@@ -26,7 +26,7 @@ export interface ComplianceDoc {
 export const COMPLIANCE_DOCS: readonly ComplianceDoc[] = [
   {
     id: "user-agreement",
-    title: "用户协议（2026 年内测修订版）",
+    title: "用户协议（2026 年正式版）",
     content: agreementDoc,
   },
   { id: "privacy-policy", title: "隐私政策", content: privacyDoc },

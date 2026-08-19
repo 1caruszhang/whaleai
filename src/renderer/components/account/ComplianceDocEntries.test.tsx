@@ -66,16 +66,18 @@ describe("首登勾选处的合规文件链接（票 11）", () => {
     expect(screen.getByRole("button", { name: "《计费标准》" })).toBeDefined();
   });
 
-  it("点击《用户协议》打开全文查看器（含文末修订记录，全文可达）", async () => {
+  it("点击《用户协议》打开全文查看器（正式版定稿，全文可达）", async () => {
     renderLogin();
     fireEvent.click(screen.getByRole("button", { name: "《用户协议》" }));
     const viewer = await screen.findByRole("dialog", {
-      name: "用户协议（2026 年内测修订版）",
+      name: "用户协议（2026 年正式版）",
     });
-    // 文首：服务提供方主体；文末：修订记录附录 → 整份文档已渲染。
+    // 文首：服务提供方主体；文末：签署栏 → 整份文档已渲染。
     expect(viewer).toHaveTextContent("四川鲸杉人工智能科技有限公司");
-    expect(viewer).toHaveTextContent("修订记录");
-    expect(viewer).toHaveTextContent("决策票 13 修订项 9");
+    expect(viewer).toHaveTextContent("乙方（服务接受方）");
+    // 正式版不携带修订记录与草稿标注。
+    expect(viewer).not.toHaveTextContent("修订记录");
+    expect(viewer).not.toHaveTextContent("本条为修订");
   });
 
   it("点击《计费标准》打开全文，价目表首末行均在（与公示文件同源）", async () => {
@@ -103,13 +105,13 @@ describe("首登勾选处的合规文件链接（票 11）", () => {
     renderLogin();
     fireEvent.click(screen.getByRole("button", { name: "《用户协议》" }));
     await screen.findByRole("dialog", {
-      name: "用户协议（2026 年内测修订版）",
+      name: "用户协议（2026 年正式版）",
     });
     // 勾选框未被链接点击误触发：提交按钮仍禁用。
     expect(screen.getByRole("button", { name: "登 录" })).toBeDisabled();
     fireEvent.click(screen.getByRole("button", { name: "关闭" }));
     expect(
-      screen.queryByRole("dialog", { name: "用户协议（2026 年内测修订版）" }),
+      screen.queryByRole("dialog", { name: "用户协议（2026 年正式版）" }),
     ).toBeNull();
     expect(screen.getByRole("button", { name: "登 录" })).toBeDisabled();
   });
@@ -120,7 +122,7 @@ describe("设置页（个人信息）的合规文件入口（票 11）", () => {
     renderAccountPanel();
     expect(screen.getByText("合规文件")).toBeDefined();
     expect(
-      screen.getByRole("button", { name: /用户协议（2026 年内测修订版）/ }),
+      screen.getByRole("button", { name: /用户协议（2026 年正式版）/ }),
     ).toBeDefined();
     expect(screen.getByRole("button", { name: "隐私政策" })).toBeDefined();
     expect(screen.getByRole("button", { name: "计费标准" })).toBeDefined();
