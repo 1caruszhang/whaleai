@@ -20,4 +20,4 @@ if [ "$(uname -s)" = "Darwin" ]; then
 fi
 
 cargo check --manifest-path "$PROJECT_DIR/src-tauri/Cargo.toml"
-echo "小鲸同学开发环境已就绪；运行 npm run tauri:dev 启动应用。"
+echo "鲸杉geo开发环境已就绪；运行 npm run tauri:dev 启动应用。"

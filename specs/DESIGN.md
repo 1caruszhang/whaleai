@@ -53,4 +53,4 @@
 
 ## 文案与品牌
 
-面向用户统一使用“小鲸同学”，英文或代码内产品标识使用 `Xiaojing`/`xiaojing`。不展示内部端口、凭据路径、provider secret 或执行器实现细节。
+面向用户统一使用“鲸杉geo”，英文界面使用“Jingshan GEO”，代码内产品标识使用 `Xiaojing`/`xiaojing`。不展示内部端口、凭据路径、provider secret 或执行器实现细节。

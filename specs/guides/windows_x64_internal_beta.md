@@ -5,7 +5,7 @@
 ## 产品与数据边界
 
 - package、crate 与主程序名：xiaojing / xiaojing.exe
-- 产品名：小鲸同学
+- 产品名：鲸杉geo
 - identifier：com.xiaojing.geo
 - 内部 protocol：xiaojing
 - 数据根：%LOCALAPPDATA%\Xiaojing
@@ -200,7 +200,7 @@ CI 必须先把 PFX 导入 Cert:\CurrentUser\My，且不得打印命令参数或
 
 - **前置条件**：本机已完成 C1–C7（数据根内已有品牌、Session、GEO 产物、日志等商业化场景数据）；先退出应用并记录卸载前清单：
   `Get-ChildItem -Recurse -File "$env:LOCALAPPDATA\Xiaojing" | Measure-Object -Sum Length | Select-Object Count, Sum`。
-- **操作步骤**：1. 在 Windows 设置 → 应用卸载「小鲸同学」，确认卸载器没有数据删除入口；2. 复查上述清单命令对比文件数与总大小；3. 重装同一候选并启动。
+- **操作步骤**：1. 在 Windows 设置 → 应用卸载「鲸杉geo」，确认卸载器没有数据删除入口；2. 复查上述清单命令对比文件数与总大小；3. 重装同一候选并启动。
 - **预期**：卸载只移除程序文件与快捷方式；`%LOCALAPPDATA%\Xiaojing` 完整保留且文件数/总大小与卸载前一致；重装后原品牌、Session、GEO 产物、配置与附件全部可读；OS 凭据库中的登录 token 不受卸载影响，重装启动直达已登录工作台（若观察结果不同，如实记录）。
 - **证据要求**：卸载前后清单命令输出（截图或文本）、卸载完成截图、重装后原品牌数据截图、登录态截图。
 - **记录位**：`matrix.md` C8 行。
@@ -262,7 +262,7 @@ npm run test:windows-x64
 .\scripts\build-windows-x64.ps1 -Mode internal-unsigned
 ~~~
 
-产物为 `artifacts\windows-x64\internal-unsigned\Xiaojing_<版本>_x64_INTERNAL-UNSIGNED-setup.exe` 与 `candidate.json`。构建完成后把两者转入 `artifacts\windows-x64\acceptance\<YYYYMMDD>-<sha8>\`（见「证据归档」），再经内部受控渠道分发到验收实机。
+产物为 `artifacts\windows-x64\internal-unsigned\JingshanGEO_<版本>_x64_INTERNAL-UNSIGNED-setup.exe` 与 `candidate.json`。构建完成后把两者转入 `artifacts\windows-x64\acceptance\<YYYYMMDD>-<sha8>\`（见「证据归档」），再经内部受控渠道分发到验收实机。
 
 ### 第 2 步：内测环境就绪（依赖票 12 runbook 用户侧执行）
 

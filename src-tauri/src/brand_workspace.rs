@@ -1208,7 +1208,7 @@ fn retained_scope(
 pub(crate) fn production_store() -> Result<BrandWorkspaceStore, String> {
     crate::app_dirs::xiaojing_data_dir()
         .map(BrandWorkspaceStore::at)
-        .ok_or_else(|| "无法定位小鲸同学本地数据目录".to_string())
+        .ok_or_else(|| "无法定位鲸杉geo本地数据目录".to_string())
 }
 
 #[tauri::command]

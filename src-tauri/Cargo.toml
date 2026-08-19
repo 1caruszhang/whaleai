@@ -1,7 +1,7 @@
 [package]
 name = "xiaojing"
 version = "0.4.8"
-description = "小鲸同学 GEO 营销工作台"
+description = "鲸杉geo GEO 营销工作台"
 edition = "2021"
 # MSRV follows the repository-owned toolchain so clippy and release builds use
 # one standard-library surface. Windows paths that must replace an

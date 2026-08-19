@@ -1,6 +1,6 @@
 {
   "name": "@xiaojing/backend",
-  "description": "小鲸同学付费内测后端单体：账号 API + 计费网关 + /admin（Hono + SQLite）",
+  "description": "鲸杉geo付费内测后端单体：账号 API + 计费网关 + /admin（Hono + SQLite）",
   "type": "module",
   "private": true,
   "engines": {

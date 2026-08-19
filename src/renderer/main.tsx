@@ -87,7 +87,7 @@ function BootCommitMarker() {
 
 const App = React.lazy(() => import('./App'));
 
-// 小鲸同学只有一个主产品窗口；Theme runtime owns its renderer bridge.
+// 鲸杉geo只有一个主产品窗口；Theme runtime owns its renderer bridge.
 root.render(
   <AppErrorBoundary>
     <BootCommitMarker />

@@ -255,7 +255,7 @@ describe("Xiaojing product shell contract", () => {
     expect(input).not.toContain("modelOptions");
     expect(input).not.toContain("pluginOptions");
     expect(entry).toContain('lang="zh-CN"');
-    expect(entry).toContain("<title>小鲸同学</title>");
+    expect(entry).toContain("<title>鲸杉geo</title>");
     expect(entry).toContain('data-theme-id="xiaojing"');
     expect(entry).not.toContain(
       "localStorage.getItem('xiaojing:theme-bootstrap')",

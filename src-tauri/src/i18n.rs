@@ -149,74 +149,74 @@ fn persist_to_disk_in(dir: &std::path::Path, value: UiLanguage) -> Result<(), St
 
 pub fn t(key: &str, locale: SupportedLocale) -> &str {
     match (locale, key) {
-        (SupportedLocale::ZhCn, "notification.sessionCompleteTitle") => "Xiaojing - 任务完成",
+        (SupportedLocale::ZhCn, "notification.sessionCompleteTitle") => "鲸杉geo - 任务完成",
         (SupportedLocale::ZhCn, "notification.sessionCompleteBody") => "请您查看结果",
-        (SupportedLocale::ZhCn, "notification.sessionStoppedTitle") => "Xiaojing - 任务已停止",
+        (SupportedLocale::ZhCn, "notification.sessionStoppedTitle") => "鲸杉geo - 任务已停止",
         (SupportedLocale::ZhCn, "notification.sessionStoppedBody") => "请您查看当前结果",
-        (SupportedLocale::ZhCn, "notification.sessionErrorTitle") => "Xiaojing - 任务失败",
+        (SupportedLocale::ZhCn, "notification.sessionErrorTitle") => "鲸杉geo - 任务失败",
         (SupportedLocale::ZhCn, "notification.sessionErrorBody") => "请您查看错误详情",
         (SupportedLocale::ZhCn, "notification.geoAwaitingConfirmationTitle") => {
-            "小鲸同学 - 等待确认"
+            "鲸杉geo - 等待确认"
         }
         (SupportedLocale::ZhCn, "notification.geoAwaitingConfirmationBody") => {
             "一个 GEO 操作正在等待您的结构化确认。"
         }
         (SupportedLocale::ZhCn, "notification.geoOperationFailedTitle") => {
-            "小鲸同学 - GEO 操作失败"
+            "鲸杉geo - GEO 操作失败"
         }
         (SupportedLocale::ZhCn, "notification.geoOperationFailedBody") => {
             "一个 GEO 操作需要您查看失败状态。"
         }
-        (SupportedLocale::ZhCn, "notification.geoBatchCompletedTitle") => "小鲸同学 - 批次已完成",
+        (SupportedLocale::ZhCn, "notification.geoBatchCompletedTitle") => "鲸杉geo - 批次已完成",
         (SupportedLocale::ZhCn, "notification.geoBatchCompletedBody") => {
             "一批 GEO 内容已完成处理，可打开工作台查看。"
         }
-        (SupportedLocale::ZhCn, "notification.geoPublishFailedTitle") => "小鲸同学 - 发布失败",
+        (SupportedLocale::ZhCn, "notification.geoPublishFailedTitle") => "鲸杉geo - 发布失败",
         (SupportedLocale::ZhCn, "notification.geoPublishFailedBody") => {
             "一个确定性发布执行需要人工查看。"
         }
         (SupportedLocale::ZhCn, "notification.geoMonitoringCompletedTitle") => {
-            "小鲸同学 - 监测完成"
+            "鲸杉geo - 监测完成"
         }
         (SupportedLocale::ZhCn, "notification.geoMonitoringCompletedBody") => {
             "一项发布后监测已完成，可打开工作台查看证据。"
         }
-        (SupportedLocale::EnUs, "notification.sessionCompleteTitle") => "Xiaojing - Task complete",
+        (SupportedLocale::EnUs, "notification.sessionCompleteTitle") => "Jingshan GEO - Task complete",
         (SupportedLocale::EnUs, "notification.sessionCompleteBody") => "Please review the result",
-        (SupportedLocale::EnUs, "notification.sessionStoppedTitle") => "Xiaojing - Task stopped",
+        (SupportedLocale::EnUs, "notification.sessionStoppedTitle") => "Jingshan GEO - Task stopped",
         (SupportedLocale::EnUs, "notification.sessionStoppedBody") => {
             "Please review the current result"
         }
-        (SupportedLocale::EnUs, "notification.sessionErrorTitle") => "Xiaojing - Task failed",
+        (SupportedLocale::EnUs, "notification.sessionErrorTitle") => "Jingshan GEO - Task failed",
         (SupportedLocale::EnUs, "notification.sessionErrorBody") => {
             "Please review the error details"
         }
         (SupportedLocale::EnUs, "notification.geoAwaitingConfirmationTitle") => {
-            "Xiaojing - Confirmation needed"
+            "Jingshan GEO - Confirmation needed"
         }
         (SupportedLocale::EnUs, "notification.geoAwaitingConfirmationBody") => {
             "A GEO operation is waiting for structured confirmation."
         }
         (SupportedLocale::EnUs, "notification.geoOperationFailedTitle") => {
-            "Xiaojing - GEO operation failed"
+            "Jingshan GEO - GEO operation failed"
         }
         (SupportedLocale::EnUs, "notification.geoOperationFailedBody") => {
             "A GEO operation needs you to review its failure state."
         }
         (SupportedLocale::EnUs, "notification.geoBatchCompletedTitle") => {
-            "Xiaojing - Batch completed"
+            "Jingshan GEO - Batch completed"
         }
         (SupportedLocale::EnUs, "notification.geoBatchCompletedBody") => {
             "A GEO content batch finished. Open the workbench to review it."
         }
         (SupportedLocale::EnUs, "notification.geoPublishFailedTitle") => {
-            "Xiaojing - Publishing failed"
+            "Jingshan GEO - Publishing failed"
         }
         (SupportedLocale::EnUs, "notification.geoPublishFailedBody") => {
             "A deterministic publishing execution needs manual review."
         }
         (SupportedLocale::EnUs, "notification.geoMonitoringCompletedTitle") => {
-            "Xiaojing - Monitoring completed"
+            "Jingshan GEO - Monitoring completed"
         }
         (SupportedLocale::EnUs, "notification.geoMonitoringCompletedBody") => {
             "A post-publish monitoring plan finished. Open the workbench for evidence."
@@ -325,7 +325,7 @@ mod tests {
     fn translates_native_session_completion_notifications() {
         assert_eq!(
             t("notification.sessionCompleteTitle", SupportedLocale::ZhCn),
-            "Xiaojing - 任务完成"
+            "鲸杉geo - 任务完成"
         );
         assert_eq!(
             t("notification.sessionErrorBody", SupportedLocale::EnUs),

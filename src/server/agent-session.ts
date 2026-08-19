@@ -367,7 +367,7 @@ async function runTurn(
       systemPrompt: buildSystemPrompt(),
       canUseTool: async (toolName, input, options) => {
         if (!isXiaojingMainAgentTool(toolName)) {
-          return { behavior: 'deny', message: '小鲸同学只能调用已登记的 GEO 能力。' };
+          return { behavior: 'deny', message: '鲸杉geo只能调用已登记的 GEO 能力。' };
         }
         if (toolName === 'AskUserQuestion') {
           return askUserQuestion(input as Record<string, unknown>, options.signal);

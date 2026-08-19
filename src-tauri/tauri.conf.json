@@ -1,6 +1,6 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
-  "productName": "小鲸同学",
+  "productName": "鲸杉geo",
   "version": "0.4.8",
   "identifier": "com.xiaojing.geo",
   "build": {

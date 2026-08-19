@@ -1,6 +1,6 @@
 # api.jingshanai.com 部署上线 Runbook（票 12）
 
-小鲸同学付费内测后端（`backend/`，Hono + SQLite 单 monolith）的生产部署手册：
+鲸杉geo付费内测后端（`backend/`，Hono + SQLite 单 monolith）的生产部署手册：
 成都 ECS 上 Docker 单容器 + 宝塔 nginx 反代 `api.jingshanai.com` + SSL。本文可照抄执行，
 命令默认在**服务器**上运行（另有标注的除外）；回滚 = 换镜像 tag。
 
@@ -202,7 +202,7 @@ XIAOJING_IMAGE_TAG=<tag> docker compose up -d   # 升级/回滚统一入口（�
 SSL 证书路径以宝塔申请成功后自动填写的为准，下方 `ssl_certificate` 两行用面板生成的路径）：
 
 ```nginx
-# api.jingshanai.com → 小鲸同学后端容器（票 12）。独立站点文件，不影响其他站点。
+# api.jingshanai.com → 鲸杉geo后端容器（票 12）。独立站点文件，不影响其他站点。
 server {
     listen 80;
     listen 443 ssl http2;

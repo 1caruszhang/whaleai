@@ -109,7 +109,7 @@ export function validateIdentityContract(manifest, packageJson, cargoText, tauri
     package: 'xiaojing',
     crate: 'xiaojing',
     binary: 'xiaojing.exe',
-    productName: '小鲸同学',
+    productName: '鲸杉geo',
     identifier: 'com.xiaojing.geo',
     protocol: 'xiaojing',
     dataRoot: '%LOCALAPPDATA%\\Xiaojing',

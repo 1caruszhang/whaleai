@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1
-# 小鲸同学后端镜像（票 12 部署形态）：多阶段构建，运行层无 node_modules、
+# 鲸杉geo后端镜像（票 12 部署形态）：多阶段构建，运行层无 node_modules、
 # 非 root、带 HEALTHCHECK。密钥只经运行时环境变量注入——本文件与镜像层
 # 永远不出现任何真实值（红线，见 specs/guides/deploy-api-jingshanai.md）。
 

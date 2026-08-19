@@ -1,6 +1,6 @@
 {
   "name": "xiaojing",
-  "description": "小鲸同学 GEO 营销工作台",
+  "description": "鲸杉geo GEO 营销工作台",
   "type": "module",
   "version": "0.4.8",
   "packageManager": "npm@11.13.0",

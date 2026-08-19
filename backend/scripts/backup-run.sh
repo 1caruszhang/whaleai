@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 小鲸同学生产备份执行器（票 15）：由 deploy-ecs.sh backup-install 安装到
+# 鲸杉geo生产备份执行器（票 15）：由 deploy-ecs.sh backup-install 安装到
 # /opt/xiaojing-api/backup-run.sh，cron 与 backup-run 子命令共用同一入口。
 #
 # 机制：借当前 api 容器自己的镜像（node:24 基础层，已在服务器上，无需额外

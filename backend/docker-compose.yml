@@ -1,4 +1,4 @@
-# 小鲸同学后端生产 compose（票 12 部署形态：Docker 单容器 + SQLite 卷）。
+# 鲸杉geo后端生产 compose（票 12 部署形态：Docker 单容器 + SQLite 卷）。
 #
 # 本文件与镜像层都不携带任何密钥——真实值只在两处：
 #   1. 服务器上的 env 文件（默认 /opt/xiaojing-api/.env，XIAOJING_ENV_FILE 覆盖）；

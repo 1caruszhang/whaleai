@@ -1,4 +1,4 @@
-# 小鲸同学后端单体（付费内测）
+# 鲸杉geo后端单体（付费内测）
 
 Hono / TypeScript 单 monolith + SQLite：账号 API、计费核心（点数账本 + permit，
 票 03）、网关主 Agent 通道与对话隐藏额度（票 04）、其余 Provider 代理与签名

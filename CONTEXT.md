@@ -1,4 +1,4 @@
-# Xiaojing 小鲸同学
+# Jingshan GEO 鲸杉geo
 
 桌面 GEO 营销工作台。品牌优先：一切 GEO 工作发生在一个 BrandWorkspace 边界内，主聊天是唯一 Agent 入口。
 

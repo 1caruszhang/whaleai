@@ -18,18 +18,18 @@ describe('Xiaojing desktop identity', () => {
 
     expect(packageJson).toMatchObject({
       name: 'xiaojing',
-      description: '小鲸同学 GEO 营销工作台',
+      description: '鲸杉geo GEO 营销工作台',
     });
     expect(tauriConfig).toMatchObject({
-      productName: '小鲸同学',
+      productName: '鲸杉geo',
       identifier: 'com.xiaojing.geo',
     });
     expect(tauriConfig.app.security.assetProtocol.scope).toEqual(['$LOCALDATA/Xiaojing/**']);
     expect(tauriConfig.app.security.csp).toContain('xiaojing:');
     expect(tauriConfig.app.security.csp).toContain('http://xiaojing.localhost');
     expect(rustShell).toContain('.register_asynchronous_uri_scheme_protocol("xiaojing"');
-    expect(rustShell).toContain('.title("小鲸同学")');
-    expect(html).toContain('<title>小鲸同学</title>');
+    expect(rustShell).toContain('.title("鲸杉geo")');
+    expect(html).toContain('<title>鲸杉geo</title>');
   });
 
   it('keeps the native config owner on the new local-data root', () => {

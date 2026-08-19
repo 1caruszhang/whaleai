@@ -97,7 +97,7 @@ function loginPageHtml(errorMessage?: string): string {
     '运营登录',
     `<main>
   <div class="card" style="max-width:420px;margin:60px auto">
-    <h1>小鲸同学 · 运营台</h1>
+    <h1>鲸杉geo · 运营台</h1>
     ${errorMessage ? `<p class="error">${esc(errorMessage)}</p>` : ''}
     <form method="post" action="/admin/session">
       <label for="password">运营密码</label>
@@ -124,7 +124,7 @@ function errorPageHtml(message: string, backHref: string): string {
 
 function headerHtml(): string {
   return `<header class="top">
-  <h1>小鲸同学 · 运营台</h1>
+  <h1>鲸杉geo · 运营台</h1>
   <form class="inline" method="post" action="/admin/logout">
     <button class="secondary" type="submit">退出登录</button>
   </form>

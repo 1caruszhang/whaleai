@@ -210,13 +210,13 @@ Assert-ArtifactSignature -Path $installer -MustBeSigned ($Mode -eq "production-s
 New-Item -ItemType Directory -Path $ArtifactRoot -Force | Out-Null
 $version = (Get-Content -LiteralPath (Join-Path $ProjectDir "package.json") -Raw -Encoding UTF8 | ConvertFrom-Json).version
 $label = if ($Mode -eq "production-signed") { "PRODUCTION-SIGNED" } else { "INTERNAL-UNSIGNED" }
-$candidateName = "Xiaojing_${version}_x64_${label}-setup.exe"
+$candidateName = "JingshanGEO_${version}_x64_${label}-setup.exe"
 $candidatePath = Join-Path $ArtifactRoot $candidateName
 Copy-Item -LiteralPath $installer -Destination $candidatePath -Force
 
 $candidate = [ordered]@{
     schemaVersion = 1
-    productName = "小鲸同学"
+    productName = "鲸杉geo"
     identifier = "com.xiaojing.geo"
     targetTriple = $TargetTriple
     mode = $Mode

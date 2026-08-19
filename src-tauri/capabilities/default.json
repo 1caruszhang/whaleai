@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "小鲸同学桌面壳最小权限",
+  "description": "鲸杉geo桌面壳最小权限",
   "windows": ["main"],
   "permissions": [
     "core:default",

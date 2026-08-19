@@ -39,7 +39,7 @@ const XIAOJING_THEME: ResolvedTheme = {
   themeId: 'xiaojing',
   key: 'xiaojing-dark',
   hero: {
-    productName: '小鲸同学',
+    productName: '鲸杉geo',
     slogans: {
       'zh-CN': '让品牌成为 AI 的答案',
       'en-US': 'Make your brand the AI answer',

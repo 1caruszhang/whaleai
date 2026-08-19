@@ -232,7 +232,7 @@ pub fn run() {
 
             let builder = WebviewWindowBuilder::new(app, "main", WebviewUrl::default())
                 .scroll_bar_style(crate::webview_policy::scroll_bar_style())
-                .title("小鲸同学")
+                .title("鲸杉geo")
                 .inner_size(1200.0, 800.0)
                 .min_inner_size(800.0, 600.0)
                 .center()

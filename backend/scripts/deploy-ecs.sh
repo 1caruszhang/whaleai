@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 小鲸同学后端 ECS 部署助手（票 12 生产层，自动化 runbook §2-§3 + §5-§6 的可脚本部分）。
+# 鲸杉geo后端 ECS 部署助手（票 12 生产层，自动化 runbook §2-§3 + §5-§6 的可脚本部分）。
 # 人工步骤（域名 DNS、宝塔建站与 SSL、资金池预存）见 specs/guides/deploy-api-jingshanai.md §4/§7。
 #
 # 用法（在仓库检出目录执行）：

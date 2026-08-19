@@ -1,5 +1,5 @@
 #!/bin/bash
-# Stage the Xiaojing Session Sidecar runtime for the current Unix host.
+# Stage the Jingshan GEO Session Sidecar runtime for the current Unix host.
 
 set -euo pipefail
 

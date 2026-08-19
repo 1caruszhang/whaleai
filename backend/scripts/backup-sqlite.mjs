@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * 小鲸同学生产 SQLite 备份（票 15）：用 node:sqlite 的 VACUUM INTO 做
+ * 鲸杉geo生产 SQLite 备份（票 15）：用 node:sqlite 的 VACUUM INTO 做
  * 在线热备——对源库取一致性快照导出为独立文件，不停机、不直接拷贝
  * WAL 中间态（cp 卷文件可能截到写中间态，见 runbook §5）。
  *

@@ -12,7 +12,7 @@ export default function XiaojingWelcome() {
             <img src={xiaojingLogo} alt="" className="h-14 w-14 object-contain" />
           </div>
           <div>
-            <p className="text-sm font-semibold tracking-[0.18em] text-[var(--accent)]">小鲸同学</p>
+            <p className="text-sm font-semibold tracking-[0.18em] text-[var(--accent)]">鲸杉geo</p>
             <h1 className="mt-1 text-3xl font-semibold">从一个真实品牌开始 GEO 工作</h1>
           </div>
         </div>

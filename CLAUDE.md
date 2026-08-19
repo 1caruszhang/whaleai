@@ -1,6 +1,6 @@
-# Xiaojing — Desktop GEO Workbench
+# Jingshan GEO — Desktop GEO Workbench
 
-小鲸同学（Xiaojing）是基于 Tauri v2 与 Claude Agent SDK 的桌面 GEO 营销工作台。使用 Conventional Commits；不得提交密钥、令牌或用户隐私数据。
+鲸杉geo（Jingshan GEO）是基于 Tauri v2 与 Claude Agent SDK 的桌面 GEO 营销工作台。使用 Conventional Commits；不得提交密钥、令牌或用户隐私数据。
 
 ## 权威来源
 
