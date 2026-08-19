@@ -18,6 +18,7 @@ import {
   getXiaojingGeoBillingPermitChannel,
   getXiaojingGeoProviderCapabilities,
 } from '../geo/provider-runtime';
+import { PublishEgressService } from '../geo/publish-egress';
 import { createPublishSchedulerPort } from '../geo/publish-scheduler';
 import { jsonResponse } from '../utils/http';
 import {
@@ -29,6 +30,24 @@ import {
 
 /** 网关查单契约：单次最多 20 个 sn。 */
 const ORDER_QUERY_BATCH = 20;
+
+/** 发布 egress HTML 上限：Rust 侧批准正文已限 256KB + 渲染开销。 */
+const PUBLISH_EGRESS_MAX_HTML_BYTES = 320 * 1024;
+
+/** 发布执行器 egress 公共载荷校验（身份门之后的第一道防线）。 */
+function parsePublishEgressIdentity(
+  payload: Record<string, unknown>,
+): { executionId: string; itemId: string } | { error: string } {
+  const executionId = payload.executionId;
+  const itemId = payload.itemId;
+  if (typeof executionId !== "string" || !executionId) {
+    return { error: "publish_execution_id_invalid" };
+  }
+  if (typeof itemId !== "string" || !itemId) {
+    return { error: "publish_item_id_invalid" };
+  }
+  return { executionId, itemId };
+}
 
 export async function handleXiaojingEffectsRoute(
   pathname: string,
@@ -223,6 +242,136 @@ export async function handleXiaojingEffectsRoute(
       return jsonResponse(
         { success: false, error: message },
         message.includes("identity_mismatch") ? 403 : 400,
+      );
+    }
+  }
+
+  // 发布执行器 Provider egress（票 08 闭环）：只有 Rust 的确定性调度器会
+  // 调这两个 localhost 控制面端点（同 post-publish-monitor 的 worker 路由
+  // 模式）。上传/下单经 typed port 走网关（重签与计费在服务器侧）；下单
+  // 幂等 sn 由本路由按 distributionOrderSn(executionId, itemId) 派生，
+  // Rust 不传 sn。egress 结果是分类值（success/safe-retryable/
+  // non-retryable/unknown），控制面本身始终 200。
+  if (
+    pathname === "/api/xiaojing/publish-scheduler/egress/upload" &&
+    request.method === "POST"
+  ) {
+    try {
+      const payload = (await request.json()) as {
+        workspaceId: string;
+        sessionId: string;
+        executionId: string;
+        itemId: string;
+        objectKey: string;
+        html: string;
+      };
+      const runtimeSessionId = getRuntimeSessionIdForRequest();
+      const workspaceId = basename(resolve(workspacePath));
+      if (
+        payload.workspaceId !== workspaceId ||
+        payload.sessionId !== runtimeSessionId
+      ) {
+        return jsonResponse(
+          { success: false, error: "publish_scheduler_identity_mismatch" },
+          403,
+        );
+      }
+      const identity = parsePublishEgressIdentity(payload);
+      if ("error" in identity) {
+        return jsonResponse({ success: false, error: identity.error }, 400);
+      }
+      if (
+        typeof payload.objectKey !== "string" ||
+        !payload.objectKey ||
+        typeof payload.html !== "string"
+      ) {
+        return jsonResponse(
+          { success: false, error: "publish_egress_upload_payload_invalid" },
+          400,
+        );
+      }
+      if (payload.html.length > PUBLISH_EGRESS_MAX_HTML_BYTES) {
+        return jsonResponse(
+          { success: false, error: "publish_egress_upload_body_too_large" },
+          413,
+        );
+      }
+      const result = await new PublishEgressService(
+        getXiaojingGeoProviderCapabilities(),
+      ).upload({
+        executionId: identity.executionId,
+        itemId: identity.itemId,
+        objectKey: payload.objectKey,
+        html: payload.html,
+      });
+      return jsonResponse({ success: true, result });
+    } catch {
+      return jsonResponse(
+        { success: false, error: "publish_egress_upload_payload_invalid" },
+        400,
+      );
+    }
+  }
+
+  if (
+    pathname === "/api/xiaojing/publish-scheduler/egress/order" &&
+    request.method === "POST"
+  ) {
+    try {
+      const payload = (await request.json()) as {
+        workspaceId: string;
+        sessionId: string;
+        executionId: string;
+        itemId: string;
+        kind: string;
+        resourceId: number;
+        title: string;
+        contentUrl: string;
+      };
+      const runtimeSessionId = getRuntimeSessionIdForRequest();
+      const workspaceId = basename(resolve(workspacePath));
+      if (
+        payload.workspaceId !== workspaceId ||
+        payload.sessionId !== runtimeSessionId
+      ) {
+        return jsonResponse(
+          { success: false, error: "publish_scheduler_identity_mismatch" },
+          403,
+        );
+      }
+      const identity = parsePublishEgressIdentity(payload);
+      if ("error" in identity) {
+        return jsonResponse({ success: false, error: identity.error }, 400);
+      }
+      if (
+        (payload.kind !== "media" && payload.kind !== "we-media") ||
+        !Number.isInteger(payload.resourceId) ||
+        payload.resourceId < 1 ||
+        typeof payload.title !== "string" ||
+        !payload.title ||
+        typeof payload.contentUrl !== "string" ||
+        !payload.contentUrl
+      ) {
+        return jsonResponse(
+          { success: false, error: "publish_egress_order_payload_invalid" },
+          400,
+        );
+      }
+      const result = await new PublishEgressService(
+        getXiaojingGeoProviderCapabilities(),
+      ).placeOrder({
+        executionId: identity.executionId,
+        itemId: identity.itemId,
+        kind: payload.kind,
+        resourceId: payload.resourceId,
+        title: payload.title,
+        contentUrl: payload.contentUrl,
+      });
+      return jsonResponse({ success: true, result });
+    } catch {
+      return jsonResponse(
+        { success: false, error: "publish_egress_order_payload_invalid" },
+        400,
       );
     }
   }

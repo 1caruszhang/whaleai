@@ -567,6 +567,15 @@ pub(crate) fn inject_into_sidecar(command: &mut std::process::Command) -> Result
     Ok(())
 }
 
+/// 发布执行器的网关 egress 身份（票 08 闭环）：账号会话在位（OS 凭据库
+/// 有 token，可注入网关模式 Sidecar）时返回非密钥的网关基地址，供
+/// `PublishScheduler` 冻结网关传输快照与指纹；未登录返回 None。绝不
+/// 返回 token 本体。
+pub(crate) fn publish_egress_gateway_base_url() -> Option<String> {
+    let has_session = platform::read().map(|secret| secret.is_some()).ok()?;
+    has_session.then(gateway_base_url)
+}
+
 // ---------------------------------------------------------------------------
 // Tauri commands（返回值一律是无 token 投影）
 // ---------------------------------------------------------------------------

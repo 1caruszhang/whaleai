@@ -167,6 +167,11 @@ pub enum SidecarOwner {
     BackgroundCompletion(String),
     /// Hidden GEO monitoring pass owned by BrandWorkspace.
     GeoMonitor(String),
+    /// Deterministic publish executor egress lease owned by the Rust
+    /// `PublishScheduler` (ticket 08 gateway port). String is the publish
+    /// execution ID; mirrors `GeoMonitor` — a hidden scheduler attaching to the
+    /// execution's source Session Sidecar to reach the gateway provider ports.
+    PublishExecutor(String),
 }
 
 /// Explicit three-state lifecycle for a SessionSidecar.

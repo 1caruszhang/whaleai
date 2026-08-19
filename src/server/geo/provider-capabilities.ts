@@ -313,26 +313,101 @@ export function sanitizeGeoProviderError(
     .replace(
       /(api[_-]?key|access[_-]?key|secret|signature)(\s*[=:]\s*)[^\s,;&]+/gi,
       "$1$2[REDACTED]",
+    )
+  const sanitized = message.slice(0, 500);
+  // 脱敏不得洗掉机器可读字段：类型化错误按原类重建，egress 分类层才能
+  // 依据 status/errorCode 映射三态。
+  if (error instanceof GeoUpstreamHttpError) {
+    return new GeoUpstreamHttpError(
+      error.slot,
+      error.status,
+      sanitized,
+      error.errorCode,
     );
-  return new Error(message.slice(0, 500));
+  }
+  if (error instanceof GeoCapabilityUnavailableError) {
+    return new GeoCapabilityUnavailableError(sanitized);
+  }
+  return new Error(sanitized);
+}
+
+/**
+ * 机器可读的上游/网关 HTTP 失败（票 08 发布 egress 分类用）：保留既有
+ * 错误文案（调用方只看 message 的行为不变），额外携带 HTTP 状态码与
+ * 网关业务错误码，供 egress 层把结果映射回 Unknown/SafeRetryable/
+ * NonRetryable 三态（如 402 insufficient_balance → NonRetryable）。
+ */
+export class GeoUpstreamHttpError extends Error {
+  constructor(
+    readonly slot: GeoProviderCapabilitySlot,
+    readonly status: number,
+    message: string,
+    readonly errorCode?: string,
+  ) {
+    super(message);
+    this.name = "GeoUpstreamHttpError";
+  }
+}
+
+/** 能力未配置/未进入网关模式：请求未发出，属确定性拒绝（非重试族）。 */
+export class GeoCapabilityUnavailableError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "GeoCapabilityUnavailableError";
+  }
 }
 
 function required(
   value: string | undefined,
   slot: GeoProviderCapabilitySlot,
 ): string {
-  if (!value) throw new Error(`${slot} 能力尚未配置`);
+  if (!value) throw new GeoCapabilityUnavailableError(`${slot} 能力尚未配置`);
   return value;
 }
 
 function safeUpstreamFailure(
   slot: GeoProviderCapabilitySlot,
   status: number,
-): Error {
-  if (status === 429) return new Error(`${slot} 服务限流（HTTP 429）`);
+): GeoUpstreamHttpError {
+  if (status === 429)
+    return new GeoUpstreamHttpError(slot, status, `${slot} 服务限流（HTTP 429）`);
   if (status === 401 || status === 403)
-    return new Error(`${slot} 凭据无效或无权访问`);
-  return new Error(`${slot} 上游请求失败（HTTP ${status}）`);
+    return new GeoUpstreamHttpError(slot, status, `${slot} 凭据无效或无权访问`);
+  return new GeoUpstreamHttpError(
+    slot,
+    status,
+    `${slot} 上游请求失败（HTTP ${status}）`,
+  );
+}
+
+/**
+ * 网关返回非 2xx 时读取网关错误信封（`{error, message, …}`，见后端
+ * AppError 序列化）：文案用网关的（如 402 的「点数不足……请充值」），
+ * `error` 码随错误对象透出。网关信封不可读时回落既有固定文案。
+ */
+async function gatewayHttpFailure(
+  slot: GeoProviderCapabilitySlot,
+  response: Response,
+  fallback: () => GeoUpstreamHttpError,
+): Promise<GeoUpstreamHttpError> {
+  const fallbackError = fallback();
+  try {
+    const body = (await response.clone().json()) as {
+      error?: string;
+      message?: string;
+    };
+    if (typeof body.message === "string" && body.message.length > 0) {
+      return new GeoUpstreamHttpError(
+        slot,
+        response.status,
+        `${slot} ${body.message}`,
+        typeof body.error === "string" ? body.error : undefined,
+      );
+    }
+  } catch {
+    // 网关错误体不可解析：沿用固定文案。
+  }
+  return fallbackError;
 }
 
 async function openAiChat(
@@ -498,7 +573,7 @@ export function createGeoProviderCapabilities(
     body: Record<string, unknown>,
   ): Promise<void> => {
     if (!gatewayMode) {
-      throw new Error(
+      throw new GeoCapabilityUnavailableError(
         "distribution 订单操作需要网关模式（账号 admission 注入网关地址与账号 token）",
       );
     }
@@ -812,8 +887,11 @@ export function createGeoProviderCapabilities(
                 body: html,
               },
             );
-            if (!response.ok)
-              throw safeUpstreamFailure("object-storage", response.status);
+            if (!response.ok) {
+              throw await gatewayHttpFailure("object-storage", response, () =>
+                safeUpstreamFailure("object-storage", response.status),
+              );
+            }
             const payload = (await response.json()) as { url?: string };
             if (typeof payload.url !== "string" || payload.url.length === 0) {
               throw new Error("object-storage 返回了无效响应");
@@ -969,7 +1047,7 @@ export function createGeoProviderCapabilities(
       async placeOrder(kind, order) {
         try {
           if (!gatewayMode) {
-            throw new Error(
+            throw new GeoCapabilityUnavailableError(
               "distribution 下单需要网关模式（账号 admission 注入网关地址与账号 token）",
             );
           }
@@ -1001,8 +1079,13 @@ export function createGeoProviderCapabilities(
               }),
             },
           );
-          if (!response.ok)
-            throw safeUpstreamFailure("distribution", response.status);
+          if (!response.ok) {
+            // 网关错误信封（AppError）携带语义码与文案（402 insufficient_
+            // balance 的「点数不足……请充值后再试」），随类型化错误透出。
+            throw await gatewayHttpFailure("distribution", response, () =>
+              safeUpstreamFailure("distribution", response.status),
+            );
+          }
           const payload = (await response.json()) as {
             order?: Partial<GeoDistributionPlacedOrder>;
           };
@@ -1032,7 +1115,7 @@ export function createGeoProviderCapabilities(
       async queryOrders(kind, sns) {
         try {
           if (!gatewayMode) {
-            throw new Error(
+            throw new GeoCapabilityUnavailableError(
               "distribution 查单需要网关模式（账号 admission 注入网关地址与账号 token）",
             );
           }

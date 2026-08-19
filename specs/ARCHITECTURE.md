@@ -47,7 +47,7 @@ Renderer 的普通 HTTP/SSE 控制面必须经 Rust。只有 `/refs/:id` 和 `/a
 | 聊天历史和 Session-private 工作 | Session runtime | Rust Session store + Session Sidecar |
 | 一次 GEO 动作 | GEO service | `GeoOperation` records in BrandWorkspace |
 | 工作区文件 | workspace path policy | Tauri workspace commands |
-| Provider 凭据（发布直连残留，票 08 切网关后移除） | admission policy | Rust credential owner |
+| Provider 凭据（监测直连残留，票 08 发布已切网关 port；监测切网关后移除） | admission policy | Rust credential owner |
 | 账号登录态与 token（票 06 起） | account admission policy | Rust account owner（OS 凭据库 + config 投影） |
 | Provider 全局并发 | provider capability policy | Rust FIFO limiter |
 | 定时发布 | publish policy | Rust `PublishScheduler` |
@@ -63,6 +63,7 @@ Renderer 的普通 HTTP/SSE 控制面必须经 Rust。只有 `/refs/:id` 和 `/a
 - `Tab`
 - `BackgroundCompletion`
 - `GeoMonitor`
+- `PublishExecutor`（票 08 起：Rust 确定性发布执行器借用执行来源 Session 的 Sidecar 走网关 egress port，同监测调度器的隐藏调度 attach 模式）
 
 全部 token 释放后才停止进程。每个 generation 有自己的 dispatch gate；manager 在锁内关闭准入和确认 generation，在锁外等待请求排空、停止进程和完成资源释放。崩溃恢复保留逻辑 owner，但旧 generation 的迟到结果不能提交新状态。
 

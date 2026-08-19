@@ -326,14 +326,12 @@ async fn query_supermedia_order(
             message: "冻结的平台订单编号缺失".to_string(),
             retryable: false,
         })?;
-    let credentials = crate::geo_provider_credentials::load_publish_provider_credentials()
+    let distribution = crate::geo_provider_credentials::load_monitoring_distribution_credential()
         .map_err(|_| MonitorProviderFailure {
             code: "distribution-credential-unavailable".to_string(),
             message: "超级媒介查询凭据不可用".to_string(),
             retryable: false,
-        })?;
-    let distribution = credentials
-        .distribution
+        })?
         .ok_or_else(|| MonitorProviderFailure {
             code: "distribution-unconfigured".to_string(),
             message: "超级媒介查询凭据尚未配置".to_string(),

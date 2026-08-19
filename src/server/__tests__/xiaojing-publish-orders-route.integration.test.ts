@@ -70,13 +70,13 @@ function execution(overrides: Partial<PublishExecutionProjection> = {}): Publish
     providerSnapshot: {
       objectStorage: {
         provider: 'aliyun-oss',
-        endpointFamily: 'oss-v1-put',
+        endpointFamily: 'gateway-oss-put',
         configured: true,
         configurationFingerprint: 'fp-oss',
       },
       distribution: {
         provider: '超级媒介',
-        endpointFamily: 'chaojimeijie-order-api',
+        endpointFamily: 'gateway-order-api',
         configured: true,
         configurationFingerprint: 'fp-dist',
       },

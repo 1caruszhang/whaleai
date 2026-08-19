@@ -13,6 +13,7 @@ Session metadata 固化 workspace path、标题、创建/更新时间和 SDK res
 - `Tab(tabId)`：挂载的聊天页。
 - `BackgroundCompletion(sessionId)`：关闭 Tab 后仍在完成的 turn。
 - `GeoMonitor(wakeId)`：已授权的 GEO 监测唤醒。
+- `PublishExecutor(executionId)`：票 08 起 Rust 确定性发布执行器借用执行来源 Session 的 Sidecar 走网关 egress port（隐藏调度 attach，同监测模式）。
 
 所有 owner 释放后才停止进程。pre-warm 创建可直接复用的真实 Session Sidecar；调用方必须服从 `ensure_session_sidecar` 锁内返回的 generation 和 `is_new`。
 
