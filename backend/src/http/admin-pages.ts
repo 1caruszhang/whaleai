@@ -431,7 +431,7 @@ export function createAdminPageRoutes(deps: BackendDeps, throttle: AdminLoginThr
   const hasValidSession = async (c: Context): Promise<boolean> => {
     const token = getCookie(c, ADMIN_SESSION_COOKIE);
     if (!token) return false;
-    return (await verifyAdminToken(config.authSecret, token)).ok;
+    return (await verifyAdminToken(config.authSecret, token, deps.now())).ok;
   };
 
   /** 页面会话门：无效/缺失即 303 回登录页（覆盖 GET 页面与全部表单 POST）。 */

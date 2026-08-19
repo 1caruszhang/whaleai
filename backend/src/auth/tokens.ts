@@ -38,9 +38,18 @@ async function verifyHmacJwt(
   secret: string,
   token: string,
   audience: string,
+  nowMs?: number,
 ): Promise<{ ok: true; payload: JWTPayload } | TokenVerifyFailure> {
   try {
-    const { payload } = await jwtVerify(token, secretKey(secret), { issuer: ISSUER, audience });
+    // nowMs 注入校验时钟（与签发同源）：测试固定假时钟时，jose 默认按真实
+    // 墙钟（new Date()）校验 exp，真实时间越过「假时钟锚点 + TTL」后用例会
+    // 整批爆红；生产调用方传 deps.now()（即 Date.now()），行为不变。jose v6
+    // 的选项名是 currentDate（v5 的 clockTimestamp 已不存在，传错名被静默忽略）。
+    const { payload } = await jwtVerify(token, secretKey(secret), {
+      issuer: ISSUER,
+      audience,
+      ...(nowMs !== undefined ? { currentDate: new Date(nowMs) } : {}),
+    });
     return { ok: true, payload };
   } catch (error) {
     if (error instanceof errors.JWTExpired) return { ok: false, reason: 'expired' };
@@ -65,8 +74,9 @@ export async function signAccessToken(
 export async function verifyAccessToken(
   secret: string,
   token: string,
+  nowMs?: number,
 ): Promise<TokenVerifySuccess<AccessTokenClaims> | TokenVerifyFailure> {
-  const verified = await verifyHmacJwt(secret, token, CLIENT_AUDIENCE);
+  const verified = await verifyHmacJwt(secret, token, CLIENT_AUDIENCE, nowMs);
   if (!verified.ok) return verified;
   const { sub, sid, pv } = verified.payload;
   if (typeof sub !== 'string' || typeof sid !== 'string' || typeof pv !== 'number') {
@@ -91,8 +101,9 @@ export async function signAdminToken(
 export async function verifyAdminToken(
   secret: string,
   token: string,
+  nowMs?: number,
 ): Promise<TokenVerifySuccess<{ role: 'admin' }> | TokenVerifyFailure> {
-  const verified = await verifyHmacJwt(secret, token, ADMIN_AUDIENCE);
+  const verified = await verifyHmacJwt(secret, token, ADMIN_AUDIENCE, nowMs);
   if (!verified.ok) return verified;
   if (verified.payload.role !== 'admin') return { ok: false, reason: 'invalid' };
   return { ok: true, claims: { role: 'admin' } };

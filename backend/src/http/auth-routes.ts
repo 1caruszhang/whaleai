@@ -26,7 +26,7 @@ export function requireAccountAuth(deps: BackendDeps) {
     const token = readBearerToken(c.req.header('Authorization'));
     if (!token) throw new AppError('invalid_token', '缺少 Bearer 凭证。', 401);
 
-    const verified = await verifyAccessToken(deps.config.authSecret, token);
+    const verified = await verifyAccessToken(deps.config.authSecret, token, deps.now());
     if (!verified.ok) {
       throw new AppError(
         verified.reason === 'expired' ? 'token_expired' : 'invalid_token',

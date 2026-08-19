@@ -34,6 +34,10 @@ Docker 单容器 + 宝塔 nginx 反代 `api.jingshanai.com`；完整上线手册
   （公网流量一律经反代）。
 - 本地容器级验证（构建→起容器→健康→合约冒烟→SSE 透传 mock→清理，占位
   密钥不触公网）：`npm run verify:container`。
+- 生产 SQLite 每日备份自动化（票 15）：`deploy-ecs.sh backup-install/run/list/uninstall`
+  子命令组（VACUUM INTO 在线热备、保留最近 14 份、cron 幂等安装），机制与
+  恢复手册见 runbook §5；本地全链路演练（造数据→备份→删卷回放→数据可读）：
+  `npm run verify:backup`。
 
 ## 环境变量
 
