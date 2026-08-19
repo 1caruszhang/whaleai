@@ -2,6 +2,7 @@ import { basename, resolve } from 'node:path';
 
 import type { GeoBaselineEngineId } from '../../shared/geo/baseline';
 import type { GeoDashboardEvidenceKind, GeoDashboardFilter } from '../../shared/geo/dashboard';
+import type { PublishOrderStatusEntry } from '../../shared/geo/publishScheduler';
 import { createGeoDashboardPort, GeoDashboardService } from '../geo/dashboard';
 import {
   checkPublishedPageAccess,
@@ -9,6 +10,10 @@ import {
   PostPublishInsufficientBalanceError,
   type PostPublishBaselineProbeInput,
 } from '../geo/post-publish-monitoring';
+import {
+  distributionOrderSn,
+  type GeoDistributionOrderStatus,
+} from '../geo/provider-capabilities';
 import {
   getXiaojingGeoBillingPermitChannel,
   getXiaojingGeoProviderCapabilities,
@@ -21,6 +26,9 @@ import {
   recordBaselineMilestones,
   type XiaojingRouteContext,
 } from './xiaojing-shared';
+
+/** 网关查单契约：单次最多 20 个 sn。 */
+const ORDER_QUERY_BATCH = 20;
 
 export async function handleXiaojingEffectsRoute(
   pathname: string,
@@ -138,6 +146,83 @@ export async function handleXiaojingEffectsRoute(
       return jsonResponse(
         { success: false, error: message },
         message.includes("conflict") ? 409 : 400,
+      );
+    }
+  }
+
+  // 订单状态投影（票 09）：renderer 只持展示投影，计费权威在网关——查单
+  // 本身即对账，网关据返回状态驱动结转/退点。sn 为票 08 的确定性幂等键
+  // （distributionOrderSn(executionId, itemId)），重试/重放观察同一订单。
+  if (
+    pathname === "/api/xiaojing/publish-scheduler/orders" &&
+    request.method === "POST"
+  ) {
+    try {
+      const payload = (await request.json()) as {
+        workspaceId: string;
+        sessionId: string;
+        executionId: string;
+      };
+      const runtimeSessionId = getRuntimeSessionIdForRequest();
+      const workspaceId = basename(resolve(workspacePath));
+      if (
+        payload.workspaceId !== workspaceId ||
+        payload.sessionId !== runtimeSessionId
+      ) {
+        return jsonResponse(
+          { success: false, error: "publish_scheduler_identity_mismatch" },
+          403,
+        );
+      }
+      if (typeof payload.executionId !== "string" || !payload.executionId) {
+        return jsonResponse(
+          { success: false, error: "publish_execution_id_invalid" },
+          400,
+        );
+      }
+      const execution = await createPublishSchedulerPort({
+        workspaceId,
+        sessionId: runtimeSessionId,
+      }).get(payload.executionId);
+      const distribution = getXiaojingGeoProviderCapabilities().distribution;
+      // 网关查单上限 20 个 sn：按渠道类别分组后分批查询。
+      const snsByKind = new Map<'media' | 'we-media', string[]>();
+      for (const item of execution.items) {
+        const group = snsByKind.get(item.channel.kind) ?? [];
+        group.push(distributionOrderSn(execution.id, item.id));
+        snsByKind.set(item.channel.kind, group);
+      }
+      const bySn = new Map<string, GeoDistributionOrderStatus>();
+      for (const [kind, sns] of snsByKind) {
+        for (let index = 0; index < sns.length; index += ORDER_QUERY_BATCH) {
+          const statuses = await distribution.queryOrders(
+            kind,
+            sns.slice(index, index + ORDER_QUERY_BATCH),
+          );
+          for (const status of statuses) {
+            if (status.sn) bySn.set(status.sn, status);
+          }
+        }
+      }
+      const orders: PublishOrderStatusEntry[] = execution.items.map((item) => {
+        const sn = distributionOrderSn(execution.id, item.id);
+        const matched = bySn.get(sn);
+        return {
+          itemId: item.id,
+          sn,
+          kind: item.channel.kind,
+          status: matched ? matched.status : null,
+          url: matched?.url ?? null,
+          screenshot: matched?.screenshot ?? null,
+          publishedAt: matched?.publishedAt ?? null,
+        };
+      });
+      return jsonResponse({ success: true, orders });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return jsonResponse(
+        { success: false, error: message },
+        message.includes("identity_mismatch") ? 403 : 400,
       );
     }
   }
