@@ -57,12 +57,20 @@ describe("备份自动化对表（票 15）", () => {
     expect(deployScript).toContain("scripts/backup-run.sh");
     expect(deployScript).toContain(`BACKUP_CRON_FILE=${CRON_FILE}`);
     expect(deployScript).toContain(`XIAOJING_BACKUP_CRON:-"${DEFAULT_CRON}"`);
+    // 5 字段形状 + 字符集校验（挡注入；不得用 `wc -w` 计数——BSD wc 输出带
+    // 前导空格，macOS 开发机上恒不等于 5）。
+    expect(deployScript).toMatch(
+      /grep -Eq '\^\[0-9A-Za-z\/\*,-\]\+\( \[0-9A-Za-z\/\*,-\]\+\)\{4\}\$'/,
+    );
     // 幂等口径：同名 cron 文件整覆写 + 属主/权限固定。
     expect(deployScript).toMatch(
       /printf '%s root %s\/backup-run\.sh >> %s\/backups\/backup\.log 2>&1\\n'/,
     );
     expect(deployScript).toContain('chown root:root "$cron_file"');
     expect(deployScript).toContain("systemctl enable --now crond");
+    // backups 目录属主对齐容器内 node 用户（uid 1000）：root 属主的 700 目录
+    // 在 Linux 上会让按镜像默认 USER node 运行的备份容器写不进。
+    expect(deployScript).toContain("chown 1000:1000 $SERVER_DIR/backups");
   });
 
   it("backup-uninstall 幂等卸载 cron，保留脚本与历史备份", () => {

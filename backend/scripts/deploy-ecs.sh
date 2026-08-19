@@ -454,14 +454,15 @@ cmd_env_check() {
 # （node:sqlite VACUUM INTO 在线热备，详见 runbook §5）；本组子命令只做
 # 脚本上传与 /etc/cron.d/xiaojing-backup 的安装/卸载，幂等可重复。
 BACKUP_CRON_FILE=/etc/cron.d/xiaojing-backup
-BACKUP_KEEP_DEFAULT=14
 
 cmd_backup_install() {
   [ $# -ge 1 ] || die "用法：backup-install <ssh目标>"
   local target=$1
   local cron_spec=${XIAOJING_BACKUP_CRON:-"30 4 * * *"}
-  # cron 5 字段形状预检（远端再整文件覆写，天然幂等）。
-  [ "$(printf '%s' "$cron_spec" | wc -w)" = 5 ] || die "XIAOJING_BACKUP_CRON 必须是 5 字段 cron 表达式（收到：$cron_spec）"
+  # cron 5 字段形状 + 字符集预检（顺带挡掉换行/引号注入；远端再整文件覆写，天然幂等）。
+  if ! printf '%s' "$cron_spec" | grep -Eq '^[0-9A-Za-z/*,-]+( [0-9A-Za-z/*,-]+){4}$'; then
+    die "XIAOJING_BACKUP_CRON 必须是 5 字段 cron 表达式（收到：$cron_spec）"
+  fi
 
   local backend
   backend=$(backend_dir)
@@ -470,7 +471,9 @@ cmd_backup_install() {
   [ -f "$wrapper" ] || die "缺少 $wrapper"
 
   log "上传备份脚本 → $target:$SERVER_DIR"
-  ssh_cmd "$target" "mkdir -p $SERVER_DIR/backups && chmod 700 $SERVER_DIR/backups"
+  # backups 目录属主对齐容器内 node 用户（uid 1000）：备份容器以镜像默认
+  # USER node 运行，root 属主的 700 目录在 Linux 上会写不进（VACUUM INTO 失败）。
+  ssh_cmd "$target" "mkdir -p $SERVER_DIR/backups && chown 1000:1000 $SERVER_DIR/backups && chmod 700 $SERVER_DIR/backups"
   # shellcheck disable=SC2086
   scp -o ServerAliveInterval=15 $SSH_OPTS_EXTRA "$script" "$wrapper" "$target:$SERVER_DIR/"
 
@@ -489,7 +492,7 @@ systemctl enable --now crond 2>/dev/null || systemctl enable --now cron 2>/dev/n
 echo "CRON_INSTALLED: $(cat "$cron_file")"
 REMOTE
 
-  log "backup-install 完成：每日「${cron_spec}」备份 → $SERVER_DIR/backups（保留最近 ${BACKUP_KEEP_DEFAULT} 份）"
+  log "backup-install 完成：每日「${cron_spec}」备份 → $SERVER_DIR/backups（默认保留最近 14 份，XIAOJING_BACKUP_KEEP 可调）"
   log "立即试跑一次：./backend/scripts/deploy-ecs.sh backup-run $target"
 }
 

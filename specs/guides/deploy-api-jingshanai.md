@@ -282,8 +282,9 @@ server {
   导出为独立单文件，避免直接 cp 卷文件截到 WAL 写中间态；WAL 中尚未
   checkpoint 的数据也进快照。
 - **导出**：`/opt/xiaojing-api/backups/xiaojing-<YYYYMMDD-HHMMSS>.sqlite`（北京
-  时间命名），权限 600；目录 700。备份容器只挂载数据卷、输出目录与脚本本体
-  （ro），不挂 `.env`、不接触任何密钥。
+  时间命名），权限 600；目录 700、属主对齐容器内 node 用户（uid 1000，与
+  数据卷 wal/shm 属主对称，备份容器按镜像默认 USER node 运行）。备份容器
+  只挂载数据卷、输出目录与脚本本体（ro），不挂 `.env`、不接触任何密钥。
 - **自校验**：每份备份落盘后立即 `PRAGMA integrity_check`，非 ok 即失败退出
   （cron 日志可见）。
 - **保留窗口**：默认保留最近 14 份（`XIAOJING_BACKUP_KEEP`），窗口外自动清理；
