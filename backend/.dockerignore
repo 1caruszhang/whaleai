@@ -1,0 +1,17 @@
+# 密钥与真实数据绝不进构建上下文/镜像层（票 12 红线）。
+# scripts/verify-container.mjs 会在容器侧再抽查一次（docker export 全量文件表）。
+.env
+.env.*
+data/
+dist/
+node_modules/
+tests/
+scripts/verify-container.mjs
+.git/
+.gitignore
+.dockerignore
+Dockerfile
+docker-compose.yml
+tsconfig.json
+vitest.config.ts
+*.md

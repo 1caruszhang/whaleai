@@ -9,6 +9,8 @@
   "scripts": {
     "dev": "tsx watch --env-file-if-exists=.env src/index.ts",
     "start": "node --env-file-if-exists=.env --import tsx/esm src/index.ts",
+    "build": "node scripts/bundle.mjs",
+    "verify:container": "node scripts/verify-container.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run"
   },
@@ -20,6 +22,7 @@
   },
   "devDependencies": {
     "@types/node": "^24.10.1",
+    "esbuild": "0.25.12",
     "tsx": "4.21.0",
     "typescript": "^5.9.3",
     "vitest": "^3.2.4"
