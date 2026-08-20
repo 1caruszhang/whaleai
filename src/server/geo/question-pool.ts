@@ -28,6 +28,7 @@ import {
 import { anySignal } from "../utils/cancellation";
 import { managementApi } from "../utils/management-api-client";
 import type { GeoBillingPermitPort } from "./billing-permit";
+import { embedWithDegradation } from "./embedding-fallback";
 import type {
   GeoEmbeddingCapability,
   GeoKeywordSearchCapability,
@@ -755,11 +756,17 @@ export class QuestionPoolService {
         "embedding",
         { texts: embeddingTexts, dimensions: this.embedding.dimensions },
         signal,
-        async () => ({
-          vectors: await this.embedding.embed(embeddingTexts, { signal }),
-        }),
+        async () =>
+          embedWithDegradation(this.embedding, embeddingTexts, {
+            signal,
+            logTag: "[question-pool]",
+          }),
       );
-      const vectors = (embeddingOutput as { vectors: number[][] }).vectors;
+      const { vectors, degraded: embeddingDegraded } = embeddingOutput as {
+        vectors: number[][];
+        /** 瞬时故障降级标记：随 checkpoint output 持久化，可追溯。 */
+        degraded?: boolean;
+      };
       if (!Array.isArray(vectors) || vectors.length !== embeddingTexts.length) {
         throw new Error("question_pool_embedding_invalid");
       }
@@ -777,7 +784,11 @@ export class QuestionPoolService {
             text: candidate.text,
             selected: candidate.recommended || score.priority === "high",
             recommended: candidate.recommended,
-            score,
+            // 降级标记复用既有 formula 字段（先例：user-added 占位分），
+            // 不改 DB schema；瞬时故障下分数由降级向量算出，须可追溯。
+            score: embeddingDegraded
+              ? { ...score, formula: `${score.formula}; degraded-embedding` }
+              : score,
             evidence: candidate.sourceKeywords.map((term) => ({
               kind: "keyword-search" as const,
               reference:

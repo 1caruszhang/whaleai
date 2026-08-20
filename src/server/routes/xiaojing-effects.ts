@@ -16,8 +16,8 @@ import {
   type GeoDistributionOrderStatus,
 } from '../geo/provider-capabilities';
 import {
-  getXiaojingGeoBillingPermitChannel,
-  getXiaojingGeoProviderCapabilities,
+  getXiaojingGeoBillingPermitChannelForRequest,
+  getXiaojingGeoProviderCapabilitiesForRequest,
 } from '../geo/provider-runtime';
 import { PublishEgressService } from '../geo/publish-egress';
 import { createPublishSchedulerPort } from '../geo/publish-scheduler';
@@ -26,6 +26,7 @@ import {
   getRuntimeSessionIdForRequest,
   getXiaojingGeoBaselineService,
   recordBaselineMilestones,
+  requestAccountAccessToken,
   type XiaojingRouteContext,
 } from './xiaojing-shared';
 
@@ -204,10 +205,26 @@ export async function handleXiaojingEffectsRoute(
         workspaceId,
         sessionId: runtimeSessionId,
       }).get(payload.executionId);
-      const distribution = getXiaojingGeoProviderCapabilities().distribution;
-      // 网关查单上限 20 个 sn：按渠道类别分组后分批查询。
+      const distribution = getXiaojingGeoProviderCapabilitiesForRequest(
+        requestAccountAccessToken(request),
+      ).distribution;
+      // 网关查单上限 20 个 sn：按渠道类别分组后分批查询。只查网关侧已存在
+      // 订单的 item——pending 排期项的 sn 尚不在网关 publish_orders 表，
+      // 查询会整批 404（order_not_found）。主判定为 externalOrderId 非 null
+      // （下单成功后由执行器写回）；status 已过提交节点（submitted /
+      // failed-nonretryable / reconciliation-required）为辅。failed-retryable
+      // 可能是上传阶段失败、订单未建，故不作为查单依据——宁可漏查一轮
+      // （投影 status=null），不可把不存在订单的 sn 发给网关炸掉整批。
+      const QUERYABLE_ITEM_STATUSES: ReadonlySet<string> = new Set([
+        "submitted",
+        "failed-nonretryable",
+        "reconciliation-required",
+      ]);
       const snsByKind = new Map<'media' | 'we-media', string[]>();
       for (const item of execution.items) {
+        if (item.externalOrderId == null && !QUERYABLE_ITEM_STATUSES.has(item.status)) {
+          continue;
+        }
         const group = snsByKind.get(item.channel.kind) ?? [];
         group.push(distributionOrderSn(execution.id, item.id));
         snsByKind.set(item.channel.kind, group);
@@ -298,7 +315,9 @@ export async function handleXiaojingEffectsRoute(
         );
       }
       const result = await new PublishEgressService(
-        getXiaojingGeoProviderCapabilities(),
+        getXiaojingGeoProviderCapabilitiesForRequest(
+          requestAccountAccessToken(request),
+        ),
       ).upload({
         executionId: identity.executionId,
         itemId: identity.itemId,
@@ -359,7 +378,9 @@ export async function handleXiaojingEffectsRoute(
         );
       }
       const result = await new PublishEgressService(
-        getXiaojingGeoProviderCapabilities(),
+        getXiaojingGeoProviderCapabilitiesForRequest(
+          requestAccountAccessToken(request),
+        ),
       ).placeOrder({
         executionId: identity.executionId,
         itemId: identity.itemId,
@@ -557,7 +578,9 @@ export async function handleXiaojingEffectsRoute(
       const identity = { workspaceId, sessionId: runtimeSessionId };
       const dashboard = await new GeoDashboardService(
         createGeoDashboardPort(identity),
-        getXiaojingGeoProviderCapabilities().keywordSearch,
+        getXiaojingGeoProviderCapabilitiesForRequest(
+          requestAccountAccessToken(request),
+        ).keywordSearch,
       ).get(payload.filters ?? {});
       return jsonResponse({ success: true, dashboard });
     } catch (error) {
@@ -594,7 +617,9 @@ export async function handleXiaojingEffectsRoute(
       const identity = { workspaceId, sessionId: runtimeSessionId };
       const drilldown = await new GeoDashboardService(
         createGeoDashboardPort(identity),
-        getXiaojingGeoProviderCapabilities().keywordSearch,
+        getXiaojingGeoProviderCapabilitiesForRequest(
+          requestAccountAccessToken(request),
+        ).keywordSearch,
       ).drilldown({ kind: payload.kind, id: payload.id });
       return jsonResponse({ success: true, drilldown });
     } catch (error) {
@@ -630,9 +655,10 @@ export async function handleXiaojingEffectsRoute(
           403,
         );
       }
+      const requestToken = requestAccountAccessToken(request);
       const result = await new PostPublishBaselineProbeService(
-        getXiaojingGeoProviderCapabilities().keywordSearch,
-        getXiaojingGeoBillingPermitChannel(),
+        getXiaojingGeoProviderCapabilitiesForRequest(requestToken).keywordSearch,
+        getXiaojingGeoBillingPermitChannelForRequest(requestToken),
       ).probe(payload.input);
       return jsonResponse({ success: true, result });
     } catch (error) {
@@ -741,7 +767,9 @@ export async function handleXiaojingEffectsRoute(
       }
       const kind = payload.kind;
       const sn = distributionOrderSn(payload.executionId, payload.itemId);
-      const [record] = await getXiaojingGeoProviderCapabilities()
+      const [record] = await getXiaojingGeoProviderCapabilitiesForRequest(
+        requestAccountAccessToken(request),
+      )
         .distribution.queryOrders(kind, [sn]);
       return jsonResponse({
         success: true,
@@ -783,7 +811,9 @@ export async function handleXiaojingEffectsRoute(
           403,
         );
       }
-      const channel = getXiaojingGeoBillingPermitChannel();
+      const channel = getXiaojingGeoBillingPermitChannelForRequest(
+        requestAccountAccessToken(request),
+      );
       if (!channel) {
         return jsonResponse({
           success: true,

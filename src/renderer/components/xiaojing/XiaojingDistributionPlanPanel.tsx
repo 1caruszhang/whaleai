@@ -5,6 +5,7 @@ import { loadLatestDistributionPlan } from "@/api/distributionPlanClient";
 import { useTabApi, useTabState } from "@/context/TabContext";
 import { isPendingSessionId } from "../../../shared/constants";
 import type { DistributionPlanProjection } from "../../../shared/geo/distributionPlan";
+import { cnyToPoints } from "../../../shared/geo/points";
 
 interface XiaojingDistributionPlanPanelProps {
   workspaceId: string;
@@ -125,44 +126,32 @@ export default memo(function XiaojingDistributionPlanPanel({
               >
                 <div>
                   <span className="block font-semibold">
-                    {candidate.name}
+                    {KIND_LABEL[candidate.kind]} · {candidate.name}
                     {plan.selectedResourceIds.includes(candidate.resourceId) &&
                       "（已选）"}
                   </span>
                   <span className="text-[var(--ink-muted)]">
-                    {KIND_LABEL[candidate.kind]} · Provider 状态 2（可发） ·
-                    权重 {candidate.recommendationWeight.toFixed(1)}
-                  </span>
-                </div>
-                <div className="mt-2 grid grid-cols-2 gap-1 text-[var(--ink-muted)]">
-                  <span>
-                    报价：
+                    所需点数：
                     {candidate.estimatedPriceCny === null
-                      ? "未知"
-                      : `¥${candidate.estimatedPriceCny}`}
+                      ? "点数待定"
+                      : `${cnyToPoints(candidate.estimatedPriceCny)} 点`}
                   </span>
                 </div>
-                <p className="mt-2">适配：{candidate.fitReasons.join("；")}</p>
-                <div className="mt-2">
-                  <p className="text-[var(--ink-muted)]">
-                    召回路命中：
-                    {candidate.pathHits
-                      .map(
-                        (path) =>
-                          `${PATH_LABEL[path] ?? path}（${
-                            candidate.evidence.find((item) => item.path === path)
-                              ?.label ?? ""
-                          }）`,
-                      )
-                      .join("；")}
-                  </p>
-                  {candidate.evidence.map((evidence) => (
-                    <p key={evidence.path} className="text-[var(--ink-muted)]">
-                      {PATH_LABEL[evidence.path]} +{evidence.weight.toFixed(1)}：
-                      {evidence.reference}
-                    </p>
-                  ))}
-                </div>
+                <p className="mt-2 text-[var(--ink-muted)]">
+                  召回路命中：
+                  {candidate.pathHits
+                    .map(
+                      (path) =>
+                        `${PATH_LABEL[path] ?? path}（${
+                          candidate.evidence.find((item) => item.path === path)
+                            ?.label ?? ""
+                        }）`,
+                    )
+                    .join("；")}
+                </p>
+                {candidate.fitReasons.length > 0 && (
+                  <p className="mt-2">适配：{candidate.fitReasons.join("；")}</p>
+                )}
               </article>
             ))}
 
@@ -190,7 +179,7 @@ export default memo(function XiaojingDistributionPlanPanel({
               })}
             </div>
             <div className="grid grid-cols-2 gap-2">
-              <span>预算（元）：{plan.budgetCny}</span>
+              <span>预算：{cnyToPoints(plan.budgetCny)} 点</span>
               <span>发布时间：{localDateTime(plan.publishStartAt)}</span>
             </div>
             <p className="flex items-center gap-2 rounded-lg bg-[var(--success-bg)] p-2 text-[var(--success)]">

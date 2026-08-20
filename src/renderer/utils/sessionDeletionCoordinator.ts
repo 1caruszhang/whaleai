@@ -1,11 +1,11 @@
-import type { BackgroundCompletionResult, SessionDeleteResult } from '@/api/tauriClient';
+import type { BackgroundCompletionResult, SessionDeleteResult, SessionPersistentOwnersResult } from '@/api/tauriClient';
 import type { Tab } from '@/types/tab';
 
 interface SessionDeletionCoordinatorInput {
     sessionId: string;
     getTabs: () => readonly Tab[];
     terminateTabsForSession: (sessionId: string) => void;
-    hasPersistentOwners: (sessionId: string) => Promise<boolean>;
+    hasPersistentOwners: (sessionId: string) => Promise<SessionPersistentOwnersResult>;
     handoffMountedSessionActivity: (sessionId: string) => Promise<BackgroundCompletionResult>;
     stopSseProxy: (tabId: string) => Promise<unknown>;
     deletePersistedSession: (sessionId: string, releasableTabIds: readonly string[]) => Promise<SessionDeleteResult>;
@@ -111,9 +111,12 @@ export async function deleteSessionThroughAppOwner({
 
     // Rust repeats the same predicate under the deletion lifecycle lock. This
     // preflight is only to preserve mounted Tabs when refusal is already known;
-    // it never grants permission to mutate storage.
-    if (await hasPersistentOwners(sessionId)) {
-        return { deleted: false, reason: 'in-use' };
+    // it never grants permission to mutate storage. The refusal names the
+    // blocking reason ('busy-replying' vs 'monitor-active') so the dialog copy
+    // can tell the two causes apart.
+    const persistentOwners = await hasPersistentOwners(sessionId);
+    if (persistentOwners.hasPersistentOwners) {
+        return { deleted: false, reason: persistentOwners.reason ?? 'in-use' };
     }
 
     if (hasMountedTab) {
@@ -128,7 +131,7 @@ export async function deleteSessionThroughAppOwner({
             return { deleted: false, reason: 'activity-unavailable' };
         }
         if (activity.started) {
-            return { deleted: false, reason: 'in-use' };
+            return { deleted: false, reason: 'busy-replying' };
         }
     }
 

@@ -36,7 +36,9 @@
     "brandDeleteConfirm": "删除品牌",
     "brandDeletePreviewFailed": "无法开始删除品牌：{{message}}",
     "deleteFailed": {
-      "in-use": "会话正在回复，或存在进行中的发布后监测，暂时无法删除，请稍后再试。",
+      "in-use": "会话存在其他进行中的工作，暂时无法删除，请稍后再试。",
+      "busy-replying": "会话正在回复，请停止回复或等待结束后再删除。",
+      "monitor-active": "该会话创建的发布后监测仍在进行（含已暂停），请先在效果页处理监测计划后再删除。",
       "transition-in-progress": "会话正在打开，请稍后再试。",
       "activity-unavailable": "暂时无法确认会话状态，请稍后重试。",
       "unexpected": "删除失败，请重试；若持续失败请重启应用。",

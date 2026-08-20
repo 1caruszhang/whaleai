@@ -22,6 +22,9 @@ const MAX_BODY_BYTES: usize = 256 * 1024;
 const CLAIM_LEASE_MS: i64 = 5 * 60 * 1_000;
 const BACKGROUND_INTERVAL: Duration = Duration::from_secs(30);
 const RETRY_BACKOFF_MS: [i64; 3] = [60_000, 300_000, 900_000];
+/// 未登录时认领到的执行单推迟到下一轮再试的间隔：不消耗重试次数，
+/// 登录恢复后指纹自然匹配、自动继续执行。
+const LOGIN_RESUME_DEFER_MS: i64 = 5 * 60 * 1_000;
 const IRREVERSIBLE_IMPACT: &str =
     "开始后将上传最终批准正文，并可能向渠道提交付费订单；渠道受理后可能产生费用且无法由本应用撤销。";
 
@@ -368,17 +371,20 @@ static PROVIDER_EXECUTION_CONTEXT_LOADS: std::sync::atomic::AtomicUsize =
 
 /// 票 08 起（网关 port 闭环）测试注入的网关 egress 身份：生产路径读
 /// `account_auth` 的账号会话事实，单测不能触碰真实 OS 凭据库。
+/// 外层 None = 未注入（保持旧行为）；Some(None) = 强制未登录（不受
+/// 开发机真实登录态污染）；Some(Some(base)) = 强制网关基地址。
 #[cfg(test)]
-static TEST_GATEWAY_EGRESS_BASE_URL: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+static TEST_GATEWAY_EGRESS_BASE_URL: std::sync::Mutex<Option<Option<String>>> =
+    std::sync::Mutex::new(None);
 
 fn gateway_egress_base_url() -> Option<String> {
     #[cfg(test)]
-    if let Some(base) = TEST_GATEWAY_EGRESS_BASE_URL
+    if let Some(forced) = TEST_GATEWAY_EGRESS_BASE_URL
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .clone()
     {
-        return Some(base);
+        return forced;
     }
     crate::account_auth::publish_egress_gateway_base_url()
 }
@@ -435,6 +441,26 @@ fn unavailable_provider_snapshot() -> PublishProviderSnapshot {
             configuration_fingerprint: None,
         },
     }
+}
+
+/// 指纹比对只在「双方都 configured 且指纹不同」时判定配置变化：当前侧
+/// 因未登录拿不到网关指纹（configured=false）时无法得出「配置变了」的
+/// 结论——网关配置未必变化，只是登录态抖动——必须按「无变化」处理，
+/// 等登录恢复后指纹自然匹配。
+fn provider_configuration_changed(
+    frozen: &PublishProviderSnapshot,
+    current: &PublishProviderSnapshot,
+) -> bool {
+    fn slot_changed(
+        frozen: &PublishProviderSlotSnapshot,
+        current: &PublishProviderSlotSnapshot,
+    ) -> bool {
+        frozen.configured
+            && current.configured
+            && frozen.configuration_fingerprint != current.configuration_fingerprint
+    }
+    slot_changed(&frozen.object_storage, &current.object_storage)
+        || slot_changed(&frozen.distribution, &current.distribution)
 }
 
 #[derive(Debug)]
@@ -1851,8 +1877,17 @@ async fn call_publish_egress_sidecar(
     .map_err(|error| {
         SidecarCallFailure::Unreachable(bounded_reason(format!("Sidecar 附着失败：{error}")))
     })?;
-    let request_result =
-        post_egress_envelope(ensure.port, endpoint, egress_body(route, payload)).await;
+    // 发布执行器附着后附当前新鲜账号 token：Sidecar 已长跑数小时时
+    // admission env token 早已过期，请求级 token（临期自动 refresh）才是
+    // 网关调用的有效凭据；未登录不附头，Sidecar 回退 env。
+    let account_token = crate::account_auth::fresh_account_access_token().await;
+    let request_result = post_egress_envelope(
+        ensure.port,
+        endpoint,
+        egress_body(route, payload),
+        account_token.as_deref(),
+    )
+    .await;
     if let Err(error) = crate::sidecar::release_session_sidecar(&manager, &route.session_id, &owner)
     {
         crate::ulog_warn!(
@@ -1881,10 +1916,13 @@ fn egress_body(route: &PublishEgressRoute, payload: Value) -> Value {
 /// control-plane route and extract the typed `result` of a success envelope.
 /// Separated from the attach/release lifecycle so the transport mapping is
 /// deterministically testable against a local mock-sidecar listener.
+/// `account_token` 是请求级新鲜账号 token（Some 时附
+/// `x-xiaojing-account-token` 头，Sidecar 优先于 admission env 使用）。
 async fn post_egress_envelope(
     port: u16,
     endpoint: &str,
     body: Value,
+    account_token: Option<&str>,
 ) -> Result<Value, SidecarCallFailure> {
     let client = crate::local_http::builder()
         .timeout(PUBLISH_EGRESS_HTTP_TIMEOUT)
@@ -1892,18 +1930,19 @@ async fn post_egress_envelope(
         .map_err(|error| {
             SidecarCallFailure::Unreachable(bounded_reason(format!("客户端构建失败：{error}")))
         })?;
-    let response = client
+    let mut request = client
         .post(format!("http://127.0.0.1:{port}{endpoint}"))
-        .json(&body)
-        .send()
-        .await
-        .map_err(|error| {
-            if error.is_connect() || error.is_request() {
-                SidecarCallFailure::Unreachable(bounded_reason(error.to_string()))
-            } else {
-                SidecarCallFailure::Indeterminate(bounded_reason(error.to_string()))
-            }
-        })?;
+        .json(&body);
+    if let Some(token) = account_token {
+        request = request.header(crate::account_auth::ACCOUNT_TOKEN_HEADER, token);
+    }
+    let response = request.send().await.map_err(|error| {
+        if error.is_connect() || error.is_request() {
+            SidecarCallFailure::Unreachable(bounded_reason(error.to_string()))
+        } else {
+            SidecarCallFailure::Indeterminate(bounded_reason(error.to_string()))
+        }
+    })?;
     let status = response.status();
     let envelope = response
         .json::<Value>()
@@ -2205,7 +2244,7 @@ impl PublishScheduler {
     ) -> Result<(), String> {
         let current_provider =
             configured_provider_snapshot().unwrap_or_else(|_| unavailable_provider_snapshot());
-        if current_provider != claim.provider_snapshot {
+        if provider_configuration_changed(&claim.provider_snapshot, &current_provider) {
             settle_reconciliation(
                 workspace,
                 &claim,
@@ -2213,6 +2252,13 @@ impl PublishScheduler {
                 "Provider 配置指纹在执行前变化，未发出外部请求",
                 now_ms,
             )?;
+            return Ok(());
+        }
+        if current_provider != claim.provider_snapshot {
+            // 两侧快照不一致但构不成「配置变化」：当前侧未登录拿不到网关
+            // 指纹。不 brick、不消耗重试次数——释放 claim 并推迟，登录
+            // 恢复后指纹自然匹配、自动继续执行。
+            defer_claim_until_login(workspace, &claim, now_ms)?;
             return Ok(());
         }
         if claim.stage == "uploading" {
@@ -2378,7 +2424,13 @@ fn reconcile_provider_configuration(workspace: &BrandWorkspace, now_ms: i64) -> 
     let mut failed_execution_ids = Vec::new();
     for (execution_id, snapshot_json) in executions {
         let snapshot = serde_json::from_str::<PublishProviderSnapshot>(&snapshot_json).ok();
-        if snapshot.as_ref() == Some(&current) {
+        // 只在「双方都 configured 且指纹不同」时判为配置变化：当前侧未登录
+        // 拿不到网关指纹时跳过本轮巡检，不动这些执行单（快照不可解析的行
+        // 保持旧的 fail-closed 行为）。
+        let unchanged = snapshot
+            .as_ref()
+            .is_some_and(|frozen| !provider_configuration_changed(frozen, &current));
+        if unchanged {
             continue;
         }
         transaction
@@ -3026,6 +3078,55 @@ fn update_failed_claim(
     Ok(())
 }
 
+/// 未登录时认领到的执行单：释放 claim、恢复认领前状态并推迟到下一轮，
+/// 不消耗重试次数也不标失败；登录恢复后指纹自然匹配、自动继续执行。
+fn defer_claim_until_login(
+    workspace: &BrandWorkspace,
+    claim: &ClaimedPublishItem,
+    now_ms: i64,
+) -> Result<(), String> {
+    let mut connection = open_database(workspace)?;
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| format!("defer publish claim transaction: {error}"))?;
+    let now = now_iso(now_ms);
+    let restored_status = if claim.stage == "uploading" {
+        "pending"
+    } else {
+        "uploaded"
+    };
+    let next_attempt_at_ms = now_ms + LOGIN_RESUME_DEFER_MS;
+    let changed = transaction
+        .execute(
+            "UPDATE geo_publish_items SET status=?3, revision=revision+1,
+             claim_token=NULL, lease_until_ms=NULL, next_attempt_at_ms=?4
+             WHERE id=?1 AND claim_token=?2",
+            params![
+                claim.item_id,
+                claim.claim_token,
+                restored_status,
+                next_attempt_at_ms
+            ],
+        )
+        .map_err(|error| format!("persist publish login deferral: {error}"))?;
+    if changed != 1 {
+        return Err("publish_item_claim_conflict".to_string());
+    }
+    insert_audit(
+        &transaction,
+        &claim.execution_id,
+        Some(&claim.item_id),
+        "execution-deferred-login-required",
+        None,
+        &json!({"code": "account-login-required", "nextAttemptAtMs": next_attempt_at_ms}),
+        &now,
+    )?;
+    transaction
+        .commit()
+        .map_err(|error| format!("commit publish login deferral: {error}"))?;
+    refresh_execution_status(workspace, &claim.execution_id, now_ms)
+}
+
 fn settle_reconciliation(
     workspace: &BrandWorkspace,
     claim: &ClaimedPublishItem,
@@ -3310,7 +3411,7 @@ mod tests {
 
     /// 测试网关 egress 身份注入：生产路径读 `account_auth` 的账号会话
     /// （OS 凭据库），单测不得触碰——沿既有确定性测试模式改为静态注入。
-    struct TestEnvironment(Option<String>);
+    struct TestEnvironment(Option<Option<String>>);
 
     impl TestEnvironment {
         fn configured() -> Self {
@@ -3330,7 +3431,7 @@ mod tests {
     fn set_test_gateway_base(base: Option<&str>) {
         *TEST_GATEWAY_EGRESS_BASE_URL
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = base.map(str::to_string);
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(base.map(str::to_string));
     }
 
     impl Drop for TestEnvironment {
@@ -4443,6 +4544,78 @@ mod tests {
         ));
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn logged_out_reconcile_and_claim_never_brick_frozen_executions() {
+        let _lock = ENV_LOCK.lock().await;
+        let _env = TestEnvironment::configured();
+        let fixture = setup_fixture(1, 0);
+        let started = confirm_start(&fixture, &preview(&fixture));
+
+        // 事故回归：重启巡检发生在登录恢复之前——当前快照 configured=false
+        // 无指纹，与建单时冻结的已登录快照不等。这只是登录态抖动，不是配置
+        // 变化：巡检不得 brick，执行不得发出请求，也不得消耗重试次数。
+        set_test_gateway_base(None);
+        let provider = Arc::new(MockProvider::default());
+        let clock = Arc::new(AtomicI64::new(fixture.now_ms));
+        scheduler(&fixture, provider.clone(), clock.clone())
+            .tick_workspace(&fixture.workspace)
+            .await
+            .unwrap();
+        assert_eq!(provider.counts(), (0, 0));
+        let deferred = fixture
+            .store
+            .get_publish_execution(&fixture.workspace.id, "session-13", &started.id)
+            .unwrap();
+        assert_eq!(deferred.status, "running");
+        assert_eq!(deferred.items[0].status, "pending");
+        assert_eq!(deferred.items[0].failure_code, None);
+        assert_eq!(deferred.items[0].attempts, 0);
+
+        // 登录恢复后指纹自然匹配：无需人工对账，执行自动继续。
+        set_test_gateway_base(Some(TEST_GATEWAY_BASE));
+        clock.store(fixture.now_ms + LOGIN_RESUME_DEFER_MS, Ordering::SeqCst);
+        scheduler(&fixture, provider.clone(), clock.clone())
+            .tick_workspace(&fixture.workspace)
+            .await
+            .unwrap();
+        assert_eq!(provider.counts(), (1, 1));
+        let resumed = fixture
+            .store
+            .get_publish_execution(&fixture.workspace.id, "session-13", &started.id)
+            .unwrap();
+        assert_eq!(resumed.status, "succeeded");
+        assert_eq!(resumed.items[0].status, "submitted");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn reconcile_still_bricks_when_both_fingerprints_differ() {
+        let _lock = ENV_LOCK.lock().await;
+        let _env = TestEnvironment::configured();
+        let fixture = setup_fixture(1, 0);
+        let started = confirm_start(&fixture, &preview(&fixture));
+
+        // 双方都 configured 且指纹真不同（网关身份轮换）：仍是配置变化，
+        // 必须 brick 并禁止沿旧幂等键执行。
+        set_test_gateway_base(Some("https://rotated-gateway.example.test"));
+        let provider = Arc::new(MockProvider::default());
+        let clock = Arc::new(AtomicI64::new(fixture.now_ms));
+        scheduler(&fixture, provider.clone(), clock.clone())
+            .tick_workspace(&fixture.workspace)
+            .await
+            .unwrap();
+        assert_eq!(provider.counts(), (0, 0));
+        let bricked = fixture
+            .store
+            .get_publish_execution(&fixture.workspace.id, "session-13", &started.id)
+            .unwrap();
+        assert_eq!(bricked.status, "reconciliation-required");
+        assert_eq!(bricked.items[0].status, "reconciliation-required");
+        assert_eq!(
+            bricked.items[0].failure_code.as_deref(),
+            Some("provider-configuration-changed")
+        );
+    }
+
     #[test]
     fn mock_sidecar_envelopes_map_to_publish_outcomes() {
         // 上传：成功回执 → Success；余额类/限流类/未知信封按三态透传。
@@ -4530,6 +4703,7 @@ mod tests {
             port,
             "/api/xiaojing/publish-scheduler/egress/upload",
             json!({}),
+            None,
         )
         .await
         .unwrap();
@@ -4538,7 +4712,8 @@ mod tests {
             post_egress_envelope(
                 port,
                 "/api/xiaojing/publish-scheduler/egress/order",
-                json!({})
+                json!({}),
+                None,
             )
             .await,
             Err(SidecarCallFailure::Indeterminate(_))
@@ -4547,7 +4722,8 @@ mod tests {
             post_egress_envelope(
                 port,
                 "/api/xiaojing/publish-scheduler/egress/order",
-                json!({})
+                json!({}),
+                None,
             )
             .await,
             Err(SidecarCallFailure::Indeterminate(_))
@@ -4561,11 +4737,69 @@ mod tests {
             post_egress_envelope(
                 closed_port,
                 "/api/xiaojing/publish-scheduler/egress/order",
-                json!({})
+                json!({}),
+                None,
             )
             .await,
             Err(SidecarCallFailure::Unreachable(_))
         ));
+        server.abort();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn post_egress_envelope_attaches_account_token_header_only_when_present() {
+        let _lock = ENV_LOCK.lock().await;
+        // mock sidecar 捕获请求头原文并回成功信封。
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (heads_tx, mut heads_rx) = tokio::sync::mpsc::channel::<String>(4);
+        #[allow(clippy::disallowed_methods)]
+        let server = tokio::spawn(async move {
+            for _ in 0..2 {
+                let Ok((stream, _)) = listener.accept().await else {
+                    break;
+                };
+                let stream = stream;
+                let _ = stream.readable().await;
+                let mut scratch = [0_u8; 4096];
+                let read = stream.try_read(&mut scratch).unwrap_or(0);
+                let head = String::from_utf8_lossy(&scratch[..read]).to_string();
+                let _ = heads_tx.send(head).await;
+                let _ = stream.try_write(
+                    b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 28\r\n\r\n{\"success\":true,\"result\":{}}",
+                );
+            }
+        });
+
+        post_egress_envelope(
+            port,
+            "/api/xiaojing/publish-scheduler/egress/upload",
+            json!({}),
+            Some("fresh-jwt-1"),
+        )
+        .await
+        .unwrap();
+        post_egress_envelope(
+            port,
+            "/api/xiaojing/publish-scheduler/egress/upload",
+            json!({}),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let with_token = heads_rx.recv().await.unwrap();
+        let without_token = heads_rx.recv().await.unwrap();
+        assert!(
+            with_token.contains("x-xiaojing-account-token: fresh-jwt-1"),
+            "登录态必须附请求级 token 头：{with_token}"
+        );
+        assert!(
+            !without_token
+                .to_ascii_lowercase()
+                .contains("x-xiaojing-account-token"),
+            "无 token 时不得附头：{without_token}"
+        );
         server.abort();
     }
 

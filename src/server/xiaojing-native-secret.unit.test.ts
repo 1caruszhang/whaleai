@@ -101,4 +101,44 @@ describe('Xiaojing native secret transport capture', () => {
     expect(native.resolveXiaojingMainAgentAuth()).toBeUndefined();
     vi.unstubAllEnvs();
   });
+
+  it('prefers the request-level fresh token over the admission env token', async () => {
+    vi.resetModules();
+    clearMainAgentAuthEnvs();
+    vi.stubEnv('XIAOJING_GATEWAY_BASE_URL', 'https://api.jingshanai.com');
+    vi.stubEnv('XIAOJING_ACCOUNT_ACCESS_TOKEN', 'jwt-env-stale');
+
+    const native = await import('./xiaojing-native-secret');
+
+    // 请求级新鲜 token 优先：Sidecar 长跑后 env token 可能已过期。
+    expect(native.resolveXiaojingMainAgentAuth('jwt-fresh-2')).toEqual({
+      baseUrl: 'https://api.jingshanai.com',
+      token: 'jwt-fresh-2',
+    });
+    // 未携带/空白 token 回退 admission env（与既有路由同一语义）。
+    expect(native.resolveXiaojingMainAgentAuth(undefined)).toEqual({
+      baseUrl: 'https://api.jingshanai.com',
+      token: 'jwt-env-stale',
+    });
+    expect(native.resolveXiaojingMainAgentAuth('   ')).toEqual({
+      baseUrl: 'https://api.jingshanai.com',
+      token: 'jwt-env-stale',
+    });
+    vi.unstubAllEnvs();
+  });
+
+  it('rescues a request-level token even when the env token was never injected', async () => {
+    vi.resetModules();
+    clearMainAgentAuthEnvs();
+    // admission 只注入网关地址（出生时未登录），请求级 token 仍可救活主 Agent。
+    vi.stubEnv('XIAOJING_GATEWAY_BASE_URL', 'https://api.jingshanai.com');
+
+    const native = await import('./xiaojing-native-secret');
+
+    expect(native.resolveXiaojingMainAgentAuth('jwt-fresh-2')).toEqual({
+      baseUrl: 'https://api.jingshanai.com',
+      token: 'jwt-fresh-2',
+    });
+    vi.unstubAllEnvs();
+  });
 });

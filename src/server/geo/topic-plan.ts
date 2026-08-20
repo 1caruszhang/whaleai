@@ -30,9 +30,11 @@ import { XIAOJING_GEO_PROVIDER_DEFAULTS } from "../../shared/geo/providerCapabil
 import {
   deriveServiceScope,
   projectBrandProfile,
+  resolveBrandName,
 } from "../../shared/geo/profileInjection";
 import { managementApi } from "../utils/management-api-client";
 import type { GeoBillingPermitPort } from "./billing-permit";
+import { embedWithDegradation } from "./embedding-fallback";
 import type {
   GeoEmbeddingCapability,
   GeoTextCapability,
@@ -201,7 +203,9 @@ function deriveProfile(context: TopicPlanContext) {
   if (!industry) throw new Error("topic_plan_industry_required");
   const projected = projectBrandProfile(context.facts);
   return {
-    brandName: valuesFor(".fullName")[0] || context.brandName,
+    // 品牌名裁决（与正文/标题同一口径）：知识库身份事实 fullName →
+    // shortNames 优先，workspace 名仅无身份事实时兜底。
+    brandName: resolveBrandName(projected, context.brandName),
     shortNames: valuesFor(".shortNames"),
     competitors: valuesFor(".competitors"),
     industry,
@@ -430,9 +434,16 @@ export class TopicPlanService {
     }
     const profile = deriveProfile(context);
     const modelAttempts: TopicPlanModelAttempt[] = [];
-    const questionVectors = await providerCall(() =>
-      this.embedding.embed(context.questions.map((question) => question.text)),
+    // 瞬时 embedding 故障（网络/超时、429、5xx）回落确定性降级向量继续
+    // （WARN 日志在 embedWithDegradation 内）；配置类失败显式抛出。
+    const questionEmbedding = await providerCall(() =>
+      embedWithDegradation(
+        this.embedding,
+        context.questions.map((question) => question.text),
+        { logTag: "[topic-plan]" },
+      ),
     );
+    const questionVectors = questionEmbedding.vectors;
     modelAttempts.push({
       stage: "question-embedding",
       provider: "volcengine",
@@ -504,9 +515,12 @@ export class TopicPlanService {
       ...topics.map(topicEmbeddingText),
       ...context.facts.map(factEmbeddingText),
     ];
-    const semanticVectors = await providerCall(() =>
-      this.embedding.embed(semanticTexts),
+    const semanticEmbedding = await providerCall(() =>
+      embedWithDegradation(this.embedding, semanticTexts, {
+        logTag: "[topic-plan]",
+      }),
     );
+    const semanticVectors = semanticEmbedding.vectors;
     if (semanticVectors.length !== semanticTexts.length) {
       throw new Error("topic_plan_embedding_count_invalid");
     }
@@ -752,9 +766,14 @@ export class TopicPlanService {
         })),
       ),
     ];
-    const vectors = await providerCall(() =>
-      this.embedding.embed(embeddingEntries.map((entry) => entry.text)),
+    const titleEmbedding = await providerCall(() =>
+      embedWithDegradation(
+        this.embedding,
+        embeddingEntries.map((entry) => entry.text),
+        { logTag: "[topic-plan]" },
+      ),
     );
+    const vectors = titleEmbedding.vectors;
     if (vectors.length !== embeddingEntries.length) {
       throw new Error("topic_plan_title_embedding_count_invalid");
     }

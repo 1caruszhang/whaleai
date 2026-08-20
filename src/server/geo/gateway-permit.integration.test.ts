@@ -613,7 +613,12 @@ describe("ticket 07: client gateway transport + permit billing against the real 
 
   beforeEach(async () => {
     upstream = upstreamMock();
-    tb = await startTestBackend({ fetch: upstream.respond as unknown as typeof fetch });
+    // 测试后端按生产口径配置 embedding 兜底 endpoint id：缺失时网关 503
+    // （embedding_endpoint_not_configured）属配置类显式失败，不再静默降级。
+    tb = await startTestBackend({
+      fetch: upstream.respond as unknown as typeof fetch,
+      config: { arkEmbeddingEndpointId: 'ep-test-embedding' },
+    });
     const provisioned = await provisionLoggedInAccount(tb.app);
     accessToken = provisioned.accessToken;
     accountId = provisioned.accountId;
@@ -700,7 +705,10 @@ describe("ticket 07: client gateway transport + permit billing against the real 
   it("settles only successful units when 3 of 10 articles fail upstream", async () => {
     await tb.cleanup();
     upstream = upstreamMock({ failThemes: ["主题 a3", "主题 a5", "主题 a8"] });
-    tb = await startTestBackend({ fetch: upstream.respond as unknown as typeof fetch });
+    tb = await startTestBackend({
+      fetch: upstream.respond as unknown as typeof fetch,
+      config: { arkEmbeddingEndpointId: 'ep-test-embedding' },
+    });
     const provisioned = await provisionLoggedInAccount(tb.app);
     accessToken = provisioned.accessToken;
     accountId = provisioned.accountId;

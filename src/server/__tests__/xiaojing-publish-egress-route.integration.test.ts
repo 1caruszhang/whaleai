@@ -20,6 +20,7 @@ const mocks = vi.hoisted(() => ({
   sessionId: 'session-egress-42',
   putHtml: vi.fn(),
   placeOrder: vi.fn(),
+  requestTokens: [] as (string | undefined)[],
 }));
 
 vi.mock('../agent-session', () => ({
@@ -31,7 +32,15 @@ vi.mock('../geo/provider-runtime', () => ({
     objectStorage: { putHtml: mocks.putHtml },
     distribution: { placeOrder: mocks.placeOrder },
   }),
+  getXiaojingGeoProviderCapabilitiesForRequest: (token?: string) => {
+    mocks.requestTokens.push(token);
+    return {
+      objectStorage: { putHtml: mocks.putHtml },
+      distribution: { placeOrder: mocks.placeOrder },
+    };
+  },
   getXiaojingGeoBillingPermitChannel: () => undefined,
+  getXiaojingGeoBillingPermitChannelForRequest: () => undefined,
 }));
 
 let workspace: string;
@@ -80,6 +89,38 @@ describe('publish scheduler egress routes', () => {
   beforeEach(() => {
     mocks.putHtml.mockReset();
     mocks.placeOrder.mockReset();
+    mocks.requestTokens.length = 0;
+  });
+
+  it('forwards the request-level account token header to the typed ports', async () => {
+    mocks.putHtml.mockResolvedValue({
+      url: 'https://cdn.example.test/articles/w-1/a-1/approved-v1-abc.html',
+    });
+    const request = post('/api/xiaojing/publish-scheduler/egress/upload', {
+      ...UPLOAD_BODY,
+      workspaceId,
+    });
+    // Rust 代理/worker 附带的当前新鲜 token（临期已自动 refresh）。
+    request.headers.set('x-xiaojing-account-token', 'fresh-jwt-egress');
+    const response = await handleXiaojingRoute(
+      '/api/xiaojing/publish-scheduler/egress/upload',
+      request,
+      { workspacePath: workspace },
+    );
+    expect(response?.status).toBe(200);
+    expect(mocks.requestTokens).toEqual(['fresh-jwt-egress']);
+
+    // 无头请求（旧客户端/直连）：回退 admission env token 的单例口径。
+    mocks.requestTokens.length = 0;
+    await handleXiaojingRoute(
+      '/api/xiaojing/publish-scheduler/egress/upload',
+      post('/api/xiaojing/publish-scheduler/egress/upload', {
+        ...UPLOAD_BODY,
+        workspaceId,
+      }),
+      { workspacePath: workspace },
+    );
+    expect(mocks.requestTokens).toEqual([undefined]);
   });
 
   it('uploads through the port and returns the typed success envelope', async () => {

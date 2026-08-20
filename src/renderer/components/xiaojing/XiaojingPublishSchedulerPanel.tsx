@@ -11,6 +11,7 @@ import type {
   PublishExecutionProjection,
   PublishItemProjection,
 } from "../../../shared/geo/publishScheduler";
+import { cnyToPoints } from "../../../shared/geo/points";
 import {
   orderStage,
   ossStage,
@@ -125,7 +126,7 @@ export default memo(function XiaojingPublishSchedulerPanel({
                 分发计划 {execution.distributionPlanId} · revision {execution.distributionPlanRevision}
               </p>
               <p className="mt-1">
-                预计 ¥{execution.estimatedSpendCny.toFixed(2)} / 预算 ¥{execution.budgetCny.toFixed(2)}
+                预计 {execution.totalPricePoints} 点 / 预算 {cnyToPoints(execution.budgetCny)} 点
               </p>
               <p className="mt-1 flex items-center gap-1 text-[var(--ink-muted)]">
                 <Clock3 className="h-3.5 w-3.5" /> {new Date(execution.publishStartAt).toLocaleString()}
@@ -154,7 +155,7 @@ export default memo(function XiaojingPublishSchedulerPanel({
                 <p className="mt-2 leading-5">{item.article.bodySummary}</p>
                 <div className="mt-2 rounded-lg bg-[var(--paper-inset)] p-2 leading-5">
                   <p>{item.channel.name}（{item.channel.kind === "media" ? "媒体" : "自媒体"}）</p>
-                  <p>资源 #{item.channel.resourceId} · 预计 ¥{item.channel.estimatedPriceCny.toFixed(2)} · 历史发布率 {item.channel.publishedRate}%</p>
+                  <p>资源 #{item.channel.resourceId} · 预计 {item.channel.pricePoints} 点 · 历史发布率 {item.channel.publishedRate}%</p>
                   <p>排期：{new Date(item.scheduledAt).toLocaleString()}</p>
                 </div>
                 {item.externalOrderId && <p className="mt-2 text-[var(--success)]">外部订单：{item.externalOrderId}</p>}

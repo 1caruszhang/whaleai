@@ -49,7 +49,7 @@ Owner 必须针对具体事实、scope 与 lifecycle phase 定义。`BrandWorksp
 - 只有已登记的 `/refs/:id` 与 `/attachment/*` 是原生 fetch 大载荷数据面，并同时满足 CORS、CSP、大小和路径约束。
 - 新 SSE JSON 事件必须加入 renderer 白名单。
 - BrandWorkspace SQLite、Session 元数据、配置、工作区文件和凭据各有独立 owner；不能用 React state 覆盖磁盘事实。
-- Provider 凭据只由 Rust admission 注入当前 Session Sidecar，不能进入 renderer、日志、数据库或构建产物。账号登录 token（commercial-beta，票 06 起）只存 OS 凭据库与 Rust 进程内存；admission 改为注入运营网关地址 + 账号 access token，renderer 只拿登录态/余额投影，拿不到 token 本体。
+- Provider 凭据只由 Rust admission 注入当前 Session Sidecar，不能进入 renderer、日志、数据库或构建产物。账号登录 token（commercial-beta，票 06 起）只存 OS 凭据库与 Rust 进程内存；admission 改为注入运营网关地址 + 账号 access token，renderer 只拿登录态/余额投影，拿不到 token 本体。admission env token 只是启动兜底：Rust 发往 Sidecar 的控制面请求统一附 `x-xiaojing-account-token` 头携带当前新鲜 token（按 exp 临期自动 refresh，单飞轮换），Sidecar 头优先、无头回退 env。
 - 监测调度仍由 BrandWorkspace owner 驱动，但以品牌级「效果」入口呈现（只读展示 + 显式启用门），不形成第二个 Agent 入口。主链不内嵌基线探测；基线在「效果」入口按需执行，监测启用前必须先冻结一次基线。
 
 ## 文档路由

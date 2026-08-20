@@ -36,7 +36,9 @@
     "brandDeleteConfirm": "Delete brand",
     "brandDeletePreviewFailed": "Cannot start brand deletion: {{message}}",
     "deleteFailed": {
-      "in-use": "The session is still responding, or an active post-publish monitor is running. Try again later.",
+      "in-use": "The session has other work in progress and cannot be deleted right now. Try again later.",
+      "busy-replying": "The session is still responding. Stop the response or wait for it to finish before deleting.",
+      "monitor-active": "A post-publish monitor created by this session is still running (including paused). Handle the monitor plan on the Effect page before deleting.",
       "transition-in-progress": "The session is still opening. Try again shortly.",
       "activity-unavailable": "Session activity cannot be verified right now. Try again shortly.",
       "unexpected": "Delete failed. Please retry; if it keeps failing, restart the app.",

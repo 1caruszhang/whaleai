@@ -228,6 +228,128 @@ describe('KnowledgeAuthority policy', () => {
   });
 });
 
+describe('KnowledgeAuthority array supplement merge', () => {
+  const arrayCurrent = (items: string[], overrides: Partial<KnowledgeCurrentFact> = {}): KnowledgeCurrentFact =>
+    current({ normalizedValueJson: JSON.stringify(items), unit: null, ...overrides });
+
+  it('classifies array-vs-array differences as supplements, never conflicts', () => {
+    const base = arrayCurrent(['隐形车衣', '改色膜']);
+    expect(classifyKnowledgeCandidate(base, '["隐形车衣","改色膜","太阳膜"]', null, 'model-inferred', 'knowledge-update')).toBe('awaiting-confirmation');
+    expect(classifyKnowledgeCandidate(base, '["改色膜"]', null, 'user-stated', 'knowledge-update')).toBe('awaiting-confirmation');
+  });
+
+  it('keeps scalar differences and type mismatches as conflicts', () => {
+    expect(classifyKnowledgeCandidate(current(), '120', 'cny', 'user-stated', 'knowledge-update')).toBe('conflict');
+    // 一边数组一边标量：类型不一致，仍走冲突二选一
+    expect(classifyKnowledgeCandidate(arrayCurrent(['隐形车衣']), '"隐形车衣"', null, 'user-stated', 'knowledge-update')).toBe('conflict');
+    expect(classifyKnowledgeCandidate(current(), '["100"]', null, 'user-stated', 'knowledge-update')).toBe('conflict');
+  });
+
+  it('rewrites an array candidate to the deduped union, current order first', async () => {
+    const port = fakePort(arrayCurrent(['隐形车衣', '改色膜']));
+    const authority = new KnowledgeAuthority({ workspaceId: 'brand-1', sessionId: 'session-1' }, port);
+    const candidate = await authority.propose({
+      rawInput: '材料补充核心产品',
+      origin: 'model-inferred',
+      intent: 'knowledge-update',
+      key: { subject: '品牌', predicate: 'enterprise-profile.core-products' },
+      value: [' 改色膜 ', '太阳膜'],
+      source: { excerpt: '核心产品：改色膜、太阳膜', confidence: 0.8 },
+    });
+    // 「 改色膜 」规范化后与 current 去重，新增「太阳膜」追加在旧值之后
+    expect(candidate.status).toBe('awaiting-confirmation');
+    expect(port.submissions[0]).toMatchObject({
+      disposition: 'awaiting-confirmation',
+      valueJson: '["隐形车衣","改色膜","太阳膜"]',
+      normalizedValueJson: '["隐形车衣","改色膜","太阳膜"]',
+    });
+  });
+
+  it('falls back to the same-value path when the candidate adds nothing new', async () => {
+    const port = fakePort(arrayCurrent(['隐形车衣', '改色膜']));
+    const authority = new KnowledgeAuthority({ workspaceId: 'brand-1', sessionId: 'session-1' }, port);
+    await authority.propose({
+      rawInput: '重复补充核心产品',
+      origin: 'model-inferred',
+      intent: 'knowledge-update',
+      key: { subject: '品牌', predicate: 'enterprise-profile.core-products' },
+      value: ['改色膜', ' 隐形车衣 '],
+      source: { excerpt: '核心产品：改色膜、隐形车衣', confidence: 0.8 },
+    });
+    // 并集与 current 完全相同（顺序也回落到 current 原序）→ 沿用既有
+    // same 逻辑：仍落待确认候选，整卡确认后仅合并来源、不升事实版本。
+    expect(port.submissions[0]).toMatchObject({
+      disposition: 'awaiting-confirmation',
+      normalizedValueJson: '["隐形车衣","改色膜"]',
+    });
+  });
+
+  it('adopt-new of an array supplement lands the union as the new current', async () => {
+    const base = arrayCurrent(['隐形车衣'], { version: 2 });
+    let stored: KnowledgeCandidate | null = null;
+    const port: KnowledgeAuthorityPort = {
+      current: async () => base,
+      submit: async (request) => {
+        stored = {
+          id: 'candidate-merge-1',
+          status: request.disposition,
+          proposedAt: 'now',
+          baseVersion: request.expectedCurrentVersion,
+          current: base,
+          ...request,
+        } as KnowledgeCandidate;
+        return stored;
+      },
+      candidate: async () => stored!,
+      // 模拟 Rust adopt-new：异值采纳写候选值并升版本
+      decide: async (request) => ({
+        candidateId: request.candidateId,
+        factKey: stored!.key.identity,
+        decision: request.decision,
+        status: 'adopted',
+        current: { ...base, normalizedValueJson: stored!.normalizedValueJson, version: base.version + 1 },
+        knowledgeVersion: 5,
+        affectedArtifacts: [],
+      }),
+      revise: async () => { throw new Error('not needed'); },
+    };
+    const authority = new KnowledgeAuthority({ workspaceId: 'brand-1', sessionId: 'session-1' }, port);
+    const candidate = await authority.propose({
+      rawInput: '补充核心产品太阳膜',
+      origin: 'model-inferred',
+      intent: 'knowledge-update',
+      key: { subject: '品牌', predicate: 'enterprise-profile.core-products' },
+      value: ['隐形车衣', '太阳膜'],
+      source: { excerpt: '核心产品：隐形车衣、太阳膜', confidence: 0.8 },
+    });
+    expect(candidate.status).toBe('awaiting-confirmation');
+    const result = await authority.decide({
+      candidateId: candidate.id,
+      decision: 'adopt-new',
+      expectedCurrentVersion: 2,
+      actorId: 'desktop-user',
+    });
+    expect(result.current?.normalizedValueJson).toBe('["隐形车衣","太阳膜"]');
+    expect(result.current?.version).toBe(3);
+  });
+
+  it('merges array values on revision add as well', async () => {
+    const port = revisionPort({ current: arrayCurrent(['隐形车衣']) });
+    const authority = new KnowledgeAuthority({ workspaceId: 'brand-1', sessionId: 'session-1' }, port);
+    await authority.revise({
+      action: 'add',
+      key: { subject: '品牌', predicate: 'enterprise-profile.core-products' },
+      value: ['隐形车衣', '太阳膜'],
+      reason: '加一条核心产品：太阳膜',
+      actorId: 'desktop-user',
+    });
+    expect(port.revisions[0].submission).toMatchObject({
+      disposition: 'awaiting-confirmation',
+      normalizedValueJson: '["隐形车衣","太阳膜"]',
+    });
+  });
+});
+
 describe('KnowledgeAuthority chat revision', () => {
   it('modifies a pending candidate through the normalization pipeline', async () => {
     const port = revisionPort();

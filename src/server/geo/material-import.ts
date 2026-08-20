@@ -22,7 +22,7 @@ import { toKnowledgeCardCandidate } from '../../shared/geo/knowledgeCard';
 import { buildSsrfGuardedDispatcher, isUrlSchemeSafe } from '../utils/ssrf';
 import { withAbortSignal } from '../utils/cancellation';
 import { managementApi, managementApiBytes } from '../utils/management-api-client';
-import type { GeoBillingPermitPort } from './billing-permit';
+import { GatewayBillingError, type GeoBillingPermitPort } from './billing-permit';
 import type { KnowledgeAuthority, KnowledgeCandidate } from './knowledge-authority';
 import { GeoUpstreamHttpError } from './provider-capabilities';
 import type {
@@ -351,12 +351,14 @@ function extractionPrompt(context: BrandMaterialContext, material: BrandMaterial
     '- fullName（标量）：品牌完整的注册全称。',
     '- shortNames（数组）：简称/缩写/昵称。',
     '- addresses（数组）：街道级具体地址（街道+门牌号、楼栋、楼层）；区/市/区域名不是地址。',
-    '- serviceArea（标量）：服务的地理区域/范围（如「成都新都」）。',
     '- industry（标量，必填）：单一原子行业品类词，禁止复合；复合业务选最主要品类，其余落 products。'
     + '示例：「汽车音响改装」是原子，「汽车音响改装与隔音降噪」是复合（禁止）。',
     '- contactInfo（数组）：电话号码数字（如「028-12345678」「13800138000」）；多门店/多号码各占一项，全部保留，不合并成一项。',
     '',
     '## 判断类字段（材料有则抽取；没有可依上下文推断，标 inferred）',
+    '- serviceArea（标量）：品牌【实际已落地/可提供服务的地理范围】（如「成都新都」「广东省」）。'
+    + '「面向/计划/拓展中/稳步推进 X 市场」等愿景性、招商性表述禁止作为取值；'
+    + '材料未明写实际范围时，可从客户案例/落地门店/合作档口的地域分布推断。',
     '- products（数组，必填）：核心产品/服务。原子化是硬规则——每项一个可独立命名的产品/服务，'
     + '禁止把多个服务用顿号/逗号/连词/斜杠拼在一项里。宁可多拆几项。',
     '- coreAdvantages（数组，必填）：核心差异化优势，一项一个原子优势点。',
@@ -491,11 +493,13 @@ function parseCompetitorSuggestions(
     const normalized = name.toLowerCase();
     // 反虚构：名字必须字面出现在检索文本中，且不与已知竞品重复；排除名单
     // （品牌自身/别名/关联主体）按双向子串匹配——目标品牌「九味牛」要连
-    // 「成都九味牛食品」一起拦下（js_ai dedupeAndFilterCompetitors 契约）。
+    // 「成都九味牛食品」一起拦下（js_ai dedupeAndFilterCompetitors 契约）；
+    // 短名形近变体（材料错别字）由 isSimilarSelfName 一并拦下。
     if (!haystack.includes(normalized)) continue;
     if (limits.knownCompetitors.has(normalized)) continue;
     if ([...limits.excludedNames].some(
-      (excluded) => excluded === normalized || excluded.includes(normalized) || normalized.includes(excluded),
+      (excluded) => excluded === normalized || excluded.includes(normalized) || normalized.includes(excluded)
+        || isSimilarSelfName(normalized, excluded),
     )) continue;
     if (seen.has(normalized)) continue;
     seen.add(normalized);
@@ -632,9 +636,42 @@ export function parseProfileFacts(
 }
 
 /**
+ * 短名形近变体护栏：材料错别字会把品牌短名的形近变体漏进竞品/关联品牌
+ * （品牌「炊班长」被材料写成「炊事班」——与短名逐位比对差两个位置，按
+ * 字符多重集只差一个字）。规则：去空白后等长、长度 2–4、含 CJK 的两个
+ * 名字，忽略字序的字符差异（多重集对称差）≤1 判为自引用——覆盖同音/形
+ * 近换字与字序调换；长度 1 豁免（单字重名率太高），长度 ≥5 或不等长仍
+ * 只走相等/双向子串旧规则，避免误伤真实竞品。纯函数，dropSelfReferences
+ * 与 parseCompetitorSuggestions 共用同一判定。
+ */
+const CJK_CHAR = /[㐀-鿿豈-﫿]/;
+
+export function isSimilarSelfName(candidate: string, self: string): boolean {
+  const left = candidate.replace(/\s+/g, '');
+  const right = self.replace(/\s+/g, '');
+  if (left.length !== right.length) return false;
+  if (left.length < 2 || left.length > 4) return false;
+  if (!CJK_CHAR.test(left) || !CJK_CHAR.test(right)) return false;
+  return multisetDifference(left, right) <= 1;
+}
+
+/** 忽略字序的字符差异：right 中在 left 字符多重集里找不到配对的字符数。 */
+function multisetDifference(left: string, right: string): number {
+  const counts = new Map<string, number>();
+  for (const char of left) counts.set(char, (counts.get(char) ?? 0) + 1);
+  let unmatched = 0;
+  for (const char of right) {
+    const count = counts.get(char) ?? 0;
+    if (count > 0) counts.set(char, count - 1);
+    else unmatched += 1;
+  }
+  return unmatched;
+}
+
+/**
  * relatedBrands/competitors 落库前的确定性自名过滤：剔除品牌名、同批抽出的
- * 全称与别名（大小写不敏感、双向子串）。提示词只能降频，这层把「本品牌进入
- * 自己的关联/竞品列表」变成结构不可能（js_ai dedupeAndFilterCompetitors 契约）。
+ * 全称与别名（大小写不敏感、双向子串 + 短名形近变体）。提示词只能降频，这层
+ * 把「本品牌进入自己的关联/竞品列表」变成结构不可能（js_ai dedupeAndFilterCompetitors 契约）。
  */
 function dropSelfReferences(
   context: BrandMaterialContext,
@@ -654,7 +691,8 @@ function dropSelfReferences(
     const normalized = value.trim().toLowerCase();
     if (normalized.length < 2) return false;
     return [...selfNames].some(
-      (self) => self === normalized || self.includes(normalized) || normalized.includes(self),
+      (self) => self === normalized || self.includes(normalized) || normalized.includes(self)
+        || isSimilarSelfName(normalized, self),
     );
   };
   return facts.flatMap((fact) => {
@@ -667,16 +705,20 @@ function dropSelfReferences(
 }
 
 function errorCode(error: unknown): MaterialErrorCode {
+  // GatewayBillingError 是类型化错误，message 是自由中文文本，子串机制会把
+  // insufficient_balance / billing_transport_failed 等真实原因掩蔽成泛化
+  // 兜底——先按类型归到登记码 material_billing_failed。
+  if (error instanceof GatewayBillingError) return 'material_billing_failed';
   const message = error instanceof Error ? error.message : String(error);
   return MATERIAL_ERROR_CODES.find((candidate) => message.includes(candidate))
     ?? 'material_processing_failed';
 }
 
 /**
- * model_failed 的非密钥诊断：上游/网关 HTTP 状态与业务码（provider 层
- * 出口已脱敏），用于区分限流/鉴权/上游故障。非类型化错误只记异常类名
- * （如 TypeError/AbortError），自由文本 message 可能夹带请求细节，不进
- * 日志。只进日志，不进返回值、数据库或 renderer。
+ * 失败的非密钥诊断：上游/网关 HTTP 状态与业务码（provider 层出口已脱敏），
+ * 用于区分限流/鉴权/上游故障。非类型化错误只记异常类名（如
+ * TypeError/AbortError），自由文本 message 可能夹带请求细节，不进日志。
+ * 只进日志，不进返回值、数据库或 renderer。
  */
 function upstreamFailureDiagnostic(error: unknown): Record<string, unknown> | undefined {
   const cause = error instanceof Error ? error.cause : undefined;
@@ -687,6 +729,23 @@ function upstreamFailureDiagnostic(error: unknown): Record<string, unknown> | un
     return { upstreamError: cause.name };
   }
   return undefined;
+}
+
+/**
+ * 全失败码共用的脱敏诊断：异常类名 + 类型化错误的非密钥字段
+ * （GatewayBillingError 的 code/status；model_failed 时经
+ * upstreamFailureDiagnostic 取上游 HTTP 状态/业务码）。自由文本 message
+ * 可能夹带请求细节，一律不进日志。只进日志，不进 DB 或返回值。
+ */
+function failureDiagnostic(error: unknown): Record<string, unknown> {
+  const diagnostic: Record<string, unknown> = {
+    errorName: error instanceof Error ? error.name : typeof error,
+  };
+  if (error instanceof GatewayBillingError) {
+    diagnostic.billingCode = error.code;
+    diagnostic.billingStatus = error.status;
+  }
+  return { ...diagnostic, ...upstreamFailureDiagnostic(error) };
 }
 
 export function materialLogProjection(input: {
@@ -1242,12 +1301,13 @@ export class MaterialImportService {
       };
     } catch (error) {
       const code = errorCode(error);
-      if (code === 'model_failed') {
-        const diagnostic = upstreamFailureDiagnostic(error);
-        if (diagnostic) {
-          console.log(`[materials] extract diagnostic ${JSON.stringify({ materialId, ...diagnostic })}`);
-        }
-      }
+      // 所有失败码都打一条脱敏诊断（原 model_failed 特例的推广）：真实原因
+      // 不再只以泛化 code 留在 DB，日志可定位计费/上游/解析层故障。
+      console.log(`[materials] extract diagnostic ${JSON.stringify({
+        materialId,
+        errorCode: code,
+        ...failureDiagnostic(error),
+      })}`);
       await this.materialPort.finish({
         attemptId: attempt.id,
         materialId,

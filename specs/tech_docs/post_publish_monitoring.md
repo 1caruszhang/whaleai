@@ -10,7 +10,7 @@ The in-process scheduler starts with the Rust management control plane, reloads 
 
 ## Order status queries go through the gateway
 
-The publish-status and access-indexing units no longer hold direct supermedia credentials. Rust posts `(publishExecutionId, publishItemId, channelKind)` to the source Session Sidecar's `/api/xiaojing/post-publish-monitor/order-query` control-plane route; the Sidecar derives the idempotent sn with `distributionOrderSn(executionId, itemId)` (the same derivation ticket 08 used at order placement) and the gateway re-signs with server-side credentials. The frozen `externalRequestSn` remains an audit reference only. A null record maps to the existing retryable "not observed yet" failure.
+The publish-status and access-indexing units no longer hold direct supermedia credentials. Rust posts `(publishExecutionId, publishItemId, channelKind)` to the source Session Sidecar's `/api/xiaojing/post-publish-monitor/order-query` control-plane route; the Sidecar derives the idempotent sn with `distributionOrderSn(executionId, itemId)` (the same derivation ticket 08 used at order placement) and the gateway re-signs with server-side credentials. All monitor worker calls (baseline-probe / access-check / order-query / balance) carry the `x-xiaojing-account-token` header with the current fresh account access token (Rust refreshes it when the JWT exp is within the 120s margin), which the Sidecar prefers over the birth-time admission env token — patrols fire hours after Sidecar start. The frozen `externalRequestSn` remains an audit reference only. A null record maps to the existing retryable "not observed yet" failure.
 
 ## Paused state (insufficient balance)
 

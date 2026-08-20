@@ -59,10 +59,13 @@ describe("Xiaojing product shell contract", () => {
     expect(app).toContain("<XiaojingGeoEffectPage");
     expect(app).toContain("tab.view === 'brand-effect'");
     expect(app).toContain("brandState.currentWorkspace");
-    // 品牌档案整页只读投影：版本史与产物血缘来自 BrandWorkspace 历史投影，
-    // 无确认或动作入口。
+    // 品牌档案整页只读投影：三层信息架构——第一层「当前档案」看板（最新
+    // 已确认版本事实按语义 widget 分格）、第二层「版本历史」diff 台账、
+    // 第三层「已批准产物」按类型分组的血缘；数据来自 BrandWorkspace 历史
+    // 投影，除读取与展开折叠外无确认或动作入口。
     expect(archive).toContain("loadBrandHistory");
-    expect(archive).toContain('aria-label="品牌知识版本"');
+    expect(archive).toContain('aria-label="当前档案"');
+    expect(archive).toContain('aria-label="版本历史"');
     expect(archive).toContain('aria-label="已批准产物"');
     expect(archive).not.toContain("decideGeoKnowledge");
     expect(archive).not.toContain("controlGeoOperation");

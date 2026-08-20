@@ -330,6 +330,9 @@ export function sanitizeGeoProviderError(
   if (error instanceof GeoCapabilityUnavailableError) {
     return new GeoCapabilityUnavailableError(sanitized);
   }
+  if (error instanceof GeoTransientUpstreamError) {
+    return new GeoTransientUpstreamError(error.slot, sanitized);
+  }
   return new Error(sanitized);
 }
 
@@ -357,6 +360,51 @@ export class GeoCapabilityUnavailableError extends Error {
     super(message);
     this.name = "GeoCapabilityUnavailableError";
   }
+}
+
+/**
+ * 瞬时性上游失败（网络错误、超时等未拿到 HTTP 响应的故障）：与携带状态码
+ * 的 GeoUpstreamHttpError 互补，供 embedding 消费方区分「可降级的瞬时
+ * 故障」与「必须显式失败的配置类故障」。
+ */
+export class GeoTransientUpstreamError extends Error {
+  constructor(
+    readonly slot: GeoProviderCapabilitySlot,
+    message: string,
+  ) {
+    super(message);
+    this.name = "GeoTransientUpstreamError";
+  }
+}
+
+/**
+ * 网关/上游信封里的配置类机器可读错误码：无论 HTTP 状态码（真实事故：
+ * 网关缺 ARK_EMBEDDING_ENDPOINT_ID 时抛 503，按状态启发式会被误判瞬时）
+ * 一律判配置类、显式失败，不参与瞬时降级与退避重试。
+ */
+const GEO_CONFIGURATION_ERROR_CODES: ReadonlySet<string> = new Set([
+  "embedding_endpoint_not_configured",
+]);
+
+/**
+ * embedding 降级的错误分类（用户裁决的折中语义）：仅瞬时失败——网络错误/
+ * 超时（GeoTransientUpstreamError）、408、429、5xx——允许消费方回落确定性
+ * 降级向量让流程继续；配置类失败（其余 4xx、能力未配置、响应契约不符，
+ * 以及信封携带配置类 errorCode 的任意状态）不得降级，必须显式失败并给出
+ * 可操作的配置指向。分类优先看机器可读 errorCode，拿不到才回退 status
+ * 启发式。
+ */
+export function isTransientGeoUpstreamFailure(error: unknown): boolean {
+  if (error instanceof GeoTransientUpstreamError) return true;
+  if (error instanceof GeoUpstreamHttpError) {
+    if (error.errorCode && GEO_CONFIGURATION_ERROR_CODES.has(error.errorCode)) {
+      return false;
+    }
+    return (
+      error.status === 408 || error.status === 429 || error.status >= 500
+    );
+  }
+  return false;
 }
 
 function required(
@@ -410,6 +458,55 @@ async function gatewayHttpFailure(
     // 网关错误体不可解析：沿用固定文案。
   }
   return fallbackError;
+}
+
+/**
+ * 上游非 2xx 时读取并透出错误体（embedding 专用；真实事故：网关漏配 model
+ * 兜底 → 上游 400「model 缺失」，旧实现只透出状态码无法定位）。方舟信封
+ * `{error:{code,message}}` 与网关信封 `{error,message}` 都尝试；均不可读
+ * 时并入截断的原始文本片段。文案仍经 sanitizeGeoProviderError 脱敏，
+ * 不透出密钥。
+ */
+async function upstreamHttpFailure(
+  slot: GeoProviderCapabilitySlot,
+  response: Response,
+): Promise<GeoUpstreamHttpError> {
+  const fallback = safeUpstreamFailure(slot, response.status);
+  try {
+    const text = await response.clone().text();
+    if (!text) return fallback;
+    let detail: string | undefined;
+    let errorCode: string | undefined;
+    try {
+      const body = JSON.parse(text) as {
+        error?: string | { message?: string; code?: string };
+        message?: string;
+      };
+      const nested =
+        typeof body.error === "object" && body.error !== null
+          ? body.error
+          : undefined;
+      detail =
+        nested?.message ??
+        (typeof body.message === "string" ? body.message : undefined);
+      errorCode =
+        nested?.code ??
+        (typeof body.error === "string" ? body.error : undefined);
+    } catch {
+      detail = text.slice(0, 300);
+    }
+    if (detail) {
+      return new GeoUpstreamHttpError(
+        slot,
+        response.status,
+        `${fallback.message}：${detail}`.slice(0, 400),
+        errorCode,
+      );
+    }
+  } catch {
+    // 错误体不可读：沿用固定文案。
+  }
+  return fallback;
 }
 
 async function openAiChat(
@@ -813,20 +910,33 @@ export function createGeoProviderCapabilities(
               attempt++
             ) {
               try {
-                const response = await fetchImpl(arkEmbeddingEndpoint, {
-                  method: "POST",
-                  headers: {
-                    Authorization: `Bearer ${apiKey}`,
-                    "Content-Type": "application/json",
-                  },
-                  body: JSON.stringify({
-                    ...(model ? { model } : {}),
-                    input: [{ type: "text", text: texts[index] }],
-                  }),
-                  signal: options?.signal,
-                });
+                let response: Response;
+                try {
+                  response = await fetchImpl(arkEmbeddingEndpoint, {
+                    method: "POST",
+                    headers: {
+                      Authorization: `Bearer ${apiKey}`,
+                      "Content-Type": "application/json",
+                    },
+                    body: JSON.stringify({
+                      ...(model ? { model } : {}),
+                      input: [{ type: "text", text: texts[index] }],
+                    }),
+                    signal: options?.signal,
+                  });
+                } catch (error) {
+                  // 网络错误/超时（未拿到响应）：包装为瞬时失败供消费方降级；
+                  // abort 是用户取消，不属于可降级故障。
+                  if (options?.signal?.aborted) throw error;
+                  throw new GeoTransientUpstreamError(
+                    "embedding",
+                    `embedding 上游网络错误：${
+                      error instanceof Error ? error.message : String(error)
+                    }`,
+                  );
+                }
                 if (!response.ok)
-                  throw safeUpstreamFailure("embedding", response.status);
+                  throw await upstreamHttpFailure("embedding", response);
                 const payload = (await response.json()) as {
                   data?: { embedding?: number[] };
                 };
@@ -844,6 +954,9 @@ export function createGeoProviderCapabilities(
               } catch (error) {
                 lastError = error;
                 if (options?.signal?.aborted) throw error;
+                // 只重试瞬时失败（网络/超时、408、429、5xx）；配置类
+                // （其余 4xx）与响应契约错误重试无意义，立即失败。
+                if (!isTransientGeoUpstreamFailure(error)) break;
                 if (
                   attempt < XIAOJING_GEO_PROVIDER_DEFAULTS.embeddingMaxRetries
                 ) {
@@ -851,7 +964,21 @@ export function createGeoProviderCapabilities(
                 }
               }
             }
-            if (lastError) throw sanitizeGeoProviderError(lastError, secrets);
+            if (lastError) {
+              // 配置类失败附可操作指向（真实事故：网关漏配 model 兜底 → 400）。
+              if (
+                lastError instanceof GeoUpstreamHttpError &&
+                !isTransientGeoUpstreamFailure(lastError)
+              ) {
+                lastError = new GeoUpstreamHttpError(
+                  lastError.slot,
+                  lastError.status,
+                  `${lastError.message}；请检查 embedding 模型/端点配置（直连模式 XIAOJING_ARK_EMBEDDING_ENDPOINT_ID，网关模式检查网关侧模型兜底配置）`,
+                  lastError.errorCode,
+                );
+              }
+              throw sanitizeGeoProviderError(lastError, secrets);
+            }
           }
         };
         await Promise.all(

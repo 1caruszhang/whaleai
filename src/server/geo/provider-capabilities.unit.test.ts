@@ -4,6 +4,9 @@ import {
   captureGeoProviderRuntimeSecrets,
   createGeoProviderCapabilities,
   distributionOrderSn,
+  GeoTransientUpstreamError,
+  GeoUpstreamHttpError,
+  isTransientGeoUpstreamFailure,
   sanitizeGeoProviderError,
   type GeoProviderRuntimeSecrets,
 } from "./provider-capabilities";
@@ -653,5 +656,160 @@ describe("GEO typed provider capabilities", () => {
     expect(safe.message).not.toContain("ark-live-secret");
     expect(safe.message).not.toContain("abcdef");
     expect(safe.message).toContain("[REDACTED]");
+  });
+});
+
+describe("embedding 错误分类与透出", () => {
+  const directSecrets: GeoProviderRuntimeSecrets = {
+    arkApiKey: "ark-test",
+    embeddingEndpointId: "ep-test",
+  };
+  const silentSleep = () => vi.fn(async (_ms: number) => {});
+  const vector2048 = () => Array.from({ length: 2048 }, () => 0.5);
+
+  it("网关模式 400 透出上游错误体、附配置指向且不重试（真实事故回归）", async () => {
+    const sleep = silentSleep();
+    const failFetch = vi.fn(async () =>
+      jsonResponse(
+        { error: { code: "InvalidParameter", message: "model 缺失" } },
+        400,
+      ),
+    );
+    const capabilities = createGeoProviderCapabilities(
+      {
+        gatewayBaseUrl: "https://gw.example.test",
+        accountAccessToken: "account-token-1",
+      },
+      { fetch: failFetch as typeof fetch, sleep },
+    );
+
+    const failure = await capabilities.embedding.embed(["x"]).catch((e) => e);
+
+    expect(failure).toBeInstanceOf(GeoUpstreamHttpError);
+    expect(failure.status).toBe(400);
+    expect(failure.errorCode).toBe("InvalidParameter");
+    expect(failure.message).toContain("model 缺失");
+    expect(failure.message).toContain("请检查 embedding 模型/端点配置");
+    expect(isTransientGeoUpstreamFailure(failure)).toBe(false);
+    // 配置类失败（4xx≠429）立即失败，不退避重试。
+    expect(failFetch).toHaveBeenCalledTimes(1);
+    expect(sleep).not.toHaveBeenCalled();
+  });
+
+  it("网关模式 503 + embedding_endpoint_not_configured 判配置类：不重试、透出 code", async () => {
+    // 回归：网关缺 ARK_EMBEDDING_ENDPOINT_ID 时 requireEmbeddingModel 抛 503
+    // （provider-proxy-routes），按状态启发式会被误判瞬时并静默降级；
+    // 分类必须优先信封里的机器可读 errorCode。
+    const sleep = silentSleep();
+    const failFetch = vi.fn(async () =>
+      jsonResponse(
+        {
+          error: "embedding_endpoint_not_configured",
+          message:
+            "embedding 服务暂不可用：服务器缺少 ARK_EMBEDDING_ENDPOINT_ID 配置",
+        },
+        503,
+      ),
+    );
+    const capabilities = createGeoProviderCapabilities(
+      {
+        gatewayBaseUrl: "https://gw.example.test",
+        accountAccessToken: "account-token-1",
+      },
+      { fetch: failFetch as typeof fetch, sleep },
+    );
+
+    const failure = await capabilities.embedding.embed(["x"]).catch((e) => e);
+
+    expect(failure).toBeInstanceOf(GeoUpstreamHttpError);
+    expect(failure.status).toBe(503);
+    expect(failure.errorCode).toBe("embedding_endpoint_not_configured");
+    expect(failure.message).toContain("ARK_EMBEDDING_ENDPOINT_ID");
+    expect(isTransientGeoUpstreamFailure(failure)).toBe(false);
+    expect(failFetch).toHaveBeenCalledTimes(1);
+    expect(sleep).not.toHaveBeenCalled();
+  });
+
+  it("5xx 退避重试后可恢复；持续失败归类为瞬时", async () => {
+    const sleep = silentSleep();
+    let calls = 0;
+    const flakyFetch = vi.fn(async () => {
+      calls += 1;
+      if (calls < 3) return new Response("upstream boom", { status: 500 });
+      return jsonResponse({ data: { embedding: vector2048() } });
+    });
+    const capabilities = createGeoProviderCapabilities(directSecrets, {
+      fetch: flakyFetch as typeof fetch,
+      sleep,
+    });
+
+    const vectors = await capabilities.embedding.embed(["x"]);
+
+    expect(vectors).toEqual([vector2048()]);
+    expect(calls).toBe(3);
+    expect(sleep.mock.calls.map((call) => call[0])).toEqual([500, 1000]);
+
+    const down = vi.fn(async () => new Response("down", { status: 503 }));
+    const downCaps = createGeoProviderCapabilities(directSecrets, {
+      fetch: down as typeof fetch,
+      sleep: silentSleep(),
+    });
+    const failure = await downCaps.embedding.embed(["x"]).catch((e) => e);
+    expect(failure).toBeInstanceOf(GeoUpstreamHttpError);
+    expect(failure.message).toContain("down");
+    expect(isTransientGeoUpstreamFailure(failure)).toBe(true);
+    expect(down).toHaveBeenCalledTimes(3); // 1 + embeddingMaxRetries
+  });
+
+  it("429 限流退避重试并归类为瞬时", async () => {
+    const sleep = silentSleep();
+    const limited = vi.fn(async () =>
+      jsonResponse({ error: { message: "rate limited" } }, 429),
+    );
+    const capabilities = createGeoProviderCapabilities(directSecrets, {
+      fetch: limited as typeof fetch,
+      sleep,
+    });
+
+    const failure = await capabilities.embedding.embed(["x"]).catch((e) => e);
+
+    expect(failure).toBeInstanceOf(GeoUpstreamHttpError);
+    expect(failure.status).toBe(429);
+    expect(isTransientGeoUpstreamFailure(failure)).toBe(true);
+    expect(limited).toHaveBeenCalledTimes(3);
+    expect(sleep.mock.calls.map((call) => call[0])).toEqual([500, 1000]);
+  });
+
+  it("网络错误包装为 GeoTransientUpstreamError 并退避重试", async () => {
+    const sleep = silentSleep();
+    const down = vi.fn(async () => {
+      throw new TypeError("fetch failed");
+    });
+    const capabilities = createGeoProviderCapabilities(directSecrets, {
+      fetch: down as typeof fetch,
+      sleep,
+    });
+
+    const failure = await capabilities.embedding.embed(["x"]).catch((e) => e);
+
+    expect(failure).toBeInstanceOf(GeoTransientUpstreamError);
+    expect(failure.message).toContain("fetch failed");
+    expect(isTransientGeoUpstreamFailure(failure)).toBe(true);
+    expect(down).toHaveBeenCalledTimes(3);
+  });
+
+  it("透出的上游错误体先脱敏密钥", async () => {
+    const failFetch = vi.fn(async () =>
+      jsonResponse({ error: { message: "bad key ark-test leaked" } }, 400),
+    );
+    const capabilities = createGeoProviderCapabilities(directSecrets, {
+      fetch: failFetch as typeof fetch,
+      sleep: silentSleep(),
+    });
+
+    const failure = await capabilities.embedding.embed(["x"]).catch((e) => e);
+
+    expect(failure.message).toContain("bad key [REDACTED] leaked");
+    expect(failure.message).not.toContain("ark-test");
   });
 });

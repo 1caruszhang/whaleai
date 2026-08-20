@@ -30,6 +30,7 @@ import type {
   PublishItemProjection,
   PublishOrderStatusEntry,
 } from "../../../shared/geo/publishScheduler";
+import { cnyToPoints } from "../../../shared/geo/points";
 import {
   publishOrderRefundsPoints,
   publishOrderStatusActive,
@@ -496,8 +497,7 @@ export default function PublishAuthorizationGateCard({
           合计 {execution.totalPricePoints} 点
         </span>
         <span className="rounded-full bg-[var(--paper-inset)] px-2 py-0.5">
-          预计 ¥{execution.estimatedSpendCny.toFixed(2)} / 预算 ¥
-          {execution.budgetCny.toFixed(2)}
+          预计 {execution.totalPricePoints} 点 / 预算 {cnyToPoints(execution.budgetCny)} 点
         </span>
         <span className="rounded-full bg-[var(--paper-inset)] px-2 py-0.5">
           {execution.items.length} 个发布项

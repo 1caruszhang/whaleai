@@ -25,6 +25,8 @@ low                   = priorityTotal < 100
 
 当没有最近选中池时，nearest cosine 按 `0` 计，因此 `recentPoolSimilarity = 0` 且 `optimizationPotential = 50`。每题持久化三个原始分量、sum、阈值、formula 与 `policyVersion=xiaojing-content-prompt-v1`，修改阈值必须升级 policy version。
 
+embedding 失败语义（折中降级，用户裁决）：Provider 侧只对瞬时失败（网络错误/超时、408、429、5xx，由 `isTransientGeoUpstreamFailure` 判定）退避重试，配置类失败（其余 4xx、能力未配置）立即失败；非 2xx 响应的错误体（方舟 `{error:{code,message}}` / 网关 `{error,message}` 信封）脱敏后透出，配置类失败文案附可操作指向（如 `XIAOJING_ARK_EMBEDDING_ENDPOINT_ID` / 网关侧模型兜底配置）。瞬时失败在业务层回落确定性 FNV-1a 词频降级向量（`embedding-fallback.ts`，维度与 Provider 一致）让流程继续，可观测性为硬要求：WARN 日志 + 每题 `score.formula` 追加 `; degraded-embedding` 标记（复用既有字段，先例：`user-added; not scored`）+ embedding checkpoint output 携带 `degraded: true`。配置类失败不走降级，显式失败并终止工具。
+
 ## 提示词形态（ADR-0006，修正四声明范围 = 锚 + 上限）
 
 - 挖词与问题生成两段 prompt 按 js_ai 不变量清单承载（第一人称陈述、三类递进、意图维度+反同质化、通顺最高原则、推荐尾巴禁令、每词至少 1 条、recommended 2–3 个）。清单唯一真源见 `content_prompt_invariants.md`。

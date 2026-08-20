@@ -1,7 +1,11 @@
 import { describe, expect, it } from 'vitest';
 
 import type { GeoOperationProjection } from '../../shared/geo/operation';
-import { geoOperationControlFailure, geoOperationProjectionPayload } from './xiaojing-geo-tool';
+import {
+  accountTokenCacheFingerprint,
+  geoOperationControlFailure,
+  geoOperationProjectionPayload,
+} from './xiaojing-geo-tool';
 
 function operation(overrides: Partial<GeoOperationProjection> = {}): GeoOperationProjection {
   return {
@@ -29,6 +33,22 @@ function operation(overrides: Partial<GeoOperationProjection> = {}): GeoOperatio
     ...overrides,
   };
 }
+
+describe('accountTokenCacheFingerprint', () => {
+  it('hashes the raw token into a stable 16-hex fingerprint', () => {
+    const fingerprint = accountTokenCacheFingerprint('account-token-secret-1');
+    expect(fingerprint).toMatch(/^[0-9a-f]{16}$/);
+    expect(fingerprint).not.toContain('account-token-secret-1');
+    // 同 token 同指纹（实例复用），不同 token 不同指纹（轮换后重建）。
+    expect(accountTokenCacheFingerprint('account-token-secret-1')).toBe(fingerprint);
+    expect(accountTokenCacheFingerprint('account-token-secret-2')).not.toBe(fingerprint);
+  });
+
+  it('maps a missing token to an empty fingerprint', () => {
+    expect(accountTokenCacheFingerprint(undefined)).toBe('');
+    expect(accountTokenCacheFingerprint('')).toBe('');
+  });
+});
 
 describe('geoOperationProjectionPayload', () => {
   it('attaches a modeling hint exactly when the session list is empty', () => {

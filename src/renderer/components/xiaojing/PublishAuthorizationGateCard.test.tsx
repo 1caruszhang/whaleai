@@ -321,6 +321,12 @@ describe("PublishAuthorizationGateCard", () => {
     // ¥142.00 × 1.6 → 2272 点（服务端算好投影，卡片只展示）。
     expect(within(card).getByText(/单价 2272 点/)).toBeInTheDocument();
     expect(within(card).getByText(/合计 2272 点/)).toBeInTheDocument();
+    // 汇总行点数化：预计取 totalPricePoints；预算按公式换算
+    // （¥1000 → 16000 点），不再出现 ¥ 金额。
+    expect(
+      within(card).getByText(/预计 2272 点 \/ 预算 16000 点/),
+    ).toBeInTheDocument();
+    expect(card.textContent ?? "").not.toContain("¥");
     // 界面不出现「服务费」字样（含 60% 服务费不单列）。
     expect(within(card).queryByText(/服务费/)).toBeNull();
     expect(card.textContent ?? "").not.toContain("服务费");

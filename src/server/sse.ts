@@ -57,6 +57,19 @@ function summarizeValue(value: unknown, fieldName?: string): unknown {
 }
 
 export function summarizeSsePayload(event: string, data: unknown): string {
+  // 流式快照每 flush 一次全量 payload，递归摘要与快照本身同阶开销；
+  // 降级为 messageId + 字节数，只保留定位能力。
+  if (event === 'chat:message-update') {
+    const update = data as { message?: { id?: unknown } } | null;
+    const id = update && typeof update.message?.id === 'string' ? update.message.id : 'unknown';
+    let bytes = -1;
+    try {
+      bytes = encoder.encode(JSON.stringify(data)).length;
+    } catch {
+      // 保留 -1 表示序列化失败。
+    }
+    return `messageId=${id} bytes=${bytes}`;
+  }
   if (event === 'chat:message-replay' && data && typeof data === 'object') {
     const replay = data as {
       message?: { id?: string; role?: string };

@@ -1459,11 +1459,17 @@ impl SidecarManager {
     /// Check if a session's Sidecar has an owner whose work remains bound to
     /// this session identity after a desktop Tab detaches.
     pub fn session_has_persistent_owners(&self, session_id: &str) -> bool {
-        self.session_owners(session_id).any(|owner| {
-            matches!(
-                owner,
-                SidecarOwner::BackgroundCompletion(_) | SidecarOwner::GeoMonitor(_)
-            )
+        self.session_persistent_owner_reason(session_id).is_some()
+    }
+
+    /// Classify the persistent owner that keeps a session identity stable
+    /// after a desktop Tab detaches, so deletion refusals can name the
+    /// user-facing blocking reason instead of a collapsed "in-use".
+    pub fn session_persistent_owner_reason(&self, session_id: &str) -> Option<&'static str> {
+        self.session_owners(session_id).find_map(|owner| match owner {
+            SidecarOwner::BackgroundCompletion(_) => Some("busy-replying"),
+            SidecarOwner::GeoMonitor(_) => Some("monitor-active"),
+            _ => None,
         })
     }
 
@@ -1502,10 +1508,30 @@ impl SidecarManager {
         session_id: &str,
         releasable_tab_ids: &std::collections::HashSet<String>,
     ) -> bool {
-        self.session_owners(session_id).any(|owner| match owner {
-            SidecarOwner::Tab(tab_id) => !releasable_tab_ids.contains(tab_id),
-            _ => true,
-        })
+        self.session_unreleasable_owner_reason(session_id, releasable_tab_ids)
+            .is_some()
+    }
+
+    /// Classify the first owner that blocks deletion beyond the App-authorized
+    /// releasable Tabs. BackgroundCompletion/GeoMonitor owners name their
+    /// user-facing reason; a Tab outside the authorized set or a
+    /// PublishExecutor stays on the generic "in-use" bucket.
+    pub fn session_unreleasable_owner_reason(
+        &self,
+        session_id: &str,
+        releasable_tab_ids: &std::collections::HashSet<String>,
+    ) -> Option<&'static str> {
+        self.session_owners(session_id)
+            .filter(|owner| match owner {
+                SidecarOwner::Tab(tab_id) => !releasable_tab_ids.contains(tab_id),
+                _ => true,
+            })
+            .map(|owner| match owner {
+                SidecarOwner::BackgroundCompletion(_) => "busy-replying",
+                SidecarOwner::GeoMonitor(_) => "monitor-active",
+                _ => "in-use",
+            })
+            .next()
     }
 
     fn session_owners<'a>(&'a self, session_id: &'a str) -> impl Iterator<Item = &'a SidecarOwner> {
@@ -1604,6 +1630,66 @@ mod completion_claim_tests {
                 .expect("live generation")
                 .completion_claims,
             HashSet::from([("session-a".to_string(), "turn-1".to_string())])
+        );
+    }
+
+    #[test]
+    fn persistent_and_unreleasable_owners_classify_the_blocking_reason() {
+        let mut manager = SidecarManager::new();
+        let releasable = HashSet::from(["tab-a".to_string()]);
+        assert_eq!(manager.session_persistent_owner_reason("session-a"), None);
+        assert_eq!(
+            manager.session_unreleasable_owner_reason("session-a", &releasable),
+            None
+        );
+
+        manager.insert_test_ready_frontend_sidecar(
+            "session-a",
+            32001,
+            SidecarOwner::Tab("tab-a".to_string()),
+        );
+        // An authorized Tab alone never blocks; an unauthorized one stays on
+        // the generic bucket.
+        assert_eq!(manager.session_persistent_owner_reason("session-a"), None);
+        assert_eq!(
+            manager.session_unreleasable_owner_reason("session-a", &releasable),
+            None
+        );
+        assert_eq!(
+            manager.session_unreleasable_owner_reason("session-a", &HashSet::new()),
+            Some("in-use")
+        );
+
+        assert!(manager.add_session_owner(
+            "session-a",
+            SidecarOwner::BackgroundCompletion("session-a".to_string()),
+        ));
+        assert_eq!(
+            manager.session_persistent_owner_reason("session-a"),
+            Some("busy-replying")
+        );
+        assert_eq!(
+            manager.session_unreleasable_owner_reason("session-a", &releasable),
+            Some("busy-replying")
+        );
+    }
+
+    #[test]
+    fn geo_monitor_owner_classifies_as_monitor_active() {
+        let mut manager = SidecarManager::new();
+        let releasable = HashSet::new();
+        manager.insert_test_ready_frontend_sidecar(
+            "session-geo",
+            32002,
+            SidecarOwner::GeoMonitor("wake-1".to_string()),
+        );
+        assert_eq!(
+            manager.session_persistent_owner_reason("session-geo"),
+            Some("monitor-active")
+        );
+        assert_eq!(
+            manager.session_unreleasable_owner_reason("session-geo", &releasable),
+            Some("monitor-active")
         );
     }
 

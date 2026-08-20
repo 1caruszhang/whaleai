@@ -134,18 +134,10 @@ export async function releaseTabSession(sessionId: string, tabId: string): Promi
   return invoke<boolean>('cmd_release_tab_session', { sessionId, tabId });
 }
 
-/** Preserve a Session identity while any non-Tab lifecycle owner exists. */
-export async function sessionHasPersistentOwners(sessionId: string): Promise<boolean> {
-  if (!isTauri()) return false;
-  try {
-    return await invoke<boolean>('cmd_session_has_persistent_owners', { sessionId });
-  } catch {
-    return true;
-  }
-}
-
 export type SessionDeleteFailureReason =
   | 'in-use'
+  | 'busy-replying'
+  | 'monitor-active'
   | 'not-found'
   | 'protected-session'
   | 'invalid-session-id'
@@ -153,6 +145,28 @@ export type SessionDeleteFailureReason =
   | 'transition-in-progress'
   | 'activity-unavailable'
   | 'unexpected';
+
+export type SessionPersistentOwnerReason =
+  | 'in-use'
+  | 'busy-replying'
+  | 'monitor-active'
+  | 'activity-unavailable';
+
+export interface SessionPersistentOwnersResult {
+  hasPersistentOwners: boolean;
+  reason?: SessionPersistentOwnerReason;
+}
+
+/** Preserve a Session identity while any non-Tab lifecycle owner exists. */
+export async function sessionHasPersistentOwners(sessionId: string): Promise<SessionPersistentOwnersResult> {
+  if (!isTauri()) return { hasPersistentOwners: false };
+  try {
+    return await invoke<SessionPersistentOwnersResult>('cmd_session_has_persistent_owners', { sessionId });
+  } catch {
+    // 无法确认 owner 状态时保持拒绝语义，并让用户文案区分「状态未知」。
+    return { hasPersistentOwners: true, reason: 'activity-unavailable' };
+  }
+}
 
 export type SessionDeleteResult =
   | { deleted: true }

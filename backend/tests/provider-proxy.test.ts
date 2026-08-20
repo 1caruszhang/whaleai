@@ -301,6 +301,43 @@ describe('gateway provider proxy (ticket 05)', () => {
     expect(JSON.parse(upstream.calls[1]!.body).model).toBe('ep-client-explicit');
   });
 
+  it('returns 503 with an actionable config error when the body omits model and no endpoint id is configured', async () => {
+    const upstream = mockUpstream(() => Response.json({}));
+    await tb.cleanup();
+    tb = await startTestBackend({ fetch: upstream.fetch });
+    const { accessToken } = await provisionLoggedInAccount(tb.app);
+    const headers = { authorization: `Bearer ${accessToken}`, 'content-type': 'application/json' };
+
+    // 部署漏配 ARK_EMBEDDING_ENDPOINT_ID 且 sidecar 请求体不带 model：透传只会
+    // 换来上游不可诊断的 400——网关直接 503 并点名缺失配置，不触上游。
+    const res = await tb.app.request('/gw/ark/embeddings/multimodal', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ input: [{ type: 'text', text: '知识片段' }] }),
+    });
+    expect(res.status).toBe(503);
+    expect(await res.json()).toMatchObject({
+      error: 'embedding_endpoint_not_configured',
+      message: expect.stringContaining('ARK_EMBEDDING_ENDPOINT_ID'),
+    });
+    expect(upstream.calls).toHaveLength(0);
+
+    // 显式携带 model 的请求不受守卫影响，仍按原口径透传。
+    const upstream2 = mockUpstream(() =>
+      Response.json({ data: { embedding: [0.1] }, usage: { prompt_tokens: 2 } }),
+    );
+    await tb.cleanup();
+    tb = await startTestBackend({ fetch: upstream2.fetch });
+    const second = await provisionLoggedInAccount(tb.app, '13800000007', 'initial-pass-7');
+    const ok = await tb.app.request('/gw/ark/embeddings/multimodal', {
+      method: 'POST',
+      headers: { authorization: `Bearer ${second.accessToken}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'ep-client-explicit', input: [{ type: 'text', text: 'x' }] }),
+    });
+    expect(ok.status).toBe(200);
+    expect(JSON.parse(upstream2.calls[0]!.body).model).toBe('ep-client-explicit');
+  });
+
   it('proxies doubao search searchSources with the dedicated search key', async () => {
     const upstream = mockUpstream(() =>
       Response.json({

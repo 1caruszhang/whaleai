@@ -19,6 +19,10 @@ const workspace: BrandWorkspace = {
   updatedAt: "2026-08-15T00:00:00Z",
 };
 
+/**
+ * v7（最新）：brand.name 与 v6 同值（不进 diff），新增 fullname 与 products
+ * （数组值，验证胶囊渲染）；v6 独有 industry（在 v7 diff 中体现为移除）。
+ */
 const history = {
   workspaceId: "brand-17",
   knowledgeVersions: [
@@ -46,6 +50,12 @@ const history = {
           normalizedValueJson: '"鲸跃科技（杭州）有限公司"',
           sources: [],
         },
+        {
+          factKey: "enterprise-profile.products",
+          factVersion: 1,
+          normalizedValueJson: '["GEO 监测","内容分发"]',
+          sources: [],
+        },
       ],
       usedBy: [{ kind: "question-pool", id: "pool-7", revision: 3 }],
     },
@@ -54,6 +64,12 @@ const history = {
       actorSessionId: "session-knowledge",
       createdAt: "2026-08-14T00:00:00Z",
       facts: [
+        {
+          factKey: "brand.name",
+          factVersion: 2,
+          normalizedValueJson: '"鲸跃科技"',
+          sources: [],
+        },
         {
           factKey: "enterprise-profile.industry",
           factVersion: 1,
@@ -80,62 +96,127 @@ const history = {
       usedBy: [{ kind: "distribution-plan", id: "distribution-7", revision: 4 }],
       createdAt: "2026-08-15T00:02:00Z",
     },
+    {
+      id: "pool-7",
+      kind: "question-pool",
+      revision: 3,
+      knowledgeVersion: 7,
+      operationId: "operation-11",
+      sessionId: "session-pool",
+      status: "confirmed",
+      sourceRefs: [{ kind: "knowledge-version", id: "7", revision: 7 }],
+      usedBy: [],
+      createdAt: "2026-08-15T00:01:00Z",
+    },
   ],
 };
 
 describe("XiaojingBrandArchivePage", () => {
   beforeEach(() => mocks.load.mockReset());
 
-  it("loads the current brand archive on mount and projects knowledge version history read-only", async () => {
+  it("当前档案看板只投影最新版本事实，按语义 widget 分格", async () => {
     mocks.load.mockResolvedValue(history);
 
     render(<XiaojingBrandArchivePage workspace={workspace} />);
 
     expect(mocks.load).toHaveBeenCalledWith("brand-17");
-    const knowledge = await screen.findByRole("region", { name: "品牌知识版本" });
+    const current = await screen.findByRole("region", { name: "当前档案" });
     expect(screen.getByRole("heading", { name: "品牌档案" })).toBeInTheDocument();
     expect(screen.getByText("当前品牌：鲸跃科技")).toBeInTheDocument();
-    expect(within(knowledge).getByText("知识版本 v7")).toBeInTheDocument();
-    expect(within(knowledge).getByText(/user-approved-material.*material-7.*公司注册品牌/)).toBeInTheDocument();
-    expect(within(knowledge).getByText("question-pool · pool-7 · revision 3")).toBeInTheDocument();
+    // Hero：品牌名 + 已确认状态 + tabular-nums 计数微标签。
+    expect(within(current).getByRole("heading", { name: "鲸跃科技" })).toBeInTheDocument();
+    expect(within(current).getByText(/已确认 · 知识版本 v7/)).toBeInTheDocument();
+    expect(within(current).getByText(/FIELDS · 档案字段/)).toBeInTheDocument();
+
+    // 语义 widget 分格：字段值是主角，数组值渲染为胶囊。
+    const identity = within(current).getByRole("region", { name: "品牌身份" });
+    expect(within(identity).getByText("品牌全称")).toBeInTheDocument();
+    expect(within(identity).getByText("鲸跃科技（杭州）有限公司")).toBeInTheDocument();
+    const products = within(current).getByRole("region", { name: "产品矩阵" });
+    expect(within(products).getByText("GEO 监测")).toBeInTheDocument();
+    expect(within(products).getByText("内容分发")).toBeInTheDocument();
+    // 非 Profile 字段落入兜底格，factKey 回退原文。
+    expect(within(current).getByRole("region", { name: "其他事实" })).toHaveTextContent("brand.name");
+
+    // 历史版本的事实不混入当前档案（v6 独有的行业字段默认不可见）。
+    expect(screen.queryByText("GEO 营销工具")).not.toBeInTheDocument();
   });
 
-  it("projects approved artifact lineage without decision or action entries", async () => {
+  it("来源证据默认不渲染，点击卡片角落入口显式展开", async () => {
+    mocks.load.mockResolvedValue(history);
+
+    render(<XiaojingBrandArchivePage workspace={workspace} />);
+
+    const current = await screen.findByRole("region", { name: "当前档案" });
+    expect(screen.queryByText(/公司注册品牌为鲸跃科技/)).not.toBeInTheDocument();
+
+    const other = within(current).getByRole("region", { name: "其他事实" });
+    fireEvent.click(within(other).getByRole("button", { name: /证据 1/ }));
+
+    expect(await within(other).findByText(/user-approved-material.*material-7.*公司注册品牌/)).toBeInTheDocument();
+  });
+
+  it("版本历史默认收起，每行给 diff 摘要，展开只看 diff 详情", async () => {
+    mocks.load.mockResolvedValue(history);
+
+    render(<XiaojingBrandArchivePage workspace={workspace} />);
+    await screen.findByRole("region", { name: "当前档案" });
+
+    // 默认收起：diff 摘要不可见。
+    expect(screen.queryByText("新增 2 · 移除 1")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /版本历史/ }));
+    const ledger = screen.getByRole("region", { name: "版本历史" });
+
+    // v7 vs v6：新增 fullname/products，移除 industry，brand.name 同值不进摘要。
+    expect(within(ledger).getByText("新增 2 · 移除 1")).toBeInTheDocument();
+    // v6 是首版：全部字段记为新增。
+    expect(within(ledger).getByText("新增 2", { exact: true })).toBeInTheDocument();
+    // diff 详情未展开前不重复字段内容。
+    expect(screen.queryByText("GEO 营销工具")).not.toBeInTheDocument();
+
+    fireEvent.click(within(ledger).getByRole("button", { name: /v7/ }));
+    expect(await within(ledger).findByText("移除 行业")).toBeInTheDocument();
+    expect(within(ledger).getByText("GEO 营销工具")).toBeInTheDocument();
+    expect(within(ledger).getByText("新增 品牌全称")).toBeInTheDocument();
+    expect(within(ledger).getByText("新增 核心产品")).toBeInTheDocument();
+  });
+
+  it("产物按七类分组为 widget，UUID/Operation/Session 收进技术详情折叠", async () => {
     mocks.load.mockResolvedValue(history);
 
     render(<XiaojingBrandArchivePage workspace={workspace} />);
 
     const artifacts = await screen.findByRole("region", { name: "已批准产物" });
-    expect(within(artifacts).getByText("已批准文章")).toBeInTheDocument();
-    expect(within(artifacts).getByText("approved-article")).toBeInTheDocument();
-    expect(within(artifacts).getByText("已批准")).toBeInTheDocument();
-    expect(within(artifacts).getByText("article-7-v2 · revision 2")).toBeInTheDocument();
-    expect(within(artifacts).getByText("topic-plan · topic-7 · revision 1")).toBeInTheDocument();
-    expect(within(artifacts).getByText("distribution-plan · distribution-7 · revision 4")).toBeInTheDocument();
+    const articles = within(artifacts).getByRole("region", { name: "已批准文章" });
+    const pools = within(artifacts).getByRole("region", { name: "问题池" });
 
-    // 只读整页：除读取类控件（刷新/重试）外不出现任何确认或动作入口。
-    for (const action of [/批准/, /确认/, /采纳/, /发布/, /拒绝/, /暂停/, /取消/]) {
-      expect(screen.queryByRole("button", { name: action })).not.toBeInTheDocument();
-    }
+    // 组 widget：中文类型名 + 数量 + 最新状态与时间 + 简化血缘。
+    expect(within(articles).getByText("最新 已批准")).toBeInTheDocument();
+    expect(within(articles).getByText("基于知识 v7")).toBeInTheDocument();
+    expect(within(pools).getByText("最新 已确认")).toBeInTheDocument();
+    // 工程标识默认不可见。
+    expect(screen.queryByText(/article-7-v2/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/operation-17/)).not.toBeInTheDocument();
+
+    fireEvent.click(within(articles).getByRole("button", { name: /全部 1 条/ }));
+    fireEvent.click(within(articles).getByRole("button", { name: "技术详情" }));
+
+    expect(await within(articles).findByText(/article-7-v2 · revision 2/)).toBeInTheDocument();
+    expect(within(articles).getByText(/Operation operation-17 · Session session-article/)).toBeInTheDocument();
+    expect(within(articles).getByText("topic-plan · topic-7 · revision 1")).toBeInTheDocument();
+    expect(within(articles).getByText("distribution-plan · distribution-7 · revision 4")).toBeInTheDocument();
   });
 
-  it("labels archive fields in Chinese and collapses historical knowledge versions by default", async () => {
+  it("整页只读：除刷新/重试/展开折叠外无确认或动作入口", async () => {
     mocks.load.mockResolvedValue(history);
 
     render(<XiaojingBrandArchivePage workspace={workspace} />);
+    await screen.findByRole("region", { name: "当前档案" });
 
-    const knowledge = await screen.findByRole("region", { name: "品牌知识版本" });
-    // 档案字段复用 knowledgeCard.fields 中文词表；领域私有 factKey 回退原文。
-    expect(within(knowledge).getByText("品牌全称")).toBeInTheDocument();
-    expect(within(knowledge).getByText("鲸跃科技（杭州）有限公司")).toBeInTheDocument();
-    expect(within(knowledge).getByText("brand.name")).toBeInTheDocument();
-    // 概览磁贴统计最新版本的档案字段数。
-    expect(screen.getByText("最新档案字段")).toBeInTheDocument();
-
-    // 最新版本默认展开，历史版本收起为摘要行；点击后显式展开。
-    expect(within(knowledge).queryByText("GEO 营销工具")).not.toBeInTheDocument();
-    fireEvent.click(within(knowledge).getByRole("button", { name: /知识版本 v6/ }));
-    expect(await within(knowledge).findByText("GEO 营销工具")).toBeInTheDocument();
+    for (const action of [/批准/, /确认/, /采纳/, /发布/, /拒绝/, /暂停/, /取消/]) {
+      expect(screen.queryByRole("button", { name: action })).not.toBeInTheDocument();
+    }
   });
 
   it("reloads when the followed brand switches", async () => {
@@ -169,6 +250,6 @@ describe("XiaojingBrandArchivePage", () => {
 
     expect(screen.getByText(/先在左侧选择品牌/)).toBeInTheDocument();
     expect(mocks.load).not.toHaveBeenCalled();
-    expect(screen.queryByRole("region", { name: "品牌知识版本" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "当前档案" })).not.toBeInTheDocument();
   });
 });

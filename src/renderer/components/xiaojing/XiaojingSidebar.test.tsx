@@ -221,6 +221,57 @@ describe('XiaojingSidebar brand session lifecycle', () => {
     await waitFor(() => expect(onDeleteSession).toHaveBeenCalledTimes(2));
   });
 
+  it.each([
+    {
+      reason: 'busy-replying' as const,
+      message: /会话正在回复，请停止回复或等待结束后再删除/,
+    },
+    {
+      reason: 'monitor-active' as const,
+      message: /发布后监测仍在进行（含已暂停）/,
+    },
+  ])('distinguishes the $reason refusal copy in the deletion dialog', async ({ reason, message }) => {
+    const preview: BrandSessionDeletionPreview = {
+      workspaceId: workspace.id,
+      sessionId: session.id,
+      title: session.title,
+      scope: { sessionRecords: 1, chatTranscripts: 1 },
+      retained: {
+        knowledgeFacts: 0,
+        operations: 0,
+        artifacts: 0,
+        publishOrders: 0,
+        observations: 0,
+      },
+      confirmationToken: 'one-use-token',
+    };
+    const onDeleteSession = vi.fn(async () => (
+      { deleted: false, reason } as const
+    ));
+
+    render(
+      <XiaojingSidebar
+        brandState={state({ previewDeletion: vi.fn(async () => preview) })}
+        activeTab={undefined}
+        onOpenWorkspace={vi.fn(async () => true)}
+        onOpenSession={vi.fn(async () => true)}
+        onRenameSession={vi.fn(async () => undefined)}
+        onDeleteSession={onDeleteSession}
+        onDeleteBrand={brandDeleteProps.onDeleteBrand}
+        onOpenBrandArchive={vi.fn()}
+        onOpenBrandEffect={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: `管理会话 ${session.title}` }));
+    fireEvent.click(screen.getByRole('button', { name: '永久删除' }));
+    await screen.findByRole('heading', { name: `永久删除“${session.title}”` });
+
+    fireEvent.click(screen.getByRole('button', { name: '永久删除' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(message);
+  });
+
   it('creates one brand with multiple product lines and opens it', async () => {
     const created = { ...workspace, id: 'brand-created', name: '新品牌' };
     const createWorkspace = vi.fn(async () => created);

@@ -14,6 +14,11 @@ use std::time::Duration;
 /// Sidecar admission 传输名：运营网关根地址与账号 access token。
 pub const GATEWAY_BASE_URL_ENV: &str = "XIAOJING_GATEWAY_BASE_URL";
 pub const ACCOUNT_ACCESS_TOKEN_ENV: &str = "XIAOJING_ACCOUNT_ACCESS_TOKEN";
+/// 发往 Sidecar 的请求头名：Rust 代理/worker 在每次请求上附带当前新鲜的
+/// 账号 access token（Sidecar 优先于启动时 admission 注入的 env token 使用）。
+/// 这是进程内 HTTP 头，不是 env，不进 SIDECAR_ENV_NAMES 清洗名单；Sidecar
+/// 只把它作为调网关的 Bearer，绝不转发给其他上游。
+pub const ACCOUNT_TOKEN_HEADER: &str = "x-xiaojing-account-token";
 const DEFAULT_GATEWAY_BASE_URL: &str = "https://api.jingshanai.com";
 /// Debug 构建从 `.env`/启动环境读取的网关地址覆盖名（本地联调后端用）。
 #[cfg(debug_assertions)]
@@ -577,6 +582,100 @@ pub(crate) fn publish_egress_gateway_base_url() -> Option<String> {
 }
 
 // ---------------------------------------------------------------------------
+// 请求级新鲜 token（Rust→Sidecar 统一附头）
+// ---------------------------------------------------------------------------
+
+/// 距 JWT exp 不足该余量即视为临期，先刷新再附头——发布排期等场景请求
+/// 发出后网关侧仍可能排队处理，余量必须覆盖这段在途时间。
+const ACCESS_TOKEN_REFRESH_MARGIN_SECS: i64 = 120;
+
+/// 读取 JWT payload 的 exp（秒）。不验签——验签权威在网关，本地只用 exp
+/// 决定是否需要先刷新。非 JWT / 无 exp / 不可解析一律返回 None。
+fn access_token_exp_epoch(token: &str) -> Option<i64> {
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+    let payload = token.split('.').nth(1)?;
+    let bytes = URL_SAFE_NO_PAD.decode(payload).ok()?;
+    serde_json::from_slice::<serde_json::Value>(&bytes)
+        .ok()?
+        .get("exp")?
+        .as_i64()
+}
+
+/// 当前 token 是否需要先刷新：exp 临期/已过才刷新；exp 未知（非 JWT）不
+/// 主动刷新，附上现有 token 由网关裁决。
+fn access_token_needs_refresh(token: &str, now: i64) -> bool {
+    match access_token_exp_epoch(token) {
+        Some(exp) => exp - now <= ACCESS_TOKEN_REFRESH_MARGIN_SECS,
+        None => false,
+    }
+}
+
+/// refresh token 是一次性轮换凭证：并发请求同时刷新会触发网关
+/// refresh_reuse_detected 杀死会话，进程内刷新必须单飞。
+fn account_refresh_lock() -> &'static tokio::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
+/// 取 token 的纯流程核心（依赖注入便于确定性测试）：
+/// - 未登录/读不到会话 → None（调用方不附头，Sidecar 回退 admission env）。
+/// - token 未临期 → 直接返回，绝不触碰网络（每请求刷新会打爆网关）。
+/// - 已临期 → 单飞刷新（轮换自动落库），返回新 token；刷新失败（断网等）
+///   回退现有 token，由网关 401 给出权威结论——绝不因取 token 失败阻断
+///   本地控制面请求。
+async fn resolve_fresh_token<R, F>(
+    read: impl Fn() -> Option<AccountSessionSecret>,
+    refresh: R,
+) -> Option<String>
+where
+    R: FnOnce(String) -> F,
+    F: std::future::Future<Output = Option<AccountSessionSecret>>,
+{
+    let secret = read()?;
+    if !access_token_needs_refresh(&secret.access_token, now_epoch()) {
+        return Some(secret.access_token);
+    }
+    let _guard = account_refresh_lock().lock().await;
+    // 双检：等锁期间并发调用可能已完成轮换并落库。
+    let secret = read()?;
+    if !access_token_needs_refresh(&secret.access_token, now_epoch()) {
+        return Some(secret.access_token);
+    }
+    match refresh(secret.refresh_token.clone()).await {
+        Some(refreshed) => Some(refreshed.access_token),
+        None => Some(secret.access_token),
+    }
+}
+
+/// 发往 Sidecar 的请求可用的最新账号 access token。未登录返回 None。
+pub(crate) async fn fresh_account_access_token() -> Option<String> {
+    resolve_fresh_token(
+        || platform::read().ok().flatten(),
+        |refresh_token| async move {
+            let client = gateway_client().ok()?;
+            refresh_tokens(&client, &refresh_token).await.ok()
+        },
+    )
+    .await
+}
+
+/// 把当前新鲜 token 附到发往 Sidecar 的请求上；未登录/取不到不附头。
+pub(crate) async fn with_fresh_account_token(
+    builder: reqwest::RequestBuilder,
+) -> reqwest::RequestBuilder {
+    match fresh_account_access_token().await {
+        Some(token) => builder.header(ACCOUNT_TOKEN_HEADER, token),
+        None => builder,
+    }
+}
+
+/// 账号 token 头是 Rust→Sidecar 的进程内传输：renderer 入站同名头一律
+/// 剥离（renderer 无权注入 token），由 Rust 以新鲜 token 覆盖。
+pub(crate) fn is_account_token_header(name: &str) -> bool {
+    name.eq_ignore_ascii_case(ACCOUNT_TOKEN_HEADER)
+}
+
+// ---------------------------------------------------------------------------
 // Tauri commands（返回值一律是无 token 投影）
 // ---------------------------------------------------------------------------
 
@@ -954,5 +1053,118 @@ mod tests {
         let env = env_map(&command);
         assert_eq!(env.get(GATEWAY_BASE_URL_ENV), Some(&None));
         assert_eq!(env.get(ACCOUNT_ACCESS_TOKEN_ENV), Some(&None));
+    }
+
+    fn fake_jwt(exp: i64) -> String {
+        use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+        let header = URL_SAFE_NO_PAD.encode(r#"{"alg":"HS256","typ":"JWT"}"#);
+        let payload = URL_SAFE_NO_PAD.encode(format!(r#"{{"exp":{exp}}}"#));
+        format!("{header}.{payload}.sig")
+    }
+
+    /// 无 exp 的 JWT 形状（payload 为 `{}`）。
+    fn fake_jwt_without_exp() -> String {
+        use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+        let header = URL_SAFE_NO_PAD.encode(r#"{"alg":"HS256","typ":"JWT"}"#);
+        format!("{header}.e30.sig")
+    }
+
+    #[test]
+    fn access_token_exp_reads_jwt_payload_without_verifying() {
+        assert_eq!(
+            access_token_exp_epoch(&fake_jwt(1_700_000_000)),
+            Some(1_700_000_000)
+        );
+        // 非 JWT / payload 非法 / 无 exp：一律视为未知，不主动刷新。
+        assert_eq!(access_token_exp_epoch("opaque-token"), None);
+        assert_eq!(access_token_exp_epoch("a.!!!.c"), None);
+        assert_eq!(access_token_exp_epoch(&fake_jwt_without_exp()), None);
+    }
+
+    #[test]
+    fn refresh_decision_only_fires_near_expiry() {
+        let now = 1_000_000;
+        assert!(!access_token_needs_refresh(&fake_jwt(now + 10_000), now));
+        assert!(access_token_needs_refresh(
+            &fake_jwt(now + ACCESS_TOKEN_REFRESH_MARGIN_SECS),
+            now
+        ));
+        assert!(access_token_needs_refresh(&fake_jwt(now - 1), now));
+        assert!(!access_token_needs_refresh("opaque-token", now));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn fresh_token_returns_none_when_logged_out() {
+        let token =
+            resolve_fresh_token(|| None, |_| async { unreachable!("未登录不得刷新") }).await;
+        assert_eq!(token, None);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn fresh_token_cache_hit_never_touches_network() {
+        let now = now_epoch();
+        let secret = AccountSessionSecret {
+            access_token: fake_jwt(now + 10_000),
+            refresh_token: "refresh-1".to_string(),
+        };
+        let refreshes = std::rc::Rc::new(std::cell::Cell::new(0_u32));
+        let counter = refreshes.clone();
+        let token = resolve_fresh_token(
+            || Some(secret.clone()),
+            move |_| {
+                counter.set(counter.get() + 1);
+                async { None }
+            },
+        )
+        .await;
+        assert_eq!(token, Some(secret.access_token));
+        assert_eq!(refreshes.get(), 0, "未临期 token 不得触发 refresh");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn expired_token_refreshes_once_and_returns_rotated_access_token() {
+        let now = now_epoch();
+        let stale = AccountSessionSecret {
+            access_token: fake_jwt(now - 10),
+            refresh_token: "refresh-old".to_string(),
+        };
+        let rotated = AccountSessionSecret {
+            access_token: fake_jwt(now + 10_000),
+            refresh_token: "refresh-new".to_string(),
+        };
+        let refreshes = std::rc::Rc::new(std::cell::Cell::new(0_u32));
+        let counter = refreshes.clone();
+        let rotated_clone = rotated.clone();
+        let token = resolve_fresh_token(
+            || Some(stale.clone()),
+            move |refresh_token| {
+                counter.set(counter.get() + 1);
+                assert_eq!(refresh_token, "refresh-old");
+                let rotated = rotated_clone.clone();
+                async move { Some(rotated) }
+            },
+        )
+        .await;
+        assert_eq!(token, Some(rotated.access_token));
+        assert_eq!(refreshes.get(), 1);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn failed_refresh_falls_back_to_current_token_instead_of_blocking() {
+        let now = now_epoch();
+        let stale = AccountSessionSecret {
+            access_token: fake_jwt(now - 10),
+            refresh_token: "refresh-old".to_string(),
+        };
+        let token = resolve_fresh_token(|| Some(stale.clone()), |_| async { None }).await;
+        assert_eq!(token, Some(stale.access_token));
+    }
+
+    #[test]
+    fn account_token_header_matching_is_case_insensitive() {
+        assert!(is_account_token_header(ACCOUNT_TOKEN_HEADER));
+        assert!(is_account_token_header("X-Xiaojing-Account-Token"));
+        assert!(!is_account_token_header("authorization"));
+        assert!(!is_account_token_header("x-xiaojing-account-token2"));
     }
 }

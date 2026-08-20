@@ -15,6 +15,7 @@ import type {
   GeoKeywordSearchCapability,
   GeoTextCapability,
 } from "./provider-capabilities";
+import { GeoUpstreamHttpError } from "./provider-capabilities";
 
 function basePool(
   overrides: Partial<QuestionPoolProjection> = {},
@@ -772,5 +773,57 @@ describe("QuestionPoolService billing permits (ticket 07)", () => {
       { kind: "apply", permitId: "qpool:attempt-08", operation: "question_pool", units: 1 },
       { kind: "report", permitId: "qpool:attempt-08", unit: 0, outcome: "success" },
     ]);
+  });
+
+  it("degrades to deterministic fallback vectors on transient embedding failure", async () => {
+    const persistence = new FakePersistence();
+    const provider = providers();
+    provider.embedding.embed.mockRejectedValue(
+      new GeoUpstreamHttpError(
+        "embedding",
+        503,
+        "embedding 上游请求失败（HTTP 503）",
+      ),
+    );
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { service: subject } = service(persistence, provider);
+
+    const pool = await subject.generate(input);
+
+    // 瞬时失败：流程继续，公式打降级标记，WARN 日志可观测。
+    expect(pool.status).toBe("awaiting-selection");
+    expect(pool.questions.length).toBeGreaterThan(0);
+    for (const question of pool.questions) {
+      expect(question.score.formula).toContain("degraded-embedding");
+    }
+    expect(warn).toHaveBeenCalled();
+    expect(String(warn.mock.calls[0]?.[0])).toContain("[question-pool]");
+    // 降级标记随 checkpoint output 持久化（可追溯）。
+    expect(persistence.outputs.get("embedding")).toMatchObject({
+      degraded: true,
+    });
+    warn.mockRestore();
+  });
+
+  it("fails explicitly without fallback on config-class embedding failure", async () => {
+    const persistence = new FakePersistence();
+    const provider = providers();
+    provider.embedding.embed.mockRejectedValue(
+      new GeoUpstreamHttpError(
+        "embedding",
+        400,
+        "embedding 上游请求失败（HTTP 400）：model 缺失；请检查 embedding 模型/端点配置",
+      ),
+    );
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { service: subject } = service(persistence, provider);
+
+    await expect(subject.generate(input)).rejects.toThrow(
+      /请检查 embedding 模型\/端点配置/,
+    );
+    expect(persistence.persistCalls).toBe(0);
+    expect(persistence.status.get("embedding")).toBe("failed");
+    expect(warn).not.toHaveBeenCalled();
+    warn.mockRestore();
   });
 });

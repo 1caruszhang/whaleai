@@ -26,6 +26,7 @@ import {
   isGenericTargetRegion,
   projectBrandProfile,
   renderBrandIdentityBlock,
+  resolveBrandName,
 } from "../../shared/geo/profileInjection";
 import { validateTitleCandidates } from "../../shared/geo/topicPlan";
 import { XIAOJING_GEO_PROVIDER_DEFAULTS } from "../../shared/geo/providerCapabilities";
@@ -382,6 +383,8 @@ export class ArticleGenerationService {
     context: ArticleGenerationContext,
   ): Promise<string> {
     const profile = projectBrandProfile(context.article.plannedFacts);
+    // 品牌名裁决：知识库身份事实优先，workspace 名仅无身份事实时兜底。
+    const brandName = resolveBrandName(profile, context.brandName);
     // 地域锚（ADR-0006 修正四）：用派生的服务范围，不再透传原始 serviceArea。
     const region = deriveServiceScope(profile)?.primary ?? context.targetRegion;
     const industry = firstProfileValue(profile, "industry") ?? context.productLine;
@@ -396,7 +399,7 @@ export class ArticleGenerationService {
     const messages = buildDirectTitleMessages({
       theme: context.article.topic,
       contentType: context.article.contentType,
-      brandName: context.brandName,
+      brandName,
       ...(profile.shortNames?.[0] ? { shortName: profile.shortNames[0] } : {}),
       competitors: profile.competitors ?? [],
       industry,
@@ -417,9 +420,8 @@ export class ArticleGenerationService {
       targetRegion: isGenericTargetRegion(region) ? "" : region,
       industry,
       businessTerms,
-      brandNames: [context.brandName, ...(profile.shortNames ?? [])].filter(
-        Boolean,
-      ),
+      // 校验集合 = 裁决名 + 已确认简称；无身份事实时裁决名即 workspace 兜底名。
+      brandNames: [brandName, ...(profile.shortNames ?? [])].filter(Boolean),
       competitors: profile.competitors ?? [],
       currentYear,
     });
@@ -479,11 +481,11 @@ export class ArticleGenerationService {
         context.article.sourcePlanItemId === null
           ? await this.generateDirectTitle(context)
           : context.article.requestedTitle;
-      const identityBlock = renderBrandIdentityBlock(
-        projectBrandProfile(context.article.plannedFacts),
-      );
+      const articleProfile = projectBrandProfile(context.article.plannedFacts);
+      const identityBlock = renderBrandIdentityBlock(articleProfile);
       const messages = buildArticleGenerationMessages({
-        brandName: context.brandName,
+        // 品牌名裁决：知识库身份事实优先，workspace 名仅无身份事实时兜底。
+        brandName: resolveBrandName(articleProfile, context.brandName),
         productLine: context.productLine,
         targetRegion: context.targetRegion,
         contentType: context.article.contentType,

@@ -327,6 +327,16 @@ export function normalizeFactValue(
   };
 }
 
+/** 解析 JSON 数组；非数组或非法 JSON 返回 null。 */
+function parseJsonArray(json: string): unknown[] | null {
+  try {
+    const value: unknown = JSON.parse(json);
+    return Array.isArray(value) ? value : null;
+  } catch {
+    return null;
+  }
+}
+
 export function classifyKnowledgeCandidate(
   current: KnowledgeCurrentFact | null,
   normalizedValueJson: string,
@@ -339,7 +349,44 @@ export function classifyKnowledgeCandidate(
     current.normalizedValueJson === normalizedValueJson &&
     normalizeUnit(current.unit) === unit;
   if (same) return "awaiting-confirmation";
+  // 数组字段的差异是补充语义而非矛盾：propose 已把候选改写为去重并集，
+  // 整卡确认即采纳合并结果。只有标量 vs 标量、或类型不一致（一边数组
+  // 一边标量）才是需要二选一的冲突。
+  if (
+    parseJsonArray(current.normalizedValueJson) &&
+    parseJsonArray(normalizedValueJson)
+  ) {
+    return "awaiting-confirmation";
+  }
   return "conflict";
+}
+
+/**
+ * 数组字段增量合并：current 与候选同为 JSON 数组时，把候选改写为
+ * 「current 各项在前、候选新增项去重后追加」的并集（去重按 canonicalJson
+ * 逐项规范化比较，与 normalizeFactValue 口径一致），确认卡展示的候选值
+ * 即 adopt-new 后的最终形态。标量或类型不一致保持原值（走冲突二选一）。
+ * 并集与 current 完全相同时沿用既有 same 逻辑：仍落 awaiting-confirmation
+ * 候选，整卡确认后仅合并来源、不升事实版本（见 Rust adopt-new 同值分支）。
+ */
+function mergeArraySupplement(
+  current: KnowledgeCurrentFact | null,
+  value: { valueJson: string; normalizedValueJson: string; unit: string | null },
+): { valueJson: string; normalizedValueJson: string; unit: string | null } {
+  if (!current) return value;
+  const currentItems = parseJsonArray(current.normalizedValueJson);
+  const candidateItems = parseJsonArray(value.normalizedValueJson);
+  if (!currentItems || !candidateItems) return value;
+  const seen = new Set(currentItems.map((item) => canonicalJson(item)));
+  const merged = [...currentItems];
+  for (const item of candidateItems) {
+    const token = canonicalJson(item);
+    if (seen.has(token)) continue;
+    seen.add(token);
+    merged.push(item);
+  }
+  const normalizedValueJson = canonicalJson(merged);
+  return { valueJson: normalizedValueJson, normalizedValueJson, unit: value.unit };
 }
 
 export class KnowledgeAuthority {
@@ -373,22 +420,25 @@ export class KnowledgeAuthority {
     if (!rawInput || rawInput.length > 20_000)
       throw new Error("raw input must be 1-20000 characters");
 
-    return this.submitCandidate(key.identity, (current) => ({
-      rawInput,
-      origin: input.origin,
-      intent: input.intent,
-      key,
-      ...value,
-      source: { ...input.source, excerpt },
-      expectedCurrentVersion: current?.version ?? 0,
-      disposition: classifyKnowledgeCandidate(
-        current,
-        value.normalizedValueJson,
-        value.unit,
-        input.origin,
-        input.intent,
-      ),
-    }), (submission) => this.port.submit(submission));
+    return this.submitCandidate(key.identity, (current) => {
+      const merged = mergeArraySupplement(current, value);
+      return {
+        rawInput,
+        origin: input.origin,
+        intent: input.intent,
+        key,
+        ...merged,
+        source: { ...input.source, excerpt },
+        expectedCurrentVersion: current?.version ?? 0,
+        disposition: classifyKnowledgeCandidate(
+          current,
+          merged.normalizedValueJson,
+          merged.unit,
+          input.origin,
+          input.intent,
+        ),
+      };
+    }, (submission) => this.port.submit(submission));
   }
 
   /**
@@ -513,27 +563,30 @@ export class KnowledgeAuthority {
       const value = normalizeFactValue(input.value, input.unit);
       const candidate = await this.submitCandidate(
         key.identity,
-        (current) => ({
-          rawInput: reason,
-          origin: "user-stated" as const,
-          intent: "knowledge-update" as const,
-          key,
-          ...value,
-          source: {
-            materialId: input.materialId ?? null,
-            excerpt: reason.slice(0, 4_000),
-            confidence: 1,
-            profileProvenance: "asked" as const,
-          },
-          expectedCurrentVersion: current?.version ?? 0,
-          disposition: classifyKnowledgeCandidate(
-            current,
-            value.normalizedValueJson,
-            value.unit,
-            "user-stated",
-            "knowledge-update",
-          ),
-        }),
+        (current) => {
+          const merged = mergeArraySupplement(current, value);
+          return {
+            rawInput: reason,
+            origin: "user-stated" as const,
+            intent: "knowledge-update" as const,
+            key,
+            ...merged,
+            source: {
+              materialId: input.materialId ?? null,
+              excerpt: reason.slice(0, 4_000),
+              confidence: 1,
+              profileProvenance: "asked" as const,
+            },
+            expectedCurrentVersion: current?.version ?? 0,
+            disposition: classifyKnowledgeCandidate(
+              current,
+              merged.normalizedValueJson,
+              merged.unit,
+              "user-stated",
+              "knowledge-update",
+            ),
+          };
+        },
         (submission) =>
           this.port.revise({
             ...this.identity,
