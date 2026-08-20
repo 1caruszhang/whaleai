@@ -7,6 +7,7 @@ import {
   renderBrandIdentityBlock,
   renderFullProfileBlock,
   renderMiningProfileBlock,
+  resolveBrandName,
   type BrandProfileFact,
 } from "./profileInjection";
 
@@ -61,6 +62,34 @@ describe("projectBrandProfile", () => {
     expect(profileValues(profile, "shortNames")).toEqual(["行乐音改"]);
     expect(firstProfileValue(profile, "serviceArea")).toBe("成都本地");
     expect(profileValues(profile, "coreAdvantages")).toEqual(["无损改装工艺"]);
+  });
+});
+
+describe("resolveBrandName（用户拍板 2026-08-19：知识库身份事实优先，workspace 名仅兜底）", () => {
+  it("fullName 与 shortNames 同存时取 fullName（炊班长事故回归）", () => {
+    const profile = projectBrandProfile([
+      fact("brand.fullName", "广州造卤先生餐饮管理有限公司"),
+      fact("brand.shortNames", ["造卤先生", "炊班主"]),
+    ]);
+    expect(resolveBrandName(profile, "炊班长")).toBe(
+      "广州造卤先生餐饮管理有限公司",
+    );
+  });
+
+  it("fullName 缺失时回退 shortNames[0]，仍不用 workspace 名", () => {
+    const profile = projectBrandProfile([
+      fact("brand.shortNames", ["造卤先生", "炊班主"]),
+    ]);
+    expect(resolveBrandName(profile, "炊班长")).toBe("造卤先生");
+  });
+
+  it("知识库无任何身份事实时才用 workspace 名兜底", () => {
+    expect(resolveBrandName({}, "炊班长")).toBe("炊班长");
+    const profile = projectBrandProfile([
+      fact("brand.industry", "餐饮"),
+      fact("brand.products", ["卤味"]),
+    ]);
+    expect(resolveBrandName(profile, "炊班长")).toBe("炊班长");
   });
 });
 

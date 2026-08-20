@@ -21,10 +21,11 @@ export async function sendXiaojingMessage(
   images: ImagePayload[] | undefined,
   _workspacePath: string,
   sessionFiles?: string[],
+  requestAccountToken?: string,
 ): Promise<XiaojingMessageSendResult> {
   let result: Awaited<ReturnType<typeof enqueueUserMessage>>;
   try {
-    result = await enqueueUserMessage(text, images, sessionFiles);
+    result = await enqueueUserMessage(text, images, sessionFiles, requestAccountToken);
   } catch (error) {
     // 已提交的业务决策不受影响；投递失败以结构化结果返回（GD-8④）。
     return {

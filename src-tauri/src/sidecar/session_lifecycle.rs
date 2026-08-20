@@ -1028,19 +1028,45 @@ pub async fn cmd_ensure_session_sidecar(
 }
 
 /// Check whether a session identity must remain stable after a Tab detaches.
-/// Includes live background owners and durable GEO monitoring state.
+/// Includes live background owners and durable GEO monitoring state. The
+/// refusal names the user-facing reason (`busy-replying` for live reply
+/// activity, `monitor-active` for durable post-publish monitor ownership) so
+/// the renderer can route the deletion dialog copy per cause.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionPersistentOwnersResult {
+    has_persistent_owners: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<&'static str>,
+}
+
 #[tauri::command]
 #[allow(non_snake_case)]
 pub async fn cmd_session_has_persistent_owners(
     state: tauri::State<'_, ManagedSidecarManager>,
     sessionId: String,
-) -> Result<bool, String> {
+) -> Result<SessionPersistentOwnersResult, String> {
     let sidecars = state.inner().clone();
-    let has_live_owner = {
+    let live_reason = {
         let manager = sidecars.lock().unwrap_or_else(|e| e.into_inner());
-        manager.session_has_persistent_owners(&sessionId)
+        manager.session_persistent_owner_reason(&sessionId)
     };
-    Ok(has_live_owner || has_persisted_session_owner(&sessionId).await?)
+    if let Some(reason) = live_reason {
+        return Ok(SessionPersistentOwnersResult {
+            has_persistent_owners: true,
+            reason: Some(reason),
+        });
+    }
+    if has_persisted_session_owner(&sessionId).await? {
+        return Ok(SessionPersistentOwnersResult {
+            has_persistent_owners: true,
+            reason: Some("monitor-active"),
+        });
+    }
+    Ok(SessionPersistentOwnersResult {
+        has_persistent_owners: false,
+        reason: None,
+    })
 }
 
 /// Delete a transcript while releasing only the exact mounted Tab owners named
@@ -1084,11 +1110,11 @@ pub async fn cmd_delete_session_if_unowned(
         return Ok(SessionDeleteCommandResult::refused("invalid-session-id"));
     }
     if has_persisted_session_owner(&sessionId).await? {
-        return Ok(SessionDeleteCommandResult::refused("in-use"));
+        return Ok(SessionDeleteCommandResult::refused("monitor-active"));
     }
     let _lifecycle = acquire_session_lifecycle(&[&sessionId]).await;
     if has_persisted_session_owner(&sessionId).await? {
-        return Ok(SessionDeleteCommandResult::refused("in-use"));
+        return Ok(SessionDeleteCommandResult::refused("monitor-active"));
     }
     let sidecars = state.inner().clone();
     let releasable_tab_ids = releasableTabIds.into_iter().collect::<HashSet<_>>();
@@ -1096,8 +1122,10 @@ pub async fn cmd_delete_session_if_unowned(
     tauri::async_runtime::spawn_blocking(move || {
         let session_port = {
             let manager = sidecars.lock().map_err(|error| error.to_string())?;
-            if manager.session_has_unreleasable_owners(&sessionId, &releasable_tab_ids) {
-                return Ok(SessionDeleteCommandResult::refused("in-use"));
+            if let Some(reason) =
+                manager.session_unreleasable_owner_reason(&sessionId, &releasable_tab_ids)
+            {
+                return Ok(SessionDeleteCommandResult::refused(reason));
             }
             manager
                 .get_session_sidecar(&sessionId)
@@ -1107,7 +1135,7 @@ pub async fn cmd_delete_session_if_unowned(
         if let Some(port) = session_port {
             match super::background::check_sidecar_is_busy(port) {
                 Some(false) => {}
-                Some(true) => return Ok(SessionDeleteCommandResult::refused("in-use")),
+                Some(true) => return Ok(SessionDeleteCommandResult::refused("busy-replying")),
                 None => return Ok(SessionDeleteCommandResult::refused("activity-unavailable")),
             }
         }
@@ -1116,8 +1144,10 @@ pub async fn cmd_delete_session_if_unowned(
         // Revalidate owners before the storage mutation while the outer
         // per-Session lifecycle fence still excludes new owner acquisition.
         let manager = sidecars.lock().map_err(|error| error.to_string())?;
-        if manager.session_has_unreleasable_owners(&sessionId, &releasable_tab_ids) {
-            return Ok(SessionDeleteCommandResult::refused("in-use"));
+        if let Some(reason) =
+            manager.session_unreleasable_owner_reason(&sessionId, &releasable_tab_ids)
+        {
+            return Ok(SessionDeleteCommandResult::refused(reason));
         }
         drop(manager);
         let brand_deletion = match (
@@ -1367,7 +1397,7 @@ pub fn cmd_can_restore_session(sessionId: String, workspacePath: String) -> bool
 mod session_lifecycle_tests {
     use super::{
         acquire_session_lifecycle, is_canonical_session_id, EnsureSidecarResult,
-        SessionDeleteCommandResult,
+        SessionDeleteCommandResult, SessionPersistentOwnersResult,
     };
     use std::time::Duration;
 
@@ -1398,9 +1428,34 @@ mod session_lifecycle_tests {
             serde_json::to_value(SessionDeleteCommandResult::deleted()).unwrap(),
             serde_json::json!({ "deleted": true })
         );
+        for reason in ["in-use", "busy-replying", "monitor-active"] {
+            assert_eq!(
+                serde_json::to_value(SessionDeleteCommandResult::refused(reason)).unwrap(),
+                serde_json::json!({ "deleted": false, "reason": reason })
+            );
+        }
+    }
+
+    #[test]
+    fn persistent_owners_result_names_the_blocking_reason() {
         assert_eq!(
-            serde_json::to_value(SessionDeleteCommandResult::refused("in-use")).unwrap(),
-            serde_json::json!({ "deleted": false, "reason": "in-use" })
+            serde_json::to_value(SessionPersistentOwnersResult {
+                has_persistent_owners: false,
+                reason: None,
+            })
+            .unwrap(),
+            serde_json::json!({ "hasPersistentOwners": false })
+        );
+        assert_eq!(
+            serde_json::to_value(SessionPersistentOwnersResult {
+                has_persistent_owners: true,
+                reason: Some("monitor-active"),
+            })
+            .unwrap(),
+            serde_json::json!({
+                "hasPersistentOwners": true,
+                "reason": "monitor-active",
+            })
         );
     }
 

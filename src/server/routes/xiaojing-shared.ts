@@ -17,6 +17,17 @@ import { sendXiaojingMessage } from '../xiaojing-reminder-send';
 
 export type XiaojingRouteContext = Readonly<{ workspacePath: string }>;
 
+/** Rust 代理/worker 附带的请求级账号 access token 头名（与
+ * src-tauri/src/account_auth.rs `ACCOUNT_TOKEN_HEADER` 逐字节一致）。
+ * 这是进程内 HTTP 头：Sidecar 只把它作为调网关的 Bearer，绝不转发给
+ * 网关以外的上游，也绝不写入日志/数据库/响应。 */
+const ACCOUNT_TOKEN_HEADER = 'x-xiaojing-account-token';
+
+/** 提取请求级新鲜账号 token（Rust 侧已按 exp 临期自动 refresh）。 */
+export function requestAccountAccessToken(request: Request): string | undefined {
+  return request.headers.get(ACCOUNT_TOKEN_HEADER)?.trim() || undefined;
+}
+
 type Identity = { workspaceId: string; sessionId: string };
 const identityKey = (identity: Identity) => `${identity.workspaceId}:${identity.sessionId}`;
 

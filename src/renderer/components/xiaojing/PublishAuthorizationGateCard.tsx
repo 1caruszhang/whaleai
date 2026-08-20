@@ -14,12 +14,14 @@ import {
   useRef,
   useState,
 } from "react";
+import { useTranslation } from "react-i18next";
 
 import {
   confirmPublishExecution,
   loadLatestPublishExecution,
   loadPublishExecution,
   loadPublishOrderStatuses,
+  resumeReconciledExecution,
   startPublishExecution,
 } from "@/api/publishSchedulerClient";
 import { AccountApiContext, AccountStateContext } from "@/context/AccountContext";
@@ -30,6 +32,7 @@ import type {
   PublishItemProjection,
   PublishOrderStatusEntry,
 } from "../../../shared/geo/publishScheduler";
+import { cnyToPoints } from "../../../shared/geo/points";
 import {
   publishOrderRefundsPoints,
   publishOrderStatusActive,
@@ -312,6 +315,7 @@ export default function PublishAuthorizationGateCard({
 }) {
   const { apiPost } = useTabApi();
   const { sessionId } = useTabState();
+  const { t } = useTranslation("chat");
   const [execution, setExecution] = useState(data.execution);
   const [status, setStatus] = useState(data.execution.status);
   const [confirmedImpact, setConfirmedImpact] = useState(false);
@@ -483,6 +487,27 @@ export default function PublishAuthorizationGateCard({
     }
   };
 
+  // 对账恢复通道（票 40）：从未提交的 reconciliation-required 执行交还给
+  // 调度器；Rust 侧负责登录态/指纹/已提交项三道安全闸。成功后刷新余额
+  // 投影，恢复期间若有点数变动立即可见。
+  const resume = async () => {
+    if (busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const next = await resumeReconciledExecution(identity, {
+        executionId: execution.id,
+        expectedRevision: execution.revision,
+      });
+      mergeRefreshed(next);
+      void accountRefreshRef.current?.();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const disabled = !sessionId || isPendingSessionId(sessionId);
 
   return (
@@ -496,8 +521,7 @@ export default function PublishAuthorizationGateCard({
           合计 {execution.totalPricePoints} 点
         </span>
         <span className="rounded-full bg-[var(--paper-inset)] px-2 py-0.5">
-          预计 ¥{execution.estimatedSpendCny.toFixed(2)} / 预算 ¥
-          {execution.budgetCny.toFixed(2)}
+          预计 {execution.totalPricePoints} 点 / 预算 {cnyToPoints(execution.budgetCny)} 点
         </span>
         <span className="rounded-full bg-[var(--paper-inset)] px-2 py-0.5">
           {execution.items.length} 个发布项
@@ -597,6 +621,27 @@ export default function PublishAuthorizationGateCard({
             <p className="mt-1 text-xs text-[var(--ink-muted)]">
               渠道订单状态暂不可用：{ordersError}
             </p>
+          )}
+          {status === "reconciliation-required" && (
+            <div
+              className="mt-2 rounded-lg border border-[var(--warning)] bg-[var(--warning-bg)] p-2"
+              data-publish-resume={execution.id}
+            >
+              <p className="text-xs leading-5 text-[var(--ink-muted)]">
+                {t("publishResume.hint")}
+              </p>
+              <button
+                type="button"
+                onClick={() => {
+                  void resume();
+                }}
+                disabled={busy || disabled}
+                className="mt-2 flex w-full items-center justify-center gap-1.5 rounded-lg bg-[var(--button-primary-bg)] px-3 py-2 text-sm font-medium text-[var(--button-primary-text)] disabled:opacity-50"
+              >
+                {busy && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+                {busy ? t("publishResume.busy") : t("publishResume.button")}
+              </button>
+            </div>
           )}
           <div className="mt-2 space-y-2">
             {execution.items.map((item) => (

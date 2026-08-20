@@ -131,14 +131,20 @@ describe("XiaojingPublishSchedulerPanel read-only projection", () => {
     expect(mocks.latest).not.toHaveBeenCalled();
   });
 
-  it("shows exact approved body summary, channel, price, budget and schedule", async () => {
+  it("shows exact approved body summary, channel, points, budget and schedule", async () => {
     render(<XiaojingPublishSchedulerPanel workspaceId="brand-13" />);
     const panel = await screen.findByRole("region", { name: "确定性发布计划" });
     expect(within(panel).getByText("新能源车主如何选择汽车音响")).toBeInTheDocument();
     expect(within(panel).getByText(/批准 revision 3/)).toBeInTheDocument();
     expect(within(panel).getByText(/最终批准正文摘要/)).toBeInTheDocument();
     expect(within(panel).getByText(/汽车产业观察/)).toBeInTheDocument();
-    expect(within(panel).getByText(/预计 ¥88.00 \/ 预算 ¥500.00/)).toBeInTheDocument();
+    // 点数化：预计取服务端 totalPricePoints（¥88 → 1408 点），预算按公式
+    // 换算（¥500 → 8000 点）；单渠道直接展示 pricePoints，不出现 ¥ 金额。
+    expect(within(panel).getByText(/预计 1408 点 \/ 预算 8000 点/)).toBeInTheDocument();
+    expect(
+      within(panel).getByText(/资源 #8 · 预计 1408 点 · 历史发布率 92%/),
+    ).toBeInTheDocument();
+    expect(panel.textContent ?? "").not.toContain("¥");
   });
 
   // 参照 js_ai 的发布状态设计：每个发布项展示 OSS 上传与超级媒介订单

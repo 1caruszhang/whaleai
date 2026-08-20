@@ -7,6 +7,7 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke: mocks.invoke }));
 import {
   loadLatestPublishExecution,
   loadPublishExecution,
+  resumeReconciledExecution,
   startPublishExecution,
   type PublishSchedulerApiPost,
 } from "./publishSchedulerClient";
@@ -39,6 +40,25 @@ describe("publishSchedulerClient", () => {
         workspaceId: "brand-13",
         sessionId: "session-13",
         input: { executionId: "execution-13", expectedRevision: 2 },
+      },
+    );
+  });
+
+  it("resumes a reconciled execution through the Rust UI command with revision CAS", async () => {
+    mocks.invoke.mockReset();
+    mocks.invoke.mockResolvedValue({ id: "execution-13", status: "scheduled" });
+
+    await resumeReconciledExecution(
+      { workspaceId: "brand-13", sessionId: "session-13" },
+      { executionId: "execution-13", expectedRevision: 7 },
+    );
+
+    expect(mocks.invoke).toHaveBeenCalledWith(
+      "cmd_publish_execution_resume_ui",
+      {
+        workspaceId: "brand-13",
+        sessionId: "session-13",
+        input: { executionId: "execution-13", expectedRevision: 7 },
       },
     );
   });

@@ -692,9 +692,16 @@ async fn monitor_sidecar_control_plane(
                 message: bounded_error(error),
                 retryable: true,
             })?;
-        let response = client
-            .post(format!("http://127.0.0.1:{}{}", ensure.port, endpoint))
-            .json(&Value::Object(body))
+        // 监测单元可能在计划排期数小时后才执行：附当前新鲜账号 token
+        // （临期自动 refresh），Sidecar 调网关优先于 admission env；未登录
+        // 不附头，Sidecar 回退 env。
+        let request = crate::account_auth::with_fresh_account_token(
+            client
+                .post(format!("http://127.0.0.1:{}{}", ensure.port, endpoint))
+                .json(&Value::Object(body)),
+        )
+        .await;
+        let response = request
             .send()
             .await
             .map_err(|error| MonitorProviderFailure {

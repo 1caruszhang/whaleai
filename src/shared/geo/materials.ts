@@ -31,6 +31,9 @@ export const MATERIAL_ERROR_CODES = [
   'model_response_invalid',
   'no_facts_extracted',
   'knowledge_candidate_failed',
+  // 计费预扣/回报的 GatewayBillingError（insufficient_balance、网关不可达等）：
+  // message 是自由中文文本，errorCode() 按类型归此码，不落泛化兜底。
+  'material_billing_failed',
   'website_url_rejected',
   'website_redirect_rejected',
   'website_too_many_redirects',

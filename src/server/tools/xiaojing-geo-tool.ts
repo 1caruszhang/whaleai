@@ -1,9 +1,11 @@
+import { createHash } from 'node:crypto';
 import { basename, resolve } from 'node:path';
 
 import {
   configureXiaojingGeoProviderAdmission,
-  getXiaojingGeoBillingPermitChannel,
+  getXiaojingGeoBillingPermitChannelForRequest,
   getXiaojingGeoProviderCapabilities,
+  getXiaojingGeoProviderCapabilitiesForRequest,
 } from '../geo/provider-runtime';
 import {
   createKnowledgeAuthority,
@@ -68,6 +70,9 @@ import {
 interface XiaojingGeoContext {
   workspace?: string;
   sessionId: string;
+  /** 本轮聊天请求携带的新鲜账号 token（Rust 代理附头，临期已在 Rust 侧
+   * refresh）：GEO 工具调网关优先于 admission env token；未携带回退 env。 */
+  requestAccountToken?: string;
 }
 
 let context: XiaojingGeoContext = { sessionId: 'default' };
@@ -95,6 +100,9 @@ export function configureXiaojingGeo(
   context = {
     sessionId: next.sessionId,
     ...(next.workspace ? { workspace: resolve(next.workspace) } : {}),
+    ...(next.requestAccountToken?.trim()
+      ? { requestAccountToken: next.requestAccountToken.trim() }
+      : {}),
   };
   configureXiaojingGeoProviderAdmission({
     workspacePath: next.workspace,
@@ -228,7 +236,7 @@ function materialIdentity(): { workspaceId: string; sessionId: string } {
 
 function materialImportService(): MaterialImportService {
   const identity = materialIdentity();
-  const capabilities = getXiaojingGeoProviderCapabilities();
+  const capabilities = getXiaojingGeoProviderCapabilitiesForRequest(context.requestAccountToken);
   return new MaterialImportService(
     identity,
     createBrandMaterialPort(identity),
@@ -237,7 +245,7 @@ function materialImportService(): MaterialImportService {
     {},
     capabilities.keywordSearch,
     undefined,
-    getXiaojingGeoBillingPermitChannel(),
+    getXiaojingGeoBillingPermitChannelForRequest(context.requestAccountToken),
   );
 }
 
@@ -246,25 +254,42 @@ function brandMaterialPort() {
 }
 
 // 题库/主题服务与 index.ts 的 HTTP 路由共用同一构造；这里按 Session 缓存实例，
-// 保证 agent 工具与面板/卡片走完全相同的领域语义与复用规则。
+// 保证 agent 工具与面板/卡片走完全相同的领域语义与复用规则。缓存键携带本轮
+// 请求级 token 的截断指纹：轮换（refresh）后必须重建服务，不能让旧 token 留在
+// 已缓存的能力闭包里；token 稳定时实例照常复用。原始 token 不进常驻缓存键
+// （生命周期长于请求），只留 SHA-256 前 16 hex。
 function stageIdentity(): { workspaceId: string; sessionId: string } {
   if (!context.workspace) throw new Error('This stage requires an explicit workspace identity');
   return { workspaceId: basename(context.workspace), sessionId: context.sessionId };
 }
 
+/**
+ * 请求级 token 的缓存键指纹：SHA-256 前 16 hex。原始 token 不进常驻缓存键
+ * （生命周期长于请求）；指纹只用于区分轮换前后的 token，碰撞即同 key 复用
+ * 同实例，语义与原「token 原文入 key」一致。
+ */
+export function accountTokenCacheFingerprint(token: string | undefined): string {
+  if (!token) return '';
+  return createHash('sha256').update(token).digest('hex').slice(0, 16);
+}
+
+function stageRuntimeKey(identity: { workspaceId: string; sessionId: string }): string {
+  return `${identity.workspaceId}:${identity.sessionId}:${accountTokenCacheFingerprint(context.requestAccountToken)}`;
+}
+
 let questionPoolRuntime: { key: string; service: QuestionPoolService } | null = null;
 function questionPoolService(): QuestionPoolService {
   const identity = stageIdentity();
-  const key = `${identity.workspaceId}:${identity.sessionId}`;
+  const key = stageRuntimeKey(identity);
   if (questionPoolRuntime?.key === key) return questionPoolRuntime.service;
-  const capabilities = getXiaojingGeoProviderCapabilities();
+  const capabilities = getXiaojingGeoProviderCapabilitiesForRequest(context.requestAccountToken);
   const service = new QuestionPoolService(
     identity,
     createQuestionPoolPort(identity),
     capabilities.keywordSearch,
     capabilities.generation,
     capabilities.embedding,
-    getXiaojingGeoBillingPermitChannel(),
+    getXiaojingGeoBillingPermitChannelForRequest(context.requestAccountToken),
   );
   questionPoolRuntime = { key, service };
   return service;
@@ -273,16 +298,16 @@ function questionPoolService(): QuestionPoolService {
 let topicPlanRuntime: { key: string; service: TopicPlanService } | null = null;
 function topicPlanService(): TopicPlanService {
   const identity = stageIdentity();
-  const key = `${identity.workspaceId}:${identity.sessionId}`;
+  const key = stageRuntimeKey(identity);
   if (topicPlanRuntime?.key === key) return topicPlanRuntime.service;
-  const capabilities = getXiaojingGeoProviderCapabilities();
+  const capabilities = getXiaojingGeoProviderCapabilitiesForRequest(context.requestAccountToken);
   const service = new TopicPlanService(
     identity,
     createTopicPlanPort(identity),
     capabilities.generation,
     capabilities.embedding,
     undefined,
-    getXiaojingGeoBillingPermitChannel(),
+    getXiaojingGeoBillingPermitChannelForRequest(context.requestAccountToken),
   );
   topicPlanRuntime = { key, service };
   return service;
@@ -291,15 +316,15 @@ function topicPlanService(): TopicPlanService {
 let articleRuntime: { key: string; service: ArticleGenerationService } | null = null;
 function articleService(): ArticleGenerationService {
   const identity = stageIdentity();
-  const key = `${identity.workspaceId}:${identity.sessionId}`;
+  const key = stageRuntimeKey(identity);
   if (articleRuntime?.key === key) return articleRuntime.service;
-  const capabilities = getXiaojingGeoProviderCapabilities();
+  const capabilities = getXiaojingGeoProviderCapabilitiesForRequest(context.requestAccountToken);
   const service = new ArticleGenerationService(
     identity,
     createArticlePort(identity),
     capabilities.generation,
     capabilities.reflection,
-    getXiaojingGeoBillingPermitChannel(),
+    getXiaojingGeoBillingPermitChannelForRequest(context.requestAccountToken),
   );
   articleRuntime = { key, service };
   return service;
@@ -308,16 +333,16 @@ function articleService(): ArticleGenerationService {
 let distributionRuntime: { key: string; service: DistributionPlanningService } | null = null;
 function distributionService(): DistributionPlanningService {
   const identity = stageIdentity();
-  const key = `${identity.workspaceId}:${identity.sessionId}`;
+  const key = stageRuntimeKey(identity);
   if (distributionRuntime?.key === key) return distributionRuntime.service;
-  const capabilities = getXiaojingGeoProviderCapabilities();
+  const capabilities = getXiaojingGeoProviderCapabilitiesForRequest(context.requestAccountToken);
   const service = new DistributionPlanningService(
     identity,
     createDistributionPlanPort(identity),
     capabilities.distribution,
     capabilities.keywordSearch,
     undefined,
-    getXiaojingGeoBillingPermitChannel(),
+    getXiaojingGeoBillingPermitChannelForRequest(context.requestAccountToken),
   );
   distributionRuntime = { key, service };
   return service;

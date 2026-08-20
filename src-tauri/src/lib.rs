@@ -155,6 +155,7 @@ pub fn run() {
             brand_workspace::cmd_publish_execution_start_ui,
             brand_workspace::cmd_publish_execution_latest_ui,
             brand_workspace::cmd_publish_item_retry_ui,
+            brand_workspace::cmd_publish_execution_resume_ui,
             brand_workspace::cmd_post_publish_monitor_prepare_ui,
             brand_workspace::cmd_post_publish_monitor_latest_ui,
             brand_workspace::cmd_post_publish_monitor_get_ui,

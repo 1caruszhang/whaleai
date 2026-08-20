@@ -177,6 +177,76 @@ describe("ArticleGenerationService", () => {
     );
   });
 
+  it("知识库身份与 workspace 名冲突时，正文 prompt 的品牌行用知识库值（炊班长事故回归）", async () => {
+    const row = {
+      ...article("a1"),
+      plannedFacts: [
+        {
+          factKey: "fact-1",
+          predicate: "profile.history",
+          normalizedValueJson: '"成立10年"',
+        },
+        {
+          factKey: "identity-full-name",
+          predicate: "brand.fullName",
+          normalizedValueJson: '"广州造卤先生餐饮管理有限公司"',
+        },
+        {
+          factKey: "identity-short-names",
+          predicate: "brand.shortNames",
+          normalizedValueJson: '["造卤先生", "炊班主"]',
+        },
+      ],
+    };
+    const rows = [row];
+    const bodyPrompts: string[] = [];
+    const port = {
+      start: vi.fn(async () => operation(rows)),
+      latest: vi.fn(async () => operation(rows)),
+      getOperation: vi.fn(async () => operation(rows)),
+      claimGeneration: vi.fn(async () => ({
+        article: row,
+        brandName: "炊班长",
+        productLine: "知识服务",
+        targetRegion: "中国",
+        claimToken: "claim-a1",
+      })),
+      finishGeneration: vi.fn(async () => ({ ...row, status: "draft_ready", revision: 1 })),
+      failGeneration: vi.fn(),
+    } as unknown as ArticlePersistencePort;
+    const generation = {
+      slot: "generation",
+      complete: vi.fn(
+        async (messages: readonly GeoTextMessage[], options?: CompleteOptions) => {
+          if (options?.purpose !== "title-planning") {
+            bodyPrompts.push(messages.map((message) => message.content).join("\n"));
+          }
+          return directGenerationComplete(messages, options);
+        },
+      ),
+    } satisfies GeoTextCapability;
+    const service = new ArticleGenerationService(
+      { workspaceId: "workspace-1", sessionId: "session-1" },
+      port,
+      generation,
+      { slot: "reflection", complete: vi.fn() },
+    );
+    await service.start({
+      workspaceId: "workspace-1",
+      sessionId: "session-1",
+      source: {
+        kind: "direct",
+        count: 1,
+        themes: ["主题 a1"],
+        contentType: "guide",
+        constraints: "",
+      },
+    });
+    expect(bodyPrompts).toHaveLength(1);
+    expect(bodyPrompts[0]).toContain("品牌：广州造卤先生餐饮管理有限公司");
+    expect(bodyPrompts[0]).not.toContain("品牌：炊班长");
+  });
+
   it("returns its exact operation when two brand Sessions interleave", async () => {
     const articleA = { ...article("article-a"), operationId: "operation-a" };
     const articleB = { ...article("article-b"), operationId: "operation-b" };

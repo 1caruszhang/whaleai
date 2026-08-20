@@ -22,3 +22,76 @@ describe('provider-runtime account admission merge', () => {
     vi.unstubAllEnvs();
   });
 });
+
+// 请求级新鲜 token（Rust 代理/worker 经 x-xiaojing-account-token 头附带）：
+// 头优先于 admission env token，无头回退 env——Sidecar 长跑后 env token
+// 过期不得再杀死发布/监测的网关调用。
+describe('provider-runtime request-level account token', () => {
+  function captureBearerTokens(): string[] {
+    const seen: string[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (_input: unknown, init?: RequestInit) => {
+      seen.push(new Headers(init?.headers).get('authorization') ?? '');
+      return new Response(JSON.stringify({ code: 200, data: [] }), {
+        status: 200,
+      });
+    }));
+    return seen;
+  }
+
+  it('capabilities use the request-level token as gateway Bearer when present', async () => {
+    vi.resetModules();
+    vi.stubEnv('XIAOJING_GATEWAY_BASE_URL', 'https://gw.example.test');
+    vi.stubEnv('XIAOJING_ACCOUNT_ACCESS_TOKEN', 'stale-env-token');
+    const seen = captureBearerTokens();
+
+    const runtime = await import('./provider-runtime');
+    const capabilities =
+      runtime.getXiaojingGeoProviderCapabilitiesForRequest('fresh-request-token');
+    await capabilities.distribution.queryOrders('media', ['xj-test']);
+    expect(seen).toEqual(['Bearer fresh-request-token']);
+    vi.unstubAllEnvs();
+    vi.unstubAllGlobals();
+  });
+
+  it('falls back to the admission env token when no request token rides along', async () => {
+    vi.resetModules();
+    vi.stubEnv('XIAOJING_GATEWAY_BASE_URL', 'https://gw.example.test');
+    vi.stubEnv('XIAOJING_ACCOUNT_ACCESS_TOKEN', 'env-token-1');
+    const seen = captureBearerTokens();
+
+    const runtime = await import('./provider-runtime');
+    await runtime
+      .getXiaojingGeoProviderCapabilitiesForRequest(undefined)
+      .distribution.queryOrders('media', ['xj-test']);
+    // 空白 token 与缺省同义。
+    await runtime
+      .getXiaojingGeoProviderCapabilitiesForRequest('   ')
+      .distribution.queryOrders('media', ['xj-test']);
+    expect(seen).toEqual(['Bearer env-token-1', 'Bearer env-token-1']);
+    vi.unstubAllEnvs();
+    vi.unstubAllGlobals();
+  });
+
+  it('billing permit channel follows the same request-token-first rule', async () => {
+    vi.resetModules();
+    vi.stubEnv('XIAOJING_GATEWAY_BASE_URL', 'https://gw.example.test');
+    vi.stubEnv('XIAOJING_ACCOUNT_ACCESS_TOKEN', 'env-token-1');
+    const seen: string[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (_input: unknown, init?: RequestInit) => {
+      seen.push(new Headers(init?.headers).get('authorization') ?? '');
+      return new Response(
+        JSON.stringify({ balance: { total: 7, frozen: 0, available: 7 } }),
+        { status: 200 },
+      );
+    }));
+
+    const runtime = await import('./provider-runtime');
+    await runtime
+      .getXiaojingGeoBillingPermitChannelForRequest('fresh-request-token')
+      ?.balance();
+    await runtime.getXiaojingGeoBillingPermitChannelForRequest()?.balance();
+    expect(seen).toEqual(['Bearer fresh-request-token', 'Bearer env-token-1']);
+    vi.unstubAllEnvs();
+    vi.unstubAllGlobals();
+  });
+});

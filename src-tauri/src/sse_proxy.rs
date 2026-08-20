@@ -695,6 +695,9 @@ async fn connect_sse_attempt_with_read_timeout<R: tauri::Runtime>(
         }
     };
 
+    // SSE 长连接只承载事件流，不触发网关调用；账号 token 头由控制面 POST
+    // 代理（execute_http_request）与 Rust worker 统一附加，这里不重复，
+    // 避免离线时 refresh 尝试拖慢重连退避。
     let response = match client
         .get(identity.url)
         .header("Accept", "text/event-stream")
@@ -1095,9 +1098,14 @@ async fn execute_http_request(
         }
     };
 
-    // Add headers
+    // Add headers. The account token header is a Rust→Sidecar in-process
+    // transport: any renderer-supplied copy is stripped here and replaced
+    // with the current fresh token below (renderer never holds the token).
     if let Some(headers) = request.headers {
         for (key, value) in headers {
+            if crate::account_auth::is_account_token_header(&key) {
+                continue;
+            }
             req_builder = req_builder.header(&key, &value);
         }
     }
@@ -1106,6 +1114,15 @@ async fn execute_http_request(
     if let Some(ref body) = request.body {
         req_builder = req_builder.header("Content-Type", "application/json");
         req_builder = req_builder.body(body.clone());
+    }
+
+    // 附当前新鲜账号 access token（临期/过期先走 refresh 轮换）：Sidecar
+    // 调网关时优先于启动时 admission 注入的 env token。只发往本机 Sidecar
+    // 地址，绝不随其他目标外流；未登录不附头。
+    let is_local_sidecar = request.url.starts_with("http://127.0.0.1:")
+        || request.url.starts_with("http://localhost:");
+    if is_local_sidecar {
+        req_builder = crate::account_auth::with_fresh_account_token(req_builder).await;
     }
 
     // Send request with detailed error logging.

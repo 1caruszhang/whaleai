@@ -68,7 +68,10 @@ camelCase 字段 token（`canonicalEnterpriseProfileField`）：identity 入库�
 知识版本史与产物血缘的呈现位置是左侧栏「品牌档案」一级入口：品牌级只读整页
 （`XiaojingBrandArchivePage`），跟随当前选中品牌、不依赖任何 Session，数据来自
 `cmd_brand_workspace_history` 返回的 `BrandHistoryProjection`（`knowledge_versions`
-用户批准快照与已批准产物的 `sourceRefs`/`usedBy` 血缘）。整页除读取（刷新/重试）
+用户批准快照与已批准产物的 `sourceRefs`/`usedBy` 血缘）。页面分三层（DESIGN.md
+布局节）：「当前档案」看板只投影最新版本事实（字段经 `canonicalEnterpriseProfileField`
+归一后按语义 widget 分格），「版本历史」默认收起、每行携带与上一版的前端 diff
+摘要，「产物」按七类分组、工程标识折叠进「技术详情」。整页除读取（刷新/重试）
 外不提供任何确认或动作入口；右侧 GEO 工作台不再渲染历史面板。
 
 Node 再通过既有 Management API `/api/brand-knowledge/*` 交给 Rust。Rust 同时校验 Sidecar immutable management id、process generation、逻辑 Session id 和品牌 workspace path；JSON 中换一个 `workspaceId` 不能访问另一品牌。
@@ -94,9 +97,11 @@ subject + predicate + sorted scope + effectiveFrom + effectiveTo
 
 | origin | intent | 行为 |
 |---|---|---|
-| `user-stated` | `knowledge-update` | 无当前值或同值都待确认；异值形成冲突 |
+| `user-stated` | `knowledge-update` | 无当前值或同值都待确认；异值形成冲突（数组字段例外，见下） |
 | `model-inferred` | 任意 | 始终保存为待确认/冲突候选，不能合并或替换 authority |
 | 任意 | `chat-observation` | 普通聊天建议门；始终待确认/冲突，不能写 authority |
+
+数组字段（products/customerCases/coreAdvantages 等）的差异是**补充语义而非矛盾**：current 与候选同为 JSON 数组时，propose（含聊天修订 add）把候选值改写为「current 各项在前、候选新增项按 canonicalJson 逐项去重后追加」的并集，分类为 `awaiting-confirmation`——确认卡展示的候选值即 `adopt-new` 后的最终形态，整卡确认一次即完成增量合并，不要求二选一。并集与 current 完全相同（候选无新增）时沿用同值路径：仍落待确认候选，确认后仅合并来源、不升事实版本。只有标量 vs 标量差异、或类型不一致（一边数组一边标量）才判 `conflict` 走二选一。
 
 候选提交必须同时保存 raw input、结构化 candidate、来源材料引用、最小原文摘录和置信度。企业 Profile 材料候选还保存 `extracted / asked / inferred` provenance；材料入口的 raw input 只保存 material/field/provenance 标识，不复制整份隐私正文。候选确认前不创建或修改 current fact；同值来源也必须经过用户确认后才合并（确认粒度为整卡一次确认，见 ADR 0003）。
 
@@ -125,7 +130,7 @@ subject + predicate + sorted scope + effectiveFrom + effectiveTo
 结构化冲突卡支持：
 
 - `keep-current`：保留当前值，候选终结；
-- `adopt-new`：同值只合并来源且版本不变；异值把旧 current 移入 history并让新值版本 `+1`；
+- `adopt-new`：同值只合并来源且版本不变；异值把旧 current 移入 history并让新值版本 `+1`（数组补充候选的"新值"即 propose 时写入的去重并集，裁决路径无需再做合并）；
 - `adopt-edited`：采用用户在批量确认卡内编辑后的值（Node 先经同一归一化管道）。编辑值与当前权威同值时仅合并来源；候选行保留原始提议值，审计 before/after 可重建"原值→改值"链路；
 - `split-scope`：必须改变 scope 或 effective time，并对目标键执行 version `0` CAS；
 - `reject-candidate`：拒绝候选，不改 current。

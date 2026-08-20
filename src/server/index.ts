@@ -24,6 +24,7 @@ import {
 import { handleChatStreamRoute } from './routes/chat-stream';
 import { handleSessionReadRoute } from './routes/session-read';
 import { handleXiaojingRoute } from './routes/xiaojing';
+import { requestAccountAccessToken } from './routes/xiaojing-shared';
 import type { ImagePayload } from './types/image';
 import {
   composeSidecarRequestHandler,
@@ -99,7 +100,7 @@ async function main(): Promise<void> {
         headers: {
           'Access-Control-Allow-Origin': '*',
           'Access-Control-Allow-Methods': 'GET, POST, PATCH, DELETE, OPTIONS',
-          'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+          'Access-Control-Allow-Headers': 'Content-Type, Authorization, x-xiaojing-account-token',
         },
       });
     }
@@ -171,7 +172,13 @@ async function main(): Promise<void> {
       if (payload?.sessionId && payload.sessionId !== getSessionId()) {
         return jsonResponse({ success: false, error: 'session_identity_mismatch' }, 409);
       }
-      const result = await sendXiaojingMessage(text, images, workspacePath, sessionFiles);
+      const result = await sendXiaojingMessage(
+        text,
+        images,
+        workspacePath,
+        sessionFiles,
+        requestAccountAccessToken(request),
+      );
       return jsonResponse(result, result.success ? 200 : (result.status ?? 500));
     }
 

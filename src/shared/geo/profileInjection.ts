@@ -175,6 +175,24 @@ export function firstProfileValue(
   return profile[field]?.[0];
 }
 
+/**
+ * 品牌名裁决（用户拍板 2026-08-19）：品牌名只用知识库已确认的身份事实，
+ * 优先级 fullName[0] → shortNames[0]；知识库没有任何身份事实时才用
+ * workspace 名兜底。workspace 名是创建品牌工作区时用户随手填的展示名，
+ * 与已确认身份冲突时必须让位（炊班长事故：知识库 fullName=造卤先生，
+ * 正文却用了 workspace 名「炊班长」）。
+ */
+export function resolveBrandName(
+  profile: BrandProfile,
+  workspaceName: string,
+): string {
+  return (
+    firstProfileValue(profile, "fullName") ??
+    firstProfileValue(profile, "shortNames") ??
+    workspaceName
+  );
+}
+
 /** 挖词阶段的业务画像块：只喂业务信号，不给品牌名（ADR-0028 禁品牌名不变量）。 */
 export function renderMiningProfileBlock(profile: BrandProfile): string {
   const lines: string[] = [];

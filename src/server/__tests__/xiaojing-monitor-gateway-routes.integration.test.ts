@@ -18,6 +18,7 @@ const mocks = vi.hoisted(() => ({
   sessionId: 'session-monitor-gw-14',
   queryOrders: vi.fn(),
   balance: vi.fn(),
+  requestTokens: [] as (string | undefined)[],
 }));
 
 vi.mock('../agent-session', () => ({
@@ -28,10 +29,20 @@ vi.mock('../geo/provider-runtime', () => ({
   getXiaojingGeoProviderCapabilities: () => ({
     distribution: { queryOrders: mocks.queryOrders },
   }),
+  getXiaojingGeoProviderCapabilitiesForRequest: (token?: string) => {
+    mocks.requestTokens.push(token);
+    return { distribution: { queryOrders: mocks.queryOrders } };
+  },
   getXiaojingGeoBillingPermitChannel: () =>
     mocks.balance.getMockImplementation()
       ? { balance: mocks.balance }
       : undefined,
+  getXiaojingGeoBillingPermitChannelForRequest: (token?: string) => {
+    mocks.requestTokens.push(token);
+    return mocks.balance.getMockImplementation()
+      ? { balance: mocks.balance }
+      : undefined;
+  },
 }));
 
 let workspace: string;
@@ -84,6 +95,38 @@ describe('post-publish monitor gateway routes', () => {
   beforeEach(() => {
     mocks.queryOrders.mockReset();
     mocks.balance.mockReset();
+    mocks.requestTokens.length = 0;
+  });
+
+  it('forwards the request-level account token header on order-query and balance', async () => {
+    mocks.queryOrders.mockResolvedValue([]);
+    const query = post('/api/xiaojing/post-publish-monitor/order-query', {
+      ...QUERY_BODY,
+      workspaceId,
+    });
+    query.headers.set('x-xiaojing-account-token', 'fresh-jwt-monitor');
+    await handleXiaojingRoute(
+      '/api/xiaojing/post-publish-monitor/order-query',
+      query,
+      { workspacePath: workspace },
+    );
+
+    mocks.balance.mockResolvedValue({ total: 7, frozen: 0, available: 7 });
+    const balance = post('/api/xiaojing/post-publish-monitor/balance', {
+      workspaceId,
+      sessionId: mocks.sessionId,
+    });
+    balance.headers.set('x-xiaojing-account-token', 'fresh-jwt-monitor');
+    await handleXiaojingRoute(
+      '/api/xiaojing/post-publish-monitor/balance',
+      balance,
+      { workspacePath: workspace },
+    );
+
+    expect(mocks.requestTokens).toEqual([
+      'fresh-jwt-monitor',
+      'fresh-jwt-monitor',
+    ]);
   });
 
   it('queries the gateway with the server-derived sn and returns the matched record', async () => {

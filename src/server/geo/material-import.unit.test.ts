@@ -3,9 +3,11 @@ import { describe, expect, it, vi } from 'vitest';
 import * as XLSX from 'xlsx';
 
 import type { KnowledgeCandidate, KnowledgeCurrentFact, KnowledgeProposalInput } from './knowledge-authority';
+import { GatewayBillingError } from './billing-permit';
 import {
   MaterialImportService,
   fetchWebsiteMaterial,
+  isSimilarSelfName,
   materialLogProjection,
   parseBrandMaterial,
   parseProfileFacts,
@@ -503,6 +505,28 @@ describe('competitor enrichment (js_ai enrich real competitors)', () => {
     expect(competitorsCall?.[0].source.excerpt).toContain('云帆信息：主要竞争对手包括云帆信息');
   });
 
+  it('drops lookalike short-name typo variants of the brand from enriched suggestions', async () => {
+    const port = new FakeMaterialPort();
+    // 检索语料里字面出现品牌形近变体「鲸悦科技」（品牌「鲸跃科技」的错别字），
+    // 反虚构字面匹配会放行，排除名单的相似度护栏必须拦下。
+    const current = service(port, {
+      completeResponses: [extractionResponse(), JSON.stringify({
+        competitors: [
+          { name: '鲸悦科技', sourceExcerpt: '竞争对手包括鲸悦科技' },
+          { name: '云帆信息', sourceExcerpt: '与云帆信息直接竞争' },
+        ],
+      })],
+      search: async () => '鲸跃科技的主要竞争对手包括鲸悦科技与云帆信息。',
+    });
+    const result = await current.value.importPastedText('公司资料');
+
+    expect(result.ok).toBe(true);
+    const competitorsCall = current.propose.mock.calls.find(
+      ([input]) => input.key.predicate === 'enterprise-profile.competitors',
+    );
+    expect(competitorsCall?.[0].value).toEqual(['云帆信息']);
+  });
+
   it('merges enriched names into extracted competitors as a single candidate', async () => {
     const port = new FakeMaterialPort();
     const current = service(port, {
@@ -722,6 +746,11 @@ describe('competitor enrichment (js_ai enrich real competitors)', () => {
     expect(prompt).toContain('relatedBrands（数组）');
     expect(prompt).toContain('不是直接竞品】的其他品牌');
     expect(prompt).toContain('其全称/简称/别名不得进入 relatedBrands');
+    // serviceArea 是实际已落地范围，不是愿景/招商话术；未明写时可从
+    // 客户案例/落地门店/合作档口的地域分布推断（判断类，标 inferred）。
+    expect(prompt).toContain('serviceArea（标量）：品牌【实际已落地/可提供服务的地理范围】');
+    expect(prompt).toContain('愿景性、招商性表述禁止作为取值');
+    expect(prompt).toContain('客户案例/落地门店/合作档口的地域分布推断');
     // 竞品纪律：层级原则（含行业例子）、二选一信号、前东家最高优先级排除、
     // 来源只有材料与后续检索（禁止凭模型记忆推断）。
     expect(prompt).toContain('同体量层级');
@@ -837,6 +866,41 @@ describe('profile and document compatibility', () => {
       { field: 'relatedBrands', value: ['鲸跃科技'], provenance: 'inferred' },
     ] }), context);
     expect(dropped).toHaveLength(0);
+  });
+
+  // 回归（品牌「炊班长」事故）：材料错别字形近变体「炊事班」不是 brandName
+  // 「炊班长」/短名「炊班主」的相等或子串，旧规则放行进了竞品。
+  it('drops lookalike short-name typo variants of the brand from competitors', () => {
+    const brandContext: BrandMaterialContext = {
+      workspaceId: 'brand-07',
+      brandName: '炊班长',
+      productLines: [],
+    };
+    const facts = parseProfileFacts(JSON.stringify({ facts: [
+      { field: 'shortNames', value: ['炊班主'], provenance: 'extracted', sourceExcerpt: '简称' },
+      { field: 'competitors', value: ['炊事班', '真功夫'], provenance: 'extracted', sourceExcerpt: '竞品' },
+    ] }), brandContext);
+    // 形近变体被判自引用剔除，真实竞品不误伤。
+    expect(facts.find((fact) => fact.field === 'competitors')?.value).toEqual(['真功夫']);
+  });
+
+  describe('isSimilarSelfName', () => {
+    it('treats edit-distance-1 CJK short names as self references', () => {
+      expect(isSimilarSelfName('炊事班', '炊班长')).toBe(true);
+      expect(isSimilarSelfName('炊事班', '炊班主')).toBe(true);
+      expect(isSimilarSelfName('炊 事 班', '炊班长')).toBe(true);
+      expect(isSimilarSelfName('真功夫', '炊班长')).toBe(false);
+      expect(isSimilarSelfName('云帆信息', '鲸跃科技')).toBe(false);
+    });
+
+    it('stays scoped to 2–4 char CJK names (length 1 exempt, length ≥5 uses legacy rules)', () => {
+      // 长度 1 豁免（单字重名率太高）。
+      expect(isSimilarSelfName('鲸', '鲸')).toBe(false);
+      // 长度 ≥5 不启用相似度，仍只走相等/双向子串旧规则。
+      expect(isSimilarSelfName('鲸跃科技有', '鲸跃科技司')).toBe(false);
+      // 非 CJK 短名不适用（拉丁名缩写重名率高）。
+      expect(isSimilarSelfName('abcd', 'abce')).toBe(false);
+    });
   });
 
   // 回归：模型对同一 (field, scope) 重复输出多条事实（如多门店电话各一条）时，
@@ -1023,5 +1087,51 @@ describe('MaterialImportService billing permits (ticket 07)', () => {
     expect(permits.calls).toEqual([
       { kind: 'apply', permitId: 'mat:attempt-text-1-1', operation: 'material_import', units: 1 },
     ]);
+  });
+
+  // 回归：GatewayBillingError 的 message 是自由中文文本，子串匹配会把
+  // insufficient_balance 掩蔽成泛化 material_processing_failed；按类型归码。
+  it('maps GatewayBillingError permit rejection to material_billing_failed', async () => {
+    const port = new FakeMaterialPort();
+    const permits = permitPort({
+      failApplyWith: new GatewayBillingError(
+        'insufficient_balance',
+        '点数不足：本次需 20 点，当前可用 4 点。',
+        402,
+        { required: 20, available: 4 },
+      ),
+    });
+    const subject = billedService(port, permits.port);
+
+    const result = await subject.value.importPastedText('公司全称：鲸跃科技有限公司');
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.errorCode).toBe('material_billing_failed');
+    expect(port.finishes[0]).toMatchObject({ status: 'failed', errorCode: 'material_billing_failed' });
+  });
+
+  it('logs one sanitized diagnostic for every failure code without free-form message text', async () => {
+    const spy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    try {
+      const port = new FakeMaterialPort();
+      const permits = permitPort({
+        failApplyWith: new GatewayBillingError('insufficient_balance', '点数不足：私密详情', 402),
+      });
+      const subject = billedService(port, permits.port);
+
+      await subject.value.importPastedText('公司全称：鲸跃科技有限公司');
+
+      const line = spy.mock.calls
+        .map((call) => String(call[0]))
+        .find((entry) => entry.includes('diagnostic'));
+      expect(line).toBeDefined();
+      expect(line).toContain('material_billing_failed');
+      expect(line).toContain('GatewayBillingError');
+      expect(line).toContain('insufficient_balance');
+      // 自由文本 message 不进日志。
+      expect(line).not.toContain('私密详情');
+    } finally {
+      spy.mockRestore();
+    }
   });
 });

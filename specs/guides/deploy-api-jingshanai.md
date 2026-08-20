@@ -81,6 +81,7 @@ env 注入清单（逐项 = `backend/src/config.ts` fail-fast 权威清单；缺
 | 变量 | 建议值 | 说明 |
 |---|---|---|
 | `OSS_PUBLIC_BASE_URL` | `https://<bucket>.oss-cn-chengdu.aliyuncs.com` | putHtml 返回给客户端的文章预览 URL 基地址（公网可访问）；不配则返回内网 URL，客户端打不开 |
+| `ARK_EMBEDDING_ENDPOINT_ID` | doubao-embedding-vision 在线推理接入点（形如 `ep-xxx`） | 网关模式 sidecar 的 embedding 请求体不带 model，靠它兜底补齐；不配则 embedding 路由直接 503，问题池/选题的向量打分不可用 |
 | `OSS_INTERNAL_HOST` | 默认 `oss-cn-chengdu-internal.aliyuncs.com` | OSS 内网 endpoint；ECS 与 bucket 同地域时用默认即可 |
 | `CHAT_INPUT_CNY_PER_MTOK` / `CHAT_INPUT_CACHE_HIT_CNY_PER_MTOK` / `CHAT_OUTPUT_CNY_PER_MTOK` | 按 DeepSeek 官网现价 | 对话隐藏额度折点单价（默认 2/0.2/3 是占位口径） |
 
@@ -108,6 +109,7 @@ OSS_BUCKET=__SET_ON_SERVER__
 DISTRIBUTION_APP_ID=__SET_ON_SERVER__
 DISTRIBUTION_SECRET=__SET_ON_SERVER__
 OSS_PUBLIC_BASE_URL=__SET_ON_SERVER__
+ARK_EMBEDDING_ENDPOINT_ID=__SET_ON_SERVER__
 EOF
 sudo chmod 600 /opt/xiaojing-api/.env
 # AUTH_SECRET 生成示例：openssl rand -hex 32

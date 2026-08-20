@@ -179,9 +179,31 @@ export function createProviderProxyRoutes(deps: BackendDeps) {
   );
 
   // ── ARK multimodal embeddings（embedding key 缺省回落 ARK key，与 sidecar 同）──
+  // 请求体缺 model 且服务器未配置兜底 endpoint id 时，透传注定被火山方舟 400
+  // 拒绝且原因不可见（bodyTransform 不注册、无 model 原样上行）——此处直接 503
+  // 配置错误并点名缺失的环境变量，不触上游。显式带 model 或非 JSON body 不受影响。
+  const requireEmbeddingModel = async (c: GatewayContext, next: () => Promise<void>) => {
+    if (config.arkEmbeddingEndpointId) return await next();
+    let parsed: { model?: unknown };
+    try {
+      parsed = JSON.parse(await c.req.raw.clone().text()) as { model?: unknown };
+    } catch {
+      // 非 JSON body 不在此判定，按原透传口径交上游报错。
+      return await next();
+    }
+    if (parsed.model === undefined || parsed.model === '') {
+      throw new AppError(
+        'embedding_endpoint_not_configured',
+        'embedding 服务暂不可用：服务器缺少 ARK_EMBEDDING_ENDPOINT_ID 配置（doubao-embedding-vision 在线推理接入点，形如 ep-xxx），请联系运维配置后重试。',
+        503,
+      );
+    }
+    return await next();
+  };
   routes.post(
     '/gw/ark/embeddings/multimodal',
     requireAccount,
+    requireEmbeddingModel,
     bearerProxy({
       provider: 'ark',
       route: 'ark.embeddings',

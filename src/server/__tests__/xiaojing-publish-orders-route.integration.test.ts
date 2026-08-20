@@ -31,7 +31,11 @@ vi.mock('../geo/provider-runtime', () => ({
   getXiaojingGeoProviderCapabilities: () => ({
     distribution: { queryOrders: mocks.queryOrders },
   }),
+  getXiaojingGeoProviderCapabilitiesForRequest: () => ({
+    distribution: { queryOrders: mocks.queryOrders },
+  }),
   getXiaojingGeoBillingPermitChannel: () => undefined,
+  getXiaojingGeoBillingPermitChannelForRequest: () => undefined,
 }));
 
 let workspace: string;
@@ -201,6 +205,7 @@ describe('publish scheduler order status route', () => {
   it('projects per-item gateway order status with deterministic sns', async () => {
     mocks.getExecution.mockResolvedValue(execution());
     const mediaSn = distributionOrderSn('exec-orders-1', 'item-media-1');
+    const pendingSn = distributionOrderSn('exec-orders-1', 'item-we-media-2');
     mocks.queryOrders.mockImplementation(async (kind: string, sns: readonly string[]) => {
       expect(sns.length).toBeLessThanOrEqual(20);
       if (kind === 'media') {
@@ -260,6 +265,73 @@ describe('publish scheduler order status route', () => {
       screenshot: null,
     });
     expect(body.orders[1].sn).toBe(distributionOrderSn('exec-orders-1', 'item-we-media-2'));
+    // 未提交 item（externalOrderId=null 且 status 未过提交节点）的 sn 不发给网关：
+    // 其订单尚不在网关 publish_orders 表，查询会整批 404。
+    for (const call of mocks.queryOrders.mock.calls) {
+      expect(call[1]).not.toContain(pendingSn);
+    }
+  });
+
+  it('does not query unsubmitted items at all, returning them with status null', async () => {
+    mocks.getExecution.mockResolvedValue(execution({
+      items: [
+        { ...execution().items[1], id: 'item-pending-a', status: 'pending' },
+        { ...execution().items[1], id: 'item-uploaded-b', status: 'uploaded' },
+        // 上传阶段失败也可能是 failed-retryable：此时网关侧无订单，不查单。
+        { ...execution().items[1], id: 'item-retryable-c', status: 'failed-retryable' },
+      ],
+    }));
+
+    const response = await handleXiaojingRoute('/api/xiaojing/publish-scheduler/orders', post({
+      workspaceId,
+      sessionId: mocks.sessionId,
+      executionId: 'exec-orders-1',
+    }), { workspacePath: workspace });
+
+    expect(response?.status).toBe(200);
+    const body = await response?.json() as {
+      success: boolean;
+      orders: Array<{ itemId: string; status: number | null }>;
+    };
+    expect(body.success).toBe(true);
+    expect(body.orders).toHaveLength(3);
+    for (const order of body.orders) {
+      expect(order.status).toBeNull();
+    }
+    expect(mocks.queryOrders).not.toHaveBeenCalled();
+  });
+
+  it('queries items whose status passed the submit node even without externalOrderId', async () => {
+    mocks.getExecution.mockResolvedValue(execution({
+      items: [
+        { ...execution().items[0], externalOrderId: null, status: 'submitted' },
+        { ...execution().items[1], status: 'reconciliation-required' },
+      ],
+    }));
+    const mediaSn = distributionOrderSn('exec-orders-1', 'item-media-1');
+    const weMediaSn = distributionOrderSn('exec-orders-1', 'item-we-media-2');
+    mocks.queryOrders.mockImplementation(async (kind: string) =>
+      kind === 'media'
+        ? [{ sn: mediaSn, status: 3, url: null, screenshot: null, publishedAt: null, feedback: null }]
+        : [{ sn: weMediaSn, status: 4, url: 'https://mp.example/a', screenshot: null, publishedAt: '2026-08-21T00:00:00Z', feedback: null }],
+    );
+
+    const response = await handleXiaojingRoute('/api/xiaojing/publish-scheduler/orders', post({
+      workspaceId,
+      sessionId: mocks.sessionId,
+      executionId: 'exec-orders-1',
+    }), { workspacePath: workspace });
+
+    expect(response?.status).toBe(200);
+    const body = await response?.json() as {
+      success: boolean;
+      orders: Array<{ itemId: string; status: number | null }>;
+    };
+    expect(body.success).toBe(true);
+    expect(body.orders[0]).toMatchObject({ itemId: 'item-media-1', status: 3 });
+    expect(body.orders[1]).toMatchObject({ itemId: 'item-we-media-2', status: 4 });
+    const queriedSns = mocks.queryOrders.mock.calls.flatMap((call) => call[1] as string[]);
+    expect(queriedSns.sort()).toEqual([mediaSn, weMediaSn].sort());
   });
 
   it('returns 403 before any port or provider call on identity mismatch', async () => {

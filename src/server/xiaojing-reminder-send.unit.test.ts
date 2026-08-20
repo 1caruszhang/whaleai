@@ -56,6 +56,26 @@ describe('sendXiaojingMessage — reminder delivery never throws (GD-8④)', () 
     expect(result).toEqual({ success: true });
     expect(enqueueUserMessage).toHaveBeenCalledWith('reminder', undefined, [
       'xiaojing_files/s/a.md',
-    ]);
+    ], undefined);
+  });
+
+  it('forwards the request-level account token to the enqueue', async () => {
+    enqueueUserMessage.mockResolvedValueOnce({
+      accepted: true,
+    } as Awaited<ReturnType<typeof enqueueUserMessage>>);
+    const result = await sendXiaojingMessage(
+      'reminder',
+      undefined,
+      '/tmp/workspace',
+      undefined,
+      'jwt-fresh-2',
+    );
+    expect(result).toEqual({ success: true });
+    expect(enqueueUserMessage).toHaveBeenCalledWith(
+      'reminder',
+      undefined,
+      undefined,
+      'jwt-fresh-2',
+    );
   });
 });

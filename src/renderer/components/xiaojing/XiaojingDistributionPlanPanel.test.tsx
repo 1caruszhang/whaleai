@@ -171,22 +171,59 @@ describe("XiaojingDistributionPlanPanel read-only projection", () => {
     expect(
       await within(panel).findByText(/汽车产业观察（已选）/),
     ).toBeInTheDocument();
-    expect(within(panel).getByText(/Provider 状态 2（可发）/)).toBeInTheDocument();
-    expect(within(panel).getByText(/报价：未知/)).toBeInTheDocument();
-    // 发布率不参与决策也不展示（用户裁决 2026-08-18）。
-    expect(within(panel).queryByText(/成功率/)).not.toBeInTheDocument();
-    // 推荐行展示召回路命中（被动/主动/保底/偏好），不再展示风险文案。
+    // 渠道推荐行只剩四要素：类型标签+渠道名、所需点数、召回路命中、适配。
+    expect(within(panel).getByText(/媒体 · 汽车产业观察/)).toBeInTheDocument();
+    expect(within(panel).getByText(/所需点数：点数待定/)).toBeInTheDocument();
     expect(within(panel).getByText(/召回路命中：/)).toBeInTheDocument();
     expect(within(panel).getByText(/被动召回（真实问题来源域名命中）/)).toBeInTheDocument();
-    expect(within(panel).getByText(/被动召回 \+0.4/)).toBeInTheDocument();
+    expect(within(panel).getByText(/适配：行业分类匹配汽车/)).toBeInTheDocument();
+    // ¥ 报价、Provider 状态、权重与发布率等其余字段不再展示。
+    expect(panel.textContent ?? "").not.toContain("¥");
+    expect(within(panel).queryByText(/报价/)).not.toBeInTheDocument();
+    expect(within(panel).queryByText(/Provider 状态/)).not.toBeInTheDocument();
+    expect(within(panel).queryByText(/权重/)).not.toBeInTheDocument();
+    expect(within(panel).queryByText(/成功率/)).not.toBeInTheDocument();
+    expect(within(panel).queryByText(/发布率/)).not.toBeInTheDocument();
     expect(within(panel).queryByText(/风险：/)).not.toBeInTheDocument();
     expect(
       within(panel).queryByText(/价格未知，不能进入已确认分发计划/),
     ).not.toBeInTheDocument();
+    // 预算点数化：¥500 → 8000 点。
+    expect(within(panel).getByText(/预算：8000 点/)).toBeInTheDocument();
+    expect(within(panel).queryByText(/预算（元）/)).not.toBeInTheDocument();
     expect(within(panel).getByText(/新能源车主选音响/)).toBeInTheDocument();
     expect(
       within(panel).getByText(/任何付费、下单或发布仍需后续独立确认/),
     ).toBeInTheDocument();
+  });
+
+  it("shows computed points for priced candidates and hides the fit row when empty", async () => {
+    mocks.latest.mockResolvedValue(
+      projection({
+        status: "confirmed",
+        confirmedAt: "2026-08-15T00:02:00Z",
+        blockingIssues: [],
+        candidates: [
+          {
+            ...projection().candidates[0]!,
+            // ¥88.00 → 1408 点（ceil(8800 × 4 / 25)，与 Rust/网关同式）。
+            estimatedPriceCny: 88,
+            fitReasons: [],
+          },
+        ],
+      }),
+    );
+    render(<XiaojingDistributionPlanPanel workspaceId="brand-12" />);
+    const panel = await screen.findByRole("region", {
+      name: "渠道发现与分发计划",
+    });
+
+    expect(
+      await within(panel).findByText(/所需点数：1408 点/),
+    ).toBeInTheDocument();
+    expect(panel.textContent ?? "").not.toContain("¥");
+    // fitReasons 为空时整行「适配」不出现。
+    expect(within(panel).queryByText(/适配：/)).not.toBeInTheDocument();
   });
 
   it("exposes no discovery, selection, mapping or confirm controls", async () => {

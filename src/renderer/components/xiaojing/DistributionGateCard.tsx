@@ -12,6 +12,7 @@ import type {
   DistributionPlanEditInput,
   DistributionPlanProjection,
 } from "../../../shared/geo/distributionPlan";
+import { cnyToPoints } from "../../../shared/geo/points";
 import { unwrapToolResultText } from "../../../shared/toolResult";
 import { useGateCardRefresh } from "./useGateCardRefresh";
 
@@ -173,7 +174,7 @@ export default function DistributionGateCard({
           {plan.candidates.length} 个真实渠道候选
         </span>
         <span className="rounded-full bg-[var(--paper-inset)] px-2 py-0.5">
-          预算 ¥{plan.budgetCny}
+          预算 {cnyToPoints(plan.budgetCny)} 点
         </span>
         <span className="ml-auto">已选 {selectedIds.length}/{plan.candidates.length}</span>
       </div>
@@ -210,15 +211,14 @@ export default function DistributionGateCard({
                   />
                 )}
                 <span className="min-w-0 flex-1">
-                  <span className="block text-sm font-semibold">{candidate.name}</span>
-                  <span className="mt-0.5 block text-xs text-[var(--ink-muted)]">
-                    {KIND_LABEL[candidate.kind]} · 报价{" "}
-                    {candidate.estimatedPriceCny === null
-                      ? "未知"
-                      : `¥${candidate.estimatedPriceCny}`}
+                  <span className="block text-sm font-semibold">
+                    {KIND_LABEL[candidate.kind]} · {candidate.name}
                   </span>
-                  <span className="mt-1 block text-xs leading-4 text-[var(--ink-muted)]">
-                    适配：{candidate.fitReasons.join("；")}
+                  <span className="mt-0.5 block text-xs text-[var(--ink-muted)]">
+                    所需点数：
+                    {candidate.estimatedPriceCny === null
+                      ? "点数待定"
+                      : `${cnyToPoints(candidate.estimatedPriceCny)} 点`}
                   </span>
                   <span className="mt-1 block text-xs leading-4 text-[var(--ink-muted)]">
                     召回路命中：
@@ -233,6 +233,11 @@ export default function DistributionGateCard({
                       })
                       .join("；")}
                   </span>
+                  {candidate.fitReasons.length > 0 && (
+                    <span className="mt-1 block text-xs leading-4 text-[var(--ink-muted)]">
+                      适配：{candidate.fitReasons.join("；")}
+                    </span>
+                  )}
                 </span>
               </label>
             </article>

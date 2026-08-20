@@ -30,7 +30,7 @@
 ### 选题类型与标题（generation 槽 + `purpose: title-planning`，lite）
 
 1. 五类语义（guide/showcase/ranking/news/news_light）与整批覆盖下限后处理（不强配额）。
-2. showcase 唯一带目标品牌；ranking 绝不带品牌且必含代码注入的当前年份；不得编造年份/政策/事件。
+2. showcase 唯一带目标品牌；ranking 绝不带品牌且必含代码注入的当前年份；不得编造年份/政策/事件。标题 prompt 与 `validateTitleCandidates` 校验集的品牌名统一走 `resolveBrandName`（知识库已确认身份事实 fullName[0] → shortNames[0] 优先，workspace 名仅在无任何身份事实时兜底；炊班长事故裁决 2026-08-19）。
 3. few-shot 占位符式（【地域】【行业】【目标品牌】）+ 忠实各类型品牌分布（guide 1/3、showcase 2/3、ranking 0/3、news 3/3）+ 反抄录禁令。
 4. 风格中文释义（question/seo/attractive/professional）；「像真人会搜的，不是关键词堆砌」「有点击吸引力但不标题党」。
 5. 极限词统一清单 + 竞品名红线 + 长度按类型；确定性校验 fail-loud，有效候选 <3 整批失败。**行业命中按业务词锚集（用户裁决 2026-08-19 修正，v2）**：锚 = 行业词全部 ≥4 字后缀（「汽车音响改装」含「音响改装」——丢品类前缀但保业务动作）∪ 品牌已确认业务词汇（产品 + 衍生关键词，附去前导数字/符号变体「360°全景影像」→「全景影像」）；标题逐字包含任一锚即合格——「无损改装」「音响改装升级」「全景影像改装」是合法业务替换，「汽车音响店」这类丢业务动作的写法不合格，贴膜/洗车类跑题拦截；地域仍逐字。校验不足下限时附一次 corrective 重试（明示锚词清单），拒因计数随错误码透出（如 `industry=3,forbidden=1`），选题段 policyVersion 升 v2。
@@ -43,7 +43,7 @@
 3. 格式契约（确定性可校验）：per-type H2 下限（guide/showcase 3、ranking 6、news 两类 2）、品牌名加粗全覆盖、段落 ≤3 句、ranking 六家等长平行结构；news 两类导语 5W1H、news 主体 3–4 递进小标题（≤8 字）。
 4. 表达层：叙事视角种子（12 组 {切入角度, 开篇写法, 小标题措辞倾向}，操作内洗牌发牌、发尽重洗）只影响开篇与表达；「骨架非填空」指令（模板=参考骨架，重组结构、换叙述顺序、调小标题措辞）。
 5. 输出控制：plain Markdown、首行 H1=指定标题逐字、无【】占位符；maxTokens 8192 / temperature 0.85 / top_p 0.9。
-6. 正文恒注入品牌身份块（`renderBrandIdentityBlock`，实体层子集 + 加粗规则）；素材边界仍由 plannedFacts 圈定。
+6. 正文恒注入品牌身份块（`renderBrandIdentityBlock`，实体层子集 + 加粗规则）；素材边界仍由 plannedFacts 圈定。`品牌：` 行与 direct 标题的品牌名取值与选题同口径（`resolveBrandName`：知识库身份事实优先，workspace 名仅兜底），不与已确认身份事实冲突。
 7. 篇幅与节奏（js_ai 模板已裁决语义回迁，v2）：四类总字数 1800–2100（guide/showcase/news/news_light）、ranking 全文 ≤2500（引言 ≥100、每家约 320、每条 50–55 且单条 ≥45）；news 分段导语 ≤200/主体 ≈1400/结尾 ≤250；可读节奏每约 200 字变换角度。
 8. 关键词融入（js_ai 已裁决语义回迁，v2）：全局基线约每 300 字 1 次；guide 每 500 字 1 次、news 每 300 字 1 次、news_light 每 200 字 1 次且密度 2%–5%；guide/ranking 首段嵌入 1–2 个关键词；地域/核心关键词首次出现及关键论据处加粗，单一加粗实体（品牌名与 ranking 维度名除外）≤3 次，H2 不加粗。
 9. ranking 编排细则（js_ai 已裁决语义回迁，v2）：维度按行业真实决策关切自选；标题数字=正文陈列项数；全文倒数第三段选型建议（隐性条件式点首位，数字与陈列位 1 对账）；目标品牌最强维度置首、竞品两三条专精优势加一两条客观局限。

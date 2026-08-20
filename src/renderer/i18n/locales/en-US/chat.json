@@ -214,5 +214,10 @@
         "copiedPlainText": "Plain text copied"
       }
     }
+  },
+  "publishResume": {
+    "hint": "Safe to resume when your sign-in and channel configuration match the frozen snapshot: only items never submitted to the channel are restored; items with channel orders need manual order reconciliation.",
+    "button": "Resume execution",
+    "busy": "Resuming…"
   }
 }

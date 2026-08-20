@@ -15,7 +15,7 @@
 4. 标题按每批最多 3 项调用 generation port 的 `title-planning` purpose（system persona + `maxTokens=2048`）。每项返回 3–5 个候选和对问题覆盖、搜索意图、差异化、品牌适配、中国市场表达的解释；showcase 必须包含已确认目标品牌，ranking 不含目标品牌且包含当前年份，并统一执行地域、行业、长度、竞品和禁词约束。标题 prompt 按 ADR-0006 重写：风格中文释义（`TITLE_STYLE_DEFINITIONS`）、占位符式 few-shot（【地域】【行业】【目标品牌】，忠实各类型品牌分布）、反抄录与口语化反堆砌条目；不变量清单见 `content_prompt_invariants.md`。
 5. 所有候选与现有受保护标题使用真实 Embedding 去重，阈值 `0.92`。provider snapshot 固化默认 generation pro、标题 mini 与 Embedding family/dimensions；model attempts 逐阶段追加。
 
-任何 Provider 不可用、Embedding 数量不符、模型 JSON 解析失败、结构覆盖不全、候选不足或全部语义重复都显式失败。生产路径不允许调用 js_ai 的 `generateMockTitles`、字符串拼接主题、模板标题、随机数或伪造去重分；测试使用无网络的 deterministic mock Provider。
+embedding 失败语义（折中降级，用户裁决）：Provider 侧只对瞬时失败（网络错误/超时、408、429、5xx，由 `isTransientGeoUpstreamFailure` 判定）退避重试，配置类失败（其余 4xx、能力未配置）立即失败；非 2xx 响应的错误体脱敏后透出，配置类失败文案附可操作指向（如 `XIAOJING_ARK_EMBEDDING_ENDPOINT_ID` / 网关侧模型兜底配置）。瞬时失败在业务层回落确定性 FNV-1a 词频降级向量（`embedding-fallback.ts`）继续并打 WARN 日志——`TopicPlanModelAttempt` 结构无降级字段，WARN 日志是该链路的可观测面。配置类失败、Embedding 数量不符、模型 JSON 解析失败、结构覆盖不全、候选不足或全部语义重复仍显式失败。生产路径不允许调用 js_ai 的 `generateMockTitles`、字符串拼接主题、模板标题、随机数或伪造去重分；测试使用无网络的 deterministic mock Provider。
 
 ## 编辑、局部重生成与确认
 

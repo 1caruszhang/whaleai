@@ -93,4 +93,45 @@ describe('main agent gateway auth (ticket 07)', () => {
     expect(capturedEnv?.ANTHROPIC_AUTH_TOKEN).toBe(ACCOUNT_TOKEN);
     expect(capturedEnv?.ANTHROPIC_API_KEY).toBe('');
   });
+
+  it('prefers the request-level fresh token and falls back to the env token', async () => {
+    queryMock.mockClear();
+    const session = await store.createSession(workspace);
+    const capturedEnvs: Array<Record<string, string | undefined>> = [];
+    queryMock.mockImplementation(((params: {
+      options: { env: Record<string, string | undefined> };
+    }) => {
+      capturedEnvs.push(params.options.env);
+      return {
+        async *[Symbol.asyncIterator]() {
+          yield {
+            type: 'assistant',
+            uuid: 'sdk-gw-2',
+            message: { role: 'assistant', content: [{ type: 'text', text: 'ok' }] },
+          };
+          yield { type: 'result', subtype: 'success', result: 'ok' };
+        },
+        close() {},
+      };
+    }) as never);
+
+    await agentSession.initializeAgent(workspace, null, session.id);
+    // /chat/send 链路把 Rust 附头的新鲜 token 传到 SDK Bearer。
+    const fresh = await agentSession.enqueueUserMessage('hello', undefined, undefined, 'jwt-fresh-2');
+    expect(fresh.accepted).toBe(true);
+    await vi.waitFor(() => {
+      expect(agentSession.getAgentState().sessionState).toBe('idle');
+    });
+    // 未携带（或空白）请求级 token 时回退 admission env token。
+    const fallback = await agentSession.enqueueUserMessage('again', undefined, undefined, '   ');
+    expect(fallback.accepted).toBe(true);
+    await vi.waitFor(() => {
+      expect(agentSession.getAgentState().sessionState).toBe('idle');
+    });
+
+    expect(queryMock).toHaveBeenCalledTimes(2);
+    expect(capturedEnvs[0]?.ANTHROPIC_AUTH_TOKEN).toBe('jwt-fresh-2');
+    expect(capturedEnvs[0]?.ANTHROPIC_BASE_URL).toBe('https://gw.example.test');
+    expect(capturedEnvs[1]?.ANTHROPIC_AUTH_TOKEN).toBe(ACCOUNT_TOKEN);
+  });
 });

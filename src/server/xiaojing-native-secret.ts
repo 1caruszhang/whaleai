@@ -62,8 +62,15 @@ export function resolveXiaojingAccountAccessToken(): string | undefined {
  * runTurn fail-fast 引导登录。付费产品没有直连回落：旧 DeepSeek 凭据
  * 存在也不得进入主 Agent。token 只经返回值进入 SDK env，不进日志与
  * HTTP 响应。
+ *
+ * 请求级新鲜 token（Rust 代理经 `x-xiaojing-account-token` 头附带，临期
+ * 已在 Rust 侧自动 refresh）存在时优先于 admission env token——Sidecar
+ * 长跑后 env token 可能已过期；未携带时回退 env，与既有路由同一语义。
  */
-export function resolveXiaojingMainAgentAuth(): { baseUrl: string; token: string } | undefined {
-  if (!gatewayBaseUrl || !accountAccessToken) return undefined;
-  return { baseUrl: gatewayBaseUrl, token: accountAccessToken };
+export function resolveXiaojingMainAgentAuth(
+  requestAccountToken?: string,
+): { baseUrl: string; token: string } | undefined {
+  const token = requestAccountToken?.trim() || accountAccessToken;
+  if (!gatewayBaseUrl || !token) return undefined;
+  return { baseUrl: gatewayBaseUrl, token };
 }

@@ -34,6 +34,26 @@ export function getXiaojingGeoProviderCapabilities(): GeoProviderCapabilities {
   return capabilities;
 }
 
+/**
+ * 请求级新鲜账号 token（Rust 代理/worker 经 `x-xiaojing-account-token` 头
+ * 附带，临期已在 Rust 侧自动 refresh）：存在时优先于启动时 admission 注入
+ * 的 env token——Sidecar 长跑数小时后 env token 早已过期，发布排期/监测
+ * 巡检等到点执行的网关调用必须以请求级 token 为准。未携带时回退既有单例。
+ * 按请求新建能力闭包即可，无状态丢失（资源缓存等都在服务层，不在能力层）。
+ */
+export function getXiaojingGeoProviderCapabilitiesForRequest(
+  requestAccountToken?: string,
+): GeoProviderCapabilities {
+  const token = requestAccountToken?.trim();
+  if (!token) return getXiaojingGeoProviderCapabilities();
+  return wrapGeoProviderCapabilities(
+    createGeoProviderCapabilities({
+      ...runtimeSecrets,
+      accountAccessToken: token,
+    }),
+  );
+}
+
 export function configureXiaojingGeoProviderAdmission(input: {
   workspacePath?: string;
   sessionId: string;
@@ -63,4 +83,22 @@ export function getXiaojingGeoBillingPermitChannel(): GeoBillingPermitChannel | 
         : null;
   }
   return billingPermitChannel ?? undefined;
+}
+
+/**
+ * 请求级新鲜 token 的计费 permit 通道（与
+ * getXiaojingGeoProviderCapabilitiesForRequest 同一口径）：监测巡检的余额
+ * 预检/permit 预扣同样不能因为 admission env token 过期而误判欠费。未携带
+ * 请求级 token 时回退单例；无网关基地址时与单例一致返回 undefined。
+ */
+export function getXiaojingGeoBillingPermitChannelForRequest(
+  requestAccountToken?: string,
+): GeoBillingPermitChannel | undefined {
+  const token = requestAccountToken?.trim();
+  if (!token) return getXiaojingGeoBillingPermitChannel();
+  if (!runtimeSecrets.gatewayBaseUrl) return undefined;
+  return createGatewayBillingPermitChannel({
+    baseUrl: runtimeSecrets.gatewayBaseUrl,
+    accessToken: token,
+  });
 }
