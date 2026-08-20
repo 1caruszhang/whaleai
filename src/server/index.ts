@@ -1,6 +1,6 @@
 import { existsSync } from 'node:fs';
 import { mkdir, stat } from 'node:fs/promises';
-import { join, resolve, sep } from 'node:path';
+import { resolve } from 'node:path';
 import { serve as honoServe } from '@hono/node-server';
 
 import {
@@ -36,6 +36,7 @@ import { getAttachmentPath } from './SessionStore';
 import { initLogger, setStdioBrokenProbe } from './logger';
 import { getAppDataDir } from './utils/app-data-dir';
 import { fileResponse, sniffMime } from './utils/file-response';
+import { serveStatic } from './utils/static-assets';
 import { ensureDirSync } from './utils/fs-utils';
 import { jsonResponse } from './utils/http';
 import { sendXiaojingMessage } from './xiaojing-reminder-send';
@@ -71,16 +72,6 @@ async function ensureWorkspaceDir(path: string): Promise<string> {
     throw new Error(`Workspace is not a directory: ${absolute}`);
   }
   return absolute;
-}
-
-async function serveStatic(pathname: string): Promise<Response | null> {
-  const distRoot = resolve(process.cwd(), 'dist');
-  const relativePath = pathname === '/' ? 'index.html' : pathname.slice(1);
-  const target = resolve(distRoot, relativePath);
-  if (target !== distRoot && !target.startsWith(distRoot + sep)) return null;
-  const direct = await fileResponse(target, { contentType: sniffMime(target) });
-  if (direct) return direct;
-  return fileResponse(join(distRoot, 'index.html'), { contentType: 'text/html; charset=utf-8' });
 }
 
 async function main(): Promise<void> {
