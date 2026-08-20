@@ -50,7 +50,8 @@
       "importPastedMaterial": "导入品牌材料",
       "readSessionFile": "读取会话文件",
       "importWebsiteMaterial": "导入网站材料",
-      "retryBrandMaterial": "重试材料抽取"
+      "retryBrandMaterial": "重试材料抽取",
+      "inspectGeoProbeSamples": "查看探测样本"
     }
   },
   "knowledgeCard": {

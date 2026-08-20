@@ -177,12 +177,12 @@ export default memo(function XiaojingPostPublishMonitoringPanel({ workspaceId, p
       data-geo-monitor-located={located || undefined}
       className="rounded-2xl border border-[var(--geo-dash-border,var(--line))] bg-[var(--geo-dash-card,var(--paper-elevated))]"
     >
-      <div className="flex items-center gap-2 border-b border-[var(--geo-dash-border,var(--line-subtle))] px-4 py-3">
+      <div className="flex items-center gap-2 border-b border-[var(--geo-dash-border,var(--line-subtle))] px-4 py-2.5">
         <Activity className="h-4 w-4 text-[var(--geo-dash-secondary,var(--accent))]" />
         <h3 className="text-sm font-semibold text-[var(--geo-dash-text,var(--ink))]">发布后监测</h3>
         {plan && <span className="ml-auto text-xs text-[var(--geo-dash-text-mute,var(--ink-muted))]">{plan.status} · {plan.recoveryState}</span>}
       </div>
-      <div className="space-y-3 p-4 text-xs">
+      <div className="space-y-2.5 p-3.5 text-xs">
         <p className="leading-5 text-[var(--geo-dash-text-mute,var(--ink-muted))]">
           仅监测已由确定性发布提交成功的稳定发布项。应用退出时本地监测暂停；重启后显示待恢复或逾期，并按固定策略继续。
         </p>

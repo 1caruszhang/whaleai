@@ -68,6 +68,7 @@ function baseline(status: GeoBaselineProjection["status"] = "partial"): GeoBasel
     questionPoolRevision: 1,
     knowledgeVersion: 7,
     brandNames: ["鲸跃汽车"],
+    competitorNames: [],
     providerSnapshots: [snapshot],
     policyVersion: GEO_BASELINE_POLICY_VERSION,
     status,

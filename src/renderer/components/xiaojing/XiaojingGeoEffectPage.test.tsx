@@ -58,6 +58,9 @@ vi.mock("./XiaojingGeoEffectDashboard", () => ({
     return <section aria-label="看板面板桩" />;
   },
 }));
+vi.mock("./XiaojingGeoEffectReport", () => ({
+  default: () => <section aria-label="报告视图桩" />,
+}));
 vi.mock("@/api/tauriClient", () => ({
   sessionSidecarFetch: mocks.sessionSidecarFetch,
 }));
@@ -223,10 +226,36 @@ describe("XiaojingGeoEffectPage", () => {
     );
   });
 
+  // 报告视图：页头切换整页替换为一页纸排版（打印友好），可切回看板。
+  it("switches between the dashboard and the printable report view", () => {
+    render(
+      <XiaojingGeoEffectPage
+        workspace={workspace}
+        sessionBinding={binding}
+        onOpenBrandSession={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "报告视图" }));
+    expect(
+      screen.getByRole("region", { name: "报告视图桩" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("region", { name: "看板面板桩" }),
+    ).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "返回看板" }));
+    expect(
+      screen.getByRole("region", { name: "看板面板桩" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("region", { name: "报告视图桩" }),
+    ).not.toBeInTheDocument();
+  });
+
   // 票 32：监测告警深链的落点经整页传入三面板挂载区——精确计划 id 到达
   // 监测面板，页面对落点本身不做任何改写或猜测。
-  it("forwards the monitor deep-link target to the monitoring panel", () => {
-    const scrollIntoView = vi.fn();
+  it("forwards the monitor deep-link target to the monitoring panel", () => {    const scrollIntoView = vi.fn();
     const originalScrollIntoView = HTMLElement.prototype.scrollIntoView;
     HTMLElement.prototype.scrollIntoView = scrollIntoView;
     render(

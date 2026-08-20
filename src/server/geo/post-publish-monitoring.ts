@@ -110,6 +110,8 @@ export interface PostPublishBaselineProbeInput {
   question: string;
   sourceProviderSnapshot: GeoBaselineProviderSnapshot;
   brandNames: string[];
+  /** 冻结基线的已确认竞品名单（v1 基线缺省为无竞品判定）。 */
+  competitorNames?: string[];
   publishedArticles: Array<{ articleId: string; url: string }>;
 }
 
@@ -220,6 +222,7 @@ export class PostPublishBaselineProbeService {
       parsed.answer,
       input.brandNames,
       parsed.citations,
+      input.competitorNames,
     );
     const articleByUrl = new Map(
       input.publishedArticles

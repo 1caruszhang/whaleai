@@ -228,6 +228,36 @@ export function parseExplicitTopThreeRank(
   return null;
 }
 
+export type GeoMetricTrend =
+  | "up"
+  | "down"
+  | "flat"
+  | "fluctuating"
+  | "insufficient";
+
+/**
+ * 噪声纪律（两轮确认规则）：相邻两轮的单次差异只记为「观测波动」（中性
+ * 样式），连续两轮同向变化才确认为趋势色。输入按时间升序；null 表示该轮
+ * 无真实数据（失败/缺失），参与计数前跳过。
+ */
+export function classifyGeoMetricTrend(
+  values: readonly (number | null)[],
+): GeoMetricTrend {
+  const usable = values.filter((value): value is number => value !== null);
+  if (usable.length < 2) return "insufficient";
+  const latestDelta = usable[usable.length - 1] - usable[usable.length - 2];
+  if (latestDelta === 0) return "flat";
+  const previousDelta =
+    usable.length >= 3
+      ? usable[usable.length - 2] - usable[usable.length - 3]
+      : null;
+  const confirmed =
+    previousDelta !== null &&
+    Math.sign(previousDelta) === Math.sign(latestDelta);
+  if (!confirmed) return "fluctuating";
+  return latestDelta > 0 ? "up" : "down";
+}
+
 export function aggregatePostPublishMonitorUnits(
   units: readonly PostPublishMonitorUnitProjection[],
 ): PostPublishMonitorAggregate {

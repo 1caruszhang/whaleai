@@ -2,7 +2,7 @@ use super::*;
 use rusqlite::TransactionBehavior;
 use serde_json::{json, Value};
 
-const BASELINE_POLICY_VERSION: &str = "xiaojing-geo-baseline-v1";
+const BASELINE_POLICY_VERSION: &str = "xiaojing-geo-baseline-v2";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -128,6 +128,7 @@ pub struct GeoBaselineProjection {
     pub question_pool_revision: i64,
     pub knowledge_version: i64,
     pub brand_names: Vec<String>,
+    pub competitor_names: Vec<String>,
     pub provider_snapshots: Value,
     pub policy_version: String,
     pub status: String,
@@ -142,6 +143,7 @@ pub struct GeoBaselineProjection {
 pub struct GeoBaselinePreparation {
     pub baseline: GeoBaselineProjection,
     pub brand_names: Vec<String>,
+    pub competitor_names: Vec<String>,
 }
 
 pub(super) fn ensure_schema(connection: &Connection) -> Result<(), String> {
@@ -155,6 +157,7 @@ pub(super) fn ensure_schema(connection: &Connection) -> Result<(), String> {
                 question_pool_revision INTEGER NOT NULL,
                 knowledge_version INTEGER NOT NULL REFERENCES knowledge_versions(version),
                 brand_names_json TEXT NOT NULL,
+                competitors_json TEXT NOT NULL DEFAULT '[]',
                 provider_snapshots_json TEXT NOT NULL,
                 policy_version TEXT NOT NULL,
                 status TEXT NOT NULL CHECK(status IN ('running','succeeded','partial','failed')),
@@ -199,6 +202,13 @@ pub(super) fn ensure_schema(connection: &Connection) -> Result<(), String> {
              );",
         )
         .map_err(|error| format!("initialize GEO baseline schema: {error}"))?;
+    // v1 库缺少竞品冻结列：缺省 '[]' 即「无竞品判定」，不做数据回填。
+    ensure_column(
+        connection,
+        "geo_baselines",
+        "competitors_json",
+        "TEXT NOT NULL DEFAULT '[]'",
+    )?;
     super::drop_brand_sessions_foreign_keys(connection, &["geo_baselines"])
 }
 
@@ -323,12 +333,14 @@ impl BrandWorkspaceStore {
                 return Err("geo_baseline_idempotency_conflict".to_string());
             }
             let brand_names = existing.brand_names.clone();
+            let competitor_names = existing.competitor_names.clone();
             transaction
                 .commit()
                 .map_err(|error| format!("commit idempotent GEO baseline read: {error}"))?;
             return Ok(GeoBaselinePreparation {
                 baseline: existing,
                 brand_names,
+                competitor_names,
             });
         }
 
@@ -365,6 +377,7 @@ impl BrandWorkspaceStore {
             .map_err(|error| format!("parse selected baseline question ids: {error}"))?;
         let selected = selected_questions(&questions, &selected_ids)?;
         let brand_names = baseline_brand_names(&transaction, &workspace, knowledge_version)?;
+        let competitor_names = baseline_competitor_names(&transaction, knowledge_version)?;
         let snapshots = validated_snapshots(&request.engine_ids, &request.provider_snapshots)?;
         let now = Utc::now().to_rfc3339();
         let baseline_id = Uuid::new_v4().to_string();
@@ -395,9 +408,9 @@ impl BrandWorkspaceStore {
                 "INSERT INTO geo_baselines
                     (id, operation_id, created_by_session_id, question_pool_id,
                      question_pool_revision, knowledge_version, brand_names_json,
-                     provider_snapshots_json, policy_version, status, idempotency_key,
-                     created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'running', ?10, ?11, ?11)",
+                     competitors_json, provider_snapshots_json, policy_version, status,
+                     idempotency_key, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'running', ?11, ?12, ?12)",
                 params![
                     baseline_id,
                     operation_id,
@@ -406,6 +419,7 @@ impl BrandWorkspaceStore {
                     pool_revision,
                     knowledge_version,
                     serde_json::to_string(&brand_names).map_err(|error| error.to_string())?,
+                    serde_json::to_string(&competitor_names).map_err(|error| error.to_string())?,
                     canonical_json(&request.provider_snapshots)?,
                     request.policy_version,
                     request.idempotency_key,
@@ -440,6 +454,7 @@ impl BrandWorkspaceStore {
         Ok(GeoBaselinePreparation {
             baseline,
             brand_names,
+            competitor_names,
         })
     }
 
@@ -852,6 +867,47 @@ fn baseline_brand_names(
     Ok(names)
 }
 
+/// 冻结的已确认竞品名单：与 `baseline_brand_names` 同源的 knowledge 版本
+/// 快照读取，predicate 收敛到 `%.competitors`，兼容字符串/字符串数组值形态。
+fn baseline_competitor_names(
+    connection: &Connection,
+    knowledge_version: i64,
+) -> Result<Vec<String>, String> {
+    let mut names = Vec::new();
+    let mut statement = connection
+        .prepare(
+            "SELECT current.predicate, snapshot.normalized_value_json
+             FROM knowledge_version_facts snapshot
+             JOIN knowledge_current_facts current ON current.fact_key=snapshot.fact_key
+             WHERE snapshot.knowledge_version=?1
+               AND current.predicate LIKE '%.competitors'",
+        )
+        .map_err(|error| format!("prepare baseline competitor identifiers: {error}"))?;
+    let rows = statement
+        .query_map([knowledge_version], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(|error| format!("query baseline competitor identifiers: {error}"))?;
+    for row in rows {
+        let (_predicate, raw) =
+            row.map_err(|error| format!("read baseline competitor identifiers: {error}"))?;
+        let value: Value = serde_json::from_str(&raw).unwrap_or(Value::Null);
+        match value {
+            Value::String(name) if !name.trim().is_empty() => names.push(name.trim().to_string()),
+            Value::Array(values) => names.extend(
+                values
+                    .into_iter()
+                    .filter_map(|item| item.as_str().map(str::trim).map(str::to_string))
+                    .filter(|name| !name.is_empty()),
+            ),
+            _ => {}
+        }
+    }
+    names.sort();
+    names.dedup();
+    Ok(names)
+}
+
 fn baseline_status(connection: &Connection, baseline_id: &str) -> Result<(String, String), String> {
     let (total, succeeded, failed, running): (i64, i64, i64, i64) = connection
         .query_row(
@@ -884,12 +940,14 @@ fn read_geo_baseline(
         .query_row(
             "SELECT id, operation_id, created_by_session_id, question_pool_id,
                     question_pool_revision, knowledge_version, brand_names_json,
-                    provider_snapshots_json, policy_version, status, created_at, updated_at
+                    competitors_json, provider_snapshots_json, policy_version, status,
+                    created_at, updated_at
              FROM geo_baselines WHERE id=?1",
             [baseline_id],
             |row| {
                 let brand_names: String = row.get(6)?;
-                let snapshots: String = row.get(7)?;
+                let competitor_names: String = row.get(7)?;
+                let snapshots: String = row.get(8)?;
                 Ok(GeoBaselineProjection {
                     id: row.get(0)?,
                     operation_id: row.get(1)?,
@@ -899,13 +957,14 @@ fn read_geo_baseline(
                     question_pool_revision: row.get(4)?,
                     knowledge_version: row.get(5)?,
                     brand_names: serde_json::from_str(&brand_names).unwrap_or_default(),
+                    competitor_names: serde_json::from_str(&competitor_names).unwrap_or_default(),
                     provider_snapshots: serde_json::from_str(&snapshots).unwrap_or(json!([])),
-                    policy_version: row.get(8)?,
-                    status: row.get(9)?,
+                    policy_version: row.get(9)?,
+                    status: row.get(10)?,
                     metrics: empty_metrics(),
                     units: Vec::new(),
-                    created_at: row.get(10)?,
-                    updated_at: row.get(11)?,
+                    created_at: row.get(11)?,
+                    updated_at: row.get(12)?,
                 })
             },
         )
@@ -1375,6 +1434,148 @@ mod tests {
             store.latest_geo_baseline_readonly(&other_brand.id).unwrap(),
             None
         );
+    }
+
+    #[test]
+    fn competitor_names_freeze_with_the_baseline_and_survive_idempotent_rereads() {
+        let root = tempdir().unwrap();
+        let store = BrandWorkspaceStore::at(root.path().join("Xiaojing"));
+        let brand = store
+            .create_workspace("鲸跃汽车", vec!["汽车音响".into()])
+            .unwrap();
+        store
+            .commit_session(
+                &brand.id,
+                SessionCommit {
+                    id: "session-09".into(),
+                    title: "基线".into(),
+                    title_source: SessionTitleSource::User,
+                },
+            )
+            .unwrap();
+        seed_confirmed_pool(&brand);
+        let connection = open_database(&brand).unwrap();
+        // 竞品事实只需要 current + version snapshot 两行（读取侧 join 面），
+        // 关闭 FK 以免为测试补齐整条 candidate/decision 血缘。
+        connection
+            .execute_batch("PRAGMA foreign_keys=OFF;")
+            .unwrap();
+        // 数组形态（enterprise-profile.competitors）…
+        connection
+            .execute(
+                "INSERT INTO knowledge_current_facts
+                (fact_key, subject, predicate, scope_json, normalized_value_json, version,
+                 confirmed_by, confirmed_at, updated_at)
+             VALUES ('competitors-main', '鲸跃汽车', 'enterprise-profile.competitors', '{}',
+                     '[\"声浪坊\",\"锐驰工坊\"]', 1, 'desktop-user', 'now', 'now')",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO knowledge_version_facts
+                (knowledge_version, fact_key, fact_version, normalized_value_json, sources_json)
+             VALUES (1, 'competitors-main', 1, '[\"声浪坊\",\"锐驰工坊\"]', '[]')",
+                [],
+            )
+            .unwrap();
+        // …与字符串形态（product-line scope，验证 %.competitors 前缀匹配）。
+        connection
+            .execute(
+                "INSERT INTO knowledge_current_facts
+                (fact_key, subject, predicate, scope_json, normalized_value_json, version,
+                 confirmed_by, confirmed_at, updated_at)
+             VALUES ('competitors-line', '鲸跃汽车', 'product-line.competitors', '{}',
+                     '\"悦听阁\"', 1, 'desktop-user', 'now', 'now')",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO knowledge_version_facts
+                (knowledge_version, fact_key, fact_version, normalized_value_json, sources_json)
+             VALUES (1, 'competitors-line', 1, '\"悦听阁\"', '[]')",
+                [],
+            )
+            .unwrap();
+        drop(connection);
+
+        let request = GeoBaselinePrepareRequest {
+            workspace_id: brand.id.clone(),
+            session_id: "session-09".into(),
+            question_pool_id: "pool-08".into(),
+            engine_ids: vec!["doubao".into()],
+            provider_snapshots: json!([snapshot()]),
+            idempotency_key: "baseline-request-competitors".into(),
+            policy_version: BASELINE_POLICY_VERSION.into(),
+        };
+        let prepared = store.prepare_geo_baseline(request.clone()).unwrap();
+        assert_eq!(
+            prepared.competitor_names,
+            vec![
+                "声浪坊".to_string(),
+                "悦听阁".to_string(),
+                "锐驰工坊".to_string()
+            ]
+        );
+        assert_eq!(
+            prepared.baseline.competitor_names,
+            prepared.competitor_names
+        );
+
+        let reread = store.prepare_geo_baseline(request).unwrap();
+        assert_eq!(reread.baseline.id, prepared.baseline.id);
+        assert_eq!(reread.competitor_names, prepared.competitor_names);
+        assert_eq!(reread.baseline.competitor_names, prepared.competitor_names);
+    }
+
+    #[test]
+    fn legacy_databases_gain_the_competitors_column_and_v1_rows_read_as_empty() {
+        let root = tempdir().unwrap();
+        let store = BrandWorkspaceStore::at(root.path().join("Xiaojing"));
+        let brand = store
+            .create_workspace("鲸跃汽车", vec!["汽车音响".into()])
+            .unwrap();
+        store
+            .commit_session(
+                &brand.id,
+                SessionCommit {
+                    id: "session-09".into(),
+                    title: "基线".into(),
+                    title_source: SessionTitleSource::User,
+                },
+            )
+            .unwrap();
+        seed_confirmed_pool(&brand);
+        let connection = open_database(&brand).unwrap();
+        // 手工落一行 v1 基线（不带 competitors_json 列值，走列缺省）。
+        connection
+            .execute(
+                "INSERT INTO geo_baselines
+                (id, operation_id, created_by_session_id, question_pool_id,
+                 question_pool_revision, knowledge_version, brand_names_json,
+                 provider_snapshots_json, policy_version, status, idempotency_key,
+                 created_at, updated_at)
+             VALUES ('baseline-v1', 'operation-08', 'session-09', 'pool-08', 1, 1,
+                     '[\"鲸跃汽车\"]', '[]', 'xiaojing-geo-baseline-v1', 'succeeded',
+                     'baseline-request-v1', 'now', 'now')",
+                [],
+            )
+            .unwrap();
+        // 模拟 v1 老库：整列不存在，由 ensure_schema 的迁移补回且数据不丢。
+        connection
+            .execute_batch("ALTER TABLE geo_baselines DROP COLUMN competitors_json;")
+            .unwrap();
+        ensure_schema(&connection).unwrap();
+        drop(connection);
+
+        let legacy = store
+            .get_geo_baseline_readonly(&brand.id, "baseline-v1")
+            .unwrap()
+            .unwrap();
+        assert_eq!(legacy.policy_version, "xiaojing-geo-baseline-v1");
+        assert_eq!(legacy.brand_names, vec!["鲸跃汽车".to_string()]);
+        assert_eq!(legacy.competitor_names, Vec::<String>::new());
     }
 
     fn snapshot() -> Value {

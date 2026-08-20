@@ -19,6 +19,7 @@ const XIAOJING_GEO_TOOL_LABEL_KEYS: Record<string, string> = {
   'mcp__xiaojing-geo__read_session_file': 'process.tools.readSessionFile',
   'mcp__xiaojing-geo__import_website_material': 'process.tools.importWebsiteMaterial',
   'mcp__xiaojing-geo__retry_brand_material': 'process.tools.retryBrandMaterial',
+  'mcp__xiaojing-geo__inspect_geo_probe_samples': 'process.tools.inspectGeoProbeSamples',
 };
 
 /** 返回 chat 命名空间下的标签 key；未登记工具返回 null，调用方回退原始名称。 */

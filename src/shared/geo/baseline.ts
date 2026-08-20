@@ -1,4 +1,4 @@
-export const GEO_BASELINE_POLICY_VERSION = "xiaojing-geo-baseline-v1";
+export const GEO_BASELINE_POLICY_VERSION = "xiaojing-geo-baseline-v2";
 export const GEO_BASELINE_ENGINE_IDS = ["doubao"] as const;
 
 export type GeoBaselineEngineId = (typeof GEO_BASELINE_ENGINE_IDS)[number];
@@ -40,6 +40,14 @@ export interface GeoProbeAnalysis {
   hasCitationEvidence: boolean;
   mentionExcerpt?: string;
   recommendationExcerpt?: string;
+  /** Frozen competitor names found verbatim in the answer. */
+  competitorMentions?: string[];
+  competitorExcerpt?: string;
+  /**
+   * A negative cue occurred near the exact brand name. Deliberately decoupled
+   * from the recommendation verdict: positive and negative cues may coexist.
+   */
+  suspectedNegative?: boolean;
 }
 
 export interface GeoBaselineAttempt {
@@ -102,6 +110,8 @@ export interface GeoBaselineProjection {
   knowledgeVersion: number;
   /** Frozen exact brand identifiers used by the metric parser. */
   brandNames: string[];
+  /** Frozen confirmed competitor names used by the metric parser. */
+  competitorNames: string[];
   providerSnapshots: GeoBaselineProviderSnapshot[];
   policyVersion: typeof GEO_BASELINE_POLICY_VERSION;
   status: "running" | "succeeded" | "partial" | "failed";
@@ -261,10 +271,12 @@ export function analyzeGeoProbeAnswer(
   answer: string,
   brandNames: readonly string[],
   citations: readonly GeoProbeCitation[],
+  competitorNames: readonly string[] = [],
 ): GeoProbeAnalysis {
   const names = normalizedBrandNames(brandNames);
   let mentionExcerpt: string | undefined;
   let recommendationExcerpt: string | undefined;
+  let suspectedNegative = false;
   for (const name of names) {
     let cursor = answer.indexOf(name);
     while (cursor >= 0) {
@@ -278,9 +290,18 @@ export function analyzeGeoProbeAnswer(
         /(不推荐|不建议|不值得|避免选择|谨慎选择|风险|投诉|不靠谱)/.test(
           excerpt,
         );
+      suspectedNegative ||= negative;
       if (positive && !negative) recommendationExcerpt ??= excerpt;
       cursor = answer.indexOf(name, cursor + name.length);
     }
+  }
+  const competitorMentions: string[] = [];
+  let competitorExcerpt: string | undefined;
+  for (const name of normalizedBrandNames(competitorNames)) {
+    const index = answer.indexOf(name);
+    if (index < 0) continue;
+    competitorMentions.push(name);
+    competitorExcerpt ??= relevantExcerpt(answer, index, name.length);
   }
   return {
     brandMentioned: mentionExcerpt !== undefined,
@@ -288,7 +309,43 @@ export function analyzeGeoProbeAnswer(
     hasCitationEvidence: citations.length > 0,
     ...(mentionExcerpt ? { mentionExcerpt } : {}),
     ...(recommendationExcerpt ? { recommendationExcerpt } : {}),
+    ...(competitorMentions.length > 0 ? { competitorMentions } : {}),
+    ...(competitorExcerpt ? { competitorExcerpt } : {}),
+    ...(suspectedNegative ? { suspectedNegative } : {}),
   };
+}
+
+export type GeoQuestionDiagnosis =
+  | "suspected-negative"
+  | "competitor-dominated"
+  | "absent"
+  | "low-ranked"
+  | "ok";
+
+/**
+ * Per-question diagnosis shared by the baseline units and the monitoring
+ * probe units. Priority: suspected negative > competitor dominated (brand
+ * absent while a competitor is present) > absent > low ranked (mentioned but
+ * no explicit TOP 1/2/3) > ok. `rankPosition` left undefined (baseline units
+ * carry no rank notion) skips the rank check; an explicit null from a real
+ * monitoring probe means "mentioned but not in the top three".
+ */
+export function classifyGeoQuestionDiagnosis(input: {
+  analysis?: Pick<
+    GeoProbeAnalysis,
+    "brandMentioned" | "suspectedNegative" | "competitorMentions"
+  > | null;
+  rankPosition?: 1 | 2 | 3 | null;
+}): GeoQuestionDiagnosis {
+  const analysis = input.analysis ?? undefined;
+  if (analysis?.suspectedNegative === true) return "suspected-negative";
+  if (analysis?.brandMentioned !== true) {
+    return (analysis?.competitorMentions?.length ?? 0) > 0
+      ? "competitor-dominated"
+      : "absent";
+  }
+  if (input.rankPosition === null) return "low-ranked";
+  return "ok";
 }
 
 export function aggregateGeoBaselineUnits(
