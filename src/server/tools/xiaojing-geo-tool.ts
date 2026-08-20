@@ -27,14 +27,21 @@ import {
   createDistributionPlanPort,
   DistributionPlanningService,
 } from '../geo/distribution-plan';
-import type { DistributionPlanProjection } from '../../shared/geo/distributionPlan';
+import type {
+  DistributionPlanCardProjection,
+  DistributionPlanProjection,
+} from '../../shared/geo/distributionPlan';
 import { createPublishSchedulerPort } from '../geo/publish-scheduler';
-import type { PublishExecutionProjection } from '../../shared/geo/publishScheduler';
+import type {
+  PublishExecutionCardProjection,
+  PublishExecutionProjection,
+} from '../../shared/geo/publishScheduler';
 import type {
   ArticleOperationProjection,
   ArticleOperationSource,
 } from '../../shared/geo/articleGeneration';
 import type { QuestionPoolProjection } from '../../shared/geo/questionPool';
+import { cnyToPoints, pointsToCny } from '../../shared/geo/points';
 import { GEO_PORT_CONTRACT } from '../../shared/geo/portContract';
 import type { GeoContentType } from '../../shared/geo/portContract';
 import { recordGeoOperationMilestone } from '../geo/operation-progress';
@@ -422,6 +429,98 @@ export async function inspectBrandFact(key: FactKeyInput) {
 }
 
 /**
+ * plan_distribution 的转录投影（卡片最小投影）：只回「卡片初始渲染 +
+ * agent 复述」所需字段，把转录占用压到 ~1/7；卡片 3s 轮询 /latest 后即
+ * 切换为完整权威投影，编辑/确认请求不依赖这份瘦身数据（assignments 全量
+ * 保留以防轮询前确认）。转录只携带点数（budgetPoints /
+ * estimatedPricePoints）：CNY 金额与换算倍率不进聊天，agent 只能引用
+ * 点数字段复述费用。
+ */
+export function distributionPlanCardProjection(
+  plan: DistributionPlanProjection,
+): DistributionPlanCardProjection {
+  return {
+    id: plan.id,
+    status: plan.status,
+    revision: plan.revision,
+    budgetPoints: cnyToPoints(plan.budgetCny),
+    workspaceId: plan.workspaceId,
+    publishStartAt: plan.publishStartAt,
+    selectedResourceIds: plan.selectedResourceIds,
+    blockingIssues: plan.blockingIssues,
+    articles: plan.articles.map((article) => ({ id: article.id })),
+    assignments: plan.assignments,
+    candidates: plan.candidates.map((candidate) => ({
+      resourceId: candidate.resourceId,
+      kind: candidate.kind,
+      name: candidate.name,
+      estimatedPricePoints:
+        candidate.estimatedPriceCny === null
+          ? null
+          : cnyToPoints(candidate.estimatedPriceCny),
+      pathHits: candidate.pathHits,
+      fitReasons: candidate.fitReasons,
+      evidence: candidate.evidence.map((item) => ({
+        path: item.path,
+        label:
+          item.label.length > 64
+            ? `${item.label.slice(0, 64)}…`
+            : item.label,
+      })),
+    })),
+  };
+}
+
+/**
+ * prepare_publish 的转录投影：与 plan_distribution 同一原则——CNY 金额
+ * （budgetCny / estimatedSpendCny / 逐项 estimatedPriceCny）与换算倍率
+ * 不进聊天，只带卡片首渲染 + agent 复述所需的点数字段；完整权威投影由
+ * 卡片 3s 轮询 /latest 水合（解析侧见 PublishAuthorizationGateCard）。
+ */
+export function publishExecutionCardProjection(
+  execution: PublishExecutionProjection,
+): PublishExecutionCardProjection {
+  return {
+    id: execution.id,
+    revision: execution.revision,
+    status: execution.status,
+    workspaceId: execution.workspaceId,
+    distributionPlanId: execution.distributionPlanId,
+    publishStartAt: execution.publishStartAt,
+    confirmationDigest: execution.confirmationDigest,
+    irreversibleImpact: execution.irreversibleImpact,
+    totalPricePoints: execution.totalPricePoints,
+    budgetPoints: cnyToPoints(execution.budgetCny),
+    items: execution.items.map((item) => ({
+      id: item.id,
+      status: item.status,
+      scheduledAt: item.scheduledAt,
+      article: {
+        title: item.article.title,
+        bodySummary: item.article.bodySummary,
+      },
+      channel: {
+        resourceId: item.channel.resourceId,
+        kind: item.channel.kind,
+        name: item.channel.name,
+        pricePoints: item.channel.pricePoints,
+      },
+    })),
+  };
+}
+
+/**
+ * plan_distribution 的预算入参换算：聊天边界只携带点数，缺省走产品默认
+ * 预算 ¥1000；给出点数时按 pointsToCny 折算回内部 CNY（预算上限语义，
+ * 换算倍率不进转录）。
+ */
+export function planDistributionBudgetCny(
+  budgetPoints: number | undefined,
+): number {
+  return budgetPoints !== undefined ? pointsToCny(budgetPoints) : 1_000;
+}
+
+/**
  * Product-owned capability boundary for Xiaojing. Later GEO slices extend this
  * one fixed server instead of exposing unregistered capability sources.
  */
@@ -658,7 +757,7 @@ export async function createXiaojingGeoServer() {
                 effectiveFrom: z.string().optional(),
                 effectiveTo: z.string().optional(),
                 value: z.json().optional()
-                  .describe('modify/add: the new value the user asked for.'),
+                  .describe('modify/add: the new value the user asked for. Budget changes are in points: { budgetPoints: number }.'),
                 unit: z.string().max(80).optional(),
                 materialId: z.string().min(1).max(200).optional()
                   .describe('add: material id of the pending confirmation card — required for the knowledge gate so the new row joins that card; facts outside a pending card go through propose_brand_fact.'),
@@ -1006,13 +1105,14 @@ export async function createXiaojingGeoServer() {
       ),
       tool(
         'plan_distribution',
-        'Run the distribution-planning stage: discover real channel candidates from the approved articles and persisted evidence, then render the confirmation card where the user selects channels and confirms the plan. Confirming the plan never places orders or spends money. Derive targetAudience from brand context or the user goal; optional mappingMode/ratio/budget/publishStartAt default to product defaults.',
+        'Run the distribution-planning stage: discover real channel candidates from the approved articles and persisted evidence, then render the confirmation card where the user selects channels and confirms the plan. Confirming the plan never places orders or spends money. Derive targetAudience from brand context or the user goal; optional mappingMode/ratio/budgetPoints/publishStartAt default to product defaults. All cost values are points: pass the budget cap as budgetPoints and quote only the points fields in the result.',
         {
           targetAudience: z.string().min(2).max(200),
           mappingMode: z.enum(['one-to-one', 'ratio']).optional(),
           mediaRatio: z.number().min(0).max(100).optional(),
           weMediaRatio: z.number().min(0).max(100).optional(),
-          budgetCny: z.number().min(0).max(10_000_000).optional(),
+          budgetPoints: z.number().min(0).max(160_000_000).optional()
+            .describe('Total budget cap in points (预算点数上限). Default: product default.'),
           publishStartAt: z.string().datetime().optional(),
         },
         async (input): Promise<{ content: Array<{ type: 'text'; text: string }> }> => {
@@ -1038,52 +1138,25 @@ export async function createXiaojingGeoServer() {
                 media: input.mediaRatio ?? 2,
                 weMedia: input.weMediaRatio ?? 1,
               },
-              budgetCny: input.budgetCny ?? 1_000,
+              // 聊天边界只携带点数：预算入参是点数，服务端换算回内部 CNY
+              // （预算是上限语义，非计费），换算倍率不进转录。
+              budgetCny: planDistributionBudgetCny(input.budgetPoints),
               publishStartAt:
                 input.publishStartAt ?? new Date(Date.now() + 3_600_000).toISOString(),
             },
           });
           // 工具结果是聊天转录的一部分：只回「卡片初始渲染 + agent 复述」
-          // 所需的最小投影（id/状态/预算/选择/阻断 + 候选的名称·报价·路径·
-          // 适配·证据标签），把转录占用压到 ~1/7；卡片 3s 轮询 /latest 后即
-          // 切换为完整权威投影，编辑/确认请求不依赖这份瘦身数据（assignments
-          // 全量保留以防轮询前确认）。
-          const cardPlan = {
-            id: plan.id,
-            status: plan.status,
-            revision: plan.revision,
-            budgetCny: plan.budgetCny,
-            workspaceId: plan.workspaceId,
-            publishStartAt: plan.publishStartAt,
-            selectedResourceIds: plan.selectedResourceIds,
-            blockingIssues: plan.blockingIssues,
-            articles: plan.articles.map((article) => ({ id: article.id })),
-            assignments: plan.assignments,
-            candidates: plan.candidates.map((candidate) => ({
-              resourceId: candidate.resourceId,
-              kind: candidate.kind,
-              name: candidate.name,
-              estimatedPriceCny: candidate.estimatedPriceCny,
-              pathHits: candidate.pathHits,
-              fitReasons: candidate.fitReasons,
-              evidence: candidate.evidence.map((item) => ({
-                path: item.path,
-                label:
-                  item.label.length > 64
-                    ? `${item.label.slice(0, 64)}…`
-                    : item.label,
-              })),
-            })),
-          };
+          // 所需的最小投影，且费用字段一律为点数（CNY 与换算倍率不进聊天）；
+          // 字段口径见 distributionPlanCardProjection。
           return {
-            content: [{ type: 'text' as const, text: JSON.stringify({ kind: 'distribution-plan', plan: cardPlan }) }],
+            content: [{ type: 'text' as const, text: JSON.stringify({ kind: 'distribution-plan', plan: distributionPlanCardProjection(plan) }) }],
           };
         },
         { alwaysLoad: true },
       ),
       tool(
         'prepare_publish',
-        'Run the publishing stage: build the exact publish-execution preview (final approved articles, channels, prices, budget, schedule) from the confirmed distribution plan. This uploads nothing, charges nothing and places no order. The result renders as the irreversible-authorization card; the user authorizes and starts publishing there — the Agent can never authorize or start a paid publish.',
+        'Run the publishing stage: build the exact publish-execution preview (final approved articles, channels, per-channel points prices, points budget, schedule) from the confirmed distribution plan. This uploads nothing, charges nothing and places no order. The result renders as the irreversible-authorization card; the user authorizes and starts publishing there — the Agent can never authorize or start a paid publish. Quote only the points fields (totalPricePoints, budgetPoints, pricePoints) from the result.',
         {
           planId: z.string().min(1).max(120).optional(),
         },
@@ -1094,7 +1167,7 @@ export async function createXiaojingGeoServer() {
           }
           const preview: PublishExecutionProjection = execution;
           return {
-            content: [{ type: 'text' as const, text: JSON.stringify({ kind: 'publish-execution', execution: preview }) }],
+            content: [{ type: 'text' as const, text: JSON.stringify({ kind: 'publish-execution', execution: publishExecutionCardProjection(preview) }) }],
           };
         },
         { alwaysLoad: true },

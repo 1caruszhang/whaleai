@@ -41,11 +41,11 @@ prepare 后所有上述输入、Provider 非 secret 状态、候选资源白名�
 
 确认提交成功后，`distribution-plans/confirm` 路由在同一 Session 投递纯隐藏 `XIAOJING_DISTRIBUTION_PLAN_DECISION` reminder（只携带 plan/operation identity、revision、status 与 assignment 数），唤醒 agent 从权威计划继续进入发布准备，不重复询问已确认计划。提醒入队失败不回滚已提交的确认，响应显式返回 notification 状态。
 
-`plan_distribution` 工具结果是聊天转录的一部分，只返回**卡片最小投影**（id/状态/预算/选择/阻断 + 候选的名称·报价·路径命中·适配·证据标签≤64 字；articles 只带 id、assignments 全量保留防轮询前确认）——约 13K 字符/6K tokens，完整权威投影由卡片 3s 轮询 `/distribution-plans/latest` 水合。
+`plan_distribution` 工具结果是聊天转录的一部分，只返回**卡片最小投影**（契约类型 `DistributionPlanCardProjection`，`shared/geo/distributionPlan.ts`：id/状态/预算/选择/阻断 + 候选的名称·报价·路径命中·适配·证据标签≤64 字；articles 只带 id、assignments 全量保留防轮询前确认）——约 13K 字符/6K tokens，完整权威投影由卡片 3s 轮询 `/distribution-plans/latest` 水合。转录里的费用字段一律是点数（`budgetPoints` / `estimatedPricePoints`，由服务端 `cnyToPoints` 算好）：CNY 金额与换算倍率不进聊天，agent 只能引用点数字段复述费用；预算入参同样只收点数（`budgetPoints`，服务端 `planDistributionBudgetCny` 换算，缺省 ¥1000），确认卡在轮询水合前提交时按 `pointsToCny` 把点数预算回算为内部 CNY（预算上限语义，任意点数精确往返）。
 
 ## 聊天修订（票 38，ADR 0003）
 
-待确认（draft）计划的渠道选择与计划参数可经通用闸门修订工具 `revise_gate_content`（gate=`distribution-plan`）改/删/增：`subject='channel'` 的 add/delete 等价于选择/取消选择渠道（取消选择同时把对应分配置为 `unassigned`），`subject='assignment'` 修改逐篇分配（渠道必须已选择），缺省 `subject` 修改预算/发布开始时间。handler 复用既有 `DistributionPlanningService.edit`（白名单字段整组替换、`applyDistributionPlanEdit` 重算 blockingIssues），`edit` 携带 `reason`（用户指令原文）落 `geo_distribution_plan_audit.reason` 审计列。confirmed/discovering 计划分别按 `target_not_pending` 拒绝；确认卡（`DistributionGateCard`）待决期间每 3s 轮询 `/distribution-plans/latest`，服务端渠道选择变化时采信服务端（服务端胜），否则保留本地勾选。
+待确认（draft）计划的渠道选择与计划参数可经通用闸门修订工具 `revise_gate_content`（gate=`distribution-plan`）改/删/增：`subject='channel'` 的 add/delete 等价于选择/取消选择渠道（取消选择同时把对应分配置为 `unassigned`），`subject='assignment'` 修改逐篇分配（渠道必须已选择），缺省 `subject` 修改预算/发布开始时间——预算补丁只携带点数（`budgetPoints`，服务端按 `pointsToCny` 换算回内部 CNY，兼容旧转录的 `budgetCny`）。handler 复用既有 `DistributionPlanningService.edit`（白名单字段整组替换、`applyDistributionPlanEdit` 重算 blockingIssues），`edit` 携带 `reason`（用户指令原文）落 `geo_distribution_plan_audit.reason` 审计列。confirmed/discovering 计划分别按 `target_not_pending` 拒绝；确认卡（`DistributionGateCard`）待决期间每 3s 轮询 `/distribution-plans/latest`，服务端渠道选择变化时采信服务端（服务端胜），否则保留本地勾选。
 
 ## 测试边界
 

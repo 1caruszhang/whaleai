@@ -1,4 +1,4 @@
-import { render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type {
@@ -225,5 +225,36 @@ describe("DistributionGateCard channel recommendation rows", () => {
     // fitReasons 为空时整行「适配」不出现。
     expect(within(row).queryByText(/适配：/)).not.toBeInTheDocument();
     expect(card.textContent ?? "").not.toContain("¥");
+  });
+
+  // 聊天转录脱敏（最小方案）：plan_distribution 工具结果只带数字段
+  // （budgetPoints / estimatedPricePoints），卡片首渲染与确认回算都走点数。
+  it("renders the slim tool-result shape (points only) and back-converts budget on confirm", async () => {
+    const { budgetCny: _budgetCny, ...slimBase } = plan();
+    const { estimatedPriceCny: _estimatedPriceCny, ...slimCandidate } = candidate();
+    const slim = {
+      ...slimBase,
+      budgetPoints: 16000,
+      candidates: [{ ...slimCandidate, estimatedPricePoints: 1408 }],
+    };
+    mocks.edit.mockResolvedValue({ revision: 2 });
+    mocks.confirm.mockResolvedValue({});
+
+    render(<DistributionGateCard data={{ kind: "distribution-plan", plan: slim }} />);
+    const card = screen.getByRole("region", { name: "分发计划确认" });
+
+    expect(within(card).getByText("预算 16000 点")).toBeInTheDocument();
+    expect(within(card).getByText(/所需点数：1408 点/)).toBeInTheDocument();
+    expect(card.textContent ?? "").not.toContain("¥");
+
+    fireEvent.click(
+      within(card).getByRole("button", { name: /确认分发计划/ }),
+    );
+    await waitFor(() => expect(mocks.edit).toHaveBeenCalled());
+    // 轮询水合前确认：点数预算按 pointsToCny 回算为内部 CNY（16000 点 → 1000）。
+    const payload = mocks.edit.mock.calls[0]?.[2] as {
+      edit: { budgetCny: number };
+    };
+    expect(payload.edit.budgetCny).toBe(1000);
   });
 });

@@ -28,12 +28,14 @@ import { AccountApiContext, AccountStateContext } from "@/context/AccountContext
 import { useTabApi, useTabState } from "@/context/TabContext";
 import { isPendingSessionId } from "../../../shared/constants";
 import type {
+  PublishExecutionCardProjection,
   PublishExecutionProjection,
   PublishItemProjection,
   PublishOrderStatusEntry,
 } from "../../../shared/geo/publishScheduler";
-import { cnyToPoints } from "../../../shared/geo/points";
+import { cnyToPoints, pointsToCny } from "../../../shared/geo/points";
 import {
+  PUBLISH_SCHEDULER_POLICY_VERSION,
   publishOrderRefundsPoints,
   publishOrderStatusActive,
   publishOrderStatusLabel,
@@ -79,6 +81,102 @@ function isExecution(value: unknown): value is PublishExecutionProjection {
   );
 }
 
+/**
+ * 把 slim 转录投影（`PublishExecutionCardProjection`，契约定义在
+ * shared/geo/publishScheduler.ts）水合为完整投影形状：缺失字段填中性
+ * 默认值，卡片首渲染只依赖真实字段；3s 轮询 /latest 后由权威投影整体
+ * 纠正。预算按 pointsToCny 回算（对任意点数精确往返）。providerSnapshot
+ * 两个槽位一律标 configured: false——slim 数据不携带配置事实，卡片也
+ * 不渲染它，不做无依据的断言。旧转录里的完整投影（自带 budgetCny）
+ * 不经过本函数，原样使用。
+ */
+function hydrateSlimExecution(
+  slim: PublishExecutionCardProjection,
+): PublishExecutionProjection {
+  return {
+    id: slim.id,
+    operationId: "",
+    workspaceId: slim.workspaceId,
+    createdBySessionId: "",
+    distributionPlanId: slim.distributionPlanId,
+    distributionPlanRevision: 0,
+    policyVersion: PUBLISH_SCHEDULER_POLICY_VERSION,
+    revision: slim.revision,
+    status: slim.status,
+    budgetCny: pointsToCny(slim.budgetPoints),
+    estimatedSpendCny: 0,
+    totalPricePoints: slim.totalPricePoints,
+    publishStartAt: slim.publishStartAt,
+    irreversibleImpact: slim.irreversibleImpact,
+    confirmationDigest: slim.confirmationDigest,
+    providerSnapshot: {
+      objectStorage: {
+        provider: "aliyun-oss",
+        endpointFamily: "gateway-oss-put",
+        configured: false,
+        configurationFingerprint: null,
+      },
+      distribution: {
+        provider: "超级媒介",
+        endpointFamily: "gateway-order-api",
+        configured: false,
+        configurationFingerprint: null,
+      },
+    },
+    items: slim.items.map((item) => ({
+      id: item.id,
+      revision: 0,
+      sequence: 0,
+      article: {
+        articleId: "",
+        approvedRevision: 0,
+        approvedBodySha256: "",
+        title: item.article.title,
+        bodyBytes: 0,
+        bodySummary: item.article.bodySummary,
+      },
+      channel: {
+        resourceId: item.channel.resourceId,
+        kind: item.channel.kind,
+        name: item.channel.name,
+        estimatedPriceCny: 0,
+        publishedRate: 0,
+        pricePoints: item.channel.pricePoints,
+      },
+      scheduledAt: item.scheduledAt,
+      status: item.status,
+      idempotencyKey: "",
+      externalRequestSn: "",
+      payloadHash: "",
+      objectKey: "",
+      objectUrl: null,
+      externalOrderId: null,
+      externalContentId: null,
+      attempts: 0,
+      uploadAttempts: 0,
+      nextAttemptAt: null,
+      startedAt: null,
+      finishedAt: null,
+      requestSummary: {
+        articleId: "",
+        approvedRevision: 0,
+        approvedBodySha256: "",
+        resourceId: item.channel.resourceId,
+        scheduledAt: item.scheduledAt,
+        plannedObjectUrl: "",
+        estimatedPriceCny: 0,
+      },
+      failureCode: null,
+      failureReason: null,
+    })),
+    confirmedAt: null,
+    executionStartedAt: null,
+    finishedAt: null,
+    createdAt: "",
+    updatedAt: "",
+  };
+}
+
 function parseEnvelope(value: unknown): PublishAuthorizationGateCardData | null {
   if (Array.isArray(value)) {
     const text = value.find(
@@ -104,7 +202,15 @@ function parseEnvelope(value: unknown): PublishAuthorizationGateCardData | null 
     envelope.kind === "publish-execution" &&
     isExecution(envelope.execution)
   ) {
-    return { kind: "publish-execution", execution: envelope.execution };
+    // 新转录是 slim 投影（无 budgetCny）：水合为完整形状；旧转录的完整
+    // 投影原样使用。
+    const raw = envelope.execution as PublishExecutionProjection &
+      Partial<PublishExecutionCardProjection>;
+    const execution =
+      typeof raw.budgetCny === "number"
+        ? raw
+        : hydrateSlimExecution(raw as PublishExecutionCardProjection);
+    return { kind: "publish-execution", execution };
   }
   return null;
 }
