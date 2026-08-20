@@ -7209,7 +7209,7 @@ dependencies = [
 
 [[package]]
 name = "xiaojing"
-version = "0.4.8"
+version = "0.5.1"
 dependencies = [
  "axum",
  "base64 0.22.1",
