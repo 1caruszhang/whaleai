@@ -24,6 +24,7 @@ vi.mock('fs', async (importOriginal) => {
 type SessionStoreModule = typeof import('../SessionStore');
 let testHome: string;
 let originalHome: string | undefined;
+let originalDataRoot: string | undefined;
 let store: SessionStoreModule;
 
 const row: SessionMessage = {
@@ -36,7 +37,10 @@ const row: SessionMessage = {
 beforeAll(async () => {
   testHome = mkdtempSync(join(tmpdir(), 'xiaojing-partial-append-'));
   originalHome = process.env.HOME;
+  originalDataRoot = process.env.XIAOJING_DATA_ROOT;
   process.env.HOME = testHome;
+  // homedir() ignores HOME on Windows; XIAOJING_DATA_ROOT is the portable override.
+  process.env.XIAOJING_DATA_ROOT = join(testHome, 'Xiaojing');
   vi.resetModules();
   store = await import('../SessionStore');
 });
@@ -44,6 +48,8 @@ beforeAll(async () => {
 afterAll(() => {
   if (originalHome === undefined) delete process.env.HOME;
   else process.env.HOME = originalHome;
+  if (originalDataRoot === undefined) delete process.env.XIAOJING_DATA_ROOT;
+  else process.env.XIAOJING_DATA_ROOT = originalDataRoot;
   rmSync(testHome, { recursive: true, force: true });
 });
 
