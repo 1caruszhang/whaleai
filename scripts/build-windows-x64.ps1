@@ -216,7 +216,9 @@ Copy-Item -LiteralPath $installer -Destination $candidatePath -Force
 
 $candidate = [ordered]@{
     schemaVersion = 1
-    productName = "鲸杉geo"
+    # Windows PowerShell 5.1 misreads BOM-less UTF-8 literals as ANSI; the
+    # authoritative product name lives in tauri.conf.json.
+    productName = (Get-Content -LiteralPath (Join-Path $ProjectDir "src-tauri\tauri.conf.json") -Raw -Encoding UTF8 | ConvertFrom-Json).productName
     identifier = "com.xiaojing.geo"
     targetTriple = $TargetTriple
     mode = $Mode
