@@ -74,6 +74,21 @@ export function startPublishExecution(
 }
 
 /**
+ * 对账恢复通道（票 40）：reconciliation-required 且全部条目从未提交的
+ * 执行，在登录态与渠道配置一致时可由用户安全交还给调度器。授权与重试
+ * 一样只走 Rust UI 命令，Agent 无权跨越。
+ */
+export function resumeReconciledExecution(
+  identity: { workspaceId: string; sessionId: string },
+  input: PublishExecutionStartInput,
+): Promise<PublishExecutionProjection> {
+  return invoke<PublishExecutionProjection>("cmd_publish_execution_resume_ui", {
+    ...identity,
+    input,
+  });
+}
+
+/**
  * 订单状态投影（票 09）：经 Session Sidecar 查询网关订单（查单即对账，
  * 计费权威在后端），renderer 只持展示投影。截图为渠道回传的用户来源
  * HTML，消费方必须走现有 sanitize 栈渲染。

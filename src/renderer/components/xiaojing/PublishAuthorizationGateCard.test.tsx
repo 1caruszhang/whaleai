@@ -12,6 +12,7 @@ const mocks = vi.hoisted(() => ({
   sessionId: "session-42",
   confirm: vi.fn(),
   start: vi.fn(),
+  resume: vi.fn(),
   latest: vi.fn(),
   byId: vi.fn(),
   orders: vi.fn(),
@@ -36,6 +37,7 @@ vi.mock("@/context/AccountContext", async () => {
 vi.mock("@/api/publishSchedulerClient", () => ({
   confirmPublishExecution: mocks.confirm,
   startPublishExecution: mocks.start,
+  resumeReconciledExecution: mocks.resume,
   loadLatestPublishExecution: mocks.latest,
   loadPublishExecution: mocks.byId,
   loadPublishOrderStatuses: mocks.orders,
@@ -166,6 +168,7 @@ describe("PublishAuthorizationGateCard", () => {
   beforeEach(() => {
     mocks.confirm.mockReset();
     mocks.start.mockReset();
+    mocks.resume.mockReset();
     mocks.byId.mockReset();
     mocks.refresh.mockReset();
     mocks.accountState.points = 500;
@@ -432,5 +435,66 @@ describe("PublishAuthorizationGateCard", () => {
     expect(
       within(card).queryByText(/已按原路退回/),
     ).toBeNull();
+  });
+
+  // ── 票 40：reconciliation-required 的对账恢复通道 ────────────────────
+  it("offers resume on reconciliation-required and applies the refreshed projection", async () => {
+    mocks.resume.mockResolvedValue(
+      execution({ status: "scheduled", revision: 6 }),
+    );
+    renderCard(
+      execution({
+        status: "reconciliation-required",
+        revision: 5,
+        items: [
+          {
+            ...item,
+            status: "reconciliation-required",
+            failureCode: "provider-configuration-changed",
+            failureReason: "Provider 配置指纹已变化，禁止沿旧幂等键执行",
+          },
+        ],
+      }),
+    );
+    const card = screen.getByRole("region", { name: "付费发布授权" });
+
+    // 说明文案 + 恢复按钮只在需要人工核对时出现。
+    expect(
+      within(card).getByText(/登录态与渠道配置一致时，可安全恢复/),
+    ).toBeInTheDocument();
+    fireEvent.click(
+      within(card).getByRole("button", { name: "恢复执行" }),
+    );
+
+    await waitFor(() =>
+      expect(mocks.resume).toHaveBeenCalledWith(
+        { workspaceId: "brand-1", sessionId: "session-42" },
+        { executionId: "exec-1", expectedRevision: 5 },
+      ),
+    );
+    // 采信服务端权威投影：恢复后执行回到已排期，恢复入口消失，余额投影刷新。
+    expect(await within(card).findByText("已排期，等待调度")).toBeInTheDocument();
+    expect(
+      within(card).queryByRole("button", { name: "恢复执行" }),
+    ).toBeNull();
+    await waitFor(() => expect(mocks.refresh).toHaveBeenCalledTimes(1));
+  });
+
+  it("surfaces resume rejection without leaving the reconciled state", async () => {
+    mocks.resume.mockRejectedValue(new Error("publish_provider_unavailable"));
+    renderCard(
+      execution({ status: "reconciliation-required", revision: 5 }),
+    );
+    const card = screen.getByRole("region", { name: "付费发布授权" });
+
+    fireEvent.click(
+      within(card).getByRole("button", { name: "恢复执行" }),
+    );
+    expect(
+      await within(card).findByText("publish_provider_unavailable"),
+    ).toBeInTheDocument();
+    expect(
+      within(card).getByText("需要人工核对"),
+    ).toBeInTheDocument();
   });
 });

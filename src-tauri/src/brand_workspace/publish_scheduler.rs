@@ -1602,6 +1602,129 @@ impl BrandWorkspaceStore {
             .map_err(|error| format!("commit publish item retry: {error}"))?;
         read_execution(&connection, workspace_id, &request.execution_id)
     }
+
+    /// 对账恢复通道（票 40 事故复盘）：Provider 巡检误判 / 登录态抖动把从未
+    /// 提交的执行 brick 成 reconciliation-required 后，`retry_publish_item`
+    /// 只接 failed-retryable，没有任何通道能把它交还给调度器。本函数在
+    /// 用户确认登录态与渠道配置一致时，把从未提交的 reconciliation-required
+    /// 条目回置到认领前阶段，让执行重新进入调度。
+    ///
+    /// 口径：只接执行状态 reconciliation-required。`refresh_execution_status`
+    /// 保证任一条目为 reconciliation-required 时执行投影必为
+    /// reconciliation-required（优先级最高），因此「failed 且含
+    /// reconciliation-required 条目」在现行投影不变量下不可达，不再单列。
+    ///
+    /// 保守边界：任一条目已有 external_order_id（已提交/已扣点，存在外部
+    /// 副作用）→ 整个执行拒绝恢复——已提交项的结果核对必须走查单对账
+    /// （renderer 订单投影 / 人工），不在本通道的「从未提交」前提之内。
+    pub fn resume_reconciled_execution(
+        &self,
+        workspace_id: &str,
+        session_id: &str,
+        request: PublishStartRequest,
+        now_ms: i64,
+    ) -> Result<PublishExecutionProjection, String> {
+        let workspace = self.workspace(workspace_id)?;
+        let mut connection = open_database(&workspace)?;
+        require_session(&connection, session_id)?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| format!("resume reconciled execution transaction: {error}"))?;
+        let (revision, status, provider_json): (i64, String, String) = transaction
+            .query_row(
+                "SELECT revision, status, provider_snapshot_json
+                 FROM geo_publish_executions WHERE id=?1",
+                [&request.execution_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()
+            .map_err(|error| format!("read reconciled execution: {error}"))?
+            .ok_or_else(|| "publish_execution_not_found".to_string())?;
+        if revision != request.expected_revision {
+            return Err("publish_execution_revision_conflict".to_string());
+        }
+        if status != "reconciliation-required" {
+            return Err("publish_execution_not_resumable".to_string());
+        }
+        // 安全闸一：当前必须已登录（两槽位都 configured，拿得到网关指纹），
+        // 未登录时无法证明「配置没变」，拒绝恢复。
+        let current = configured_provider_snapshot()?;
+        if !current.object_storage.configured || !current.distribution.configured {
+            return Err("publish_provider_unavailable".to_string());
+        }
+        // 安全闸二：冻结快照与当前快照构成真实配置变化（双方都 configured
+        // 且指纹不同）时，旧幂等键不得复活。
+        let frozen: PublishProviderSnapshot = serde_json::from_str(&provider_json)
+            .map_err(|_| "publish_provider_snapshot_invalid".to_string())?;
+        if provider_configuration_changed(&frozen, &current) {
+            return Err("publish_provider_configuration_changed".to_string());
+        }
+        // 安全闸三：任一条目已有 external_order_id → 存在外部副作用，整单
+        // 拒绝（保守：已提交项走查单对账，不在本通道）。
+        let has_submitted: bool = transaction
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM geo_publish_items
+                 WHERE execution_id=?1 AND external_order_id IS NOT NULL)",
+                [&request.execution_id],
+                |row| row.get(0),
+            )
+            .map_err(|error| format!("inspect reconciled submitted items: {error}"))?;
+        if has_submitted {
+            return Err("publish_execution_has_submitted_items".to_string());
+        }
+        let now = now_iso(now_ms);
+        // 只回置从未提交的 reconciliation-required 条目：按认领前阶段
+        // （上传阶段→pending；提交阶段→uploaded，与 claim_next_item 的
+        // object_url 判段一致），清失败信息并把 next_attempt 拉到 now，
+        // 让调度器立即可重新认领；claim 租约一并清空（巡检 settle 时已清，
+        // 这里防御性再清一次）。
+        let resumed_items = transaction
+            .execute(
+                "UPDATE geo_publish_items SET
+                    status=CASE WHEN object_url IS NULL THEN 'pending' ELSE 'uploaded' END,
+                    revision=revision+1, failure_code=NULL, failure_reason=NULL,
+                    next_attempt_at_ms=?2, finished_at=NULL,
+                    claim_token=NULL, lease_until_ms=NULL
+                 WHERE execution_id=?1 AND status='reconciliation-required'
+                   AND external_order_id IS NULL",
+                params![request.execution_id, now_ms],
+            )
+            .map_err(|error| format!("resume reconciled publish items: {error}"))?;
+        if resumed_items == 0 {
+            return Err("publish_execution_not_resumable".to_string());
+        }
+        let changed = transaction
+            .execute(
+                "UPDATE geo_publish_executions SET status='scheduled', revision=revision+1,
+                 finished_at=NULL, updated_at=?2
+                 WHERE id=?1 AND revision=?3 AND status='reconciliation-required'",
+                params![request.execution_id, now, revision],
+            )
+            .map_err(|error| format!("resume reconciled execution: {error}"))?;
+        if changed != 1 {
+            return Err("publish_execution_revision_conflict".to_string());
+        }
+        transaction
+            .execute(
+                "UPDATE geo_operations SET state='publish-scheduled' WHERE id=(
+                    SELECT operation_id FROM geo_publish_executions WHERE id=?1)",
+                [&request.execution_id],
+            )
+            .map_err(|error| format!("resume reconciled operation: {error}"))?;
+        insert_audit(
+            &transaction,
+            &request.execution_id,
+            None,
+            "reconciliation-resumed",
+            Some(session_id),
+            &json!({"resumedItems": resumed_items}),
+            &now,
+        )?;
+        transaction
+            .commit()
+            .map_err(|error| format!("commit reconciled execution resume: {error}"))?;
+        read_execution(&connection, workspace_id, &request.execution_id)
+    }
 }
 
 fn read_execution(
@@ -3395,6 +3518,29 @@ pub async fn cmd_publish_item_retry_ui(
     Ok(execution)
 }
 
+#[tauri::command]
+#[allow(non_snake_case)]
+pub async fn cmd_publish_execution_resume_ui(
+    workspaceId: String,
+    sessionId: String,
+    input: PublishStartRequest,
+) -> Result<PublishExecutionProjection, String> {
+    let execution = tauri::async_runtime::spawn_blocking(move || {
+        super::production_store()?.resume_reconciled_execution(
+            &workspaceId,
+            &sessionId,
+            input,
+            Utc::now().timestamp_millis(),
+        )
+    })
+    .await
+    .map_err(|error| format!("publish resume task failed: {error}"))??;
+    if let Some(scheduler) = production_publish_scheduler() {
+        scheduler.wake();
+    }
+    Ok(execution)
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
@@ -4614,6 +4760,148 @@ mod tests {
             bricked.items[0].failure_code.as_deref(),
             Some("provider-configuration-changed")
         );
+    }
+
+    /// 构造「巡检误判」现场：未提交的执行被 brick 成 reconciliation-required。
+    async fn brick_execution(
+        fixture: &Fixture,
+        started: &PublishExecutionProjection,
+    ) -> PublishExecutionProjection {
+        set_test_gateway_base(Some("https://rotated-gateway.example.test"));
+        let provider = Arc::new(MockProvider::default());
+        let clock = Arc::new(AtomicI64::new(fixture.now_ms));
+        scheduler(fixture, provider.clone(), clock.clone())
+            .tick_workspace(&fixture.workspace)
+            .await
+            .unwrap();
+        assert_eq!(provider.counts(), (0, 0));
+        let bricked = fixture
+            .store
+            .get_publish_execution(&fixture.workspace.id, "session-13", &started.id)
+            .unwrap();
+        assert_eq!(bricked.status, "reconciliation-required");
+        bricked
+    }
+
+    fn resume(
+        fixture: &Fixture,
+        execution: &PublishExecutionProjection,
+    ) -> Result<PublishExecutionProjection, String> {
+        fixture.store.resume_reconciled_execution(
+            &fixture.workspace.id,
+            "session-13",
+            PublishStartRequest {
+                execution_id: execution.id.clone(),
+                expected_revision: execution.revision,
+            },
+            fixture.now_ms,
+        )
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn resume_rejects_when_logged_out() {
+        let _lock = ENV_LOCK.lock().await;
+        let _env = TestEnvironment::configured();
+        let fixture = setup_fixture(1, 0);
+        let started = confirm_start(&fixture, &preview(&fixture));
+        let bricked = brick_execution(&fixture, &started).await;
+
+        // 未登录（拿不到网关指纹）时无法证明配置没变：拒绝恢复。
+        set_test_gateway_base(None);
+        assert_eq!(resume(&fixture, &bricked).unwrap_err(), "publish_provider_unavailable");
+        let still = fixture
+            .store
+            .get_publish_execution(&fixture.workspace.id, "session-13", &started.id)
+            .unwrap();
+        assert_eq!(still.status, "reconciliation-required");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn resume_rejects_when_fingerprints_truly_differ() {
+        let _lock = ENV_LOCK.lock().await;
+        let _env = TestEnvironment::configured();
+        let fixture = setup_fixture(1, 0);
+        let started = confirm_start(&fixture, &preview(&fixture));
+        let bricked = brick_execution(&fixture, &started).await;
+
+        // 网关身份仍在轮换值上（双方都 configured 且指纹真不同）：拒绝恢复。
+        assert_eq!(
+            resume(&fixture, &bricked).unwrap_err(),
+            "publish_provider_configuration_changed"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn resume_rejects_when_any_item_has_external_order_id() {
+        let _lock = ENV_LOCK.lock().await;
+        let _env = TestEnvironment::configured();
+        let fixture = setup_fixture(2, 0);
+        let started = confirm_start(&fixture, &preview(&fixture));
+        let bricked = brick_execution(&fixture, &started).await;
+
+        // 登录恢复、指纹匹配，但任一条目已有 external_order_id（存在外部
+        // 副作用）：整单拒绝，已提交项必须走查单对账。
+        set_test_gateway_base(Some(TEST_GATEWAY_BASE));
+        let connection = open_database(&fixture.workspace).unwrap();
+        connection
+            .execute(
+                "UPDATE geo_publish_items SET external_order_id='order-1'
+                 WHERE id=?1",
+                [&bricked.items[0].id],
+            )
+            .unwrap();
+        assert_eq!(
+            resume(&fixture, &bricked).unwrap_err(),
+            "publish_execution_has_submitted_items"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn resume_restores_unsubmitted_execution_and_scheduler_submits() {
+        let _lock = ENV_LOCK.lock().await;
+        let _env = TestEnvironment::configured();
+        let fixture = setup_fixture(2, 0);
+        let started = confirm_start(&fixture, &preview(&fixture));
+        let bricked = brick_execution(&fixture, &started).await;
+
+        // 登录恢复且指纹匹配：全部条目从未提交，可安全恢复。
+        set_test_gateway_base(Some(TEST_GATEWAY_BASE));
+        let resumed = resume(&fixture, &bricked).unwrap();
+        assert_eq!(resumed.status, "scheduled");
+        assert_eq!(resumed.revision, bricked.revision + 1);
+        for item in &resumed.items {
+            assert_eq!(item.status, "pending");
+            assert_eq!(item.failure_code, None);
+            assert_eq!(item.failure_reason, None);
+            assert!(item.next_attempt_at.is_some());
+        }
+        let connection = open_database(&fixture.workspace).unwrap();
+        let audit: String = connection
+            .query_row(
+                "SELECT GROUP_CONCAT(event_type, '|') FROM geo_publish_audit",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(audit.contains("reconciliation-resumed"));
+
+        // 调度器重新认领，沿原幂等键跑到 submitted。
+        let provider = Arc::new(MockProvider::default());
+        let clock = Arc::new(AtomicI64::new(fixture.now_ms));
+        scheduler(&fixture, provider.clone(), clock.clone())
+            .tick_workspace(&fixture.workspace)
+            .await
+            .unwrap();
+        assert_eq!(provider.counts(), (2, 2));
+        let done = fixture
+            .store
+            .get_publish_execution(&fixture.workspace.id, "session-b", &started.id)
+            .unwrap();
+        assert_eq!(done.status, "succeeded");
+        assert!(done
+            .items
+            .iter()
+            .all(|item| item.status == "submitted" && item.external_order_id.is_some()));
     }
 
     #[test]
