@@ -360,6 +360,7 @@ function baselinePersistence(unitCount: number) {
     questionPoolRevision: 1,
     knowledgeVersion: 1,
     brandNames: ["鲸跃"],
+    competitorNames: [],
     providerSnapshots: [snapshot],
     policyVersion: GEO_BASELINE_POLICY_VERSION,
     status: "running",
@@ -378,7 +379,11 @@ function baselinePersistence(unitCount: number) {
         return id === projection.id ? projection : null;
       },
       async prepare() {
-        return { baseline: projection, brandNames: projection.brandNames };
+        return {
+          baseline: projection,
+          brandNames: projection.brandNames,
+          competitorNames: projection.competitorNames,
+        };
       },
       async claim(input: { unitId: string }) {
         const target = projection.units.find((unit) => unit.id === input.unitId)!;

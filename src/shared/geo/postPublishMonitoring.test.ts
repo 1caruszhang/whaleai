@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   aggregatePostPublishMonitorUnits,
+  classifyGeoMetricTrend,
   mapSupermediaStatus,
   parseExplicitTopThreeRank,
   type PostPublishMonitorUnitProjection,
@@ -15,7 +16,7 @@ const providerSnapshot = {
   endpointFamily: "ark-responses" as const,
   searchMode: "doubao-app-ai-search" as const,
   configurationFingerprint: "fingerprint",
-  policyVersion: "xiaojing-geo-baseline-v1" as const,
+  policyVersion: "xiaojing-geo-baseline-v2" as const,
 };
 
 describe("post-publish monitoring policy", () => {
@@ -161,5 +162,32 @@ describe("post-publish monitoring policy", () => {
       accessibleItems: 1,
       indexedItems: 0,
     });
+  });
+});
+
+describe("classifyGeoMetricTrend（两轮确认噪声纪律）", () => {
+  it("needs at least two real samples before saying anything", () => {
+    expect(classifyGeoMetricTrend([])).toBe("insufficient");
+    expect(classifyGeoMetricTrend([50])).toBe("insufficient");
+    expect(classifyGeoMetricTrend([null, 50])).toBe("insufficient");
+  });
+
+  it("marks a single-round change as fluctuation, never as a trend", () => {
+    expect(classifyGeoMetricTrend([50, 60])).toBe("fluctuating");
+    expect(classifyGeoMetricTrend([60, 50])).toBe("fluctuating");
+  });
+
+  it("confirms a trend only after two consecutive same-direction moves", () => {
+    expect(classifyGeoMetricTrend([50, 60, 70])).toBe("up");
+    expect(classifyGeoMetricTrend([70, 60, 50])).toBe("down");
+    // 方向反转：最新一轮变化仍是未确认的观测波动。
+    expect(classifyGeoMetricTrend([50, 70, 60])).toBe("fluctuating");
+    expect(classifyGeoMetricTrend([70, 50, 60])).toBe("fluctuating");
+  });
+
+  it("reports flat when the latest change is zero and skips missing rounds", () => {
+    expect(classifyGeoMetricTrend([50, 50])).toBe("flat");
+    expect(classifyGeoMetricTrend([50, 60, 60])).toBe("flat");
+    expect(classifyGeoMetricTrend([null, 40, null, 50, 60])).toBe("up");
   });
 });

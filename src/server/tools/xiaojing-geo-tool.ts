@@ -36,6 +36,13 @@ import type {
   PublishExecutionCardProjection,
   PublishExecutionProjection,
 } from '../../shared/geo/publishScheduler';
+import { createGeoBaselinePort } from '../geo/baseline';
+import { createGeoDashboardPort } from '../geo/dashboard';
+import {
+  GEO_PROBE_SAMPLE_LIMIT_MAX,
+  GeoProbeSamplesService,
+  type GeoProbeSamplesReport,
+} from '../geo/probe-samples';
 import type {
   ArticleOperationProjection,
   ArticleOperationSource,
@@ -426,6 +433,42 @@ export async function proposeBrandFact(input: KnowledgeProposalInput) {
 
 export async function inspectBrandFact(key: FactKeyInput) {
   return knowledgeAuthority().inspect(key);
+}
+
+/**
+ * inspect_geo_probe_samples 的领域入口：组合两个既有只读持久化端口
+ * （基线 latest + geo-dashboard get/drilldown），不新建 Rust 通道。
+ */
+export async function inspectGeoProbeSamples(input: {
+  limit?: number;
+}): Promise<GeoProbeSamplesReport> {
+  const identity = stageIdentity();
+  const baselinePort = createGeoBaselinePort(identity);
+  const dashboardPort = createGeoDashboardPort(identity);
+  return new GeoProbeSamplesService({
+    latestBaseline: () => baselinePort.latest(),
+    getDashboard: (filters) => dashboardPort.get(filters),
+    drilldown: (target) => dashboardPort.drilldown(target),
+  }).inspect(input);
+}
+
+/**
+ * 与 geoOperationControlFailure 同构：裸 throw 只会变成 SDK 的 isError 单行
+ * 文本，模型拿不到恢复路径；Rust 侧错误码原样透传，附一条中文恢复指引。
+ */
+export function geoProbeSamplesFailure(error: unknown): {
+  kind: 'geo-probe-samples';
+  ok: false;
+  error: string;
+  hint: string;
+} {
+  const message = error instanceof Error ? error.message : String(error);
+  return {
+    kind: 'geo-probe-samples',
+    ok: false,
+    error: message,
+    hint: '探测证据读取失败，未改变任何状态。可稍后重试；若持续失败，引导用户在「效果」页直接查看真实探测证据。',
+  };
 }
 
 /**
@@ -1169,6 +1212,34 @@ export async function createXiaojingGeoServer() {
           return {
             content: [{ type: 'text' as const, text: JSON.stringify({ kind: 'publish-execution', execution: publishExecutionCardProjection(preview) }) }],
           };
+        },
+        { alwaysLoad: true },
+      ),
+      tool(
+        'inspect_geo_probe_samples',
+        'Read real GEO probe evidence: up to limit samples from the latest frozen baseline round and from the latest post-publish monitoring round, each with the question, engine, truncated raw answer, deterministic analysis (competitorMentions, suspectedNegative) and citations. Read-only: it never starts probes and never changes any state. Use it to see what AI engines actually answered and to spot third-party brands that appear repeatedly. When a recurring third-party brand looks like a competitor, submit it with propose_brand_fact using predicate enterprise-profile.competitors (subject = the brand full name, value = string array of candidate names, excerpt = the answer passage where the name appears, origin = model-inferred) — you only ever propose; the user confirms or rejects on the knowledge confirmation card, so never claim a competitor is confirmed. competitorMentions only reflects the already-confirmed competitor list; suspectedNegative is a review lead, not a verdict — quote the passage and let the user judge.',
+        {
+          limit: z
+            .number()
+            .int()
+            .min(1)
+            .max(GEO_PROBE_SAMPLE_LIMIT_MAX)
+            .optional()
+            .describe('Samples per round (baseline and monitoring each). Default 6, max 12.'),
+        },
+        async (input) => {
+          try {
+            const report = await inspectGeoProbeSamples({ limit: input.limit });
+            return {
+              content: [{ type: 'text' as const, text: JSON.stringify(report) }],
+            };
+          } catch (error) {
+            return {
+              content: [
+                { type: 'text' as const, text: JSON.stringify(geoProbeSamplesFailure(error)) },
+              ],
+            };
+          }
         },
         { alwaysLoad: true },
       ),

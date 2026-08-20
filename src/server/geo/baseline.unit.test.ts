@@ -49,6 +49,7 @@ function baseline(units = [unit("unit-1", "成都汽车音响改装哪家好？"
     questionPoolRevision: 1,
     knowledgeVersion: 7,
     brandNames: ["鲸跃", "鲸跃汽车"],
+    competitorNames: [],
     providerSnapshots: [snapshot],
     policyVersion: GEO_BASELINE_POLICY_VERSION,
     status: "running",
@@ -76,7 +77,11 @@ class FakePersistence implements GeoBaselinePersistencePort {
   }
 
   async prepare() {
-    return { baseline: this.projection, brandNames: this.projection.brandNames };
+    return {
+      baseline: this.projection,
+      brandNames: this.projection.brandNames,
+      competitorNames: this.projection.competitorNames,
+    };
   }
 
   async claim(input: Parameters<GeoBaselinePersistencePort["claim"]>[0]) {
@@ -192,6 +197,41 @@ describe("GeoBaselineService", () => {
         hasCitationEvidence: true,
       },
     });
+  });
+
+  it("passes the frozen competitor names into the probe analysis, including retries", async () => {
+    const persistence = new FakePersistence();
+    persistence.projection = baseline([unit("unit-1", "问题一")]);
+    persistence.projection.competitorNames = ["驰马音响"];
+    let fail = true;
+    const capability = provider(async () => {
+      if (fail) throw new Error("服务限流（HTTP 429）");
+      return {
+        output_text: "常见选择有驰马音响，鲸跃汽车也值得考虑。",
+        output: [],
+      };
+    });
+    const service = new GeoBaselineService(identity, persistence, capability);
+
+    const first = await service.start({
+      ...identity,
+      questionPoolId: "pool-08",
+      engineIds: ["doubao"],
+      idempotencyKey: "baseline-request-competitors",
+    });
+    expect(first.status).toBe("failed");
+
+    fail = false;
+    const retried = await service.retry({
+      ...identity,
+      baselineId: first.id,
+      unitIds: ["unit-1"],
+    });
+    expect(retried.units[0].analysis).toMatchObject({
+      brandMentioned: true,
+      competitorMentions: ["驰马音响"],
+    });
+    expect(retried.units[0].analysis?.competitorExcerpt).toContain("驰马音响");
   });
 
   it("keeps one provider failure diagnostic and retries only that evidence unit", async () => {

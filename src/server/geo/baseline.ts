@@ -17,6 +17,7 @@ import type { GeoKeywordSearchCapability } from "./provider-capabilities";
 interface GeoBaselinePreparation {
   baseline: GeoBaselineProjection;
   brandNames: string[];
+  competitorNames: string[];
 }
 
 interface GeoBaselineUnitClaim {
@@ -256,6 +257,7 @@ export class GeoBaselineService {
       preparation.baseline.id,
       units,
       preparation.brandNames,
+      preparation.competitorNames,
     );
     const completed = await this.persistence.get(preparation.baseline.id);
     if (!completed) throw new Error("geo_baseline_not_found");
@@ -280,6 +282,7 @@ export class GeoBaselineService {
       current.id,
       units,
       current.brandNames,
+      current.competitorNames,
     );
     const completed = await this.persistence.get(current.id);
     if (!completed) throw new Error("geo_baseline_not_found");
@@ -290,13 +293,14 @@ export class GeoBaselineService {
     baselineId: string,
     units: GeoBaselineEvidenceUnit[],
     brandNames: string[],
+    competitorNames: string[],
   ): Promise<void> {
     let cursor = 0;
     const worker = async () => {
       for (;;) {
         const unit = units[cursor++];
         if (!unit) return;
-        await this.runUnit(baselineId, unit, brandNames);
+        await this.runUnit(baselineId, unit, brandNames, competitorNames);
       }
     };
     await Promise.all(
@@ -308,6 +312,7 @@ export class GeoBaselineService {
     baselineId: string,
     unit: GeoBaselineEvidenceUnit,
     brandNames: string[],
+    competitorNames: string[],
   ): Promise<void> {
     const claim = await this.persistence.claim({ baselineId, unitId: unit.id });
     if (claim.action !== "execute" || !claim.claimToken) return;
@@ -354,6 +359,7 @@ export class GeoBaselineService {
         parsed.answer,
         brandNames,
         parsed.citations,
+        competitorNames,
       );
       await this.persistence.finish({
         baselineId,

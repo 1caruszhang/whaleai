@@ -844,7 +844,29 @@ code {
   --geo-dash-coral: #ffb689; /* coral */
   --geo-dash-success: #34d399;
   --geo-dash-danger: #ff8f8f;
+  --geo-dash-amber: #fbbf24; /* 疑似负面复核线索（诊断矩阵/结论条专用） */
+  /* 细网格纹理：1px 硬切停发丝线（无渐变插值段），a0 为同色 0-alpha 孪生。 */
+  --geo-dash-grid-line: rgba(255, 255, 255, 0.045);
+  --geo-dash-grid-line-a0: rgba(255, 255, 255, 0);
+  /* 优化曲线 SVG 网格线：soft 为中景参考线，axis 为 0% 轴线。 */
+  --geo-dash-grid-soft: rgba(255, 255, 255, 0.03);
+  --geo-dash-grid-axis: rgba(255, 255, 255, 0.08);
+  /* 诊断徽章底色：同名文字色的低 alpha 垫底，打印内同步浅色重定义。 */
+  --geo-dash-badge-amber-bg: rgba(251, 191, 36, 0.14);
+  --geo-dash-badge-coral-bg: rgba(255, 182, 137, 0.16);
+  --geo-dash-badge-mute-bg: rgba(143, 143, 161, 0.12);
+  --geo-dash-badge-primary-bg: rgba(190, 194, 255, 0.14);
+  --geo-dash-badge-success-bg: rgba(52, 211, 153, 0.14);
+  --geo-dash-badge-danger-bg: rgba(255, 143, 143, 0.14);
   color: var(--geo-dash-text);
+}
+
+/* 结论条等强调卡面的细网格纹理（对齐 .ba-grid-texture 语言，变量走 geo-dash）。 */
+.geo-dash-grid-texture {
+  background-image:
+    linear-gradient(to right, var(--geo-dash-grid-line) 1px, var(--geo-dash-grid-line-a0) 1px),
+    linear-gradient(to bottom, var(--geo-dash-grid-line) 1px, var(--geo-dash-grid-line-a0) 1px);
+  background-size: 24px 24px;
 }
 
 /* KPI 卡加载微光；一次性动画，尊重 reduced-motion。 */
@@ -875,5 +897,68 @@ code {
   }
   .geo-dash-curve-draw {
     stroke-dasharray: none;
+  }
+}
+
+/* 报告视图打印：整页浅色化（只重定义 .geo-dash-scope 变量，组件零改动）、
+ * 隐藏交互控件（.geo-effect-no-print）、关闭动画。 */
+@media print {
+  .geo-dash-scope {
+    --geo-dash-bg: #ffffff;
+    --geo-dash-bg-2: #ffffff;
+    --geo-dash-card: #ffffff;
+    --geo-dash-card-2: #f6f6f7;
+    --geo-dash-border: rgba(0, 0, 0, 0.12);
+    --geo-dash-border-strong: rgba(0, 0, 0, 0.24);
+    --geo-dash-text: #1a1a1c;
+    --geo-dash-text-dim: #3f3f46;
+    --geo-dash-text-mute: #6e6e7a;
+    --geo-dash-primary: #4f46e5;
+    --geo-dash-secondary: #0e7490;
+    --geo-dash-coral: #c2410c;
+    --geo-dash-success: #047857;
+    --geo-dash-danger: #b91c1c;
+    --geo-dash-amber: #b45309;
+    --geo-dash-grid-line: rgba(0, 0, 0, 0.05);
+    --geo-dash-grid-line-a0: rgba(0, 0, 0, 0);
+    --geo-dash-grid-soft: rgba(0, 0, 0, 0.04);
+    --geo-dash-grid-axis: rgba(0, 0, 0, 0.12);
+    --geo-dash-badge-amber-bg: rgba(180, 83, 9, 0.1);
+    --geo-dash-badge-coral-bg: rgba(194, 65, 12, 0.1);
+    --geo-dash-badge-mute-bg: rgba(110, 110, 122, 0.1);
+    --geo-dash-badge-primary-bg: rgba(79, 70, 229, 0.1);
+    --geo-dash-badge-success-bg: rgba(4, 120, 87, 0.1);
+    --geo-dash-badge-danger-bg: rgba(185, 28, 28, 0.1);
+    background: #ffffff;
+  }
+  .geo-effect-no-print {
+    display: none !important;
+  }
+  /* 报告打印去外壳：侧栏与标题栏/页签隐藏，只留报告内容；链路上的
+   * 定高/裁剪容器放行完整高度，避免报告被视口高度截断。 */
+  .xiaojing-product-shell:has(.geo-effect-report) {
+    height: auto !important;
+  }
+  .xiaojing-product-shell:has(.geo-effect-report) > [data-xiaojing-sidebar],
+  .xiaojing-product-shell:has(.geo-effect-report) .custom-titlebar {
+    display: none !important;
+  }
+  .xiaojing-product-shell:has(.geo-effect-report) [data-tab-content-workspace] {
+    overflow: visible !important;
+  }
+  .xiaojing-product-shell:has(.geo-effect-report)
+    [data-tab-content-workspace]
+    > div:has(.geo-effect-report) {
+    position: static !important;
+  }
+  .geo-dash-scope:has(.geo-effect-report) {
+    height: auto !important;
+    overflow: visible !important;
+  }
+  .geo-effect-report .geo-dash-shimmer,
+  .geo-effect-report .geo-dash-curve-draw,
+  .geo-effect-report .animate-ping,
+  .geo-effect-report .animate-spin {
+    animation: none !important;
   }
 }

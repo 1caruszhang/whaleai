@@ -1,5 +1,5 @@
-import { Gauge, MessageSquarePlus } from "lucide-react";
-import { memo, useCallback, useMemo } from "react";
+import { FileText, Gauge, MessageSquarePlus } from "lucide-react";
+import { memo, useCallback, useMemo, useState } from "react";
 
 import type { BrandWorkspace } from "@/api/brandWorkspaceClient";
 import { sessionSidecarFetch } from "@/api/tauriClient";
@@ -11,6 +11,7 @@ import {
 } from "@/context/TabContext";
 import type { GeoEffectNavigationTarget } from "../../../shared/geo/notification";
 import XiaojingGeoEffectPanel from "./XiaojingGeoEffectPanel";
+import XiaojingGeoEffectReport from "./XiaojingGeoEffectReport";
 
 /** The control-plane identity the effects panels borrow: the brand's first
  *  open chat tab owns the Session Sidecar, so its (sessionId, tabId) is the
@@ -138,6 +139,8 @@ export default memo(function XiaojingGeoEffectPage({
   monitorNavigationTarget = null,
   onOpenBrandSession,
 }: Props) {
+  // 「报告视图」：一页纸排版 + @media print 浅色化，给客户/老板直接打印。
+  const [reportMode, setReportMode] = useState(false);
   if (!workspace) {
     return (
       <main
@@ -162,46 +165,63 @@ export default memo(function XiaojingGeoEffectPage({
     >
       <div className="mx-auto w-full max-w-6xl">
         <header>
-          <div className="flex items-center gap-3">
-            <span className="flex h-10 w-10 items-center justify-center rounded-xl border border-[var(--geo-dash-border)] bg-[var(--geo-dash-card)]">
-              <Gauge className="h-5 w-5 text-[var(--geo-dash-secondary)]" />
-            </span>
-            <div>
-              <h1 className="text-xl font-semibold tracking-tight text-[var(--geo-dash-text)]">效果</h1>
-              <p className="mt-0.5 text-sm text-[var(--geo-dash-text-mute)]">
-                当前品牌：{workspace.name}
-              </p>
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex items-center gap-3">
+              <span className="flex h-10 w-10 items-center justify-center rounded-xl border border-[var(--geo-dash-border)] bg-[var(--geo-dash-card)]">
+                <Gauge className="h-5 w-5 text-[var(--geo-dash-secondary)]" />
+              </span>
+              <div>
+                <h1 className="text-xl font-semibold tracking-tight text-[var(--geo-dash-text)]">效果</h1>
+                <p className="mt-0.5 text-sm text-[var(--geo-dash-text-mute)]">
+                  当前品牌：{workspace.name}
+                </p>
+              </div>
             </div>
+            <button
+              type="button"
+              aria-pressed={reportMode}
+              onClick={() => setReportMode((value) => !value)}
+              className="geo-effect-no-print inline-flex items-center gap-2 rounded-lg border border-[var(--geo-dash-border-strong)] bg-[var(--geo-dash-card-2)] px-3 py-1.5 text-xs font-medium text-[var(--geo-dash-text-dim)] transition-colors hover:border-[var(--geo-dash-secondary)] hover:text-[var(--geo-dash-secondary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--geo-dash-secondary)]"
+            >
+              <FileText className="h-3.5 w-3.5" />
+              {reportMode ? "返回看板" : "报告视图"}
+            </button>
           </div>
         </header>
 
-        {!sessionBinding && (
-          <section
-            aria-label="需要品牌会话"
-            data-geo-effect-session-banner
-            className="mt-5 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-[var(--geo-dash-border)] bg-[var(--geo-dash-card)] px-4 py-3"
-          >
-            <p className="text-xs leading-5 text-[var(--geo-dash-text-dim)]">
-              看板与监测结果已按真实数据显示。基线探测与监测计划的执行需要该品牌的真实会话。
-            </p>
-            <button
-              type="button"
-              onClick={onOpenBrandSession}
-              className="inline-flex items-center gap-2 rounded-lg border border-[var(--geo-dash-border-strong)] bg-[var(--geo-dash-card-2)] px-3 py-1.5 text-xs font-medium text-[var(--geo-dash-text-dim)] transition-colors hover:border-[var(--geo-dash-secondary)] hover:text-[var(--geo-dash-secondary)]"
-            >
-              <MessageSquarePlus className="h-3.5 w-3.5" />
-              打开品牌会话
-            </button>
-          </section>
-        )}
+        {reportMode ? (
+          <XiaojingGeoEffectReport workspace={workspace} />
+        ) : (
+          <>
+            {!sessionBinding && (
+              <section
+                aria-label="需要品牌会话"
+                data-geo-effect-session-banner
+                className="mt-5 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-[var(--geo-dash-border)] bg-[var(--geo-dash-card)] px-4 py-3"
+              >
+                <p className="text-xs leading-5 text-[var(--geo-dash-text-dim)]">
+                  看板与监测结果已按真实数据显示。基线探测与监测计划的执行需要该品牌的真实会话。
+                </p>
+                <button
+                  type="button"
+                  onClick={onOpenBrandSession}
+                  className="inline-flex items-center gap-2 rounded-lg border border-[var(--geo-dash-border-strong)] bg-[var(--geo-dash-card-2)] px-3 py-1.5 text-xs font-medium text-[var(--geo-dash-text-dim)] transition-colors hover:border-[var(--geo-dash-secondary)] hover:text-[var(--geo-dash-secondary)]"
+                >
+                  <MessageSquarePlus className="h-3.5 w-3.5" />
+                  打开品牌会话
+                </button>
+              </section>
+            )}
 
-        <EffectSessionScope workspace={workspace} binding={sessionBinding}>
-          <XiaojingGeoEffectPanel
-            key={`${workspace.id}:geo-effect`}
-            workspaceId={workspace.id}
-            monitorNavigationTarget={monitorNavigationTarget}
-          />
-        </EffectSessionScope>
+            <EffectSessionScope workspace={workspace} binding={sessionBinding}>
+              <XiaojingGeoEffectPanel
+                key={`${workspace.id}:geo-effect`}
+                workspaceId={workspace.id}
+                monitorNavigationTarget={monitorNavigationTarget}
+              />
+            </EffectSessionScope>
+          </>
+        )}
       </div>
     </main>
   );

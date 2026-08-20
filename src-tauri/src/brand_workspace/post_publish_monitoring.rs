@@ -1102,17 +1102,18 @@ impl BrandWorkspaceStore {
             return Err("post_publish_monitor_object_url_invalid".to_string());
         }
 
-        let (baseline_policy, question_pool_id, question_pool_revision, brand_names_json): (
+        let (baseline_policy, question_pool_id, question_pool_revision, brand_names_json, competitors_json): (
             String,
             String,
             i64,
             String,
+            String,
         ) = transaction
             .query_row(
-                "SELECT policy_version,question_pool_id,question_pool_revision,brand_names_json
+                "SELECT policy_version,question_pool_id,question_pool_revision,brand_names_json,competitors_json
                  FROM geo_baselines WHERE id=?1",
                 [&request.baseline_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
             )
             .optional()
             .map_err(|error| format!("read monitoring baseline: {error}"))?
@@ -1248,6 +1249,7 @@ impl BrandWorkspaceStore {
                 "article": serde_json::from_str::<Value>(&item.8).unwrap_or(Value::Null),
                 "channel": serde_json::from_str::<Value>(&item.9).unwrap_or(Value::Null),
                 "brandNames": serde_json::from_str::<Value>(&brand_names_json).unwrap_or(json!([])),
+                "competitorNames": serde_json::from_str::<Value>(&competitors_json).unwrap_or(json!([])),
             });
             transaction
                 .execute(
@@ -2041,6 +2043,11 @@ fn create_due_run(
         .and_then(|item| serde_json::from_str::<Value>(&item.8).ok())
         .and_then(|snapshot| snapshot.get("brandNames").cloned())
         .unwrap_or_else(|| json!([]));
+    let competitor_names = published_articles
+        .first()
+        .and_then(|item| serde_json::from_str::<Value>(&item.8).ok())
+        .and_then(|snapshot| snapshot.get("competitorNames").cloned())
+        .unwrap_or_else(|| json!([]));
     for item in &published_articles {
         let common = json!({
             "publishItemId": item.0,
@@ -2101,6 +2108,7 @@ fn create_due_run(
             "engineId": question.3,
             "sourceProviderSnapshot": serde_json::from_str::<Value>(&question.4).unwrap_or(Value::Null),
             "brandNames": brand_names,
+            "competitorNames": competitor_names,
             "publishedArticles": article_urls,
         });
         transaction
@@ -2823,7 +2831,7 @@ mod tests {
         connection.execute("INSERT INTO geo_publish_executions(id,operation_id,created_by_session_id,distribution_plan_id,distribution_plan_revision,status,revision,budget_cny,estimated_spend_cny,publish_start_at,confirmation_digest,provider_snapshot_json,created_at,updated_at) VALUES ('publish-exec-14','publish-op-14','session-14','distribution-14',7,'succeeded',4,20,10,?1,'digest','{}',?1,?1)", [&now]).unwrap();
         connection.execute("INSERT INTO geo_publish_items(id,execution_id,sequence,revision,article_id,approved_revision,approved_body_sha256,approved_body_path,article_json,channel_json,scheduled_at,scheduled_at_ms,status,idempotency_key,external_request_sn,payload_hash,object_key,object_url,external_order_id,external_content_id,request_summary_json) VALUES ('publish-item-14','publish-exec-14',1,5,'article-14',2,'body-hash','articles/approved/article-14/v2.md',?1,?2,?3,?4,'submitted','idem-14','request-sn-14','payload-hash','geo/object-14.md','https://oss.example.test/geo/object-14.md','platform-order-14','content-14',?5)", params![json!({"id":"article-14","title":"真实文章"}).to_string(),json!({"kind":"media","resourceId":88,"name":"真实渠道"}).to_string(),now,now_ms,json!({"plannedObjectUrl":"https://oss.example.test/geo/object-14.md"}).to_string()]).unwrap();
         connection.execute("INSERT INTO geo_operations(id,session_id,state,created_at) VALUES ('baseline-op-14','session-14','baseline-complete',?1)", [&now]).unwrap();
-        connection.execute("INSERT INTO geo_baselines(id,operation_id,created_by_session_id,question_pool_id,question_pool_revision,knowledge_version,brand_names_json,provider_snapshots_json,policy_version,status,idempotency_key,created_at,updated_at) VALUES ('baseline-14','baseline-op-14','session-14','pool-14',9,3,'[\"小鲸\"]','[]','xiaojing-geo-baseline-v1','succeeded','baseline-idem-14',?1,?1)", [&now]).unwrap();
+        connection.execute("INSERT INTO geo_baselines(id,operation_id,created_by_session_id,question_pool_id,question_pool_revision,knowledge_version,brand_names_json,competitors_json,provider_snapshots_json,policy_version,status,idempotency_key,created_at,updated_at) VALUES ('baseline-14','baseline-op-14','session-14','pool-14',9,3,'[\"小鲸\"]','[\"声浪坊\"]','[]','xiaojing-geo-baseline-v1','succeeded','baseline-idem-14',?1,?1)", [&now]).unwrap();
         connection.execute("INSERT INTO geo_baseline_units(id,baseline_id,question_id,question_text,engine_id,provider_snapshot_json,status,attempt_number,citations_json) VALUES ('baseline-unit-14','baseline-14','question-14','哪个品牌更好？','doubao','{\"engineId\":\"doubao\"}','succeeded',1,'[]')", []).unwrap();
         drop(connection);
         let plan = store
@@ -3124,6 +3132,51 @@ mod tests {
         })
         .unwrap();
         assert_eq!(wake.as_object().unwrap().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn frozen_competitor_names_flow_into_item_snapshots_and_probe_payloads() {
+        let (fixture, plan) = fixture(2);
+        // 监测 item 快照在 prepare 时即从冻结基线带走竞品名单（v1 基线行
+        //  competitors_json 走列缺省 '[]'，本 fixture 显式携带一名竞品）。
+        let connection = open_database(&fixture.workspace).unwrap();
+        let snapshot: String = connection
+            .query_row(
+                "SELECT snapshot_json FROM geo_post_publish_monitor_items WHERE plan_id=?1",
+                [&plan.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&snapshot).unwrap()["competitorNames"],
+            json!(["声浪坊"])
+        );
+        drop(connection);
+
+        let due = fixture.now_ms + 15 * 60 * 1_000;
+        let executor = PostPublishMonitorExecutor::new(
+            fixture.store.clone(),
+            Arc::new(MockProvider::default()),
+            Arc::new(MockTaskCompletion::default()),
+            Arc::new(move || due),
+        );
+        executor
+            .run_context(&context(&fixture, &plan.id))
+            .await
+            .unwrap();
+
+        let connection = open_database(&fixture.workspace).unwrap();
+        let payload: String = connection
+            .query_row(
+                "SELECT payload_json FROM geo_post_publish_monitor_units
+                 WHERE plan_id=?1 AND kind='baseline-probe'",
+                [&plan.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let payload: Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(payload["brandNames"], json!(["小鲸"]));
+        assert_eq!(payload["competitorNames"], json!(["声浪坊"]));
     }
 
     #[tokio::test]

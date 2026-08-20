@@ -50,7 +50,8 @@
       "importPastedMaterial": "Import pasted material",
       "readSessionFile": "Read session file",
       "importWebsiteMaterial": "Import website material",
-      "retryBrandMaterial": "Retry material extraction"
+      "retryBrandMaterial": "Retry material extraction",
+      "inspectGeoProbeSamples": "Inspect GEO probe samples"
     }
   },
   "knowledgeCard": {

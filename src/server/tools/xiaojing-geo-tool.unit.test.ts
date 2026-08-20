@@ -8,6 +8,7 @@ import {
   distributionPlanCardProjection,
   geoOperationControlFailure,
   geoOperationProjectionPayload,
+  geoProbeSamplesFailure,
   planDistributionBudgetCny,
   publishExecutionCardProjection,
 } from './xiaojing-geo-tool';
@@ -103,6 +104,23 @@ describe('geoOperationControlFailure', () => {
     const failure = geoOperationControlFailure('sidecar lock poisoned');
     expect(failure).toMatchObject({ kind: 'geo-operation-control', ok: false, error: 'sidecar lock poisoned' });
     expect(failure.hint).toContain('inspect_geo_operations');
+  });
+});
+
+describe('geoProbeSamplesFailure', () => {
+  it('keeps the Rust error verbatim and points at the effects page', () => {
+    const failure = geoProbeSamplesFailure(new Error('geo_dashboard_drilldown_not_found'));
+    expect(failure).toMatchObject({
+      kind: 'geo-probe-samples',
+      ok: false,
+      error: 'geo_dashboard_drilldown_not_found',
+    });
+    expect(failure.hint).toContain('效果');
+  });
+
+  it('stringifies non-Error rejections', () => {
+    const failure = geoProbeSamplesFailure('management_unavailable');
+    expect(failure).toMatchObject({ kind: 'geo-probe-samples', ok: false, error: 'management_unavailable' });
   });
 });
 

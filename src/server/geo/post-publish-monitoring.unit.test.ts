@@ -15,7 +15,7 @@ const snapshot: GeoBaselineProviderSnapshot = {
   endpointFamily: "ark-responses",
   searchMode: "doubao-app-ai-search",
   configurationFingerprint: "fingerprint",
-  policyVersion: "xiaojing-geo-baseline-v1" as const,
+  policyVersion: "xiaojing-geo-baseline-v2" as const,
 };
 const sourceSnapshot: GeoBaselineProviderSnapshot = {
   ...snapshot,
@@ -92,6 +92,38 @@ describe("PostPublishBaselineProbeService", () => {
     });
     expect(result.evidence.analysis.brandMentioned).toBe(true);
     expect(result.evidence.rankPosition).toBeNull();
+  });
+
+  it("forwards frozen competitor names into the probe analysis", async () => {
+    const result = await new PostPublishBaselineProbeService(
+      provider({ output: [{ content: [{ text: "常见选择有声浪坊，小鲸值得选择" }] }] }),
+    ).probe({
+      engineId: "doubao",
+      questionId: "q1",
+      question: "哪家好？",
+      sourceProviderSnapshot: sourceSnapshot,
+      brandNames: ["小鲸"],
+      competitorNames: ["声浪坊"],
+      publishedArticles: [],
+    });
+    expect(result.evidence.analysis).toMatchObject({
+      brandMentioned: true,
+      competitorMentions: ["声浪坊"],
+    });
+    expect(result.evidence.analysis.competitorExcerpt).toContain("声浪坊");
+
+    // v1 监测输入缺省该字段：无竞品字段，行为不变。
+    const legacy = await new PostPublishBaselineProbeService(
+      provider({ output: [{ content: [{ text: "常见选择有声浪坊，小鲸值得选择" }] }] }),
+    ).probe({
+      engineId: "doubao",
+      questionId: "q1",
+      question: "哪家好？",
+      sourceProviderSnapshot: sourceSnapshot,
+      brandNames: ["小鲸"],
+      publishedArticles: [],
+    });
+    expect(legacy.evidence.analysis).not.toHaveProperty("competitorMentions");
   });
 
   it("fails explicitly when the real typed engine is unavailable", async () => {
