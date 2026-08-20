@@ -62,6 +62,16 @@ describe('buildSystemPrompt', () => {
     expect(prompt).toContain('不把阶段链条展开写进 goal 或正文');
     expect(prompt).toContain('始终保持简体中文');
   });
+
+  // 价格脱敏回归：聊天里费用一律用「点」，只能复述工具结果里已有的
+  // 点数字段；不得出现人民币金额、不得换算、不得解释定价规则。
+  it('keeps all cost talk in points and bans CNY amounts and pricing rules', () => {
+    expect(prompt).toContain('一律用「点」表述');
+    expect(prompt).toContain('只能引用工具结果中已有的点数字段');
+    expect(prompt).toContain('不得做任何换算');
+    expect(prompt).toContain('不得解释点数与人民币的关系');
+    expect(prompt).toContain('定价规则');
+  });
 });
 
 /**

@@ -6,7 +6,9 @@ import type {
   PublishItemProjection,
   PublishOrderStatusEntry,
 } from "../../../shared/geo/publishScheduler";
-import PublishAuthorizationGateCard from "./PublishAuthorizationGateCard";
+import PublishAuthorizationGateCard, {
+  parsePublishAuthorizationGateCard,
+} from "./PublishAuthorizationGateCard";
 
 const mocks = vi.hoisted(() => ({
   sessionId: "session-42",
@@ -233,6 +235,77 @@ describe("PublishAuthorizationGateCard", () => {
     expect(within(card).getByText("已排期，等待调度")).toBeInTheDocument();
     expect(within(card).getByText("OSS 未上传")).toBeInTheDocument();
     expect(within(card).getByText("订单未提交")).toBeInTheDocument();
+  });
+
+  // 聊天价格脱敏：prepare_publish 转录是 slim 投影（无任何 *Cny 字段），
+  // 解析时水合为完整形状；点数显示与确认摘要保持权威值。
+  it("hydrates the slim tool-result projection (points only) for first render", async () => {
+    const slim = {
+      kind: "publish-execution",
+      execution: {
+        id: "exec-1",
+        revision: 1,
+        status: "awaiting-confirmation",
+        workspaceId: "brand-1",
+        distributionPlanId: "plan-1",
+        publishStartAt: "2026-08-20T02:00:00Z",
+        confirmationDigest: "digest-1",
+        irreversibleImpact: "将付费并向外部渠道发布，不可撤销。",
+        totalPricePoints: 2272,
+        budgetPoints: 16000,
+        items: [
+          {
+            id: "item-1",
+            status: "pending",
+            scheduledAt: "2026-08-20T02:00:00Z",
+            article: {
+              title: "成都汽车音响改装怎么选",
+              bodySummary: "批准稿摘要。",
+            },
+            channel: {
+              resourceId: 8,
+              kind: "media",
+              name: "汽车产业观察",
+              pricePoints: 2272,
+            },
+          },
+        ],
+      },
+    };
+    const data = parsePublishAuthorizationGateCard(JSON.stringify(slim));
+    expect(data).not.toBeNull();
+    if (!data) return;
+    render(<PublishAuthorizationGateCard data={data} />);
+    const card = screen.getByRole("region", { name: "付费发布授权" });
+
+    // 预算回算精确往返：16000 点 → ¥1000 → 16000 点；单价直接取 pricePoints。
+    expect(
+      within(card).getByText(/预计 2272 点 \/ 预算 16000 点/),
+    ).toBeInTheDocument();
+    expect(within(card).getByText(/单价 2272 点/)).toBeInTheDocument();
+    expect(within(card).getByText("成都汽车音响改装怎么选")).toBeInTheDocument();
+    expect(card.textContent ?? "").not.toContain("¥");
+
+    // 确认链路使用转录携带的 confirmationDigest / revision 原值。
+    mocks.confirm.mockResolvedValue(
+      execution({ status: "confirmed", revision: 2 }),
+    );
+    fireEvent.click(
+      within(card).getByLabelText("确认最终文章渠道预算排期和不可逆影响"),
+    );
+    fireEvent.click(
+      within(card).getByRole("button", { name: "独立确认发布执行" }),
+    );
+    await waitFor(() =>
+      expect(mocks.confirm).toHaveBeenCalledWith(
+        { workspaceId: "brand-1", sessionId: "session-42" },
+        {
+          executionId: "exec-1",
+          expectedRevision: 1,
+          confirmationDigest: "digest-1",
+        },
+      ),
+    );
   });
 
   it("shows per-item OSS and chaojimeijie stage badges with manual refresh", async () => {

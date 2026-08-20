@@ -35,6 +35,7 @@ import type {
   DistributionPlanProjection,
 } from '../../shared/geo/distributionPlan';
 import type { PublishExecutionProjection } from '../../shared/geo/publishScheduler';
+import { pointsToCny } from '../../shared/geo/points';
 
 export const GATE_REVISION_TOOL_NAME = 'revise_gate_content';
 
@@ -802,17 +803,36 @@ export function distributionPlanEditForOperation(
     operation.value && typeof operation.value === 'object' && !Array.isArray(operation.value)
       ? (operation.value as Record<string, unknown>)
       : {};
-  if (patch.budgetCny !== undefined) {
-    const budget = Number(patch.budgetCny);
-    if (!Number.isFinite(budget) || budget < 0) {
-      throw new Error('distribution_plan_budget_invalid');
-    }
+  const budget = patchBudgetCny(patch, 'distribution_plan_budget_invalid');
+  if (budget !== undefined) {
     base.budgetCny = budget;
   }
   if (typeof patch.publishStartAt === 'string' && patch.publishStartAt.trim()) {
     base.publishStartAt = patch.publishStartAt.trim();
   }
   return base;
+}
+
+/**
+ * 聊天修订的预算补丁：转录只携带点数（budgetPoints，优先；点数按
+ * pointsToCny 换算回内部 CNY，预算是上限语义、非计费），兼容旧转录里
+ * 的 budgetCny。两者都缺失返回 undefined，非法值抛 invalidCode。
+ */
+function patchBudgetCny(
+  patch: Record<string, unknown>,
+  invalidCode: string,
+): number | undefined {
+  if (patch.budgetPoints !== undefined) {
+    const points = Number(patch.budgetPoints);
+    if (!Number.isFinite(points) || points < 0) throw new Error(invalidCode);
+    return pointsToCny(points);
+  }
+  if (patch.budgetCny !== undefined) {
+    const budget = Number(patch.budgetCny);
+    if (!Number.isFinite(budget) || budget < 0) throw new Error(invalidCode);
+    return budget;
+  }
+  return undefined;
 }
 
 /**
@@ -876,14 +896,15 @@ export function createPublishPreparationGateRevisionHandler(
             reason: operation.userInstruction,
           });
         } else {
-          if (patch.budgetCny === undefined && patch.publishStartAt === undefined) {
-            throw new Error('publish revision requires budgetCny or publishStartAt');
+          const budget = patchBudgetCny(patch, 'publish_budget_invalid');
+          if (budget === undefined && patch.publishStartAt === undefined) {
+            throw new Error('publish revision requires budgetPoints or publishStartAt');
           }
           execution = await resolve().revise({
             executionId: current.id,
             expectedRevision: current.revision,
-            ...(patch.budgetCny !== undefined
-              ? { budgetCny: Number(patch.budgetCny) }
+            ...(budget !== undefined
+              ? { budgetCny: budget }
               : {}),
             ...(typeof patch.publishStartAt === 'string'
               ? { publishStartAt: patch.publishStartAt }

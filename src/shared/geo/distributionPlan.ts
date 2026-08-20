@@ -184,6 +184,41 @@ export interface DistributionPlanEditInput {
   publishStartAt: string;
 }
 
+/**
+ * `plan_distribution` 工具结果的转录投影（聊天价格脱敏）：聊天只携带
+ * 点数字段（budgetPoints / estimatedPricePoints），CNY 金额与换算倍率
+ * 不进转录。服务端 `distributionPlanCardProjection` 产出，确认卡首渲染
+ * 消费；完整权威投影由卡片 3s 轮询 /latest 水合。
+ */
+export interface DistributionPlanCardCandidate {
+  resourceId: number;
+  kind: DistributionChannelKind;
+  name: string;
+  estimatedPricePoints: number | null;
+  pathHits: DistributionRecallPath[];
+  fitReasons: string[];
+  evidence: Array<{
+    path: DistributionRecallPath;
+    /** 转录体积护栏：≤64 字，超出截断加 …。 */
+    label: string;
+  }>;
+}
+
+export interface DistributionPlanCardProjection {
+  id: string;
+  status: DistributionPlanStatus;
+  revision: number;
+  budgetPoints: number;
+  workspaceId: string;
+  publishStartAt: string;
+  selectedResourceIds: number[];
+  blockingIssues: string[];
+  articles: Array<{ id: string }>;
+  /** 全量保留：防止卡片在轮询水合前确认时丢失分配。 */
+  assignments: DistributionAssignment[];
+  candidates: DistributionPlanCardCandidate[];
+}
+
 export interface DistributionResourceInput {
   id: number;
   name: string;

@@ -12,7 +12,7 @@ import type {
   DistributionPlanEditInput,
   DistributionPlanProjection,
 } from "../../../shared/geo/distributionPlan";
-import { cnyToPoints } from "../../../shared/geo/points";
+import { cnyToPoints, pointsToCny } from "../../../shared/geo/points";
 import { unwrapToolResultText } from "../../../shared/toolResult";
 import { useGateCardRefresh } from "./useGateCardRefresh";
 
@@ -27,7 +27,37 @@ import { useGateCardRefresh } from "./useGateCardRefresh";
  */
 export interface DistributionGateCardData {
   kind: "distribution-plan";
-  plan: DistributionPlanProjection;
+  plan: GatePlan;
+}
+
+/**
+ * 卡片初始数据是 plan_distribution 工具结果里的瘦身投影：费用字段为
+ * 点数（budgetPoints / estimatedPricePoints），CNY 不进聊天转录；3s 轮询
+ * /latest 后切换为完整权威投影（含 CNY）。两处形状都合法，展示与确认
+ * 取值一律点数优先、CNY 回退。
+ */
+type GateCandidate = Omit<
+  DistributionPlanProjection["candidates"][number],
+  "estimatedPriceCny"
+> & {
+  estimatedPriceCny?: number | null;
+  estimatedPricePoints?: number | null;
+};
+
+type GatePlan = Omit<DistributionPlanProjection, "candidates" | "budgetCny"> & {
+  budgetCny?: number;
+  budgetPoints?: number;
+  candidates: GateCandidate[];
+};
+
+/** 候选单价点数：瘦身数据直接给点数；水合后的完整投影只有 CNY，现场换算。 */
+function candidatePricePoints(candidate: GateCandidate): number | null {
+  return (
+    candidate.estimatedPricePoints ??
+    (candidate.estimatedPriceCny == null
+      ? null
+      : cnyToPoints(candidate.estimatedPriceCny))
+  );
 }
 
 /** 召回路命中的展示词（与四路召回契约 passive/active/fallback/preference 一一对应）。 */
@@ -94,7 +124,7 @@ export default function DistributionGateCard({
 }) {
   const { apiPost } = useTabApi();
   const { sessionId } = useTabState();
-  const [plan, setPlan] = useState<DistributionPlanProjection>(data.plan);
+  const [plan, setPlan] = useState<GatePlan>(data.plan);
   const [selectedIds, setSelectedIds] = useState<number[]>(
     () => plan.candidates.map((candidate) => candidate.resourceId),
   );
@@ -133,6 +163,16 @@ export default function DistributionGateCard({
   const confirm = async () => {
     if (!sessionId || !hasRealSession || busy || selectedIds.length === 0) return;
     if (plan.blockingIssues.length > 0) return;
+    // fail-closed：预算数据缺失（畸形转录）时不以 0 元预算提交确认。
+    const budgetCny =
+      plan.budgetCny ??
+      (plan.budgetPoints !== undefined
+        ? pointsToCny(plan.budgetPoints)
+        : undefined);
+    if (budgetCny === undefined) {
+      setError("预算数据缺失，请等待卡片刷新后再确认。");
+      return;
+    }
     setBusy(true);
     setError(null);
     try {
@@ -140,7 +180,7 @@ export default function DistributionGateCard({
       const edit: DistributionPlanEditInput = {
         selectedResourceIds: selectedIds,
         assignments: plan.assignments,
-        budgetCny: plan.budgetCny,
+        budgetCny,
         publishStartAt: plan.publishStartAt,
       };
       const saved = await editDistributionPlan(apiPost, identity, {
@@ -174,7 +214,7 @@ export default function DistributionGateCard({
           {plan.candidates.length} 个真实渠道候选
         </span>
         <span className="rounded-full bg-[var(--paper-inset)] px-2 py-0.5">
-          预算 {cnyToPoints(plan.budgetCny)} 点
+          预算 {plan.budgetPoints ?? cnyToPoints(plan.budgetCny ?? 0)} 点
         </span>
         <span className="ml-auto">已选 {selectedIds.length}/{plan.candidates.length}</span>
       </div>
@@ -189,6 +229,7 @@ export default function DistributionGateCard({
       <div className="mt-2 space-y-2">
         {plan.candidates.map((candidate) => {
           const checked = selectedIds.includes(candidate.resourceId);
+          const pricePoints = candidatePricePoints(candidate);
           return (
             <article
               key={`${candidate.kind}:${candidate.resourceId}`}
@@ -216,9 +257,9 @@ export default function DistributionGateCard({
                   </span>
                   <span className="mt-0.5 block text-xs text-[var(--ink-muted)]">
                     所需点数：
-                    {candidate.estimatedPriceCny === null
+                    {pricePoints === null
                       ? "点数待定"
-                      : `${cnyToPoints(candidate.estimatedPriceCny)} 点`}
+                      : `${pricePoints} 点`}
                   </span>
                   <span className="mt-1 block text-xs leading-4 text-[var(--ink-muted)]">
                     召回路命中：

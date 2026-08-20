@@ -130,6 +130,39 @@ export interface PublishExecutionConfirmInput {
   confirmationDigest: string;
 }
 
+/**
+ * `prepare_publish` 工具结果的转录投影（聊天价格脱敏）：只携带点数字段
+ * （budgetPoints / totalPricePoints / pricePoints），CNY 金额与换算倍率
+ * 不进转录。服务端 `publishExecutionCardProjection` 产出，授权卡解析时
+ * 水合为完整投影形状首渲染，3s 轮询 /latest 后由权威投影纠正。
+ */
+export interface PublishExecutionCardItem {
+  id: string;
+  status: PublishItemStatus;
+  scheduledAt: string;
+  article: { title: string; bodySummary: string };
+  channel: {
+    resourceId: number;
+    kind: "media" | "we-media";
+    name: string;
+    pricePoints: number;
+  };
+}
+
+export interface PublishExecutionCardProjection {
+  id: string;
+  revision: number;
+  status: PublishExecutionStatus;
+  workspaceId: string;
+  distributionPlanId: string;
+  publishStartAt: string;
+  confirmationDigest: string;
+  irreversibleImpact: string;
+  totalPricePoints: number;
+  budgetPoints: number;
+  items: PublishExecutionCardItem[];
+}
+
 export interface PublishExecutionStartInput {
   executionId: string;
   expectedRevision: number;

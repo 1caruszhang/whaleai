@@ -13,3 +13,5 @@ SDK `settingSources` 为空，因此不会从用户级或 workspace 配置自动
 主聊天是唯一 Agent 发起入口。结构化卡片只提交用户决策或确定性 action，不能组装第二套 prompt 或启动另一个 Agent。
 
 系统文本不得包含 Provider secret、内部端口、用户正文或本地绝对路径。修改 prompt 时同步更新对应 unit test，并验证不扩大工具集合。
+
+价格表述是硬规则：费用、预算、报价一律用「点」，agent 只能引用工具结果中已有的点数字段（budgetPoints、estimatedPricePoints、totalPricePoints、pricePoints）原值复述，不得出现人民币金额、不得换算、不得解释点数与人民币的关系或任何定价规则；换算倍率只存在于服务端/卡片代码，不进入模型可见数据（分发计划工具结果只携带点数字段，见 `distribution_planning.md`）。

@@ -664,6 +664,23 @@ describe('distribution-plan gate revision mapping (票 38)', () => {
     });
     expect(budgeted.budgetCny).toBe(800);
 
+    // 聊天价格脱敏：转录只携带点数，budgetPoints 优先并按 pointsToCny
+    // 换算回内部 CNY（12800 点 → ¥800，预算上限语义）。
+    const budgetedInPoints = distributionPlanEditForOperation(distributionPlan(), {
+      action: 'modify',
+      value: { budgetPoints: 12800 },
+      userInstruction: '预算改成 12800 点',
+    });
+    expect(budgetedInPoints.budgetCny).toBe(800);
+
+    expect(() =>
+      distributionPlanEditForOperation(distributionPlan(), {
+        action: 'modify',
+        value: { budgetPoints: 'abc' },
+        userInstruction: '乱改预算',
+      }),
+    ).toThrow('distribution_plan_budget_invalid');
+
     expect(() =>
       distributionPlanEditForOperation(distributionPlan(), {
         action: 'modify',
@@ -735,6 +752,27 @@ describe('publish-preparation gate handler (票 38)', () => {
       itemUpdates: [{ itemId: 'publish-item-1', scheduledAt: '2026-08-21T08:00:00Z' }],
     }));
     expect(results.every((result) => result.ok)).toBe(true);
+  });
+
+  // 聊天价格脱敏：执行级预算补丁只携带点数，按 pointsToCny 换算后
+  // 提交 Rust 权威口（10400 点 → ¥650）。
+  it('accepts execution budget patches in points', async () => {
+    const latest = vi.fn().mockResolvedValue(execution);
+    const revise = vi
+      .fn()
+      .mockImplementation(async () => ({ ...execution, revision: 3 }));
+    const handler = createPublishPreparationGateRevisionHandler(() => ({ latest, revise }));
+    const results = await handler(
+      [
+        { action: 'modify', value: { budgetPoints: 10400 }, userInstruction: '预算改成 10400 点' },
+      ],
+      context,
+    );
+    expect(revise).toHaveBeenCalledWith(expect.objectContaining({
+      executionId: 'exec-1',
+      budgetCny: 650,
+    }));
+    expect(results[0]?.ok).toBe(true);
   });
 
   it('supports modify only and rejects immutable or missing executions', async () => {
