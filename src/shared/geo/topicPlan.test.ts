@@ -9,6 +9,7 @@ import {
   parseAndEnforceTypeRecommendations,
   parseTitlePlan,
   parseTopicClusters,
+  selectContentTypePlannedFacts,
   selectDistinctTitles,
   validateTitleCandidates,
   type TopicPlanItem,
@@ -77,6 +78,38 @@ function item(overrides: Partial<TopicPlanItem> = {}): TopicPlanItem {
 }
 
 describe("topic/type/title shared contract", () => {
+  it("pins the ranking roster facts even when semantic top-five dropped them", () => {
+    const selected = Array.from({ length: 5 }, (_, index) => ({
+      factKey: `fact-${index}`,
+      predicate: `enterprise-profile.field-${index}`,
+      normalizedValueJson: `"value-${index}"`,
+    }));
+    const competitors = {
+      factKey: "competitors",
+      predicate: "enterprise-profile.competitors",
+      normalizedValueJson: '["竞品甲","竞品乙","竞品丙","竞品丁","竞品戊"]',
+    };
+    const relatedBrands = {
+      factKey: "related-brands",
+      predicate: "enterprise-profile.relatedbrands",
+      normalizedValueJson: '["合作品牌"]',
+    };
+    expect(
+      selectContentTypePlannedFacts("ranking", selected, [
+        ...selected,
+        competitors,
+        relatedBrands,
+      ]),
+    ).toEqual([...selected, competitors, relatedBrands]);
+    expect(
+      selectContentTypePlannedFacts("guide", selected, [
+        ...selected,
+        competitors,
+        relatedBrands,
+      ]),
+    ).toEqual(selected);
+  });
+
   it("turns real embeddings into deterministic semantic-neighbor evidence", () => {
     expect(
       buildTopicSemanticHints(questions, [

@@ -508,6 +508,19 @@ export class ArticleGenerationService {
         raw,
         requestedTitle,
       );
+      if (context.article.contentType === "ranking") {
+        const rankingIssues = deterministicArticleReview(
+          body,
+          context.article.plannedFacts,
+          "ranking",
+          context.brandName,
+        ).filter((issue) => issue.severity === "blocking");
+        if (rankingIssues.length > 0) {
+          throw new Error(
+            `article_generation_ranking_output_invalid:${rankingIssues.map((issue) => issue.message).join("；")}`,
+          );
+        }
+      }
       const finished = await this.persistence.finishGeneration({
         operationId: context.article.operationId,
         articleId: context.article.id,
@@ -608,6 +621,7 @@ export class ArticleGenerationService {
       body.body,
       context.article.plannedFacts,
       context.article.contentType,
+      context.brandName,
     );
     // 用户裁定（2026-08-18）：审核先只做格式确定性检查，反思 LLM 审核暂停
     // （省一次 LLM 调用与等待；恢复时改回 REFLECTION_REVIEW_ENABLED=true）。

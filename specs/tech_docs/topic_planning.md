@@ -11,7 +11,7 @@
 
 1. `embedding` 对已确认问题生成真实向量并形成确定性近邻证据；generation LLM 结合原文、搜索意图和近邻证据完成语义分组与主题命名。每个 question ID 必须且只能进入一个主题，遗漏、重复或未知 ID 都失败。
 2. generation LLM 为每主题推荐 1–5 个 `guide / showcase / ranking / news / news_light` 类型并逐项解释。共享 pure policy 沿 js_ai `dev` 补齐整批五类覆盖下限：主题少于 5 时每类至少 1 项，至少 5 个主题时每类至少 2 项。
-3. topic 与固定 knowledge snapshot facts 再经 Embedding 相似度选择 planned facts。持久化 owner 会逐项核对 `factKey / predicate / normalizedValueJson`，不接受模型生成或 UI 伪造的事实。
+3. topic 与固定 knowledge snapshot facts 再经 Embedding 相似度选择一般 planned facts。内容类型硬事实不占语义 Top-5 名额：`ranking` 必须把该快照中的 `fullName / shortNames / relatedBrands / competitors` roster 输入钉回 item，防止竞品或排除依据因相似度排到第 6 名而消失。持久化 owner 会逐项核对 `factKey / predicate / normalizedValueJson`，不接受模型生成或 UI 伪造的事实。
 4. 标题按每批最多 3 项调用 generation port 的 `title-planning` purpose（system persona + `maxTokens=2048`）。每项返回 3–5 个候选和对问题覆盖、搜索意图、差异化、品牌适配、中国市场表达的解释；showcase 必须包含已确认目标品牌，ranking 不含目标品牌且包含当前年份，并统一执行地域、行业、长度、竞品和禁词约束。标题 prompt 按 ADR-0006 重写：风格中文释义（`TITLE_STYLE_DEFINITIONS`）、占位符式 few-shot（【地域】【行业】【目标品牌】，忠实各类型品牌分布）、反抄录与口语化反堆砌条目；不变量清单见 `content_prompt_invariants.md`。
 5. 所有候选与现有受保护标题使用真实 Embedding 去重，阈值 `0.92`。provider snapshot 固化默认 generation pro、标题 mini 与 Embedding family/dimensions；model attempts 逐阶段追加。
 

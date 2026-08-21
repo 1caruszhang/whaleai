@@ -144,19 +144,23 @@ describe('session-files reminder copy stays in sync with the system prompt', () 
   it('makes the in-chat gate cards the single entry for every confirmation', () => {
     expect(prompt).toContain('唯一的操作入口');
     // 多卡共存时方位指代会指错对象，入口指引不带「上方/下方」。
-    expect(prompt).toContain('在聊天里对应的确认卡片上完成操作并确认');
-    expect(prompt).not.toContain('在下方的确认卡片');
-    expect(prompt).toContain('run_question_pool');
-    expect(prompt).toContain('产品线取领域级');
-    expect(prompt).toContain('自动取品牌已确认的领域');
-    expect(prompt).toContain('品牌创建只需名称');
-    expect(prompt).toContain('businessFocus');
-    expect(prompt).toContain('plan_topics');
-    expect(prompt).toContain('generate_articles');
-    expect(prompt).toContain('plan_distribution');
-    expect(prompt).toContain('prepare_publish');
-    expect(prompt).toContain('你没有发起的阶段不会有卡片');
-    expect(prompt).toContain('工作台只做结果展示');
-    expect(prompt).toContain('你无权跨越');
+    expect(prompt).toContain("在聊天里对应的确认卡片上完成操作并确认");
+    expect(prompt).not.toContain("在下方的确认卡片");
+    expect(prompt).toContain("run_question_pool");
+    expect(prompt).toContain("产品线取领域级");
+    expect(prompt).toContain("自动取品牌已确认的领域");
+    expect(prompt).toContain("品牌创建只需名称");
+    expect(prompt).toContain("businessFocus");
+    expect(prompt).toContain("plan_topics");
+    expect(prompt).toContain("generate_articles");
+    expect(prompt).toContain("已确认竞品不足 5 家");
+    expect(prompt).toContain("confirm_ranking_competitors");
+    expect(prompt).toContain("服务端会绑定本 Session 的不足门与最新用户消息");
+    expect(prompt).toContain("不要再次调用 generate_articles");
+    expect(prompt).toContain("plan_distribution");
+    expect(prompt).toContain("prepare_publish");
+    expect(prompt).toContain("你没有发起的阶段不会有卡片");
+    expect(prompt).toContain("工作台只做结果展示");
+    expect(prompt).toContain("你无权跨越");
   });
 });

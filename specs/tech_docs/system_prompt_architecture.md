@@ -10,7 +10,7 @@
 
 SDK `settingSources` 为空，因此不会从用户级或 workspace 配置自动扩展产品能力。Prompt 不是权限边界；tool allowlist、Rust admission 和 BrandWorkspace revision checks 必须独立拒绝越权。
 
-主聊天是唯一 Agent 发起入口。结构化卡片只提交用户决策或确定性 action，不能组装第二套 prompt 或启动另一个 Agent。
+主聊天是唯一 Agent 发起入口。结构化卡片只提交用户决策或确定性 action，不能组装第二套 prompt 或启动另一个 Agent。排行榜生成返回已确认竞品不足 5 家时有一个窄例外：Agent 留在当前聊天说明缺口；Session Sidecar 同时绑定原文章请求与签发时用户消息。用户随后明确说出或确认名称后，`confirm_ranking_competitors` 逐字核对最新持久化用户消息，再把原话作为 `asked/user-stated` 审计，经同一 KnowledgeAuthority 提议并立即采纳；补足后工具直接恢复原文章请求。该入口不得接收模型推断、联网发现或仅被提到的名称。
 
 系统文本不得包含 Provider secret、内部端口、用户正文或本地绝对路径。修改 prompt 时同步更新对应 unit test，并验证不扩大工具集合。
 

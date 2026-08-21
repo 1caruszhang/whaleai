@@ -467,6 +467,52 @@ interface CompetitorSuggestion {
   sourceExcerpt: string;
 }
 
+const MATERIAL_COMPETITOR_SIGNAL =
+  "(?:竞品|竞争对手|竞争者|直接竞争|二选一|比价|对比|替代(?:方案|选项)?)";
+const WEB_COMPETITOR_SIGNAL =
+  "(?:竞品|竞争对手|竞争者|直接竞争|同行|同类(?:品牌|机构|门店|服务商)?|二选一|比价|对比|替代(?:方案|选项)?|哪家好|推荐|口碑)";
+const NON_COMPETITOR_RELATION =
+  "(?:前东家|曾任职于|供职于|曾任|出身于|工作于|师承|合作(?:方|商|伙伴|品牌)?|战略合作|供应商|供货商|经销(?:商|品牌)?|代理(?:商|品牌)?|客户|甲方|设备品牌|仪器品牌|器材品牌|平台渠道|母公司|子公司|兄弟品牌|同集团|隶属于|投资方)";
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * 关系词必须与候选名处于同一短句附近，避免材料同时写「曾任 A；竞品 B」时
+ * 因全段出现排除词而误伤 B。提示词用于语义召回，这层把高风险关系变成
+ * 确定性落库护栏。
+ */
+function namedRelation(
+  excerpt: string,
+  name: string,
+  relation: string,
+): boolean {
+  const escapedName = escapeRegExp(name.trim());
+  if (!escapedName) return false;
+  const gap = "[^。！？；;，,\\n]{0,120}";
+  return new RegExp(
+    `(?:${relation})${gap}${escapedName}|${escapedName}${gap}(?:${relation})`,
+    "i",
+  ).test(excerpt);
+}
+
+function hasCompetitorEvidence(
+  excerpt: string,
+  name: string,
+  signal: string,
+): boolean {
+  return (
+    excerpt.includes(name) &&
+    namedRelation(excerpt, name, signal) &&
+    !namedRelation(excerpt, name, NON_COMPETITOR_RELATION)
+  );
+}
+
+function normalizeEvidenceText(value: string): string {
+  return value.toLocaleLowerCase('zh-CN').replace(/\s+/g, ' ').trim();
+}
+
 function parseCompetitorSuggestions(
   raw: string,
   searchResult: string,
@@ -478,18 +524,25 @@ function parseCompetitorSuggestions(
 ): CompetitorSuggestion[] {
   const parsed = extractJsonObject(raw);
   if (!Array.isArray(parsed.competitors)) throw new Error('model_response_invalid');
-  const haystack = searchResult.toLowerCase();
+  const haystack = normalizeEvidenceText(searchResult);
   const seen = new Set<string>();
   const suggestions: CompetitorSuggestion[] = [];
   for (const item of parsed.competitors) {
     if (suggestions.length >= limits.deficit) break;
     if (!item || typeof item !== 'object' || Array.isArray(item)) continue;
     const holder = item as Record<string, unknown>;
-    const name = typeof holder.name === 'string' ? holder.name.trim() : '';
-    const sourceExcerpt = typeof holder.sourceExcerpt === 'string'
-      ? holder.sourceExcerpt.trim().slice(0, 4_000)
-      : '';
-    if (!name || !sourceExcerpt) continue;
+    const name = typeof holder.name === "string" ? holder.name.trim() : "";
+    const sourceExcerpt =
+      typeof holder.sourceExcerpt === "string"
+        ? holder.sourceExcerpt.trim().slice(0, 4_000)
+        : "";
+    if (
+      !name ||
+      !sourceExcerpt ||
+      !haystack.includes(normalizeEvidenceText(sourceExcerpt)) ||
+      !hasCompetitorEvidence(sourceExcerpt, name, WEB_COMPETITOR_SIGNAL)
+    )
+      continue;
     const normalized = name.toLowerCase();
     // 反虚构：名字必须字面出现在检索文本中，且不与已知竞品重复；排除名单
     // （品牌自身/别名/关联主体）按双向子串匹配——目标品牌「九味牛」要连
@@ -593,6 +646,7 @@ function mergePair(left: ExtractedProfileFact, right: ExtractedProfileFact): Ext
 export function parseProfileFacts(
   raw: string,
   context: BrandMaterialContext,
+  sourceText: string,
 ): ExtractedProfileFact[] {
   const parsed = extractJsonObject(raw);
   if (!Array.isArray(parsed.facts)) throw new Error('model_response_invalid');
@@ -632,7 +686,10 @@ export function parseProfileFacts(
       scope,
     });
   }
-  return dropSelfReferences(context, mergeFactsByFieldScope(facts));
+  return dropUnsupportedMaterialCompetitors(
+    dropSelfReferences(context, mergeFactsByFieldScope(facts)),
+    sourceText,
+  );
 }
 
 /**
@@ -701,6 +758,45 @@ function dropSelfReferences(
     const kept = values.filter((value) => !isSelf(value));
     // 全部被剔除时整条丢弃，不产出空数组候选。
     return kept.length === values.length ? [fact] : kept.length > 0 ? [{ ...fact, value: kept }] : [];
+  });
+}
+
+/**
+ * 材料腿竞品不能只凭「模型把某个品牌放进 competitors 数组」落候选：逐名
+ * 要求原文里有明确竞争信号，并排除前东家/合作/供应/客户等关系；同时把
+ * relatedBrands 里的主体从 competitors 做交叉剔除。用户明确补充走 asked
+ * 事实，不经过这条材料抽取过滤。
+ */
+function dropUnsupportedMaterialCompetitors(
+  facts: ExtractedProfileFact[],
+  sourceText: string,
+): ExtractedProfileFact[] {
+  const sourceCorpus = normalizeEvidenceText(sourceText);
+  const relatedNames = facts
+    .filter((fact) => fact.field === "relatedBrands")
+    .flatMap((fact) => (Array.isArray(fact.value) ? fact.value : [fact.value]))
+    .map((value) => value.trim().toLowerCase())
+    .filter(Boolean);
+  const isRelated = (candidate: string) => {
+    const normalized = candidate.trim().toLowerCase();
+    return relatedNames.some(
+      (related) =>
+        related === normalized ||
+        related.includes(normalized) ||
+        normalized.includes(related),
+    );
+  };
+  return facts.flatMap((fact) => {
+    if (fact.field !== "competitors") return [fact];
+    const excerpt = fact.sourceExcerpt?.trim() ?? "";
+    const values = Array.isArray(fact.value) ? fact.value : [fact.value];
+    const kept = values.filter(
+      (name) =>
+        sourceCorpus.includes(normalizeEvidenceText(excerpt)) &&
+        !isRelated(name) &&
+        hasCompetitorEvidence(excerpt, name, MATERIAL_COMPETITOR_SIGNAL),
+    );
+    return kept.length > 0 ? [{ ...fact, value: kept }] : [];
   });
 }
 
@@ -938,7 +1034,7 @@ export class MaterialImportService {
    * （本次抽取 + 已确认权威值）不足 ranking 的 5 家陈列位时，用真实检索结果
    * 补足。富化名一律 inferred（低置信）并携带检索原文摘录；与材料已抽出的
    * 竞品合并为同一条候选，避免同键多条候选顺序采纳时互相覆盖。检索或解析
-   * 失败按 independent-best-effort 静默跳过，不影响主导入结果。
+   * 失败不影响其他字段，但 process() 随后仍会产出可补充的 competitors 必审行。
    */
   private async enrichCompetitors(
     context: BrandMaterialContext,
@@ -1068,24 +1164,33 @@ export class MaterialImportService {
         }
       }))).join('\n');
     const searchSources = keywordSearch.searchSources;
-    const searchResult = typeof searchSources === 'function'
-      ? await (async () => {
-          let failed = 0;
-          const results = await Promise.all(queries.map((query) =>
-            searchSources.call(keywordSearch, query, { signal })
-              .catch(() => {
-                failed += 1;
-                return [] as GeoKeywordSearchSource[];
-              })));
-          const seen = new Set<string>();
-          const corpus: string[] = [];
-          for (const sources of results) {
-            for (const source of sources) {
-              if (seen.has(source.url)) continue;
-              seen.add(source.url);
-              corpus.push([source.title, source.summary].filter(Boolean).join('\n'));
+    const searchResult =
+      typeof searchSources === "function"
+        ? await (async () => {
+            let failed = 0;
+            const results = await Promise.all(
+              queries.map((query) =>
+                searchSources
+                  .call(keywordSearch, query, { signal })
+                  .catch(() => {
+                    failed += 1;
+                    return [] as GeoKeywordSearchSource[];
+                  }),
+              ),
+            );
+            const seen = new Set<string>();
+            const corpus: string[] = [];
+            for (const sources of results) {
+              for (const source of sources) {
+                if (seen.has(source.url)) continue;
+                seen.add(source.url);
+                corpus.push(
+                  [source.title, source.summary, `来源：${source.url}`]
+                    .filter(Boolean)
+                    .join("\n"),
+                );
+              }
             }
-          }
           if (corpus.length > 0) return corpus.join('\n');
           if (failed > 0) {
             // 固定码降级投影（脱敏契约同 materialLogProjection）：结构化召回
@@ -1153,8 +1258,8 @@ export class MaterialImportService {
   /**
    * 坏 JSON（截断/格式错误）是 provider 的瞬时输出质量问题：同一超时信号内
    * 自动重抽一次，两次都坏才落 model_response_invalid 终态。model_failed
-   * （provider 调用失败）与 no_facts_extracted（合法输出无事实）不重试，
-   * 避免掩盖 provider 故障。
+   * （provider 调用失败）不重试，避免掩盖 provider 故障。合法输出无其他
+   * 事实时仍继续联网腿并产出必审 competitors 行。
    */
   private async extractFacts(
     context: BrandMaterialContext,
@@ -1175,7 +1280,7 @@ export class MaterialImportService {
         throw new Error('model_failed', { cause });
       }
       try {
-        return parseProfileFacts(response, context);
+        return parseProfileFacts(response, context, text);
       } catch (error) {
         if (attempt === 0 && error instanceof Error && error.message === 'model_response_invalid') continue;
         throw error;
@@ -1235,7 +1340,6 @@ export class MaterialImportService {
       // model_failed 终态，材料不会永远停在 processing。
       const extractionSignal = AbortSignal.timeout(this.extractionTimeoutMs);
       const facts = await this.extractFacts(context, material, text, extractionSignal);
-      if (facts.length === 0) throw new Error('no_facts_extracted');
       const enrichedCompetitors = await this.enrichCompetitors(context, facts, extractionSignal);
       if (enrichedCompetitors) {
         const mergeIndex = facts.findIndex(
@@ -1252,6 +1356,45 @@ export class MaterialImportService {
         } else {
           facts.push(enrichedCompetitors);
         }
+      }
+      // 竞品是排行榜的必审事实：材料未明写且联网腿无合格结果时也必须在
+      // 第一张事实确认卡出现。空数组表达「当前没有可采信候选」，让用户可
+      // 直接更改/补充；绝不以合作商、前东家或模型记忆凑数。
+      if (
+        !facts.some(
+          (fact) => fact.field === "competitors" && fact.scope.kind === "brand",
+        )
+      ) {
+        let confirmedCompetitors: string[] = [];
+        try {
+          const current = await this.authority.inspect({
+            subject: context.brandName,
+            predicate: "enterprise-profile.competitors",
+            scope: { entityScope: "brand" },
+          });
+          const parsed = current
+            ? (JSON.parse(current.normalizedValueJson) as unknown)
+            : [];
+          confirmedCompetitors = (Array.isArray(parsed) ? parsed : [parsed])
+            .filter(
+              (value): value is string =>
+                typeof value === "string" && Boolean(value.trim()),
+            )
+            .map((value) => value.trim());
+        } catch {
+          // 读取失败仍产出空的必审竞品行；用户可在卡片内补充。
+        }
+        facts.push({
+          field: "competitors",
+          value: [...new Set(confirmedCompetitors)],
+          provenance: "inferred",
+          sourceExcerpt:
+            confirmedCompetitors.length > 0
+              ? "当前已确认竞品（本次材料与联网检索未发现新的合格竞品）"
+              : "材料未提供明确竞品，联网检索也未获得合格候选，请用户确认并补充",
+          confidence: confirmedCompetitors.length > 0 ? 1 : 0,
+          scope: { kind: "brand" },
+        });
       }
       const candidates: KnowledgeCandidate[] = [];
       for (const fact of facts) {

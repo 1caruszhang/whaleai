@@ -1,5 +1,5 @@
 import { GEO_PORT_CONTRACT, type GeoContentType } from "./portContract";
-import { projectBrandProfile } from "./profileInjection";
+import { projectBrandProfile, resolveBrandName } from "./profileInjection";
 import {
   TITLE_STYLE_DEFINITIONS,
   titleBusinessAnchors,
@@ -7,7 +7,7 @@ import {
 } from "./topicPlan";
 
 export const ARTICLE_GENERATION_POLICY_VERSION =
-  "xiaojing-content-prompt-v2";
+  "xiaojing-content-prompt-v3";
 export const ARTICLE_GENERATION_CONCURRENCY =
   GEO_PORT_CONTRACT.concurrency.perArticleLifecycle.limit;
 export const ARTICLE_GENERATION_MAX_ARTICLES = 20;
@@ -322,6 +322,85 @@ function factLines(facts: readonly TopicPlanKnowledgeFact[]): string[] {
   );
 }
 
+export interface RankingRoster {
+  targetBrand: string;
+  competitors: string[];
+}
+
+export interface RankingCompetitorIdentity {
+  workspaceBrandName: string;
+  fullNames: readonly string[];
+  shortNames: readonly string[];
+  relatedBrands: readonly string[];
+}
+
+function normalizeEntityName(value: string): string {
+  return normalizeArticleClaim(value.replace(/[*`_~]/g, ""));
+}
+
+function sameOrNestedEntityName(left: string, right: string): boolean {
+  return left === right || left.includes(right) || right.includes(left);
+}
+
+/**
+ * 所有 Node 排行榜入口共用的有效竞品规则。跨 Rust 边界仍由同一组契约
+ * 用例约束：去空、去重，并排除 workspace 名、身份别名和关联主体。
+ */
+export function filterValidRankingCompetitors(
+  names: readonly string[],
+  identity: RankingCompetitorIdentity,
+): string[] {
+  const excluded = [
+    identity.workspaceBrandName,
+    ...identity.fullNames,
+    ...identity.shortNames,
+    ...identity.relatedBrands,
+  ]
+    .map(normalizeEntityName)
+    .filter(Boolean);
+  const seen = new Set<string>();
+  return names.filter((name) => {
+    const normalized = normalizeEntityName(name);
+    if (
+      !normalized ||
+      seen.has(normalized) ||
+      excluded.some((blocked) => sameOrNestedEntityName(normalized, blocked))
+    ) {
+      return false;
+    }
+    seen.add(normalized);
+    return true;
+  });
+}
+
+/**
+ * ranking 的唯一名单投影：目标品牌来自身份事实（无身份事实才回退 workspace
+ * 名），竞品只来自 immutable plannedFacts 中已确认的 competitors。选五家
+ * 时保持权威数组顺序；正文可自由调整这五家在陈列位 2–6 的顺序。
+ */
+export function resolveRankingRoster(
+  facts: readonly TopicPlanKnowledgeFact[],
+  workspaceBrandName: string,
+): RankingRoster {
+  const profile = projectBrandProfile(facts);
+  const targetBrand = resolveBrandName(profile, workspaceBrandName).trim();
+  const competitors = filterValidRankingCompetitors(
+    profile.competitors ?? [],
+    {
+      workspaceBrandName,
+      fullNames: profile.fullName ?? [],
+      shortNames: profile.shortNames ?? [],
+      relatedBrands: profile.relatedBrands ?? [],
+    },
+  );
+  if (competitors.length < 5) {
+    throw new Error(
+      `article_generation_ranking_competitors_insufficient:${competitors.length}`,
+    );
+  }
+  return { targetBrand, competitors: competitors.slice(0, 5) };
+}
+
 export function buildArticleGenerationMessages(input: {
   brandName: string;
   productLine: string;
@@ -370,6 +449,19 @@ export function buildArticleGenerationMessages(input: {
         `小标题措辞倾向：${input.narrativeSeed.subtitleTendency}`,
       ].join("\n")
     : "";
+  const rankingRoster =
+    input.contentType === "ranking"
+      ? resolveRankingRoster(input.plannedFacts, input.brandName)
+      : null;
+  const rankingRosterBlock = rankingRoster
+    ? [
+        "",
+        "## 本篇排行榜固定名单（实体集合硬约束）",
+        `目标品牌固定为陈列位 1：${rankingRoster.targetBrand}`,
+        `陈列位 2–6 只能使用这五家已确认竞品：${rankingRoster.competitors.join("、")}`,
+        "五家竞品在陈列位 2–6 的顺序可自由调整；不得缺失、重复、替换或加入名单外品牌。",
+      ]
+    : [];
   const user = [
     ...(input.identityBlock ? [input.identityBlock, ""] : []),
     `品牌：${input.brandName}`,
@@ -379,6 +471,7 @@ export function buildArticleGenerationMessages(input: {
     `指定标题（必须逐字作为第一行 H1）：${input.requestedTitle}`,
     `用户约束：${input.constraints || "无额外约束"}`,
     seedBlock,
+    ...rankingRosterBlock,
     "",
     "已批准事实（唯一 Claim 根基）：",
     ...factLines(input.plannedFacts),
@@ -515,6 +608,7 @@ export function deterministicArticleReview(
   body: string,
   facts: readonly TopicPlanKnowledgeFact[],
   contentType: GeoContentType = "guide",
+  workspaceBrandName = "",
 ): ArticleReviewIssue[] {
   const issues: ArticleReviewIssue[] = [];
   const reviewBody = stripLeadingH1(body);
@@ -628,6 +722,55 @@ export function deterministicArticleReview(
         severity: "blocking",
         message:
           "ranking 必须是六家等长清单：每家使用序号 H2，并按相同顺序给出 6 个加粗维度。",
+      });
+    }
+    try {
+      const roster = resolveRankingRoster(facts, workspaceBrandName);
+      const headingNames = headings.map((heading) =>
+        normalizeEntityName(heading[0].replace(/^##\s+\d+[.、]\s+/, "")),
+      );
+      const targetNames = new Set(
+        [
+          roster.targetBrand,
+          ...(profile.fullName ?? []),
+          ...(profile.shortNames ?? []),
+        ]
+          .map(normalizeEntityName)
+          .filter(Boolean),
+      );
+      const actualCompetitors = headingNames.slice(1);
+      const expectedCompetitors = new Set(
+        roster.competitors.map(normalizeEntityName),
+      );
+      const actualSet = new Set(actualCompetitors);
+      const validEntitySet =
+        headingNames.length === 6 &&
+        targetNames.has(headingNames[0] ?? "") &&
+        actualCompetitors.length === 5 &&
+        actualSet.size === 5 &&
+        actualSet.size === expectedCompetitors.size &&
+        [...actualSet].every((name) => expectedCompetitors.has(name));
+      if (!validEntitySet) {
+        issues.push({
+          source: "deterministic",
+          category: "output-contract",
+          severity: "blocking",
+          message:
+            "ranking 第 1 家必须是目标品牌，第 2–6 家必须完整使用五家已确认竞品（竞品内部顺序不限）。",
+        });
+      }
+    } catch (error) {
+      issues.push({
+        source: "deterministic",
+        category: "output-contract",
+        severity: "blocking",
+        message:
+          error instanceof Error &&
+          error.message.startsWith(
+            "article_generation_ranking_competitors_insufficient",
+          )
+            ? "ranking 生成需要至少五家已确认竞品。"
+            : "ranking 名单无法从已批准事实中解析。",
       });
     }
   }

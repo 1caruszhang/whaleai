@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 
+import rankingCompetitorContractCases from "./rankingCompetitorContractCases.json";
+
 import {
   ARTICLE_GENERATION_CONCURRENCY,
   ARTICLE_GENERATION_POLICY_VERSION,
@@ -8,11 +10,21 @@ import {
   combineArticleReview,
   dealNarrativeSeeds,
   deterministicArticleReview,
+  filterValidRankingCompetitors,
   parseArticleReflection,
   parseGeneratedArticleBody,
+  resolveRankingRoster,
   shuffledNarrativeSeeds,
   validateDirectArticleSource,
 } from "./articleGeneration";
+
+describe("ranking competitor cross-process contract", () => {
+  it.each(rankingCompetitorContractCases)("$name", (contractCase) => {
+    expect(
+      filterValidRankingCompetitors(contractCase.competitors, contractCase),
+    ).toEqual(contractCase.expected);
+  });
+});
 
 const facts = [
   {
@@ -79,7 +91,18 @@ describe("direct article generation contract", () => {
         topic: "企业知识库指南",
         requestedTitle: "企业知识库指南",
         constraints: "",
-        plannedFacts: facts,
+        plannedFacts:
+          contentType === "ranking"
+            ? [
+                ...facts,
+                {
+                  factKey: "competitors",
+                  predicate: "enterprise-profile.competitors",
+                  normalizedValueJson:
+                    '["竞品甲","竞品乙","竞品丙","竞品丁","竞品戊"]',
+                },
+              ]
+            : facts,
       });
     for (const contentType of ["guide", "showcase", "news", "news_light"] as const) {
       expect(build(contentType).system).toContain("1800–2100 字");
@@ -105,6 +128,71 @@ describe("direct article generation contract", () => {
     expect(universal).toContain("约每 300 字 1 次");
     expect(universal).toContain("单一加粗实体全文不超过 3 次");
     expect(universal).toContain("H2 小标题不加粗");
+  });
+
+  it("requires five confirmed competitors and injects the fixed ranking roster", () => {
+    const rankingFacts = [
+      {
+        factKey: "brand-name",
+        predicate: "enterprise-profile.fullname",
+        normalizedValueJson: '"目标品牌"',
+      },
+      {
+        factKey: "competitors",
+        predicate: "enterprise-profile.competitors",
+        normalizedValueJson: '["竞品甲","竞品乙","竞品丙","竞品丁","竞品戊"]',
+      },
+    ];
+    expect(resolveRankingRoster(rankingFacts, "工作区名称")).toEqual({
+      targetBrand: "目标品牌",
+      competitors: ["竞品甲", "竞品乙", "竞品丙", "竞品丁", "竞品戊"],
+    });
+    const messages = buildArticleGenerationMessages({
+      brandName: "目标品牌",
+      productLine: "本地服务",
+      targetRegion: "成都",
+      contentType: "ranking",
+      topic: "本地服务怎么选",
+      requestedTitle: "本地服务六家对比",
+      constraints: "",
+      plannedFacts: rankingFacts,
+    });
+    expect(messages.user).toContain("目标品牌固定为陈列位 1");
+    expect(messages.user).toContain("竞品甲、竞品乙、竞品丙、竞品丁、竞品戊");
+    expect(messages.user).toContain("五家竞品在陈列位 2–6 的顺序可自由调整");
+
+    expect(() =>
+      resolveRankingRoster(
+        [
+          rankingFacts[0],
+          { ...rankingFacts[1], normalizedValueJson: '["竞品甲","竞品乙"]' },
+        ],
+        "工作区名称",
+      ),
+    ).toThrow("article_generation_ranking_competitors_insufficient:2");
+  });
+
+  it("excludes workspace self names and related brands from the ranking roster", () => {
+    const roster = resolveRankingRoster(
+      [
+        {
+          factKey: "related",
+          predicate: "enterprise-profile.relatedbrands",
+          normalizedValueJson: '["合作品牌"]',
+        },
+        {
+          factKey: "competitors",
+          predicate: "enterprise-profile.competitors",
+          normalizedValueJson:
+            '["工作区品牌","合作品牌","竞品甲","竞品乙","竞品丙","竞品丁","竞品戊"]',
+        },
+      ],
+      "工作区品牌",
+    );
+    expect(roster).toEqual({
+      targetBrand: "工作区品牌",
+      competitors: ["竞品甲", "竞品乙", "竞品丙", "竞品丁", "竞品戊"],
+    });
   });
 
   it("accepts plain markdown only when title and placeholders are valid", () => {
@@ -191,6 +279,96 @@ describe("article review gate", () => {
         expect.objectContaining({
           category: "geo-citability",
           severity: "blocking",
+        }),
+      ]),
+    );
+  });
+
+  it("blocks ranking bodies whose six headings are not the target plus five confirmed competitors", () => {
+    const rankingFacts = [
+      {
+        factKey: "brand-name",
+        predicate: "enterprise-profile.fullname",
+        normalizedValueJson: '"目标品牌"',
+      },
+      {
+        factKey: "competitors",
+        predicate: "enterprise-profile.competitors",
+        normalizedValueJson: '["竞品甲","竞品乙","竞品丙","竞品丁","竞品戊"]',
+      },
+    ];
+    const body = (names: readonly string[]) =>
+      [
+        "# 本地服务六家对比",
+        "",
+        ...names.flatMap((name, index) => [
+          `## ${index + 1}. ${name}`,
+          "• **服务范围**：信息",
+          "• **核心项目**：信息",
+          "• **适用人群**：信息",
+          "• **服务方式**：信息",
+          "• **区域覆盖**：信息",
+          "• **选择要点**：信息",
+        ]),
+      ].join("\n");
+    const valid = body([
+      "目标品牌",
+      "竞品丙",
+      "竞品甲",
+      "竞品戊",
+      "竞品乙",
+      "竞品丁",
+    ]);
+    expect(
+      deterministicArticleReview(
+        valid,
+        rankingFacts,
+        "ranking",
+        "目标品牌",
+      ).filter((issue) => issue.severity === "blocking"),
+    ).toEqual([]);
+
+    const invalid = body([
+      "目标品牌",
+      "竞品甲",
+      "竞品乙",
+      "竞品丙",
+      "竞品丁",
+      "目标品牌产品",
+    ]);
+    expect(
+      deterministicArticleReview(invalid, rankingFacts, "ranking", "目标品牌"),
+    ).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          category: "output-contract",
+          severity: "blocking",
+          message: expect.stringContaining("五家已确认竞品"),
+        }),
+      ]),
+    );
+
+    const targetNotFirst = body([
+      "竞品甲",
+      "目标品牌",
+      "竞品乙",
+      "竞品丙",
+      "竞品丁",
+      "竞品戊",
+    ]);
+    expect(
+      deterministicArticleReview(
+        targetNotFirst,
+        rankingFacts,
+        "ranking",
+        "目标品牌",
+      ),
+    ).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          category: "output-contract",
+          severity: "blocking",
+          message: expect.stringContaining("第 1 家必须是目标品牌"),
         }),
       ]),
     );

@@ -14,6 +14,7 @@ import {
   parseTitlePlan,
   parseTopicClusters,
   selectDistinctTitles,
+  selectContentTypePlannedFacts,
   selectPlannedFacts,
   validateTitleCandidates,
   titleBusinessAnchors,
@@ -546,6 +547,11 @@ export class TopicPlanService {
         factVectors,
       });
       for (const contentType of recommendation.types) {
+        const contentTypeFacts = selectContentTypePlannedFacts(
+          contentType,
+          plannedFacts,
+          context.facts,
+        );
         seeds.push({
           itemId: `item-${topic.id}-${contentType}`,
           topic,
@@ -554,7 +560,7 @@ export class TopicPlanService {
           typeSelectionReason:
             recommendation.reasons[contentType] ||
             `该类型适合${topic.searchIntent}搜索意图。`,
-          plannedFacts,
+          plannedFacts: contentTypeFacts,
         });
       }
     }

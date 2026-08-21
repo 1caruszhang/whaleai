@@ -1,0 +1,30 @@
+[
+  {
+    "name": "exclude identity related and duplicates",
+    "workspaceBrandName": "工作区品牌",
+    "fullNames": ["目标品牌有限公司"],
+    "shortNames": ["目标品牌"],
+    "relatedBrands": ["合作品牌"],
+    "competitors": [
+      "工作区品牌",
+      "目标品牌",
+      "合作品牌",
+      "竞品甲",
+      "竞品乙",
+      "竞品丙",
+      "竞品丁",
+      "竞品戊",
+      "竞品甲"
+    ],
+    "expected": ["竞品甲", "竞品乙", "竞品丙", "竞品丁", "竞品戊"]
+  },
+  {
+    "name": "workspace self does not fill the fifth slot",
+    "workspaceBrandName": "工作区品牌",
+    "fullNames": [],
+    "shortNames": [],
+    "relatedBrands": [],
+    "competitors": ["工作区品牌", "竞品甲", "竞品乙", "竞品丙", "竞品丁"],
+    "expected": ["竞品甲", "竞品乙", "竞品丙", "竞品丁"]
+  }
+]

@@ -1,19 +1,156 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from "vitest";
 
 import type { GeoOperationProjection } from '../../shared/geo/operation';
 import type { DistributionPlanProjection } from '../../shared/geo/distributionPlan';
 import type { PublishExecutionProjection } from '../../shared/geo/publishScheduler';
 import {
   accountTokenCacheFingerprint,
+  confirmRankingCompetitors,
   distributionPlanCardProjection,
   geoOperationControlFailure,
   geoOperationProjectionPayload,
   geoProbeSamplesFailure,
   planDistributionBudgetCny,
   publishExecutionCardProjection,
-} from './xiaojing-geo-tool';
+  RankingCompetitorConfirmationGate,
+  rankingCompetitorRequirement,
+} from "./xiaojing-geo-tool";
 
-function operation(overrides: Partial<GeoOperationProjection> = {}): GeoOperationProjection {
+describe("RankingCompetitorConfirmationGate", () => {
+  const source = {
+    kind: "direct" as const,
+    count: 1,
+    themes: ["本地服务六家对比"],
+    contentType: "ranking" as const,
+    constraints: "",
+  };
+
+  it("requires a prior insufficiency gate and a later verbatim user message", () => {
+    const gate = new RankingCompetitorConfirmationGate();
+    const input = {
+      subject: "目标品牌",
+      names: ["竞品丁", "竞品戊"],
+      userInstruction: "补充竞品丁和竞品戊",
+    };
+    expect(() =>
+      gate.authorize(input, {
+        id: "user-2",
+        content: input.userInstruction,
+      }),
+    ).toThrow("ranking_competitor_confirmation_not_requested");
+
+    gate.issue({
+      subject: "目标品牌",
+      source,
+      issuedAfterUserMessageId: "user-1",
+    });
+    expect(() =>
+      gate.authorize(input, {
+        id: "user-1",
+        content: input.userInstruction,
+      }),
+    ).toThrow("ranking_competitor_confirmation_user_reply_required");
+    expect(() =>
+      gate.authorize(input, {
+        id: "user-2",
+        content: "补充竞品丁",
+      }),
+    ).toThrow("ranking_competitor_confirmation_instruction_mismatch");
+    expect(
+      gate.authorize(input, {
+        id: "user-2",
+        content: input.userInstruction,
+      }),
+    ).toMatchObject({ subject: "目标品牌", source });
+  });
+
+  it("rejects names that are not present in the latest user message", () => {
+    const gate = new RankingCompetitorConfirmationGate();
+    gate.issue({
+      subject: "目标品牌",
+      source,
+      issuedAfterUserMessageId: "user-1",
+    });
+    expect(() =>
+      gate.authorize(
+        {
+          subject: "目标品牌",
+          names: ["模型搜索品牌"],
+          userInstruction: "补充竞品丁",
+        },
+        { id: "user-2", content: "补充竞品丁" },
+      ),
+    ).toThrow("ranking_competitor_confirmation_name_not_user_stated");
+  });
+});
+
+describe("confirmRankingCompetitors", () => {
+  it("adopts only the names explicitly confirmed in natural language and reports readiness", async () => {
+    const propose = vi.fn(async (input) => ({
+      id: "candidate-ranking",
+      baseVersion: 3,
+      ...input,
+    }));
+    const decide = vi.fn(async () => ({
+      current: {
+        normalizedValueJson: '["竞品甲","竞品乙","竞品丙","竞品丁","竞品戊"]',
+      },
+    }));
+    const authority = {
+      inspect: vi.fn(async () => null),
+      propose,
+      decide,
+    } as never;
+    const result = await confirmRankingCompetitors(
+      {
+        subject: "目标品牌",
+        names: ["竞品丁", "竞品戊"],
+        userInstruction: "补充竞品丁和竞品戊，并确认它们是竞品",
+      },
+      authority,
+    );
+
+    expect(propose).toHaveBeenCalledWith(
+      expect.objectContaining({
+        origin: "user-stated",
+        intent: "knowledge-update",
+        value: ["竞品丁", "竞品戊"],
+        source: expect.objectContaining({ profileProvenance: "asked" }),
+      }),
+    );
+    expect(decide).toHaveBeenCalledWith(
+      expect.objectContaining({
+        candidateId: "candidate-ranking",
+        decision: "adopt-new",
+        expectedCurrentVersion: 3,
+      }),
+    );
+    expect(result).toMatchObject({ confirmedCount: 5, readyForRanking: true });
+  });
+});
+
+describe("rankingCompetitorRequirement", () => {
+  it("turns the generation guard into a natural-language supplementation request", () => {
+    expect(
+      rankingCompetitorRequirement(
+        new Error("article_generation_ranking_competitors_insufficient:3"),
+      ),
+    ).toEqual({
+      kind: "ranking-competitors-required",
+      confirmedCount: 3,
+      missingCount: 2,
+      instruction:
+        "当前已确认 3 家竞品，还差 2 家。请用户直接在聊天中回复要补充并确认的竞品名称。",
+    });
+    expect(
+      rankingCompetitorRequirement(new Error("provider unavailable")),
+    ).toBeNull();
+  });
+});
+
+function operation(
+  overrides: Partial<GeoOperationProjection> = {},
+): GeoOperationProjection {
   return {
     id: 'op-1',
     workspaceId: 'brand-1',

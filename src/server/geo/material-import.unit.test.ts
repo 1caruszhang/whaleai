@@ -22,6 +22,14 @@ const context: BrandMaterialContext = {
   productLines: ['旗舰产品'],
 };
 
+function parseTestProfileFacts(
+  raw: string,
+  targetContext: BrandMaterialContext = context,
+  sourceText = raw,
+) {
+  return parseProfileFacts(raw, targetContext, sourceText);
+}
+
 function material(overrides: Partial<BrandMaterial> = {}): BrandMaterial {
   return {
     id: 'material-07',
@@ -229,7 +237,7 @@ describe('MaterialImportService', () => {
     expect(result.ok).toBe(true);
     expect(port.trace[0]).toBe('store:pasted-text');
     expect(port.trace[1]).toMatch(/^begin:text-/);
-    expect(current.propose).toHaveBeenCalledTimes(2);
+    expect(current.propose).toHaveBeenCalledTimes(3);
     expect(current.propose.mock.calls[0][0]).toMatchObject({
       origin: 'model-inferred',
       intent: 'knowledge-update',
@@ -260,10 +268,11 @@ describe('MaterialImportService', () => {
     expect(result.ok).toBe(true);
     if (!result.ok) throw new Error('expected success');
     expect(result.candidateIds).toEqual([
-      'candidate-enterprise-profile.fullName',
-      'candidate-enterprise-profile.products',
+      "candidate-enterprise-profile.fullName",
+      "candidate-enterprise-profile.products",
+      "candidate-enterprise-profile.competitors",
     ]);
-    expect(result.candidates).toHaveLength(2);
+    expect(result.candidates).toHaveLength(3);
     expect(result.candidates?.[0]).toMatchObject({
       id: 'candidate-enterprise-profile.fullName',
       workspaceId: 'brand-07',
@@ -441,13 +450,15 @@ describe('MaterialImportService', () => {
   });
 });
 
-describe('competitor enrichment (js_ai enrich real competitors)', () => {
-  const searchText = '鲸跃科技的主要竞争对手包括云帆信息与星河智能；供应商华创精密为其提供芯片。';
+describe("competitor enrichment (js_ai enrich real competitors)", () => {
+  const searchText =
+    "鲸跃科技的主要竞争对手包括云帆信息，并与星河智能直接竞争；供应商华创精密为其提供芯片。";
   const enrichmentResponse = JSON.stringify({
     competitors: [
       { name: '云帆信息', sourceExcerpt: '主要竞争对手包括云帆信息' },
       { name: '星河智能', sourceExcerpt: '与星河智能直接竞争' },
-      { name: '华创精密', sourceExcerpt: '供应商华创精密为其提供芯片' },
+      // 名字确实在语料中，但模型把供应关系改写成竞争关系；摘录非原文必须拒绝。
+      { name: '华创精密', sourceExcerpt: '主要竞争对手包括华创精密' },
       { name: '幻影科技', sourceExcerpt: '检索结果中不存在的公司' },
       { name: '鲸跃科技', sourceExcerpt: '鲸跃科技的主要竞争对手' },
     ],
@@ -460,7 +471,9 @@ describe('competitor enrichment (js_ai enrich real competitors)', () => {
           field: 'competitors',
           value: names,
           provenance,
-          ...(provenance === 'extracted' ? { sourceExcerpt: `材料原文：${names.join('、')}` } : {}),
+          ...(provenance === "extracted"
+            ? { sourceExcerpt: `材料明确的主要竞品包括：${names.join("、")}` }
+            : {}),
           confidence: 0.9,
           scope: { kind: 'brand' },
         },
@@ -498,8 +511,8 @@ describe('competitor enrichment (js_ai enrich real competitors)', () => {
     );
     expect(competitorsCall).toBeTruthy();
     expect(competitorsCall?.[0]).toMatchObject({
-      value: ['云帆信息', '星河智能', '华创精密'],
-      source: { profileProvenance: 'inferred' },
+      value: ["云帆信息", "星河智能"],
+      source: { profileProvenance: "inferred" },
     });
     // 依据合并保留逐名检索摘录，供卡片低置信组展示。
     expect(competitorsCall?.[0].source.excerpt).toContain('云帆信息：主要竞争对手包括云帆信息');
@@ -516,7 +529,7 @@ describe('competitor enrichment (js_ai enrich real competitors)', () => {
           { name: '云帆信息', sourceExcerpt: '与云帆信息直接竞争' },
         ],
       })],
-      search: async () => '鲸跃科技的主要竞争对手包括鲸悦科技与云帆信息。',
+      search: async () => '鲸跃科技的主要竞争对手包括鲸悦科技；与云帆信息直接竞争。',
     });
     const result = await current.value.importPastedText('公司资料');
 
@@ -533,17 +546,23 @@ describe('competitor enrichment (js_ai enrich real competitors)', () => {
       completeResponses: [competitorsFactResponse(['甲品牌'], 'extracted'), enrichmentResponse],
       search: async () => searchText,
     });
-    const result = await current.value.importPastedText('公司资料');
+    const result = await current.value.importPastedText(
+      '材料明确的主要竞品包括：甲品牌',
+    );
 
     expect(result.ok).toBe(true);
     const competitorsCalls = current.propose.mock.calls.filter(
       ([input]) => input.key.predicate === 'enterprise-profile.competitors',
     );
     expect(competitorsCalls).toHaveLength(1);
-    expect(competitorsCalls[0][0].value).toEqual(['甲品牌', '云帆信息', '星河智能', '华创精密']);
+    expect(competitorsCalls[0][0].value).toEqual([
+      "甲品牌",
+      "云帆信息",
+      "星河智能",
+    ]);
   });
 
-  it('skips enrichment silently when the search provider fails', async () => {
+  it("keeps an empty competitor row visible when the search provider fails", async () => {
     const port = new FakeMaterialPort();
     const current = service(port, {
       search: async () => { throw new Error('keyword-search unavailable'); },
@@ -551,7 +570,16 @@ describe('competitor enrichment (js_ai enrich real competitors)', () => {
     const result = await current.value.importPastedText('公司资料');
 
     expect(result).toMatchObject({ ok: true });
-    expect(current.propose).toHaveBeenCalledTimes(2);
+    expect(current.propose).toHaveBeenCalledTimes(3);
+    expect(current.propose).toHaveBeenCalledWith(
+      expect.objectContaining({
+        key: expect.objectContaining({
+          predicate: "enterprise-profile.competitors",
+        }),
+        value: [],
+        source: expect.objectContaining({ profileProvenance: "inferred" }),
+      }),
+    );
     expect(port.trace.at(-1)).toMatch(/finish:text-1:awaiting-confirmation/);
   });
 
@@ -579,14 +607,21 @@ describe('competitor enrichment (js_ai enrich real competitors)', () => {
     expect(current.complete).toHaveBeenCalledTimes(1);
   });
 
-  it('does not run enrichment when no search capability is injected', async () => {
+  it("keeps an empty competitor row visible when no search capability is injected", async () => {
     const port = new FakeMaterialPort();
     const current = service(port);
     const result = await current.value.importPastedText('公司资料');
 
     expect(result).toMatchObject({ ok: true });
-    expect(current.propose).toHaveBeenCalledTimes(2);
-    expect(current.inspect).not.toHaveBeenCalled();
+    expect(current.propose).toHaveBeenCalledTimes(3);
+    expect(current.propose).toHaveBeenCalledWith(
+      expect.objectContaining({
+        key: expect.objectContaining({
+          predicate: "enterprise-profile.competitors",
+        }),
+        value: [],
+      }),
+    );
   });
 
   it('uses complementary area+industry queries and tolerates per-query failure', async () => {
@@ -601,7 +636,7 @@ describe('competitor enrichment (js_ai enrich real competitors)', () => {
       search: async () => {
         call += 1;
         if (call === 2) throw new Error('search hiccup');
-        return call === 1 ? '云帆信息是本地同行' : '星河智能口碑不错';
+        return call === 1 ? '主要竞争对手包括云帆信息' : '与星河智能直接竞争';
       },
     });
     const result = await current.value.importPastedText('公司资料');
@@ -632,13 +667,13 @@ describe('competitor enrichment (js_ai enrich real competitors)', () => {
         if (query.includes('排行榜')) {
           return [
             { title: '医美十大品牌榜', url: 'https://rank.example/1', summary: '国际设备品牌与连锁榜单' },
-            { title: '新都医美哪家好', url: 'https://local.example/1', summary: '云帆信息是本地同行' },
+            { title: '新都医美哪家好', url: 'https://local.example/1', summary: '主要竞争对手包括云帆信息' },
           ];
         }
         return [
           // 跨 query 的同一 URL 只进语料一次。
-          { title: '新都医美哪家好', url: 'https://local.example/1', summary: '云帆信息是本地同行' },
-          { title: '本地口碑讨论', url: 'https://local.example/2', summary: '星河智能口碑不错' },
+          { title: '新都医美哪家好', url: 'https://local.example/1', summary: '主要竞争对手包括云帆信息' },
+          { title: '本地口碑讨论', url: 'https://local.example/2', summary: '与星河智能直接竞争' },
         ];
       },
     });
@@ -655,8 +690,8 @@ describe('competitor enrichment (js_ai enrich real competitors)', () => {
     const enrichmentPrompt = promptOf(current.complete.mock.calls.length - 1);
     // 语料 = 标题 + 摘要逐条拼接（无 LLM 改写），URL 去重后 3 条。
     expect(enrichmentPrompt).toContain('医美十大品牌榜');
-    expect(enrichmentPrompt).toContain('云帆信息是本地同行');
-    expect(enrichmentPrompt).toContain('星河智能口碑不错');
+    expect(enrichmentPrompt).toContain('主要竞争对手包括云帆信息');
+    expect(enrichmentPrompt).toContain('与星河智能直接竞争');
     const corpus = enrichmentPrompt.split('## 检索结果')[1] ?? '';
     expect(corpus.match(/医美十大品牌榜/g)).toHaveLength(1);
     expect(corpus.match(/新都医美哪家好/g)).toHaveLength(1);
@@ -682,7 +717,7 @@ describe('competitor enrichment (js_ai enrich real competitors)', () => {
     const competitorsCall = current.propose.mock.calls.find(
       ([input]) => input.key.predicate === 'enterprise-profile.competitors',
     );
-    expect(competitorsCall?.[0].value).toEqual(['云帆信息', '星河智能', '华创精密']);
+    expect(competitorsCall?.[0].value).toEqual(["云帆信息", "星河智能"]);
   });
 
   it('hydrates the enrichment profile from confirmed authority facts when the material lacks them', async () => {
@@ -823,7 +858,7 @@ describe('website fetch safety', () => {
 
 describe('profile and document compatibility', () => {
   it('keeps js_ai profile fields, required semantics and provenance safety while validating product-line scope', () => {
-    const facts = parseProfileFacts(JSON.stringify({ facts: [
+    const facts = parseTestProfileFacts(JSON.stringify({ facts: [
       { field: 'industry', value: 'AI', provenance: 'extracted', scope: { kind: 'brand' } },
       { field: 'coreAdvantages', value: ['快'], provenance: 'asked', scope: { kind: 'product-line', productLine: '不存在' } },
       { field: 'unknown', value: 'drop', provenance: 'extracted', sourceExcerpt: 'drop' },
@@ -834,35 +869,79 @@ describe('profile and document compatibility', () => {
     ]);
   });
 
-  it('splits composite list strings in array fields back into atomic items', () => {
-    const facts = parseProfileFacts(JSON.stringify({ facts: [
-      {
-        field: 'competitors',
-        value: '旭日酷车汽车音响、元音改汽车音响，美声汽车音响；声海汽车音响',
-        provenance: 'extracted',
-        sourceExcerpt: '竞品列表',
-      },
-      { field: 'customerCases', value: '服务200+客户，好评率98%', provenance: 'extracted', sourceExcerpt: '案例' },
-    ] }), context);
-    expect(facts.find((fact) => fact.field === 'competitors')?.value).toEqual([
-      '旭日酷车汽车音响', '元音改汽车音响', '美声汽车音响', '声海汽车音响',
+  it("splits composite list strings in array fields back into atomic items", () => {
+    const facts = parseTestProfileFacts(
+      JSON.stringify({
+        facts: [
+          {
+            field: "competitors",
+            value:
+              "旭日酷车汽车音响、元音改汽车音响，美声汽车音响；声海汽车音响",
+            provenance: "extracted",
+            sourceExcerpt:
+              "主要竞品包括旭日酷车汽车音响、元音改汽车音响、美声汽车音响、声海汽车音响",
+          },
+          {
+            field: "customerCases",
+            value: "服务200+客户，好评率98%",
+            provenance: "extracted",
+            sourceExcerpt: "案例",
+          },
+        ],
+      }),
+      context,
+    );
+    expect(facts.find((fact) => fact.field === "competitors")?.value).toEqual([
+      "旭日酷车汽车音响",
+      "元音改汽车音响",
+      "美声汽车音响",
+      "声海汽车音响",
     ]);
     // customerCases 是散文式描述，句内逗号不是列表分隔，不拆。
     expect(facts.find((fact) => fact.field === 'customerCases')?.value)
       .toEqual(['服务200+客户，好评率98%']);
   });
 
-  it('drops the brand itself (exact and bidirectional substring) from relatedBrands and competitors', () => {
-    const facts = parseProfileFacts(JSON.stringify({ facts: [
-      { field: 'fullName', value: '鲸跃科技有限公司', provenance: 'extracted', sourceExcerpt: '公司全称' },
-      { field: 'shortNames', value: ['小鲸'], provenance: 'extracted', sourceExcerpt: '简称' },
-      { field: 'relatedBrands', value: ['鲸跃科技有限公司', '成都鲸跃科技', '真伙伴品牌'], provenance: 'extracted', sourceExcerpt: '关联品牌' },
-      { field: 'competitors', value: ['小鲸', '云帆信息'], provenance: 'extracted', sourceExcerpt: '竞品' },
-    ] }), context);
-    expect(facts.find((fact) => fact.field === 'relatedBrands')?.value).toEqual(['真伙伴品牌']);
-    expect(facts.find((fact) => fact.field === 'competitors')?.value).toEqual(['云帆信息']);
+  it("drops the brand itself (exact and bidirectional substring) from relatedBrands and competitors", () => {
+    const facts = parseTestProfileFacts(
+      JSON.stringify({
+        facts: [
+          {
+            field: "fullName",
+            value: "鲸跃科技有限公司",
+            provenance: "extracted",
+            sourceExcerpt: "公司全称",
+          },
+          {
+            field: "shortNames",
+            value: ["小鲸"],
+            provenance: "extracted",
+            sourceExcerpt: "简称",
+          },
+          {
+            field: "relatedBrands",
+            value: ["鲸跃科技有限公司", "成都鲸跃科技", "真伙伴品牌"],
+            provenance: "extracted",
+            sourceExcerpt: "关联品牌",
+          },
+          {
+            field: "competitors",
+            value: ["小鲸", "云帆信息"],
+            provenance: "extracted",
+            sourceExcerpt: "主要竞品包括小鲸、云帆信息",
+          },
+        ],
+      }),
+      context,
+    );
+    expect(facts.find((fact) => fact.field === "relatedBrands")?.value).toEqual(
+      ["真伙伴品牌"],
+    );
+    expect(facts.find((fact) => fact.field === "competitors")?.value).toEqual([
+      "云帆信息",
+    ]);
     // 只剩自名的数组字段整条丢弃，不产出空数组候选。
-    const dropped = parseProfileFacts(JSON.stringify({ facts: [
+    const dropped = parseTestProfileFacts(JSON.stringify({ facts: [
       { field: 'relatedBrands', value: ['鲸跃科技'], provenance: 'inferred' },
     ] }), context);
     expect(dropped).toHaveLength(0);
@@ -876,21 +955,86 @@ describe('profile and document compatibility', () => {
       brandName: '炊班长',
       productLines: [],
     };
-    const facts = parseProfileFacts(JSON.stringify({ facts: [
-      { field: 'shortNames', value: ['炊班主'], provenance: 'extracted', sourceExcerpt: '简称' },
-      { field: 'competitors', value: ['炊事班', '真功夫'], provenance: 'extracted', sourceExcerpt: '竞品' },
-    ] }), brandContext);
+    const facts = parseTestProfileFacts(
+      JSON.stringify({
+        facts: [
+          {
+            field: "shortNames",
+            value: ["炊班主"],
+            provenance: "extracted",
+            sourceExcerpt: "简称",
+          },
+          {
+            field: "competitors",
+            value: ["炊事班", "真功夫"],
+            provenance: "extracted",
+            sourceExcerpt: "主要竞品包括炊事班、真功夫",
+          },
+        ],
+      }),
+      brandContext,
+    );
     // 形近变体被判自引用剔除，真实竞品不误伤。
     expect(facts.find((fact) => fact.field === 'competitors')?.value).toEqual(['真功夫']);
   });
 
-  describe('isSimilarSelfName', () => {
-    it('treats edit-distance-1 CJK short names as self references', () => {
-      expect(isSimilarSelfName('炊事班', '炊班长')).toBe(true);
-      expect(isSimilarSelfName('炊事班', '炊班主')).toBe(true);
-      expect(isSimilarSelfName('炊 事 班', '炊班长')).toBe(true);
-      expect(isSimilarSelfName('真功夫', '炊班长')).toBe(false);
-      expect(isSimilarSelfName('云帆信息', '鲸跃科技')).toBe(false);
+  it("rejects former employers, partners and merely mentioned brands as competitors", () => {
+    const facts = parseTestProfileFacts(
+      JSON.stringify({
+        facts: [
+          {
+            field: "relatedBrands",
+            value: ["合作品牌乙公司"],
+            provenance: "extracted",
+            sourceExcerpt: "我们与合作品牌乙公司长期合作",
+          },
+          {
+            field: "competitors",
+            value: [
+              "前东家甲公司",
+              "合作品牌乙公司",
+              "材料提及丙公司",
+              "真实竞品丁公司",
+            ],
+            provenance: "extracted",
+            sourceExcerpt:
+              "创始人曾任职于前东家甲公司；我们与合作品牌乙公司长期合作；材料提及丙公司；主要竞品包括真实竞品丁公司。",
+          },
+        ],
+      }),
+      context,
+    );
+
+    expect(facts.find((fact) => fact.field === "competitors")?.value).toEqual([
+      "真实竞品丁公司",
+    ]);
+  });
+
+  it("rejects a model-rewritten competitor excerpt that is absent from the material", () => {
+    const facts = parseTestProfileFacts(
+      JSON.stringify({
+        facts: [
+          {
+            field: "competitors",
+            value: ["甲公司"],
+            provenance: "extracted",
+            sourceExcerpt: "主要竞争对手包括甲公司",
+          },
+        ],
+      }),
+      context,
+      "供应商甲公司为我们提供设备。",
+    );
+    expect(facts).toEqual([]);
+  });
+
+  describe("isSimilarSelfName", () => {
+    it("treats edit-distance-1 CJK short names as self references", () => {
+      expect(isSimilarSelfName("炊事班", "炊班长")).toBe(true);
+      expect(isSimilarSelfName("炊事班", "炊班主")).toBe(true);
+      expect(isSimilarSelfName("炊 事 班", "炊班长")).toBe(true);
+      expect(isSimilarSelfName("真功夫", "炊班长")).toBe(false);
+      expect(isSimilarSelfName("云帆信息", "鲸跃科技")).toBe(false);
     });
 
     it('stays scoped to 2–4 char CJK names (length 1 exempt, length ≥5 uses legacy rules)', () => {
@@ -907,7 +1051,7 @@ describe('profile and document compatibility', () => {
   // 必须合并为一条候选；放行会造成同一 fact key 多条候选，整卡确认时第二条
   // 必然触发 knowledge_version_conflict（expected 0, actual 1）。
   it('merges duplicate same-field same-scope facts into one candidate (contactInfo array)', () => {
-    const facts = parseProfileFacts(JSON.stringify({ facts: [
+    const facts = parseTestProfileFacts(JSON.stringify({ facts: [
       { field: 'contactInfo', value: '18111265132', provenance: 'extracted', sourceExcerpt: '龙泉店：181 1126 5132' },
       { field: 'contactInfo', value: '17828430692', provenance: 'extracted', sourceExcerpt: '犀浦店：178 2843 0692' },
     ] }), context);
@@ -921,7 +1065,7 @@ describe('profile and document compatibility', () => {
   });
 
   it('keeps the strongest scalar fact and downgrades merged arrays containing inferred items', () => {
-    const facts = parseProfileFacts(JSON.stringify({ facts: [
+    const facts = parseTestProfileFacts(JSON.stringify({ facts: [
       { field: 'industry', value: '汽车音响改装', provenance: 'extracted', sourceExcerpt: '行业' },
       { field: 'industry', value: '汽车美容', provenance: 'inferred' },
       { field: 'products', value: ['音响改装'], provenance: 'extracted', sourceExcerpt: '产品' },
@@ -939,7 +1083,7 @@ describe('profile and document compatibility', () => {
   });
 
   it('does not merge same-field facts across different scopes', () => {
-    const facts = parseProfileFacts(JSON.stringify({ facts: [
+    const facts = parseTestProfileFacts(JSON.stringify({ facts: [
       { field: 'coreAdvantages', value: ['品牌级优势'], provenance: 'extracted', sourceExcerpt: '品牌' },
       { field: 'coreAdvantages', value: ['产品线优势'], provenance: 'extracted', sourceExcerpt: '产品线', scope: { kind: 'product-line', productLine: '旗舰产品' } },
     ] }), context);
@@ -1057,7 +1201,7 @@ describe('MaterialImportService billing permits (ticket 07)', () => {
     ]);
   });
 
-  it('reports the unit as failure (per-document refund) when extraction fails', async () => {
+  it('keeps the required competitor row when extraction returns no other facts', async () => {
     const port = new FakeMaterialPort();
     const permits = permitPort();
     const subject = billedService(port, permits.port, {
@@ -1066,10 +1210,18 @@ describe('MaterialImportService billing permits (ticket 07)', () => {
 
     const result = await subject.value.importPastedText('空内容');
 
-    expect(result.ok).toBe(false);
+    expect(result.ok).toBe(true);
+    expect(subject.propose).toHaveBeenCalledWith(
+      expect.objectContaining({
+        key: expect.objectContaining({
+          predicate: 'enterprise-profile.competitors',
+        }),
+        value: [],
+      }),
+    );
     expect(permits.calls).toEqual([
       { kind: 'apply', permitId: 'mat:attempt-text-1-1', operation: 'material_import', units: 1 },
-      { kind: 'report', permitId: 'mat:attempt-text-1-1', unit: 0, outcome: 'failure' },
+      { kind: 'report', permitId: 'mat:attempt-text-1-1', unit: 0, outcome: 'success' },
     ]);
   });
 

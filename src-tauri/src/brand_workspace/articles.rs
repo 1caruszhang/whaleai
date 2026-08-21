@@ -6,7 +6,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs::OpenOptions;
 use std::io::Write;
 
-const POLICY_VERSION: &str = "xiaojing-content-prompt-v2";
+const POLICY_VERSION: &str = "xiaojing-content-prompt-v3";
 const MAX_ARTICLES: usize = 20;
 const MAX_BODY_BYTES: usize = 256 * 1024;
 
@@ -390,7 +390,11 @@ impl BrandWorkspaceStore {
             seeds,
         ) = match request.source_kind.as_str() {
             "confirmed-topic-plan" => {
-                prepare_plan_article_seeds(&transaction, request.topic_plan_id.as_deref())?
+                prepare_plan_article_seeds(
+                    &transaction,
+                    &workspace,
+                    request.topic_plan_id.as_deref(),
+                )?
             }
             "direct" => prepare_direct_article_seeds(
                 &transaction,
@@ -1145,6 +1149,7 @@ type PreparedArticleSeeds = (
 
 fn prepare_plan_article_seeds(
     connection: &Connection,
+    workspace: &BrandWorkspace,
     requested_plan_id: Option<&str>,
 ) -> Result<PreparedArticleSeeds, String> {
     let plan_id = if let Some(id) = requested_plan_id {
@@ -1223,6 +1228,36 @@ fn prepare_plan_article_seeds(
     {
         return Err("article_generation_plan_selection_invalid".to_string());
     }
+    let selected_has_ranking = selected.iter().any(|item_id| {
+        by_id
+            .get(item_id)
+            .and_then(|item| item.get("contentType"))
+            .and_then(Value::as_str)
+            == Some("ranking")
+    });
+    // 排行榜允许用户在已确认选题之后用自然语言补足竞品。文章开始时把
+    // 最新权威快照中的 roster 输入（身份/关联主体/竞品）覆盖进 ranking
+    // item；其余 plannedFacts 仍须在该快照中逐项同值。
+    let effective_knowledge_version = if selected_has_ranking {
+        connection
+            .query_row(
+                "SELECT COALESCE(MAX(version), 0) FROM knowledge_versions",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(|error| format!("read ranking knowledge version: {error}"))?
+            .max(knowledge_version)
+    } else {
+        knowledge_version
+    };
+    let effective_snapshot = if selected_has_ranking {
+        Some(read_snapshot_facts(
+            connection,
+            effective_knowledge_version,
+        )?)
+    } else {
+        None
+    };
     let mut seeds = Vec::with_capacity(selected.len());
     for item_id in &selected {
         let item = by_id
@@ -1235,12 +1270,21 @@ fn prepare_plan_article_seeds(
         let content_type = required_article_string(item, "contentType", 40)?;
         validate_content_type(content_type)?;
         let title = required_article_string(item, "title", 200)?.to_string();
-        let facts = item
+        let mut facts = item
             .get("plannedFacts")
             .filter(|facts| facts.as_array().is_some_and(|facts| !facts.is_empty()))
             .cloned()
             .ok_or_else(|| "article_generation_plan_facts_invalid".to_string())?;
-        validate_snapshot_facts(connection, knowledge_version, &facts)?;
+        if content_type == "ranking" {
+            facts = replace_ranking_roster_facts(
+                &facts,
+                effective_snapshot
+                    .as_ref()
+                    .ok_or_else(|| "article_generation_knowledge_snapshot_empty".to_string())?,
+            )?;
+            validate_ranking_competitors(&facts, &workspace.name)?;
+        }
+        validate_snapshot_facts(connection, effective_knowledge_version, &facts)?;
         seeds.push(ArticleSeed {
             source_plan_item_id: Some(item_id.clone()),
             content_type: content_type.to_string(),
@@ -1264,7 +1308,7 @@ fn prepare_plan_article_seeds(
         "selectedItemIds": selected,
     });
     Ok((
-        knowledge_version,
+        effective_knowledge_version,
         product_line,
         target_region,
         Some(plan_id),
@@ -1312,6 +1356,9 @@ fn prepare_direct_article_seeds(
     if facts.as_array().is_none_or(Vec::is_empty) {
         return Err("article_generation_knowledge_snapshot_empty".to_string());
     }
+    if spec.content_type == "ranking" {
+        validate_ranking_competitors(&facts, &workspace.name)?;
+    }
     let seeds = (0..spec.count)
         .map(|index| {
             let theme = themes[index % themes.len()].clone();
@@ -1340,6 +1387,110 @@ fn prepare_direct_article_seeds(
         operation_spec,
         seeds,
     ))
+}
+
+fn fact_predicate_matches(fact: &Value, suffix: &str) -> bool {
+    fact.get("predicate")
+        .and_then(Value::as_str)
+        .is_some_and(|predicate| predicate.to_lowercase().ends_with(suffix))
+}
+
+fn fact_string_values(facts: &Value, suffix: &str) -> Vec<String> {
+    facts
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|fact| fact_predicate_matches(fact, suffix))
+        .flat_map(|fact| {
+            let parsed = fact
+                .get("normalizedValueJson")
+                .and_then(Value::as_str)
+                .and_then(|raw| serde_json::from_str::<Value>(raw).ok());
+            match parsed {
+                Some(Value::String(value)) => vec![value],
+                Some(Value::Array(values)) => values
+                    .into_iter()
+                    .filter_map(|value| value.as_str().map(str::to_string))
+                    .collect(),
+                _ => Vec::new(),
+            }
+        })
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .collect()
+}
+
+fn normalize_ranking_entity_name(value: &str) -> String {
+    value
+        .chars()
+        .filter_map(|character| {
+            let code = character as u32;
+            if character.is_whitespace() {
+                None
+            } else if (0xff01..=0xff5e).contains(&code) {
+                char::from_u32(code - 0xfee0).map(|value| value.to_ascii_lowercase())
+            } else {
+                Some(character.to_ascii_lowercase())
+            }
+        })
+        .collect()
+}
+
+fn ranking_roster_predicate(fact: &Value) -> bool {
+    [".fullname", ".shortnames", ".relatedbrands", ".competitors"]
+        .iter()
+        .any(|suffix| fact_predicate_matches(fact, suffix))
+}
+
+fn valid_ranking_competitors(facts: &Value, workspace_name: &str) -> HashSet<String> {
+    let excluded_names = std::iter::once(workspace_name.to_string())
+        .chain(fact_string_values(facts, ".fullname"))
+        .chain(fact_string_values(facts, ".shortnames"))
+        .chain(fact_string_values(facts, ".relatedbrands"))
+        .map(|name| normalize_ranking_entity_name(&name))
+        .filter(|name| !name.is_empty())
+        .collect::<Vec<_>>();
+    let competitors = fact_string_values(facts, ".competitors")
+        .into_iter()
+        .map(|name| normalize_ranking_entity_name(&name))
+        .filter(|name| {
+            !name.is_empty()
+                && !excluded_names.iter().any(|blocked| {
+                    blocked == name || blocked.contains(name.as_str()) || name.contains(blocked)
+                })
+        })
+        .collect::<HashSet<_>>();
+    competitors
+}
+
+fn validate_ranking_competitors(facts: &Value, workspace_name: &str) -> Result<(), String> {
+    let competitors = valid_ranking_competitors(facts, workspace_name);
+    if competitors.len() < 5 {
+        return Err(format!(
+            "article_generation_ranking_competitors_insufficient:{}",
+            competitors.len()
+        ));
+    }
+    Ok(())
+}
+
+fn replace_ranking_roster_facts(planned: &Value, snapshot: &Value) -> Result<Value, String> {
+    let roster_facts = snapshot
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|fact| ranking_roster_predicate(fact))
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut facts = planned
+        .as_array()
+        .ok_or_else(|| "article_generation_plan_facts_invalid".to_string())?
+        .iter()
+        .filter(|fact| !ranking_roster_predicate(fact))
+        .cloned()
+        .collect::<Vec<_>>();
+    facts.extend(roster_facts);
+    Ok(Value::Array(facts))
 }
 
 fn read_snapshot_facts(connection: &Connection, knowledge_version: i64) -> Result<Value, String> {
@@ -1846,6 +1997,221 @@ mod tests {
 
     fn body(title: &str) -> String {
         format!("# {title}\n\n## 定义\n品牌成立10年。\n\n## 清单\n- 核对事实\n- 固定版本")
+    }
+
+    fn append_competitor_snapshot(connection: &Connection, names: &[&str]) {
+        let competitors = serde_json::to_string(names).expect("competitor JSON");
+        connection
+            .execute_batch("PRAGMA foreign_keys=OFF;")
+            .expect("disable fixture foreign keys");
+        connection
+            .execute(
+                "INSERT INTO knowledge_current_facts
+                    (fact_key, subject, predicate, scope_json, normalized_value_json, unit,
+                     version, confirmed_by, confirmed_at, updated_at)
+                 VALUES ('fact-competitors', '品牌', 'enterprise-profile.competitors', '{}', ?1,
+                         NULL, 1, 'desktop-user', '2026-01-02T00:00:00Z', '2026-01-02T00:00:00Z')",
+                [&competitors],
+            )
+            .expect("competitor current fact");
+        connection
+            .execute(
+                "INSERT INTO knowledge_versions
+                    (version, decision_id, actor_session_id, snapshot_hash, created_at)
+                 VALUES (2, 'decision-competitors', 'session-article', 'hash-v2',
+                         '2026-01-02T00:00:00Z')",
+                [],
+            )
+            .expect("competitor knowledge version");
+        connection
+            .execute(
+                "INSERT INTO knowledge_version_facts
+                    (knowledge_version, fact_key, fact_version, normalized_value_json, unit, sources_json)
+                 VALUES (2, 'fact-1', 1, '\"成立10年\"', NULL, '[]'),
+                        (2, 'fact-competitors', 1, ?1, NULL, '[]')",
+                [&competitors],
+            )
+            .expect("competitor snapshot facts");
+        connection
+            .execute_batch("PRAGMA foreign_keys=ON;")
+            .expect("restore fixture foreign keys");
+    }
+
+    #[test]
+    fn ranking_competitor_contract_excludes_workspace_identity_and_related_brands() {
+        let cases: Vec<Value> = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../src/shared/geo/rankingCompetitorContractCases.json"
+        )))
+        .expect("shared ranking competitor contract cases");
+        for contract_case in cases {
+            let values = |key: &str| {
+                contract_case
+                    .get(key)
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default()
+            };
+            let facts = json!([
+                {
+                    "predicate": "enterprise-profile.fullName",
+                    "normalizedValueJson": serde_json::to_string(&values("fullNames")).unwrap()
+                },
+                {
+                    "predicate": "enterprise-profile.shortNames",
+                    "normalizedValueJson": serde_json::to_string(&values("shortNames")).unwrap()
+                },
+                {
+                    "predicate": "enterprise-profile.relatedBrands",
+                    "normalizedValueJson": serde_json::to_string(&values("relatedBrands")).unwrap()
+                },
+                {
+                    "predicate": "enterprise-profile.competitors",
+                    "normalizedValueJson": serde_json::to_string(&values("competitors")).unwrap()
+                }
+            ]);
+            let workspace_name = contract_case
+                .get("workspaceBrandName")
+                .and_then(Value::as_str)
+                .unwrap();
+            let actual = valid_ranking_competitors(&facts, workspace_name);
+            let expected = values("expected")
+                .into_iter()
+                .filter_map(|value| value.as_str().map(normalize_ranking_entity_name))
+                .collect::<HashSet<_>>();
+            assert_eq!(actual, expected, "case: {}", contract_case["name"]);
+            let expected_count = expected.len();
+            let validation = validate_ranking_competitors(&facts, workspace_name);
+            if expected_count >= 5 {
+                validation.expect("five valid competitors");
+            } else {
+                assert_eq!(
+                    validation.unwrap_err(),
+                    format!("article_generation_ranking_competitors_insufficient:{expected_count}")
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn ranking_requires_five_confirmed_competitors_before_creating_an_operation() {
+        let (_root, store, workspace) = seeded_store();
+        let error = store
+            .start_article_operation(
+                &workspace.id,
+                "session-article",
+                ArticleOperationStartRequest {
+                    source_kind: "direct".to_string(),
+                    topic_plan_id: None,
+                    direct_spec: Some(ArticleDirectSpec {
+                        count: 1,
+                        themes: vec!["本地服务六家对比".to_string()],
+                        content_type: "ranking".to_string(),
+                        constraints: String::new(),
+                    }),
+                },
+            )
+            .expect_err("ranking without competitors must fail before persistence");
+        assert_eq!(
+            error,
+            "article_generation_ranking_competitors_insufficient:0"
+        );
+
+        let connection = open_database(&workspace).expect("db");
+        append_competitor_snapshot(
+            &connection,
+            &["竞品甲", "竞品乙", "竞品丙", "竞品丁", "竞品戊"],
+        );
+        drop(connection);
+        let operation = store
+            .start_article_operation(
+                &workspace.id,
+                "session-article",
+                ArticleOperationStartRequest {
+                    source_kind: "direct".to_string(),
+                    topic_plan_id: None,
+                    direct_spec: Some(ArticleDirectSpec {
+                        count: 1,
+                        themes: vec!["本地服务六家对比".to_string()],
+                        content_type: "ranking".to_string(),
+                        constraints: String::new(),
+                    }),
+                },
+            )
+            .expect("ranking with five confirmed competitors");
+        assert_eq!(operation.knowledge_version, 2);
+    }
+
+    #[test]
+    fn confirmed_ranking_plan_overlays_a_later_natural_language_competitor_snapshot() {
+        let (_root, store, workspace) = seeded_store();
+        let connection = open_database(&workspace).expect("db");
+        let topics = json!([{
+            "id": "topic-ranking",
+            "name": "本地服务对比",
+            "summary": "本地服务六家客观对比"
+        }]);
+        let items = json!([{
+            "id": "selected-ranking",
+            "topicId": "topic-ranking",
+            "contentType": "ranking",
+            "typeSelectionReason": "适合并列清单",
+            "title": "2026 年本地服务六家对比",
+            "plannedFacts": [{
+                "factKey": "fact-1",
+                "predicate": "profile.history",
+                "normalizedValueJson": "\"成立10年\""
+            }],
+            "approvalStatus": "approved"
+        }]);
+        connection
+            .execute_batch("PRAGMA foreign_keys=OFF;")
+            .expect("disable fixture foreign keys");
+        connection
+            .execute(
+                "INSERT INTO geo_topic_plans
+                    (id, operation_id, created_by_session_id, question_pool_id,
+                     question_pool_revision, knowledge_version, product_line, target_region,
+                     policy_version, status, revision, topics_json, items_json,
+                     selected_item_ids_json, model_audit_json, provider_snapshot_json,
+                     model_attempts_json, created_at, updated_at)
+                 VALUES ('plan-ranking', 'plan-operation-ranking', 'session-article', 'pool-ranking',
+                         1, 1, '知识服务', '中国', 'topic-policy', 'confirmed', 1,
+                         ?1, ?2, '[\"selected-ranking\"]', '{}', '{}', '[]',
+                         '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+                params![topics.to_string(), items.to_string()],
+            )
+            .expect("ranking plan fixture");
+        connection
+            .execute_batch("PRAGMA foreign_keys=ON;")
+            .expect("restore fixture foreign keys");
+        append_competitor_snapshot(
+            &connection,
+            &["竞品甲", "竞品乙", "竞品丙", "竞品丁", "竞品戊"],
+        );
+        drop(connection);
+
+        let operation = store
+            .start_article_operation(
+                &workspace.id,
+                "session-article",
+                ArticleOperationStartRequest {
+                    source_kind: "confirmed-topic-plan".to_string(),
+                    topic_plan_id: Some("plan-ranking".to_string()),
+                    direct_spec: None,
+                },
+            )
+            .expect("ranking plan resumes after natural-language supplement");
+        assert_eq!(operation.knowledge_version, 2);
+        assert!(operation.articles[0]
+            .planned_facts
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|fact| fact
+                .get("predicate")
+                .and_then(Value::as_str)
+                .is_some_and(|predicate| predicate.to_lowercase().ends_with(".competitors"))));
     }
 
     #[test]

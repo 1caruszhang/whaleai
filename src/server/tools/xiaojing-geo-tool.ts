@@ -43,9 +43,10 @@ import {
   GeoProbeSamplesService,
   type GeoProbeSamplesReport,
 } from '../geo/probe-samples';
-import type {
-  ArticleOperationProjection,
-  ArticleOperationSource,
+import {
+  filterValidRankingCompetitors,
+  type ArticleOperationProjection,
+  type ArticleOperationSource,
 } from '../../shared/geo/articleGeneration';
 import type { QuestionPoolProjection } from '../../shared/geo/questionPool';
 import { cnyToPoints, pointsToCny } from '../../shared/geo/points';
@@ -69,6 +70,7 @@ import {
   type GateRevisionReceipt,
 } from '../geo/gate-revision';
 import { managementApi } from '../utils/management-api-client';
+import { loadSessionTranscript } from '../SessionStore';
 import {
   isSessionFileReference,
   isSessionFileTextReadable,
@@ -431,6 +433,187 @@ export async function proposeBrandFact(input: KnowledgeProposalInput) {
   };
 }
 
+export interface RankingCompetitorConfirmationChallenge {
+  subject: string;
+  source: ArticleOperationSource;
+  issuedAfterUserMessageId: string;
+}
+
+function normalizedConfirmationText(value: string): string {
+  return value.trim().replace(/\s+/g, " ").toLocaleLowerCase("zh-CN");
+}
+
+/** Session-owned、Sidecar 生命周期内的一次排行榜竞品补充门。 */
+export class RankingCompetitorConfirmationGate {
+  private pending: RankingCompetitorConfirmationChallenge | null = null;
+
+  issue(challenge: RankingCompetitorConfirmationChallenge): void {
+    this.pending = structuredClone(challenge);
+  }
+
+  clear(): void {
+    this.pending = null;
+  }
+
+  authorize(
+    input: { subject: string; names: string[]; userInstruction: string },
+    latestUserMessage: { id: string; content: string } | null,
+  ): RankingCompetitorConfirmationChallenge {
+    const pending = this.pending;
+    if (!pending) throw new Error("ranking_competitor_confirmation_not_requested");
+    if (input.subject.trim() !== pending.subject) {
+      throw new Error("ranking_competitor_confirmation_subject_mismatch");
+    }
+    if (
+      !latestUserMessage ||
+      latestUserMessage.id === pending.issuedAfterUserMessageId
+    ) {
+      throw new Error("ranking_competitor_confirmation_user_reply_required");
+    }
+    const latestInstruction = normalizedConfirmationText(
+      latestUserMessage.content,
+    );
+    if (
+      !latestInstruction ||
+      normalizedConfirmationText(input.userInstruction) !== latestInstruction
+    ) {
+      throw new Error("ranking_competitor_confirmation_instruction_mismatch");
+    }
+    const missingFromUserMessage = input.names.filter(
+      (name) =>
+        !latestInstruction.includes(normalizedConfirmationText(name)),
+    );
+    if (missingFromUserMessage.length > 0) {
+      throw new Error(
+        `ranking_competitor_confirmation_name_not_user_stated:${missingFromUserMessage.join("、")}`,
+      );
+    }
+    return structuredClone(pending);
+  }
+}
+
+type RankingCompetitorAuthority = Pick<
+  ReturnType<typeof createKnowledgeAuthority>,
+  "inspect" | "propose" | "decide"
+>;
+
+function parsedStringList(raw: string | null | undefined): string[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    return (Array.isArray(parsed) ? parsed : [parsed])
+      .filter(
+        (value): value is string =>
+          typeof value === "string" && Boolean(value.trim()),
+      )
+      .map((value) => value.trim());
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * 排行榜不足五家时的自然语言补充入口。只接受用户在当前消息中明确确认的
+ * 名称；工具把原话作为 asked 来源，经同一个 KnowledgeAuthority 提议并立即
+ * adopt，随后 Agent 可在同一回合重试文章生成。模型发现的名字仍走普通候选
+ * 卡，不能调用本入口自动确认。
+ */
+export async function confirmRankingCompetitors(
+  input: { subject: string; names: string[]; userInstruction: string },
+  authority: RankingCompetitorAuthority = knowledgeAuthority(),
+) {
+  const subject = input.subject.trim();
+  const userInstruction = input.userInstruction.trim();
+  const names = [
+    ...new Set(input.names.map((name) => name.trim()).filter(Boolean)),
+  ];
+  if (!subject || !userInstruction || names.length === 0) {
+    throw new Error("ranking_competitor_confirmation_invalid");
+  }
+  const [fullName, shortNames, relatedBrands] = await Promise.all([
+    authority.inspect({
+      subject,
+      predicate: "enterprise-profile.fullname",
+      scope: { entityScope: "brand" },
+    }),
+    authority.inspect({
+      subject,
+      predicate: "enterprise-profile.shortnames",
+      scope: { entityScope: "brand" },
+    }),
+    authority.inspect({
+      subject,
+      predicate: "enterprise-profile.relatedbrands",
+      scope: { entityScope: "brand" },
+    }),
+  ]);
+  const identity = {
+    workspaceBrandName: subject,
+    fullNames: parsedStringList(fullName?.normalizedValueJson),
+    shortNames: parsedStringList(shortNames?.normalizedValueJson),
+    relatedBrands: parsedStringList(relatedBrands?.normalizedValueJson),
+  };
+  const allowedNames = filterValidRankingCompetitors(names, identity);
+  const invalid = names.filter((name) => !allowedNames.includes(name));
+  if (invalid.length > 0) {
+    throw new Error(`ranking_competitor_name_invalid:${invalid.join("、")}`);
+  }
+  const candidate = await authority.propose({
+    rawInput: userInstruction,
+    origin: "user-stated",
+    intent: "knowledge-update",
+    key: {
+      subject,
+      predicate: "enterprise-profile.competitors",
+      scope: { entityScope: "brand" },
+    },
+    value: allowedNames,
+    source: {
+      excerpt: userInstruction,
+      confidence: 1,
+      profileProvenance: "asked",
+    },
+  });
+  const result = await authority.decide({
+    candidateId: candidate.id,
+    decision: "adopt-new",
+    expectedCurrentVersion: candidate.baseVersion,
+    actorId: "desktop-user",
+    reason: userInstruction,
+  });
+  const competitors = parsedStringList(result.current?.normalizedValueJson);
+  const confirmedCount = filterValidRankingCompetitors(
+    competitors,
+    identity,
+  ).length;
+  return {
+    kind: "ranking-competitors-confirmed",
+    added: names,
+    confirmedCount,
+    readyForRanking: confirmedCount >= 5,
+  };
+}
+
+export function rankingCompetitorRequirement(error: unknown): {
+  kind: "ranking-competitors-required";
+  confirmedCount: number;
+  missingCount: number;
+  instruction: string;
+} | null {
+  const message = error instanceof Error ? error.message : String(error);
+  const match =
+    /article_generation_ranking_competitors_insufficient:(\d+)/.exec(message);
+  if (!match) return null;
+  const confirmedCount = Math.min(4, Math.max(0, Number(match[1])));
+  const missingCount = 5 - confirmedCount;
+  return {
+    kind: "ranking-competitors-required",
+    confirmedCount,
+    missingCount,
+    instruction: `当前已确认 ${confirmedCount} 家竞品，还差 ${missingCount} 家。请用户直接在聊天中回复要补充并确认的竞品名称。`,
+  };
+}
+
 export async function inspectBrandFact(key: FactKeyInput) {
   return knowledgeAuthority().inspect(key);
 }
@@ -574,6 +757,16 @@ export async function createXiaojingGeoServer() {
   getXiaojingGeoProviderCapabilities();
   const { createSdkMcpServer, tool } = await import('@anthropic-ai/claude-agent-sdk');
   const { z } = await import('zod/v4');
+  const rankingCompetitorGate = new RankingCompetitorConfirmationGate();
+  const latestUserMessage = async () => {
+    const transcript = await loadSessionTranscript(context.sessionId);
+    const latest = [...transcript.messages]
+      .reverse()
+      .find((message) => message.role === 'user');
+    return latest
+      ? { id: latest.id, content: latest.content }
+      : null;
+  };
   const operationReferenceSchema = z.object({
     kind: z.enum(GEO_OPERATION_REFERENCE_KINDS),
     id: z
@@ -764,8 +957,75 @@ export async function createXiaojingGeoServer() {
         { alwaysLoad: true },
       ),
       tool(
-        'inspect_brand_fact',
-        'Read the current authoritative value for one exact structured fact key. Scope and effective time are part of the key and must be supplied explicitly when applicable.',
+        "confirm_ranking_competitors",
+        "Confirm competitor names the user explicitly supplied or explicitly accepted in their latest natural-language message after ranking generation reported fewer than five confirmed competitors. The server requires a pending insufficiency gate, checks the latest persisted user message verbatim, and rejects names absent from it. Never use model-inferred, searched, or merely mentioned names. When the valid total reaches five, this tool itself resumes the original article request and returns the article operation; do not call generate_articles again.",
+        {
+          subject: z
+            .string()
+            .min(1)
+            .max(200)
+            .describe(
+              "The target brand subject used by its enterprise-profile facts.",
+            ),
+          names: z
+            .array(z.string().min(1).max(200))
+            .min(1)
+            .max(20)
+            .describe(
+              "Only competitor names explicitly confirmed by the user in the latest message.",
+            ),
+          userInstruction: z
+            .string()
+            .min(1)
+            .max(2_000)
+            .describe(
+              "The user latest natural-language confirmation quoted verbatim for audit.",
+            ),
+        },
+        async (input) => {
+          const latest = await latestUserMessage();
+          const challenge = rankingCompetitorGate.authorize(input, latest);
+          const confirmed = await confirmRankingCompetitors(input);
+          if (!confirmed.readyForRanking) {
+            return {
+              content: [
+                { type: "text" as const, text: JSON.stringify(confirmed) },
+              ],
+            };
+          }
+          rankingCompetitorGate.clear();
+          try {
+            const operation = await articleService().start({
+              ...stageIdentity(),
+              source: challenge.source,
+            });
+            return {
+              content: [
+                {
+                  type: "text" as const,
+                  text: JSON.stringify({ kind: "article-operation", operation }),
+                },
+              ],
+            };
+          } catch (error) {
+            const requirement = rankingCompetitorRequirement(error);
+            if (!requirement) throw error;
+            rankingCompetitorGate.issue({
+              ...challenge,
+              issuedAfterUserMessageId: latest!.id,
+            });
+            return {
+              content: [
+                { type: "text" as const, text: JSON.stringify(requirement) },
+              ],
+            };
+          }
+        },
+        { alwaysLoad: true },
+      ),
+      tool(
+        "inspect_brand_fact",
+        "Read the current authoritative value for one exact structured fact key. Scope and effective time are part of the key and must be supplied explicitly when applicable.",
         {
           subject: z.string().min(1).max(200),
           predicate: z.string().min(1).max(200),
@@ -1129,17 +1389,44 @@ export async function createXiaojingGeoServer() {
           }
           const source: ArticleOperationSource = input.direct
             ? {
-              kind: 'direct',
-              count: input.direct.count,
-              themes: input.direct.themes,
-              contentType: input.direct.contentType as GeoContentType,
-              constraints: input.direct.constraints,
+                kind: "direct",
+                count: input.direct.count,
+                themes: input.direct.themes,
+                contentType: input.direct.contentType as GeoContentType,
+                constraints: input.direct.constraints,
+              }
+            : {
+                kind: "confirmed-topic-plan",
+                ...(input.planId ? { planId: input.planId } : {}),
+              };
+          rankingCompetitorGate.clear();
+          let operation: ArticleOperationProjection;
+          try {
+            operation = await articleService().start({
+              ...stageIdentity(),
+              source,
+            });
+          } catch (error) {
+            const requirement = rankingCompetitorRequirement(error);
+            if (requirement) {
+              const [brandContext, latest] = await Promise.all([
+                brandMaterialPort().context(),
+                latestUserMessage(),
+              ]);
+              if (!latest) throw error;
+              rankingCompetitorGate.issue({
+                subject: brandContext.brandName,
+                source,
+                issuedAfterUserMessageId: latest.id,
+              });
+              return {
+                content: [
+                  { type: "text" as const, text: JSON.stringify(requirement) },
+                ],
+              };
             }
-            : { kind: 'confirmed-topic-plan', ...(input.planId ? { planId: input.planId } : {}) };
-          const operation: ArticleOperationProjection = await articleService().start({
-            ...stageIdentity(),
-            source,
-          });
+            throw error;
+          }
           return {
             content: [{ type: 'text' as const, text: JSON.stringify({ kind: 'article-operation', operation }) }],
           };

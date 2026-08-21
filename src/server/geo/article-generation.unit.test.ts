@@ -73,7 +73,7 @@ function operation(articles: ArticleProjection[]): ArticleOperationProjection {
     topicPlanId: null,
     topicPlanRevision: null,
     knowledgeVersion: 7,
-    policyVersion: "xiaojing-content-prompt-v2",
+    policyVersion: "xiaojing-content-prompt-v3",
     status: "running",
     articles,
     createdAt: "2026-01-01T00:00:00Z",
@@ -99,6 +99,84 @@ describe("article lifecycle concurrency", () => {
 });
 
 describe("ArticleGenerationService", () => {
+  it("rejects a ranking draft before persistence when it omits a confirmed competitor", async () => {
+    const row: ArticleProjection = {
+      ...article("ranking-1"),
+      sourcePlanItemId: "plan-ranking-1",
+      contentType: "ranking",
+      requestedTitle: "2026 年本地服务六家对比",
+      plannedFacts: [
+        {
+          factKey: "brand-name",
+          predicate: "enterprise-profile.fullname",
+          normalizedValueJson: '"目标品牌"',
+        },
+        {
+          factKey: "competitors",
+          predicate: "enterprise-profile.competitors",
+          normalizedValueJson: '["竞品甲","竞品乙","竞品丙","竞品丁","竞品戊"]',
+        },
+      ],
+    };
+    const rankingBody = [
+      `# ${row.requestedTitle}`,
+      ...[
+        "目标品牌",
+        "竞品甲",
+        "竞品乙",
+        "竞品丙",
+        "竞品丁",
+        "名单外品牌",
+      ].flatMap((name, index) => [
+        `## ${index + 1}. ${name}`,
+        "• **服务范围**：信息",
+        "• **核心项目**：信息",
+        "• **适用人群**：信息",
+        "• **服务方式**：信息",
+        "• **区域覆盖**：信息",
+        "• **选择要点**：信息",
+      ]),
+    ].join("\n");
+    const port = {
+      start: vi.fn(async () => operation([row])),
+      getOperation: vi.fn(async () => operation([row])),
+      claimGeneration: vi.fn(async () => ({
+        article: row,
+        brandName: "目标品牌",
+        productLine: "本地服务",
+        targetRegion: "成都",
+        claimToken: "claim-ranking",
+      })),
+      finishGeneration: vi.fn(),
+      failGeneration: vi.fn(async ({ failureReason }) => ({
+        ...row,
+        status: "generation_failed" as const,
+        failureReason,
+      })),
+    } as unknown as ArticlePersistencePort;
+    const service = new ArticleGenerationService(
+      { workspaceId: "workspace-1", sessionId: "session-1" },
+      port,
+      { slot: "generation", complete: vi.fn(async () => rankingBody) },
+      { slot: "reflection", complete: vi.fn() },
+    );
+
+    await service.start({
+      workspaceId: "workspace-1",
+      sessionId: "session-1",
+      source: { kind: "confirmed-topic-plan", planId: "plan-1" },
+    });
+
+    expect(port.finishGeneration).not.toHaveBeenCalled();
+    expect(port.failGeneration).toHaveBeenCalledWith(
+      expect.objectContaining({
+        failureReason: expect.stringContaining(
+          "article_generation_ranking_output_invalid",
+        ),
+      }),
+    );
+  });
+
   it("isolates one provider failure and persists exact per-article retries", async () => {
     const rows = [article("a1"), article("a2")];
     const failed: string[] = [];

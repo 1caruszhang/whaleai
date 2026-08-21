@@ -437,6 +437,34 @@ export function selectPlannedFacts(input: {
     .map(({ fact }) => fact);
 }
 
+/**
+ * 语义 Top-N 决定一般素材；内容类型的硬事实不参与名额竞争。ranking 必须把
+ * 已确认竞品事实钉回计划，否则竞品在相似度第 6 名时会从 immutable
+ * plannedFacts 消失，正文阶段无法恢复。
+ */
+export function selectContentTypePlannedFacts(
+  contentType: GeoContentType,
+  selectedFacts: readonly TopicPlanKnowledgeFact[],
+  allFacts: readonly TopicPlanKnowledgeFact[],
+): TopicPlanKnowledgeFact[] {
+  if (contentType !== "ranking") return [...selectedFacts];
+  const selectedKeys = new Set(selectedFacts.map((fact) => fact.factKey));
+  const rankingRosterPredicates = new Set([
+    "competitors",
+    "fullname",
+    "shortnames",
+    "relatedbrands",
+  ]);
+  const mandatory = allFacts.filter(
+    (fact) =>
+      rankingRosterPredicates.has(
+        fact.predicate.toLowerCase().split(".").at(-1) ?? "",
+      ) &&
+      !selectedKeys.has(fact.factKey),
+  );
+  return [...selectedFacts, ...mandatory];
+}
+
 /** 标题风格的中文释义（ADR-0006：portContract 的英文 style 必须配上可执行释义）。 */
 export const TITLE_STYLE_DEFINITIONS: Record<GeoContentType, string> = {
   guide:
