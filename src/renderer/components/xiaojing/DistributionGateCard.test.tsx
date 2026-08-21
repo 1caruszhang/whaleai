@@ -126,14 +126,17 @@ function plan(
     candidates: [candidate()],
     selectedResourceIds: [8],
     assignments: [],
-    // 默认预算示例：¥1000 → 16000 点。
+    // 预算示例：¥1000 → 16000 点。
+    perArticleMaxPoints: 3_200,
+    totalMaxPoints: 16_000,
     budgetCny: 1000,
     publishStartAt: "2026-08-20T02:00:00Z",
     discoverySummary: {
       inputResources: 1,
       approvedResources: 1,
       filteredUnavailable: 0,
-      filteredHighPrice: 0,
+      filteredUnknownPrice: 0,
+      filteredOverPerArticleLimit: 0,
       alignedResources: 1,
       recommendedResources: 1,
     },

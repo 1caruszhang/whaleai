@@ -79,6 +79,8 @@ const ORDER_BODY = {
   sessionId: mocks.sessionId,
   executionId: 'execution-egress-1',
   itemId: 'item-egress-1',
+  perArticleMaxPoints: 3_000,
+  executionMaxPoints: 20_000,
   kind: 'media',
   resourceId: 101,
   title: '品牌知识服务怎么选',
@@ -186,12 +188,21 @@ describe('publish scheduler egress routes', () => {
     });
     const [kind, placement] = mocks.placeOrder.mock.calls[0] as [
       'media' | 'we-media',
-      { sn: string; resourceId: number; title: string; contentUrl: string },
+      {
+        sn: string;
+        resourceId: number;
+        title: string;
+        contentUrl: string;
+        perArticleMaxPoints: number;
+        executionMaxPoints: number;
+      },
     ];
     expect(kind).toBe('media');
     expect(placement.sn).toBe(distributionOrderSn('execution-egress-1', 'item-egress-1'));
     expect(placement.resourceId).toBe(101);
     expect(placement.title).toBe('品牌知识服务怎么选');
+    expect(placement.perArticleMaxPoints).toBe(3_000);
+    expect(placement.executionMaxPoints).toBe(20_000);
     // media 订单不携带自媒体三元组。
     expect(placement).not.toHaveProperty('publishForm');
   });

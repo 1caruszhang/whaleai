@@ -5,7 +5,6 @@ import {
   applyDistributionPlanEdit,
   assignDistributionChannels,
   buildDistributionCandidates,
-  distributionPlanBlockingIssues,
   normalizeDistributionResource,
   validateDistributionPlanStartInput,
   type DistributionArticleSnapshot,
@@ -55,9 +54,7 @@ function resource(
 
 function candidateResult(
   resources: ReturnType<typeof resource>[],
-  overrides: Partial<
-    Parameters<typeof buildDistributionCandidates>[0]
-  > = {},
+  overrides: Partial<Parameters<typeof buildDistributionCandidates>[0]> = {},
 ) {
   return buildDistributionCandidates({
     industry: "汽车改装",
@@ -74,6 +71,7 @@ function candidateResult(
       { name: "新能源车主观察", exact: true },
       { name: "盐城网", exact: true },
     ],
+    perArticleMaxPoints: 3_200,
     articles,
     resources,
     ...overrides,
@@ -91,6 +89,8 @@ describe("Ticket 12 distribution plan contract", () => {
       preferredResourceIds: [2, 2],
       mappingMode: "ratio",
       ratio: { media: 2, weMedia: 1 },
+      perArticleMaxPoints: 3_200,
+      totalMaxPoints: 16_000,
       budgetCny: 200,
       publishStartAt: "2026-08-20T09:00:00+08:00",
     });
@@ -183,7 +183,7 @@ describe("Ticket 12 distribution plan contract", () => {
     expect(active.evidence[0].articleIds).toEqual(["article-news"]);
   });
 
-  it("hard-filters unavailable, known low-rate, and high-price resources before alignment", () => {
+  it("filters unavailable and channels over the user per-article point limit before alignment", () => {
     const result = candidateResult([
       resource("media", {
         id: 1,
@@ -205,26 +205,25 @@ describe("Ticket 12 distribution plan contract", () => {
       }),
       resource("media", {
         id: 3,
-        name: "超预算门槛渠道",
+        name: "超过单篇点数上限渠道",
         status: 2,
-        price: "150",
+        price: "200.01",
         published_rate: 90,
         channel_type: 6,
         remark: "AI",
       }),
       resource("media", {
         id: 4,
-        name: "真实可用渠道",
+        name: "刚好达到单篇上限渠道",
         status: 2,
-        price: "149.99",
+        price: "200",
         published_rate: 70,
         channel_type: 6,
         remark: "AI",
       }),
     ]);
 
-    // 发布率不参与决策（用户裁决 2026-08-18）：低成功率渠道保留为候选，
-    // 唯一被质量过滤掉的是价格 >=150 的渠道。
+    // 发布率不参与决策；3200 点以内（含边界）保留，超过即过滤。
     expect(
       result.candidates
         .map((candidate) => candidate.resourceId)
@@ -232,12 +231,12 @@ describe("Ticket 12 distribution plan contract", () => {
     ).toEqual([2, 4]);
     expect(result.summary).toMatchObject({
       filteredUnavailable: 1,
-      filteredHighPrice: 1,
+      filteredOverPerArticleLimit: 1,
       approvedResources: 2,
     });
   });
 
-  it("retains zero-rate and empty-price channels; only unknown price blocks confirmation", () => {
+  it("keeps zero-rate channels eligible but excludes channels with unknown prices", () => {
     const result = candidateResult([
       resource("media", {
         id: 1,
@@ -248,31 +247,19 @@ describe("Ticket 12 distribution plan contract", () => {
         channel_type: 6,
         remark: "AI",
       }),
+      resource("media", {
+        id: 2,
+        name: "汽车零发布率媒体",
+        status: 2,
+        price: "100",
+        published_rate: 0,
+        channel_type: 6,
+        remark: "AI",
+      }),
     ]);
-    expect(result.candidates).toHaveLength(1);
-    expect(result.candidates[0].estimatedPriceCny).toBeNull();
+    expect(result.candidates.map((candidate) => candidate.resourceId)).toEqual([2]);
     expect(result.candidates[0].publishedRate).toBe(0);
-    expect(result.candidates[0].uncertainties).toEqual([
-      "价格未知，不能进入已确认分发计划",
-    ]);
-    const issues = distributionPlanBlockingIssues({
-      providerState: "available",
-      questionSources: sources,
-      articles: [articles[0]],
-      candidates: result.candidates,
-      selectedResourceIds: [1],
-      assignments: [
-        {
-          articleId: "article-news",
-          resourceId: 1,
-          reason: "source-evidence",
-          scheduledAt: "2026-08-20T01:00:00.000Z",
-        },
-      ],
-      budgetCny: 100,
-    });
-    expect(issues).toContain("selected-channel-price-unknown");
-    expect(issues).not.toContain("selected-channel-published-rate-unknown");
+    expect(result.summary.filteredUnknownPrice).toBe(1);
   });
 
   it("returns an empty candidate set instead of random or fabricated fallback", () => {
@@ -318,6 +305,7 @@ describe("Ticket 12 distribution plan contract", () => {
       candidates: result.candidates,
       mappingMode: "ratio",
       ratio: { media: 1, weMedia: 1 },
+      totalMaxPoints: 16_000,
       publishStartAt: "2026-08-20T09:00:00+08:00",
     });
     expect(
@@ -327,6 +315,79 @@ describe("Ticket 12 distribution plan contract", () => {
       new Set(assignments.map((assignment) => assignment.resourceId)).size,
     ).toBe(2);
     expect(assignments[0].reason).toBe("source-evidence");
+  });
+
+  it("skips an over-budget candidate and assigns the next affordable channel", () => {
+    const result = candidateResult([
+      resource("media", {
+        id: 1,
+        name: "文章一优先媒体",
+        status: 2,
+        price: "100",
+        channel_type: 6,
+        remark: "汽车 新能源车主",
+      }),
+      resource("media", {
+        id: 2,
+        name: "文章二昂贵媒体",
+        status: 2,
+        price: "120",
+        channel_type: 6,
+        remark: "汽车 新能源车主",
+      }),
+      resource("media", {
+        id: 3,
+        name: "文章二可负担媒体",
+        status: 2,
+        price: "100",
+        channel_type: 6,
+        remark: "汽车 新能源车主",
+      }),
+    ]);
+    const candidates = result.candidates.map((candidate) => ({
+      ...candidate,
+      evidence:
+        candidate.resourceId === 1 || candidate.resourceId === 2
+          ? [
+              ...candidate.evidence,
+              {
+                path: "passive" as const,
+                weight: 0.4,
+                label: "文章定向来源",
+                reference: "fixture",
+                url: null,
+                articleIds: [
+                  candidate.resourceId === 1
+                    ? "article-news"
+                    : "article-showcase",
+                ],
+              },
+            ]
+          : candidate.evidence,
+      pathHits:
+        candidate.resourceId === 1 || candidate.resourceId === 2
+          ? ["passive" as const, ...candidate.pathHits]
+          : candidate.pathHits,
+      hitCount:
+        candidate.hitCount +
+        (candidate.resourceId === 1 || candidate.resourceId === 2 ? 1 : 0),
+      recommendationWeight:
+        candidate.recommendationWeight +
+        (candidate.resourceId === 1 || candidate.resourceId === 2 ? 0.4 : 0),
+    }));
+
+    const assignments = assignDistributionChannels({
+      articles,
+      candidates,
+      mappingMode: "one-to-one",
+      ratio: { media: 1, weMedia: 0 },
+      totalMaxPoints: 3_200,
+      publishStartAt: "2026-08-20T09:00:00+08:00",
+    });
+
+    expect(assignments.map((assignment) => assignment.resourceId)).toEqual([
+      1, 3,
+    ]);
   });
 
   it("recomputes blockers after user edits mapping, budget and time", () => {
@@ -385,8 +446,11 @@ describe("Ticket 12 distribution plan contract", () => {
         candidates: result.candidates,
         mappingMode: "one-to-one",
         ratio: { media: 2, weMedia: 1 },
+        totalMaxPoints: 16_000,
         publishStartAt: "2026-08-20T09:00:00+08:00",
       }),
+      perArticleMaxPoints: 3_200,
+      totalMaxPoints: 16_000,
       budgetCny: 200,
       publishStartAt: "2026-08-20T01:00:00.000Z",
       discoverySummary: result.summary,

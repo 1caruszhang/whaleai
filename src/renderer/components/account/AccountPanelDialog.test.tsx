@@ -3,6 +3,10 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { AccountLedgerEntry, AccountState } from "@/api/accountClient";
 import { fetchAccountLedger } from "@/api/accountClient";
+import {
+  fetchDistributionSpendLimits,
+  saveDistributionSpendLimits,
+} from "@/api/distributionSpendLimitsClient";
 import AccountPanelDialog from "./AccountPanelDialog";
 import {
   AccountApiContext,
@@ -21,8 +25,16 @@ vi.mock("@/api/accountClient", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/api/accountClient")>();
   return { ...actual, fetchAccountLedger: vi.fn() };
 });
+vi.mock("@/api/distributionSpendLimitsClient", () => ({
+  fetchDistributionSpendLimits: vi.fn(),
+  saveDistributionSpendLimits: vi.fn(),
+}));
 
 const fetchAccountLedgerMock = vi.mocked(fetchAccountLedger);
+const fetchDistributionSpendLimitsMock = vi.mocked(
+  fetchDistributionSpendLimits,
+);
+const saveDistributionSpendLimitsMock = vi.mocked(saveDistributionSpendLimits);
 
 const SAMPLE_ENTRIES: AccountLedgerEntry[] = [
   {
@@ -84,6 +96,11 @@ function renderPanel() {
 describe("个人信息弹窗的点数明细", () => {
   beforeEach(() => {
     fetchAccountLedgerMock.mockReset();
+    fetchDistributionSpendLimitsMock.mockReset().mockResolvedValue({
+      perArticleMaxPoints: 3_000,
+      perExecutionMaxPoints: 20_000,
+    });
+    saveDistributionSpendLimitsMock.mockReset();
   });
 
   it("点击「明细」展开流水：类型、摘要、变动与变动后余额齐全", async () => {
@@ -121,7 +138,9 @@ describe("个人信息弹窗的点数明细", () => {
   });
 
   it("加载失败显示可读错误，重试后恢复", async () => {
-    fetchAccountLedgerMock.mockRejectedValueOnce("无法连接服务器，请检查网络后重试");
+    fetchAccountLedgerMock.mockRejectedValueOnce(
+      "无法连接服务器，请检查网络后重试",
+    );
     renderPanel();
 
     fireEvent.click(screen.getByRole("button", { name: "明细" }));
@@ -141,5 +160,29 @@ describe("个人信息弹窗的点数明细", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "明细" }));
     expect(await screen.findByText("暂无流水记录")).toBeDefined();
+  });
+
+  it("加载并保存用户填写的单篇与单次分发点数上限", async () => {
+    fetchDistributionSpendLimitsMock.mockResolvedValue({
+      perArticleMaxPoints: 4_000,
+      perExecutionMaxPoints: 20_000,
+    });
+    saveDistributionSpendLimitsMock.mockResolvedValue({
+      perArticleMaxPoints: 3_200,
+      perExecutionMaxPoints: 16_000,
+    });
+    renderPanel();
+
+    const perArticle = await screen.findByDisplayValue("4000");
+    const perExecution = screen.getByLabelText("每次分发最高点数");
+    fireEvent.change(perArticle, { target: { value: "3200" } });
+    fireEvent.change(perExecution, { target: { value: "16000" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存分发限额" }));
+
+    expect(saveDistributionSpendLimitsMock).toHaveBeenCalledWith({
+      perArticleMaxPoints: 3_200,
+      perExecutionMaxPoints: 16_000,
+    });
+    expect(await screen.findByText("分发限额已保存")).toBeDefined();
   });
 });

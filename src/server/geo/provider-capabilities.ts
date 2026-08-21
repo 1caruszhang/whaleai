@@ -139,6 +139,11 @@ export interface GeoDistributionResource {
 export interface GeoDistributionOrderPlacement {
   /** 代理商订单号（幂等键，与网关/上游同键，≤64 安全字符集）。 */
   sn: string;
+  /** 冻结计划所属执行及条目；网关按 executionId 原子聚合总点数。 */
+  executionId: string;
+  itemId: string;
+  perArticleMaxPoints: number;
+  executionMaxPoints: number;
   resourceId: number;
   title: string;
   /** 稿件内容预览地址（OSS 文章预览 URL，putHtml 产物）。 */
@@ -1191,6 +1196,10 @@ export function createGeoProviderCapabilities(
               },
               body: JSON.stringify({
                 sn: order.sn,
+                executionId: order.executionId,
+                itemId: order.itemId,
+                perArticleMaxPoints: order.perArticleMaxPoints,
+                executionMaxPoints: order.executionMaxPoints,
                 resourceId: order.resourceId,
                 title: order.title,
                 contentUrl: order.contentUrl,

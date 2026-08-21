@@ -188,6 +188,7 @@ token，上游密钥与签名身份全部在服务器侧。路径约定与 Sidec
 | `POST /gw/doubao-search/search_api/web_search` | 豆包搜索 | searchSources 结构化召回：专用 key 缺省回落 ARK key |
 | `PUT /gw/oss/{encodedObjectKey}` | 阿里云 OSS（**同地域内网**） | putHtml：网关以服务器 AK/SK 按 OSS V1 HMAC-SHA1 重签（Host 不参与签名，换内网 endpoint 签名不变），URL 编码口径与 sidecar `encodeObjectKey` 一致；成功返回 `{url}`（配了 `OSS_PUBLIC_BASE_URL` 用公网拼，否则内网上游 URL） |
 | `GET /gw/distribution/media/resource`、`GET /gw/distribution/we-media/resource` | 超级媒介 | 资源读取：网关以服务器 appid/secret 按 HMAC-SHA256 展平算法重签；公共参数（appid/timestamp/algorithm/signature）全部由网关生成，客户端混入的签名参数一律忽略；`timestamp` 取网关时钟（10 位 unix 秒，上游 5 分钟时效恒新鲜）；业务参数仅 `page`（≥1，默认 1）与 `size`（1–200，默认 20） |
+| `POST /gw/distribution/media/order`、`POST /gw/distribution/we-media/order` | 超级媒介 | 发布下单：网关只用服务器资源缓存的最新媒介价换算点数；在订单冻结事务内校验计划冻结的单篇上限，并按账号 + `executionId` 聚合 frozen/settled 订单校验单次总上限，随后再校验余额、冻结订单。价格刷新或并发条目均不能越过上限。 |
 
 旁路计量（票 05）：每次上游 2xx 的代理请求落一行
 `provider_usage_records`——LLM 流量记真实 token（OpenAI 系 usage 口径：
@@ -409,6 +410,9 @@ curl -s "$B/gw/distribution/we-media/resource?page=2&size=15" -H "authorization:
   稳定路由标签、token 用量（LLM；OSS/超级媒介记次数）。只作运营与上游账单
   对账，不是余额变动，不进 `ledger_entries`；表中不含上游密钥、请求体或
   账号 token。
+- `publish_orders`（0006/0007）：超级媒介订单与点数冻结权威；保存服务器侧
+  下单价、换算点数、`execution_id`/`item_id` 和两级冻结上限。未退款订单按
+  账号 + execution 聚合；上限校验和预扣冻结在同一事务内完成。
 
 迁 PostgreSQL 路径：业务层只依赖 `SqlClient` 接口（`src/db/client.ts`），
 表结构用 ANSI 形态（TEXT 主键、ISO 时间戳、INTEGER 布尔），迁移 SQL 直接

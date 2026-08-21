@@ -97,6 +97,8 @@ export type PublishOrderLedgerStatus = 'frozen' | 'settled' | 'refunded';
 export interface PublishOrderRow {
   sn: string;
   account_id: string;
+  execution_id: string;
+  item_id: string;
   kind: PublishOrderKind;
   resource_id: number;
   title: string;
@@ -108,6 +110,8 @@ export interface PublishOrderRow {
   account_rule: number | null;
   media_price_cents: number;
   points: number;
+  per_article_max_points: number;
+  execution_max_points: number;
   placement_status: PublishOrderPlacementStatus;
   ledger_status: PublishOrderLedgerStatus;
   partner_sn: string | null;

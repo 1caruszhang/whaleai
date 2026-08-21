@@ -15,6 +15,7 @@ import {
   type DistributionPlanProjection,
   type DistributionPlanStartInput,
   type DistributionPlanningContext,
+  type DistributionSpendLimits,
   type DistributionProviderSnapshot,
   type DistributionQuestionSource,
   type DistributionResourceInput,
@@ -30,6 +31,7 @@ import {
   type RecallSource,
 } from "../../shared/geo/channelRecall";
 import { parseGeoProbeProviderResponse } from "../../shared/geo/baseline";
+import { cnyToPoints } from "../../shared/geo/points";
 import { XIAOJING_GEO_PROVIDER_DEFAULTS } from "../../shared/geo/providerCapabilities";
 import { managementApi } from "../utils/management-api-client";
 import type { GeoBillingPermitPort } from "./billing-permit";
@@ -51,6 +53,7 @@ export interface DistributionPlanPreparation {
 }
 
 export interface DistributionPlanPersistencePort {
+  spendLimits(): Promise<DistributionSpendLimits>;
   context(articleOperationId?: string): Promise<DistributionPlanningContext>;
   latest(): Promise<DistributionPlanProjection | null>;
   get(planId: string): Promise<DistributionPlanProjection>;
@@ -120,6 +123,10 @@ export class RustDistributionPlanPort
 
   latest(): Promise<DistributionPlanProjection | null> {
     return this.post("/api/brand-distribution-plans/latest", {}, "plan");
+  }
+
+  spendLimits(): Promise<DistributionSpendLimits> {
+    return this.post("/api/app/distribution-spend-limits", {}, "limits");
   }
 
   context(articleOperationId?: string): Promise<DistributionPlanningContext> {
@@ -349,7 +356,9 @@ export class DistributionPlanningService {
         }
       }
     };
-    await Promise.all(Array.from({ length: Math.min(2, questions.length) }, worker));
+    await Promise.all(
+      Array.from({ length: Math.min(2, questions.length) }, worker),
+    );
     const sources: DistributionQuestionSource[] = [];
     const seen = new Set<string>();
     for (const outcome of collected) {
@@ -440,6 +449,14 @@ export class DistributionPlanningService {
     return this.persistence.context(input.articleOperationId);
   }
 
+  async spendLimits(input: {
+    workspaceId: string;
+    sessionId: string;
+  }): Promise<DistributionSpendLimits> {
+    this.assertIdentity(input);
+    return this.persistence.spendLimits();
+  }
+
   async start(input: {
     workspaceId: string;
     sessionId: string;
@@ -469,9 +486,9 @@ export class DistributionPlanningService {
     }
     const reportUnit = async (unit: number, outcome: "success" | "failure") => {
       if (!this.permits) return;
-      await this.permits.reportUnit(permitId, unit, outcome).catch(
-        () => undefined,
-      );
+      await this.permits
+        .reportUnit(permitId, unit, outcome)
+        .catch(() => undefined);
     };
     const settleDiscovery = async (
       outcomes: boolean[],
@@ -480,7 +497,9 @@ export class DistributionPlanningService {
       if (!this.permits) return;
       if (probeCount > 0) {
         await Promise.all(
-          outcomes.map((ok, unit) => reportUnit(unit, ok ? "success" : "failure")),
+          outcomes.map((ok, unit) =>
+            reportUnit(unit, ok ? "success" : "failure"),
+          ),
         );
       } else {
         await reportUnit(0, discoverySucceeded ? "success" : "failure");
@@ -531,7 +550,8 @@ export class DistributionPlanningService {
             inputResources: 0,
             approvedResources: 0,
             filteredUnavailable: 0,
-            filteredHighPrice: 0,
+            filteredUnknownPrice: 0,
+            filteredOverPerArticleLimit: 0,
             alignedResources: 0,
             recommendedResources: 0,
           },
@@ -558,7 +578,8 @@ export class DistributionPlanningService {
           ),
         ),
       ].filter(
-        (resource): resource is DistributionResourceSnapshot => resource !== null,
+        (resource): resource is DistributionResourceSnapshot =>
+          resource !== null,
       );
       const discovery = buildDistributionCandidates({
         industry: base.industry,
@@ -566,6 +587,7 @@ export class DistributionPlanningService {
         questionSources: base.questionSources,
         activeSources,
         preferenceChannels,
+        perArticleMaxPoints: base.perArticleMaxPoints,
         articles: base.articles,
         resources: normalized,
       });
@@ -574,6 +596,10 @@ export class DistributionPlanningService {
         candidates: discovery.candidates,
         mappingMode: base.mappingMode,
         ratio: base.ratio,
+        totalMaxPoints: Math.min(
+          base.totalMaxPoints,
+          cnyToPoints(base.budgetCny),
+        ),
         publishStartAt: base.publishStartAt,
       });
       const selectedResourceIds = assignments.flatMap((assignment) =>

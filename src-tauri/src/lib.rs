@@ -9,6 +9,7 @@ pub mod config_io;
 mod crash_artifact_retention;
 #[cfg(debug_assertions)]
 pub(crate) mod dev_env;
+pub mod distribution_spend_limits;
 pub mod geo_autonomy;
 pub mod geo_provider_credentials;
 pub mod geo_provider_runtime;
@@ -139,6 +140,8 @@ pub fn run() {
             account_auth::cmd_account_refresh,
             account_auth::cmd_account_ledger,
             account_auth::cmd_account_logout,
+            distribution_spend_limits::cmd_get_distribution_spend_limits,
+            distribution_spend_limits::cmd_set_distribution_spend_limits,
             brand_workspace::cmd_brand_workspace_bootstrap,
             brand_workspace::cmd_brand_workspace_create,
             brand_workspace::cmd_brand_workspace_switch,

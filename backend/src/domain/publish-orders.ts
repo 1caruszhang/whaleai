@@ -36,12 +36,16 @@ const REFUND_STATUSES = new Set([2, 5, 7]);
 
 export interface PublishOrderProjection {
   sn: string;
+  executionId: string;
+  itemId: string;
   kind: PublishOrderKind;
   resourceId: number;
   title: string;
   contentUrl: string;
   mediaPriceCents: number;
   points: number;
+  perArticleMaxPoints: number;
+  executionMaxPoints: number;
   placementStatus: PublishOrderPlacementStatus;
   ledgerStatus: PublishOrderLedgerStatus;
   partnerSn: string | null;
@@ -55,6 +59,8 @@ export interface PublishOrderProjection {
 
 export interface PlacePublishOrderInput {
   sn: string;
+  executionId: string;
+  itemId: string;
   kind: PublishOrderKind;
   resourceId: number;
   title: string;
@@ -66,6 +72,9 @@ export interface PlacePublishOrderInput {
   accountRule?: number;
   /** 上游权威媒介价（分），由调用方经资源快照缓存解析。 */
   mediaPriceCents: number;
+  /** 已确认分发计划冻结的单篇与单次点数上限。 */
+  perArticleMaxPoints: number;
+  executionMaxPoints: number;
 }
 
 export type PlacePublishOrderPhase =
@@ -86,12 +95,16 @@ export interface PlacePublishOrderBegin {
 export function publishOrderProjection(row: PublishOrderRow): PublishOrderProjection {
   return {
     sn: row.sn,
+    executionId: row.execution_id,
+    itemId: row.item_id,
     kind: row.kind,
     resourceId: row.resource_id,
     title: row.title,
     contentUrl: row.content_url,
     mediaPriceCents: row.media_price_cents,
     points: row.points,
+    perArticleMaxPoints: row.per_article_max_points,
+    executionMaxPoints: row.execution_max_points,
     placementStatus: row.placement_status,
     ledgerStatus: row.ledger_status,
     partnerSn: row.partner_sn,
@@ -153,6 +166,63 @@ function loadAccount(deps: BackendDeps, accountId: string) {
   return account;
 }
 
+function assertWithinSpendLimits(
+  deps: BackendDeps,
+  accountId: string,
+  input: PlacePublishOrderInput,
+  points: number,
+): void {
+  if (points > input.perArticleMaxPoints) {
+    throw new AppError(
+      'publish_order_per_article_limit_exceeded',
+      `渠道最新价格需 ${points} 点，超过本篇上限 ${input.perArticleMaxPoints} 点。`,
+      409,
+      { required: points, limit: input.perArticleMaxPoints },
+    );
+  }
+  const row = deps.db.get<{
+    points: number;
+    orders: number;
+    min_per_article_limit: number | null;
+    max_per_article_limit: number | null;
+    min_execution_limit: number | null;
+    max_execution_limit: number | null;
+  }>(
+    `SELECT COALESCE(SUM(CASE WHEN ledger_status IN ('frozen', 'settled') THEN points ELSE 0 END), 0) AS points,
+            COUNT(*) AS orders,
+            MIN(per_article_max_points) AS min_per_article_limit,
+            MAX(per_article_max_points) AS max_per_article_limit,
+            MIN(execution_max_points) AS min_execution_limit,
+            MAX(execution_max_points) AS max_execution_limit
+       FROM publish_orders
+      WHERE account_id = ? AND execution_id = ? AND sn <> ?`,
+    [accountId, input.executionId, input.sn],
+  );
+  if (
+    row &&
+    row.orders > 0 &&
+    (row.min_per_article_limit !== input.perArticleMaxPoints ||
+      row.max_per_article_limit !== input.perArticleMaxPoints ||
+      row.min_execution_limit !== input.executionMaxPoints ||
+      row.max_execution_limit !== input.executionMaxPoints)
+  ) {
+    throw new AppError(
+      'publish_order_execution_limits_conflict',
+      '同一次分发的冻结点数上限不一致，已拒绝下单。',
+      409,
+    );
+  }
+  const committed = row?.points ?? 0;
+  if (committed + points > input.executionMaxPoints) {
+    throw new AppError(
+      'publish_order_execution_limit_exceeded',
+      `本次分发累计需 ${committed + points} 点，超过总上限 ${input.executionMaxPoints} 点。`,
+      409,
+      { required: committed + points, committed, limit: input.executionMaxPoints },
+    );
+  }
+}
+
 /**
  * 下单第一步（事务）：幂等解析 + 预扣冻结。上游调用由路由层在其后执行；
  * 失败走 failPublishOrder 释放冻结（placement=failed，可重试），成功走
@@ -168,6 +238,8 @@ export function beginPublishOrder(
     if (existing) {
       if (existing.account_id !== accountId) throw orderNotFound();
       const sameParams =
+        existing.execution_id === input.executionId &&
+        existing.item_id === input.itemId &&
         existing.kind === input.kind &&
         existing.resource_id === input.resourceId &&
         existing.title === input.title &&
@@ -176,7 +248,9 @@ export function beginPublishOrder(
         (existing.owner ?? '') === (input.owner ?? '') &&
         existing.publish_form === (input.publishForm ?? null) &&
         existing.publish_type === (input.publishType ?? null) &&
-        existing.account_rule === (input.accountRule ?? null);
+        existing.account_rule === (input.accountRule ?? null) &&
+        existing.per_article_max_points === input.perArticleMaxPoints &&
+        existing.execution_max_points === input.executionMaxPoints;
       if (!sameParams) {
         throw new AppError(
           'sn_conflict',
@@ -191,13 +265,15 @@ export function beginPublishOrder(
         return { order: existing, phase: 'replay_pending' as const };
       }
       // failed：冻结已在失败路径释放，重新冻结后重试下单。
+      const points = publishOrderPoints(input.mediaPriceCents);
+      assertWithinSpendLimits(deps, accountId, input, points);
       const account = loadAccount(deps, accountId);
       const available = account.balance - frozenPointsFor(deps.db, accountId);
-      if (available < existing.points) throw insufficientBalance(existing.points, available, account.balance);
+      if (available < points) throw insufficientBalance(points, available, account.balance);
       const nowIso = new Date(deps.now()).toISOString();
       deps.db.run(
-        "UPDATE publish_orders SET ledger_status = 'frozen', placement_status = 'pending', updated_at = ? WHERE sn = ?",
-        [nowIso, input.sn],
+        "UPDATE publish_orders SET media_price_cents = ?, points = ?, ledger_status = 'frozen', placement_status = 'pending', updated_at = ? WHERE sn = ?",
+        [input.mediaPriceCents, points, nowIso, input.sn],
       );
       const retried = findPublishOrderBySn(deps.db, input.sn);
       if (!retried) throw new AppError('internal_error', '订单重试更新后读取失败。', 500);
@@ -205,6 +281,7 @@ export function beginPublishOrder(
     }
 
     const points = publishOrderPoints(input.mediaPriceCents);
+    assertWithinSpendLimits(deps, accountId, input, points);
     const account = loadAccount(deps, accountId);
     const available = account.balance - frozenPointsFor(deps.db, accountId);
     if (available < points) throw insufficientBalance(points, available, account.balance);
@@ -212,14 +289,17 @@ export function beginPublishOrder(
     const nowIso = new Date(deps.now()).toISOString();
     deps.db.run(
       `INSERT INTO publish_orders
-         (sn, account_id, kind, resource_id, title, content_url, remark, owner,
+         (sn, account_id, execution_id, item_id, kind, resource_id, title, content_url, remark, owner,
           publish_form, publish_type, account_rule, media_price_cents, points,
+          per_article_max_points, execution_max_points,
           placement_status, ledger_status, partner_sn, upstream_status, url,
           published_at, closed_observed_at, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 'frozen', NULL, NULL, NULL, NULL, NULL, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 'frozen', NULL, NULL, NULL, NULL, NULL, ?, ?)`,
       [
         input.sn,
         accountId,
+        input.executionId,
+        input.itemId,
         input.kind,
         input.resourceId,
         input.title,
@@ -231,6 +311,8 @@ export function beginPublishOrder(
         input.accountRule ?? null,
         input.mediaPriceCents,
         points,
+        input.perArticleMaxPoints,
+        input.executionMaxPoints,
         nowIso,
         nowIso,
       ],

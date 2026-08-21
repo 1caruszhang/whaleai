@@ -261,6 +261,10 @@ async function postCallback(tb: TestBackend, body: string): Promise<{ status: nu
 
 const ORDER_INPUT = {
   sn: 'xj-order-0001-a1b2c3d4e5f6',
+  executionId: 'publish-execution-test',
+  itemId: 'publish-item-test',
+  perArticleMaxPoints: 3_000,
+  executionMaxPoints: 20_000,
   resourceId: SEED_RESOURCE.id,
   title: '测试品牌知识服务怎么选',
   contentUrl: 'https://cdn.example.test/geo/a.html',
@@ -541,6 +545,67 @@ describe('publish ordering: state machine, ledger and callbacks (ticket 08)', ()
     expect(orderRow(tb, 'xj-order-0010-poor-4444')).toBeUndefined();
   });
 
+  it('rejects a price increase against the frozen per-article limit before ordering upstream', async () => {
+    // 模拟计划确认后资源回调把网关权威价从 ¥88 刷新到 ¥100；客户端仍只
+    // 携带冻结点数上限，不携带可伪造的媒介价。
+    tb.db.run(
+      `INSERT INTO distribution_resource_cache
+         (kind, resource_id, name, price_cents, status, fetched_at)
+       VALUES ('media', ?, '测试媒体', 10000, 1, ?)`,
+      [SEED_RESOURCE.id, new Date(FIXED_MS).toISOString()],
+    );
+    const response = await placeOrder(tb, accessToken, {
+      ...ORDER_INPUT,
+      perArticleMaxPoints: 1_408,
+    });
+    expect(response.status).toBe(409);
+    expect(response.body).toMatchObject({
+      error: 'publish_order_per_article_limit_exceeded',
+      required: 1600,
+      limit: 1408,
+    });
+    expect(upstream.calls.filter(call => call.path === '/media/order')).toHaveLength(0);
+    expect(orderRow(tb, ORDER_INPUT.sn)).toBeUndefined();
+    expect(await balanceOf(tb, accessToken)).toMatchObject({ frozen: 0 });
+  });
+
+  it('atomically rejects an order that would exceed the frozen execution total', async () => {
+    const secondSn = 'xj-order-0013-total-cap-777';
+    const results = await Promise.all([
+      placeOrder(tb, accessToken, {
+        ...ORDER_INPUT,
+        executionMaxPoints: 2_000,
+      }),
+      placeOrder(tb, accessToken, {
+        ...ORDER_INPUT,
+        sn: secondSn,
+        itemId: 'publish-item-test-2',
+        executionMaxPoints: 2_000,
+      }),
+    ]);
+    expect(results.map(result => result.status).sort()).toEqual([201, 409]);
+    const rejected = results.find(result => result.status === 409)!;
+    expect(rejected.body).toMatchObject({
+      error: 'publish_order_execution_limit_exceeded',
+      required: 2816,
+      committed: 1408,
+      limit: 2000,
+    });
+    expect(tb.db.all('SELECT sn FROM publish_orders', [])).toHaveLength(1);
+    const loosened = await placeOrder(tb, accessToken, {
+      ...ORDER_INPUT,
+      sn: 'xj-order-0014-loosen-cap-888',
+      itemId: 'publish-item-test-3',
+      executionMaxPoints: 20_000,
+    });
+    expect(loosened.status).toBe(409);
+    expect(loosened.body).toMatchObject({
+      error: 'publish_order_execution_limits_conflict',
+    });
+    expect(upstream.calls.filter(call => call.path === '/media/order')).toHaveLength(1);
+    expect(await balanceOf(tb, accessToken)).toMatchObject({ frozen: 1408 });
+  });
+
   it('releases the freeze when upstream truly rejects, and reconciles lost responses', async () => {
     // 真失败：上游不落单 → 释放冻结（failed 可重试），错误清洗回传。
     upstream.controls.nextPlaceMode = 'reject';
@@ -598,6 +663,10 @@ describe('publish ordering: state machine, ledger and callbacks (ticket 08)', ()
     // 自媒体下单缺三元组：400；补齐后走 we-media 路径下单成功。
     const weMedia = {
       sn: 'xj-order-0012-wemedia-666',
+      executionId: 'publish-execution-we-media',
+      itemId: 'publish-item-we-media',
+      perArticleMaxPoints: 3_000,
+      executionMaxPoints: 20_000,
       resourceId: SEED_WE_MEDIA_RESOURCE.id,
       title: '自媒体稿件',
       contentUrl: 'https://cdn.example.test/geo/w.html',

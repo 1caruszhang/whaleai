@@ -11,6 +11,13 @@ import {
   type GeoProviderRuntimeSecrets,
 } from "./provider-capabilities";
 
+const TEST_ORDER_LIMITS = {
+  executionId: "test-execution",
+  itemId: "test-item",
+  perArticleMaxPoints: 3_000,
+  executionMaxPoints: 20_000,
+} as const;
+
 const jsonResponse = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), {
     status,
@@ -483,6 +490,7 @@ describe("GEO typed provider capabilities", () => {
     await expect(
       capabilities.distribution.placeOrder("media", {
         sn: "xj-order-0001-directmode1",
+        ...TEST_ORDER_LIMITS,
         resourceId: 1,
         title: "标题",
         contentUrl: "https://cdn.example.test/a.html",
@@ -561,6 +569,7 @@ describe("GEO typed provider capabilities", () => {
     const sn = "xj-order-0001-gw-aaaa1111";
     const placed = await capabilities.distribution.placeOrder("media", {
       sn,
+      ...TEST_ORDER_LIMITS,
       resourceId: 101,
       title: "测试标题",
       contentUrl: "https://cdn.example.test/geo/a.html",
@@ -575,6 +584,7 @@ describe("GEO typed provider capabilities", () => {
     // 自媒体下单携带三元组。
     await capabilities.distribution.placeOrder("we-media", {
       sn: "xj-order-0002-gw-bbbb2222",
+      ...TEST_ORDER_LIMITS,
       resourceId: 202,
       title: "自媒体",
       contentUrl: "https://cdn.example.test/geo/w.html",
@@ -615,6 +625,7 @@ describe("GEO typed provider capabilities", () => {
     }
     expect(JSON.parse(calls[0]!.body)).toEqual({
       sn,
+      ...TEST_ORDER_LIMITS,
       resourceId: 101,
       title: "测试标题",
       contentUrl: "https://cdn.example.test/geo/a.html",
@@ -622,6 +633,7 @@ describe("GEO typed provider capabilities", () => {
     });
     expect(JSON.parse(calls[1]!.body)).toEqual({
       sn: "xj-order-0002-gw-bbbb2222",
+      ...TEST_ORDER_LIMITS,
       resourceId: 202,
       title: "自媒体",
       contentUrl: "https://cdn.example.test/geo/w.html",

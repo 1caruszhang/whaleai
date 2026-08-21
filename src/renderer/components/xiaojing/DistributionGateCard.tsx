@@ -44,9 +44,14 @@ type GateCandidate = Omit<
   estimatedPricePoints?: number | null;
 };
 
-type GatePlan = Omit<DistributionPlanProjection, "candidates" | "budgetCny"> & {
+type GatePlan = Omit<
+  DistributionPlanProjection,
+  "candidates" | "budgetCny" | "perArticleMaxPoints" | "totalMaxPoints"
+> & {
   budgetCny?: number;
   budgetPoints?: number;
+  perArticleMaxPoints?: number;
+  totalMaxPoints?: number;
   candidates: GateCandidate[];
 };
 
@@ -215,6 +220,12 @@ export default function DistributionGateCard({
         </span>
         <span className="rounded-full bg-[var(--paper-inset)] px-2 py-0.5">
           预算 {plan.budgetPoints ?? cnyToPoints(plan.budgetCny ?? 0)} 点
+        </span>
+        <span className="rounded-full bg-[var(--paper-inset)] px-2 py-0.5">
+          单篇上限 {plan.perArticleMaxPoints ?? "—"} 点
+        </span>
+        <span className="rounded-full bg-[var(--paper-inset)] px-2 py-0.5">
+          本次最高 {plan.totalMaxPoints ?? "—"} 点
         </span>
         <span className="ml-auto">已选 {selectedIds.length}/{plan.candidates.length}</span>
       </div>

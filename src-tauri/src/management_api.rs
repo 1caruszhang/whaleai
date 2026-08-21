@@ -78,6 +78,10 @@ pub async fn start_management_api() -> Result<u16, String> {
     let app = Router::new()
         .route("/api/app/config-changed", post(app_config_changed_handler))
         .route(
+            "/api/app/distribution-spend-limits",
+            post(app_distribution_spend_limits_handler),
+        )
+        .route(
             "/api/brand-knowledge/current",
             post(brand_knowledge_current_handler),
         )
@@ -378,6 +382,22 @@ async fn app_config_changed_handler() -> Json<serde_json::Value> {
             }))
         }
     }
+}
+
+/// Session Sidecars read the current user preference immediately before a new
+/// plan is created. The plan then freezes these values in its Rust-owned
+/// projection, so later setting changes cannot mutate pending/confirmed work.
+async fn app_distribution_spend_limits_handler(
+    headers: HeaderMap,
+    Json(request): Json<BrandKnowledgeEnvelope<Value>>,
+) -> Json<serde_json::Value> {
+    if let Err(error) = validate_brand_knowledge_request(&headers, &request) {
+        return Json(error);
+    }
+    Json(serde_json::json!({
+        "ok": true,
+        "limits": crate::distribution_spend_limits::read_distribution_spend_limits(),
+    }))
 }
 
 #[derive(Debug, Deserialize)]

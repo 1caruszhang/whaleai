@@ -205,6 +205,20 @@ export const MIGRATIONS: readonly Migration[] = [
       );
     `,
   },
+  {
+    // 用户在分发计划中冻结的点数护栏。网关按 execution_id 聚合尚未退款
+    // 的订单，并在与订单冻结相同的事务中用服务器侧最新媒介价校验单篇/
+    // 单次上限。默认值只用于兼容迁移前的历史订单，新订单必须显式携带。
+    name: '0007_publish_order_spend_limits',
+    sql: `
+      ALTER TABLE publish_orders ADD COLUMN execution_id TEXT NOT NULL DEFAULT '';
+      ALTER TABLE publish_orders ADD COLUMN item_id TEXT NOT NULL DEFAULT '';
+      ALTER TABLE publish_orders ADD COLUMN per_article_max_points INTEGER NOT NULL DEFAULT 160000000;
+      ALTER TABLE publish_orders ADD COLUMN execution_max_points INTEGER NOT NULL DEFAULT 160000000;
+      CREATE INDEX idx_publish_orders_execution
+        ON publish_orders(account_id, execution_id, ledger_status);
+    `,
+  },
 ];
 
 /** 建表只经本 runner：幂等、每条迁移独立事务、记录进 schema_migrations。 */

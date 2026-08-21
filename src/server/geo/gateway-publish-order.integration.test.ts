@@ -148,6 +148,13 @@ describe("ticket 08: distribution order port against the real backend (determini
       { fetch: routing.fetchImpl },
     );
 
+  const frozenLimits = (executionId: string, itemId: string) => ({
+    executionId,
+    itemId,
+    perArticleMaxPoints: 3_000,
+    executionMaxPoints: 20_000,
+  });
+
   async function balance(): Promise<{ total: number; frozen: number; available: number }> {
     const response = await tb.app.request("/billing/balance", {
       headers: { authorization: `Bearer ${accessToken}` },
@@ -169,6 +176,7 @@ describe("ticket 08: distribution order port against the real backend (determini
     const sn = distributionOrderSn("execution-1", "item-1");
     const placed = await capabilities().distribution.placeOrder("media", {
       sn,
+      ...frozenLimits("execution-1", "item-1"),
       resourceId: 101,
       title: "测试品牌知识服务怎么选",
       contentUrl: "https://cdn.example.test/geo/a.html",
@@ -211,12 +219,14 @@ describe("ticket 08: distribution order port against the real backend (determini
     const distribution = capabilities().distribution;
     const first = await distribution.placeOrder("media", {
       sn,
+      ...frozenLimits("execution-2", "item-1"),
       resourceId: 101,
       title: "标题",
       contentUrl: "https://cdn.example.test/geo/a.html",
     });
     const replay = await distribution.placeOrder("media", {
       sn,
+      ...frozenLimits("execution-2", "item-1"),
       resourceId: 101,
       title: "标题",
       contentUrl: "https://cdn.example.test/geo/a.html",
@@ -236,6 +246,7 @@ describe("ticket 08: distribution order port against the real backend (determini
     const rejectedSn = distributionOrderSn("execution-3", "item-1");
     await distribution.placeOrder("media", {
       sn: rejectedSn,
+      ...frozenLimits("execution-3", "item-1"),
       resourceId: 101,
       title: "标题A",
       contentUrl: "https://cdn.example.test/geo/a.html",
@@ -248,6 +259,7 @@ describe("ticket 08: distribution order port against the real backend (determini
     const refundedSn = distributionOrderSn("execution-3", "item-2");
     await distribution.placeOrder("media", {
       sn: refundedSn,
+      ...frozenLimits("execution-3", "item-2"),
       resourceId: 101,
       title: "标题B",
       contentUrl: "https://cdn.example.test/geo/b.html",
@@ -268,6 +280,7 @@ describe("ticket 08: distribution order port against the real backend (determini
     const sn = distributionOrderSn("execution-4", "item-1");
     await distribution.placeOrder("media", {
       sn,
+      ...frozenLimits("execution-4", "item-1"),
       resourceId: 101,
       title: "标题",
       contentUrl: "https://cdn.example.test/geo/a.html",
@@ -283,6 +296,7 @@ describe("ticket 08: distribution order port against the real backend (determini
     const activeSn = distributionOrderSn("execution-4", "item-2");
     await distribution.placeOrder("media", {
       sn: activeSn,
+      ...frozenLimits("execution-4", "item-2"),
       resourceId: 101,
       title: "标题2",
       contentUrl: "https://cdn.example.test/geo/c.html",

@@ -12,6 +12,12 @@ import {
 } from "./portContract";
 
 describe("GEO port contract", () => {
+  it("rejects channels whose authoritative price is missing or malformed", () => {
+    for (const price of [undefined, null, "", "   ", "unknown", "-1"]) {
+      expect(isGeoChannelQualityEligible({ price })).toBe(false);
+    }
+  });
+
   it("pins the audited js_ai baseline and the Xiaojing ownership split", () => {
     expect(GEO_PORT_CONTRACT.baseline).toEqual({
       repository: "js_ai",
@@ -181,8 +187,9 @@ describe("GEO port contract", () => {
         surplusFill: true,
       },
       quality: {
-        // 发布率不是决策输入（用户裁决 2026-08-18）：只剩价格上限。
-        maximumPriceExclusive: 150,
+        defaultPerArticleMaxPoints: 3_000,
+        defaultPerExecutionMaxPoints: 20_000,
+        limitSource: "user-setting-snapshotted-on-plan",
       },
     });
   });

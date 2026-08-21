@@ -272,6 +272,8 @@ describe('transcript card projections keep CNY out of chat', () => {
       status: 'draft',
       revision: 1,
       budgetCny: 1000,
+      perArticleMaxPoints: 3_200,
+      totalMaxPoints: 16_000,
       workspaceId: 'brand-1',
       publishStartAt: '2026-08-20T02:00:00Z',
       selectedResourceIds: [8],
@@ -302,6 +304,8 @@ describe('transcript card projections keep CNY out of chat', () => {
 
     const card = distributionPlanCardProjection(plan);
     expect(card.budgetPoints).toBe(16000);
+    expect(card.perArticleMaxPoints).toBe(3200);
+    expect(card.totalMaxPoints).toBe(16000);
     expect(card.candidates[0]?.estimatedPricePoints).toBe(1408);
     expect(card.candidates[1]?.estimatedPricePoints).toBeNull();
 
@@ -357,12 +361,17 @@ describe('transcript card projections keep CNY out of chat', () => {
 
 describe('planDistributionBudgetCny', () => {
   it('defaults to the product default budget when no points are given', () => {
-    expect(planDistributionBudgetCny(undefined)).toBe(1_000);
+    expect(planDistributionBudgetCny(undefined)).toBe(1_250);
   });
 
   it('converts a points budget cap back to internal CNY', () => {
     // 16000 点 → ¥1000；聊天边界只携带点数，换算倍率不进转录。
     expect(planDistributionBudgetCny(16_000)).toBe(1_000);
     expect(planDistributionBudgetCny(0)).toBe(0);
+  });
+
+  it('allows a lower plan budget but clamps it to the user total limit', () => {
+    expect(planDistributionBudgetCny(8_000, 16_000)).toBe(500);
+    expect(planDistributionBudgetCny(20_000, 16_000)).toBe(1_000);
   });
 });

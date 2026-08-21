@@ -31,6 +31,8 @@ const source: DistributionPlanStartInput = {
   preferredResourceIds: [],
   mappingMode: "one-to-one",
   ratio: { media: 2, weMedia: 1 },
+  perArticleMaxPoints: 3_200,
+  totalMaxPoints: 16_000,
   budgetCny: 100,
   publishStartAt: "2026-08-20T01:00:00.000Z",
 };
@@ -82,13 +84,16 @@ function plan(id: string): DistributionPlanProjection {
         scheduledAt: source.publishStartAt,
       },
     ],
+    perArticleMaxPoints: 3_200,
+    totalMaxPoints: 16_000,
     budgetCny: 100,
     publishStartAt: source.publishStartAt,
     discoverySummary: {
       inputResources: 0,
       approvedResources: 0,
       filteredUnavailable: 0,
-      filteredHighPrice: 0,
+      filteredUnknownPrice: 0,
+      filteredOverPerArticleLimit: 0,
       alignedResources: 0,
       recommendedResources: 0,
     },
@@ -127,6 +132,10 @@ function persistence() {
       derivedKeywords: ["汽车音响", "改装"],
     })),
     channelPreferences: vi.fn(async () => undefined),
+    spendLimits: vi.fn(async () => ({
+      perArticleMaxPoints: 3_200,
+      perExecutionMaxPoints: 16_000,
+    })),
     latest: vi.fn(async () => plan("unrelated-latest")),
     get: vi.fn(async (planId) => {
       const value = plans.get(planId);

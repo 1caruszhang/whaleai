@@ -27,9 +27,10 @@ import {
   createDistributionPlanPort,
   DistributionPlanningService,
 } from '../geo/distribution-plan';
-import type {
-  DistributionPlanCardProjection,
-  DistributionPlanProjection,
+import {
+  DEFAULT_DISTRIBUTION_SPEND_LIMITS,
+  type DistributionPlanCardProjection,
+  type DistributionPlanProjection,
 } from '../../shared/geo/distributionPlan';
 import { createPublishSchedulerPort } from '../geo/publish-scheduler';
 import type {
@@ -670,6 +671,10 @@ export function distributionPlanCardProjection(
     status: plan.status,
     revision: plan.revision,
     budgetPoints: cnyToPoints(plan.budgetCny),
+    perArticleMaxPoints:
+      plan.perArticleMaxPoints ??
+      DEFAULT_DISTRIBUTION_SPEND_LIMITS.perArticleMaxPoints,
+    totalMaxPoints: plan.totalMaxPoints ?? cnyToPoints(plan.budgetCny),
     workspaceId: plan.workspaceId,
     publishStartAt: plan.publishStartAt,
     selectedResourceIds: plan.selectedResourceIds,
@@ -736,14 +741,16 @@ export function publishExecutionCardProjection(
 }
 
 /**
- * plan_distribution 的预算入参换算：聊天边界只携带点数，缺省走产品默认
- * 预算 ¥1000；给出点数时按 pointsToCny 折算回内部 CNY（预算上限语义，
+ * plan_distribution 的预算入参换算：聊天边界只携带点数，缺省使用设置页
+ * 当前总上限；给出点数时按 pointsToCny 折算回内部 CNY（预算上限语义，
  * 换算倍率不进转录）。
  */
 export function planDistributionBudgetCny(
   budgetPoints: number | undefined,
+  maximumBudgetPoints: number =
+    DEFAULT_DISTRIBUTION_SPEND_LIMITS.perExecutionMaxPoints,
 ): number {
-  return budgetPoints !== undefined ? pointsToCny(budgetPoints) : 1_000;
+  return pointsToCny(Math.min(budgetPoints ?? maximumBudgetPoints, maximumBudgetPoints));
 }
 
 /**
@@ -1448,7 +1455,10 @@ export async function createXiaojingGeoServer() {
         async (input): Promise<{ content: Array<{ type: 'text'; text: string }> }> => {
           const identity = stageIdentity();
           const service = distributionService();
-          const context = await service.context({ ...stageIdentity() });
+          const [context, spendLimits] = await Promise.all([
+            service.context({ ...stageIdentity() }),
+            service.spendLimits({ ...stageIdentity() }),
+          ]);
           if (context.articles.length === 0) {
             throw new Error('distribution_approved_articles_required');
           }
@@ -1468,9 +1478,14 @@ export async function createXiaojingGeoServer() {
                 media: input.mediaRatio ?? 2,
                 weMedia: input.weMediaRatio ?? 1,
               },
+              perArticleMaxPoints: spendLimits.perArticleMaxPoints,
+              totalMaxPoints: spendLimits.perExecutionMaxPoints,
               // 聊天边界只携带点数：预算入参是点数，服务端换算回内部 CNY
               // （预算是上限语义，非计费），换算倍率不进转录。
-              budgetCny: planDistributionBudgetCny(input.budgetPoints),
+              budgetCny: planDistributionBudgetCny(
+                input.budgetPoints,
+                spendLimits.perExecutionMaxPoints,
+              ),
               publishStartAt:
                 input.publishStartAt ?? new Date(Date.now() + 3_600_000).toISOString(),
             },

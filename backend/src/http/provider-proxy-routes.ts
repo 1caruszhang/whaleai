@@ -345,6 +345,8 @@ export function createProviderProxyRoutes(deps: BackendDeps) {
 
   const placeOrderSchema = z.object({
     sn: orderSnSchema,
+    executionId: z.string().min(1).max(160),
+    itemId: z.string().min(1).max(160),
     resourceId: z.number().int().min(1),
     title: z.string().min(1).max(200),
     contentUrl: z.string().url().max(2000),
@@ -353,6 +355,8 @@ export function createProviderProxyRoutes(deps: BackendDeps) {
     publishForm: z.number().int().min(1).max(2).optional(),
     publishType: z.number().int().min(1).max(3).optional(),
     accountRule: z.number().int().min(2).max(3).optional(),
+    perArticleMaxPoints: z.number().int().min(1).max(160_000_000),
+    executionMaxPoints: z.number().int().min(1).max(160_000_000),
   });
 
   const snOnlySchema = z.object({ sn: orderSnSchema });
@@ -405,6 +409,8 @@ export function createProviderProxyRoutes(deps: BackendDeps) {
 
       const begin = beginPublishOrder(deps, account.id, {
         sn: body.sn,
+        executionId: body.executionId,
+        itemId: body.itemId,
         kind,
         resourceId: body.resourceId,
         title: body.title,
@@ -415,6 +421,8 @@ export function createProviderProxyRoutes(deps: BackendDeps) {
         publishType: body.publishType,
         accountRule: body.accountRule,
         mediaPriceCents: cached.price_cents,
+        perArticleMaxPoints: body.perArticleMaxPoints,
+        executionMaxPoints: body.executionMaxPoints,
       });
       // 幂等命中：上游已受理或在途，不触上游、不二次预扣。
       if (begin.phase === 'replay_placed' || begin.phase === 'replay_pending') {

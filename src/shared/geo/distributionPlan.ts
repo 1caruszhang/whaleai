@@ -6,6 +6,17 @@ import {
   type PreferenceChannelEntry,
   type RecallSource,
 } from "./channelRecall";
+import { cnyToPoints } from "./points";
+import {
+  DEFAULT_DISTRIBUTION_SPEND_LIMITS,
+  MAX_DISTRIBUTION_SPEND_LIMIT_POINTS,
+} from "./distributionSpendLimits";
+
+export {
+  DEFAULT_DISTRIBUTION_SPEND_LIMITS,
+  MAX_DISTRIBUTION_SPEND_LIMIT_POINTS,
+  type DistributionSpendLimits,
+} from "./distributionSpendLimits";
 
 export const DISTRIBUTION_PLAN_POLICY_VERSION =
   "js-ai-dev-four-path-distribution-v1";
@@ -13,7 +24,6 @@ export const DISTRIBUTION_RESOURCE_PAGE_SIZE = 200;
 export const DISTRIBUTION_RESOURCE_MAX_PAGES = 1_000;
 export const DISTRIBUTION_MAX_CANDIDATES =
   GEO_PORT_CONTRACT.channelRecall.recommendation.max;
-
 export type DistributionChannelKind = "media" | "we-media";
 export type DistributionRecallPath =
   keyof typeof GEO_PORT_CONTRACT.channelRecall.paths;
@@ -41,6 +51,8 @@ export interface DistributionPlanStartInput {
   preferredResourceIds: number[];
   mappingMode: "one-to-one" | "ratio";
   ratio: { media: number; weMedia: number };
+  perArticleMaxPoints: number;
+  totalMaxPoints: number;
   budgetCny: number;
   publishStartAt: string;
 }
@@ -141,7 +153,8 @@ export interface DistributionDiscoverySummary {
   inputResources: number;
   approvedResources: number;
   filteredUnavailable: number;
-  filteredHighPrice: number;
+  filteredUnknownPrice: number;
+  filteredOverPerArticleLimit: number;
   alignedResources: number;
   recommendedResources: number;
 }
@@ -168,6 +181,10 @@ export interface DistributionPlanProjection {
   candidates: DistributionChannelCandidate[];
   selectedResourceIds: number[];
   assignments: DistributionAssignment[];
+  /** 创建计划时冻结的用户设置；后续设置变更不反写既有计划。 */
+  perArticleMaxPoints: number;
+  /** 创建计划时冻结的单次分发总消费硬上限。 */
+  totalMaxPoints: number;
   budgetCny: number;
   publishStartAt: string;
   discoverySummary: DistributionDiscoverySummary;
@@ -209,6 +226,8 @@ export interface DistributionPlanCardProjection {
   status: DistributionPlanStatus;
   revision: number;
   budgetPoints: number;
+  perArticleMaxPoints: number;
+  totalMaxPoints: number;
   workspaceId: string;
   publishStartAt: string;
   selectedResourceIds: number[];
@@ -495,6 +514,20 @@ export function validateDistributionPlanStartInput(
   if (questionSources.length > 100)
     throw new Error("distribution_plan_sources_invalid");
   if (
+    !Number.isInteger(input.perArticleMaxPoints) ||
+    input.perArticleMaxPoints < 1 ||
+    input.perArticleMaxPoints > MAX_DISTRIBUTION_SPEND_LIMIT_POINTS
+  ) {
+    throw new Error("distribution_plan_per_article_limit_invalid");
+  }
+  if (
+    !Number.isInteger(input.totalMaxPoints) ||
+    input.totalMaxPoints < 1 ||
+    input.totalMaxPoints > MAX_DISTRIBUTION_SPEND_LIMIT_POINTS
+  ) {
+    throw new Error("distribution_plan_total_limit_invalid");
+  }
+  if (
     !Number.isFinite(input.budgetCny) ||
     input.budgetCny < 0 ||
     input.budgetCny > 10_000_000
@@ -597,6 +630,7 @@ export function buildDistributionCandidates(input: {
   activeSources: RecallSource[];
   /** 偏好路生效清单（内置名单+用户 overlay 合成；js_ai preferenceChannels 契约）。 */
   preferenceChannels: PreferenceChannelEntry[];
+  perArticleMaxPoints: number;
   articles: DistributionArticleSnapshot[];
   resources: DistributionResourceSnapshot[];
 }): {
@@ -615,21 +649,23 @@ export function buildDistributionCandidates(input: {
     ...new Set(input.articles.map((article) => article.contentType)),
   ];
   let filteredUnavailable = 0;
-  let filteredHighPrice = 0;
+  let filteredUnknownPrice = 0;
+  let filteredOverPerArticleLimit = 0;
   const approved: DistributionResourceSnapshot[] = [];
   for (const resource of resources) {
     if (resource.status !== 2) {
       filteredUnavailable += 1;
       continue;
     }
-    // 发布率不参与任何决策（用户裁决 2026-08-18）：既不过滤也不阻断，
-    // 质量硬约束只剩数值价格上限。
+    // 发布率不参与任何决策。用户设置以最终点数为口径；未知价格无法证明
+    // 在上限以内，因此不进入返回给用户的候选集。
     const price = parsePrice(resource.price);
-    if (
-      price !== null &&
-      price >= GEO_PORT_CONTRACT.channelRecall.quality.maximumPriceExclusive
-    ) {
-      filteredHighPrice += 1;
+    if (price === null) {
+      filteredUnknownPrice += 1;
+      continue;
+    }
+    if (cnyToPoints(price) > input.perArticleMaxPoints) {
+      filteredOverPerArticleLimit += 1;
       continue;
     }
     approved.push(resource);
@@ -664,7 +700,8 @@ export function buildDistributionCandidates(input: {
       // 主动路（ADR-0031 全局召回）：LLM 联网推荐的渠道，域名优先、名称模糊回落。
       for (const source of input.activeSources) {
         const sourceDomain = registeredDomain(source.url);
-        const domainHit = resourceDomain !== null && sourceDomain === resourceDomain;
+        const domainHit =
+          resourceDomain !== null && sourceDomain === resourceDomain;
         if (domainHit || fuzzyMatchScore(source, resource.name) >= 0.4) {
           evidence.push(
             pathEvidence(
@@ -681,8 +718,12 @@ export function buildDistributionCandidates(input: {
       // GEO 收录信号是同一规则路的加强说明，不再单列一路。
       if (industryMatch || audienceMatch) {
         const signals = [
-          industryMatch ? `超级媒介结构化类目匹配行业「${input.industry}」` : null,
-          audienceMatch ? `渠道名称或备注匹配目标人群「${input.targetAudience}」` : null,
+          industryMatch
+            ? `超级媒介结构化类目匹配行业「${input.industry}」`
+            : null,
+          audienceMatch
+            ? `渠道名称或备注匹配目标人群「${input.targetAudience}」`
+            : null,
           geoIncluded(resource) ? "资源名称/备注含真实 GEO 收录信号" : null,
         ].filter((signal): signal is string => signal !== null);
         evidence.push(
@@ -839,7 +880,8 @@ export function buildDistributionCandidates(input: {
       inputResources: resources.length,
       approvedResources: approved.length,
       filteredUnavailable,
-      filteredHighPrice,
+      filteredUnknownPrice,
+      filteredOverPerArticleLimit,
       alignedResources: candidates.length,
       recommendedResources: recommended.length,
     },
@@ -873,6 +915,7 @@ export function assignDistributionChannels(input: {
   candidates: DistributionChannelCandidate[];
   mappingMode: DistributionPlanStartInput["mappingMode"];
   ratio: DistributionPlanStartInput["ratio"];
+  totalMaxPoints: number;
   publishStartAt: string;
 }): DistributionAssignment[] {
   const scheduledAt = validIsoTimestamp(input.publishStartAt);
@@ -883,6 +926,7 @@ export function assignDistributionChannels(input: {
       ? Math.round((input.articles.length * input.ratio.media) / totalRatio)
       : input.articles.length;
   let mediaUsed = 0;
+  let allocatedPoints = 0;
   return input.articles.map((article) => {
     let ranked = candidateForArticle(article, input.candidates).filter(
       (candidate) => !used.has(candidate.resourceId),
@@ -895,7 +939,13 @@ export function assignDistributionChannels(input: {
         ...ranked.filter((candidate) => candidate.kind !== preferredKind),
       ];
     }
-    const selected = ranked[0];
+    const selected = ranked.find((candidate) => {
+      if (candidate.estimatedPriceCny === null) return false;
+      return (
+        allocatedPoints + cnyToPoints(candidate.estimatedPriceCny) <=
+        input.totalMaxPoints
+      );
+    });
     if (!selected) {
       return {
         articleId: article.id,
@@ -905,6 +955,9 @@ export function assignDistributionChannels(input: {
       };
     }
     used.add(selected.resourceId);
+    if (selected.estimatedPriceCny !== null) {
+      allocatedPoints += cnyToPoints(selected.estimatedPriceCny);
+    }
     if (selected.kind === "media") mediaUsed += 1;
     const passive = selected.evidence.some(
       (item) => item.path === "passive" && item.articleIds.includes(article.id),
@@ -932,6 +985,8 @@ export function distributionPlanBlockingIssues(
     | "candidates"
     | "selectedResourceIds"
     | "assignments"
+    | "perArticleMaxPoints"
+    | "totalMaxPoints"
     | "budgetCny"
   >,
 ): string[] {
@@ -948,7 +1003,7 @@ export function distributionPlanBlockingIssues(
   const byResource = new Map(
     plan.candidates.map((candidate) => [candidate.resourceId, candidate]),
   );
-  let estimatedTotal = 0;
+  let estimatedTotalPoints = 0;
   for (const resourceId of selected) {
     const candidate = byResource.get(resourceId);
     if (!candidate) {
@@ -961,9 +1016,19 @@ export function distributionPlanBlockingIssues(
     ) {
       issues.push("selected-channel-unavailable");
     }
-    if (candidate.estimatedPriceCny === null)
+    if (candidate.estimatedPriceCny === null) {
       issues.push("selected-channel-price-unknown");
-    else estimatedTotal += candidate.estimatedPriceCny;
+    } else {
+      const pricePoints = cnyToPoints(candidate.estimatedPriceCny);
+      estimatedTotalPoints += pricePoints;
+      if (
+        pricePoints >
+        (plan.perArticleMaxPoints ??
+          DEFAULT_DISTRIBUTION_SPEND_LIMITS.perArticleMaxPoints)
+      ) {
+        issues.push("selected-channel-per-article-limit-exceeded");
+      }
+    }
     if (candidate.evidence.length === 0)
       issues.push("selected-channel-evidence-missing");
   }
@@ -992,7 +1057,9 @@ export function distributionPlanBlockingIssues(
   }
   if (assignedArticles.size !== articleIds.size)
     issues.push("article-assignment-incomplete");
-  if (estimatedTotal > plan.budgetCny)
+  const budgetPoints = cnyToPoints(plan.budgetCny);
+  const totalMaxPoints = plan.totalMaxPoints ?? budgetPoints;
+  if (estimatedTotalPoints > Math.min(totalMaxPoints, budgetPoints))
     issues.push("distribution-budget-exceeded");
   return [...new Set(issues)];
 }

@@ -296,7 +296,7 @@ fn external_request_sn(idempotency_key: &str) -> String {
 /// 渠道订单点数单价（票 09，与网关 `publishOrderPoints` 同式）：媒介价
 /// ×1.6 → 点数向上取整（1 元 = 10 点锚点）。以分为基的整数运算：
 /// ceil(分 × 1.6 × 10 / 100) = ceil(分 × 4 / 25)。例：¥88.00 → 1408 点。
-fn publish_channel_price_points(price_cny: f64) -> i64 {
+pub(super) fn publish_channel_price_points(price_cny: f64) -> i64 {
     if !price_cny.is_finite() || price_cny <= 0.0 {
         return 0;
     }
@@ -716,6 +716,16 @@ impl BrandWorkspaceStore {
             .and_then(Value::as_f64)
             .filter(|value| value.is_finite() && *value >= 0.0)
             .ok_or_else(|| "publish_budget_invalid".to_string())?;
+        let per_article_max_points = projection
+            .get("perArticleMaxPoints")
+            .and_then(Value::as_i64)
+            .filter(|value| *value > 0)
+            .unwrap_or(crate::distribution_spend_limits::DEFAULT_PER_ARTICLE_MAX_POINTS);
+        let total_max_points = projection
+            .get("totalMaxPoints")
+            .and_then(Value::as_i64)
+            .filter(|value| *value > 0)
+            .unwrap_or_else(|| publish_channel_price_points(budget));
         let publish_start_at = projection
             .get("publishStartAt")
             .and_then(Value::as_str)
@@ -740,6 +750,7 @@ impl BrandWorkspaceStore {
 
         let mut prepared = Vec::with_capacity(assignments.len());
         let mut spend = 0.0_f64;
+        let mut spend_points = 0_i64;
         for (index, assignment) in assignments.iter().enumerate() {
             let article_id = assignment
                 .get("articleId")
@@ -803,6 +814,10 @@ impl BrandWorkspaceStore {
                 .and_then(Value::as_f64)
                 .filter(|value| value.is_finite() && *value >= 0.0)
                 .ok_or_else(|| "publish_channel_price_unknown".to_string())?;
+            let price_points = publish_channel_price_points(price);
+            if price_points > per_article_max_points {
+                return Err("publish_per_article_limit_exceeded".to_string());
+            }
             // 发布率不是决策输入（用户裁决 2026-08-18）：缺失或非法时快照记 0，
             // 不再阻断发布准备；数值仍进确认摘要保持确定性。
             let published_rate = candidate
@@ -823,6 +838,7 @@ impl BrandWorkspaceStore {
                 .ok_or_else(|| "publish_channel_snapshot_mismatch".to_string())?
                 .to_string();
             spend += price;
+            spend_points += price_points;
             let sequence = index as i64 + 1;
             let stable = format!(
                 "{plan_id}|{plan_revision}|{article_id}|{approved_revision}|{approved_hash}|{resource_id}|{scheduled_at}"
@@ -891,6 +907,9 @@ impl BrandWorkspaceStore {
         }
         if spend > budget + 0.000_001 {
             return Err("publish_budget_exceeded".to_string());
+        }
+        if spend_points > total_max_points {
+            return Err("publish_total_limit_exceeded".to_string());
         }
         for item in &prepared {
             if let Some((existing_item_id, existing_execution_id, existing_hash, existing_status, existing_item_status)) = transaction
@@ -1918,6 +1937,8 @@ pub(crate) struct PublishUploadReceipt {
 #[derive(Debug, Clone)]
 pub(crate) struct PublishOrderRequest {
     route: PublishEgressRoute,
+    per_article_max_points: i64,
+    execution_max_points: i64,
     kind: String,
     resource_id: i64,
     title: String,
@@ -2260,6 +2281,8 @@ impl PublishProvider for ProductionPublishProvider {
             let payload = json!({
                 "executionId": request.route.execution_id,
                 "itemId": request.route.item_id,
+                "perArticleMaxPoints": request.per_article_max_points,
+                "executionMaxPoints": request.execution_max_points,
                 "kind": request.kind,
                 "resourceId": request.resource_id,
                 "title": request.title,
@@ -2296,6 +2319,8 @@ struct ClaimedPublishItem {
     /// 执行的来源 Session：egress 借用它的 Sidecar owner 身份（票 08）。
     source_session_id: String,
     item_id: String,
+    per_article_max_points: i64,
+    execution_max_points: i64,
     claim_token: String,
     stage: &'static str,
     article: PublishArticleSnapshot,
@@ -2464,6 +2489,8 @@ impl PublishScheduler {
             .provider
             .submit(PublishOrderRequest {
                 route,
+                per_article_max_points: claim.per_article_max_points,
+                execution_max_points: claim.execution_max_points,
                 kind: claim.channel.kind.clone(),
                 resource_id: claim.channel.resource_id,
                 title: claim.article.title.clone(),
@@ -2659,9 +2686,11 @@ fn claim_next_item(
                     item.idempotency_key, COALESCE(item.external_request_sn, item.id),
                     item.payload_hash, item.object_key, item.object_url,
                     item.attempts, item.upload_attempts,
-                    execution.provider_snapshot_json, execution.created_by_session_id
+                    execution.provider_snapshot_json, execution.created_by_session_id,
+                    plan.projection_json
              FROM geo_publish_items item
              JOIN geo_publish_executions execution ON execution.id=item.execution_id
+             JOIN geo_distribution_plans plan ON plan.id=execution.distribution_plan_id
              WHERE execution.execution_started_at IS NOT NULL
                AND execution.status IN ('running','scheduled','partially-succeeded','failed')
                AND item.scheduled_at_ms<=?1
@@ -2695,6 +2724,7 @@ fn claim_next_item(
                     row.get::<_, i64>(12)?,
                     row.get::<_, String>(13)?,
                     row.get::<_, String>(14)?,
+                    row.get::<_, String>(15)?,
                 ))
             },
         )
@@ -2716,6 +2746,7 @@ fn claim_next_item(
         upload_attempts,
         provider_snapshot_json,
         source_session_id,
+        distribution_projection_json,
     )) = row
     else {
         transaction
@@ -2765,10 +2796,24 @@ fn claim_next_item(
     transaction
         .commit()
         .map_err(|error| format!("commit publish item claim: {error}"))?;
+    let distribution_projection: Value = serde_json::from_str(&distribution_projection_json)
+        .map_err(|_| "publish_distribution_snapshot_invalid".to_string())?;
+    let per_article_max_points = distribution_projection
+        .get("perArticleMaxPoints")
+        .and_then(Value::as_i64)
+        .filter(|value| *value > 0)
+        .unwrap_or(crate::distribution_spend_limits::DEFAULT_PER_ARTICLE_MAX_POINTS);
+    let execution_max_points = distribution_projection
+        .get("totalMaxPoints")
+        .and_then(Value::as_i64)
+        .filter(|value| *value > 0)
+        .unwrap_or(crate::distribution_spend_limits::DEFAULT_PER_EXECUTION_MAX_POINTS);
     Ok(Some(ClaimedPublishItem {
         execution_id,
         source_session_id,
         item_id,
+        per_article_max_points,
+        execution_max_points,
         claim_token,
         stage,
         article: serde_json::from_str(&article_json)
@@ -3722,7 +3767,7 @@ mod tests {
             assignments.push(json!({"articleId":article_id,"resourceId":resource_id,"reason":"weighted-score","scheduledAt":scheduled_at}));
         }
         let plan_id = "confirmed-distribution-plan-13".to_string();
-        let projection = json!({"id":plan_id,"status":"confirmed","revision":5,"articles":articles,"candidates":candidates,"assignments":assignments,"budgetCny":500.0,"publishStartAt":scheduled_at});
+        let projection = json!({"id":plan_id,"status":"confirmed","revision":5,"articles":articles,"candidates":candidates,"assignments":assignments,"perArticleMaxPoints":3_200,"totalMaxPoints":16_000,"budgetCny":500.0,"publishStartAt":scheduled_at});
         connection.execute("INSERT INTO geo_operations (id,session_id,state,created_at) VALUES ('distribution-operation-13','session-13','distribution-plan-confirmed',?1)", [&now]).unwrap();
         connection.execute("INSERT INTO geo_distribution_plans (id,operation_id,created_by_session_id,article_operation_id,knowledge_version,policy_version,status,revision,discovery_claim_token,provider_snapshot_json,resource_snapshot_json,projection_json,created_at,updated_at,confirmed_at) VALUES (?1,'distribution-operation-13','session-13','article-operation-13',1,'fixture-policy','confirmed',5,NULL,'{}','[]',?2,?3,?3,?3)", params![plan_id, projection.to_string(), now]).unwrap();
         Fixture {
@@ -3968,6 +4013,8 @@ mod tests {
             let request = &submissions[0];
             // 载荷哈希冻结确定性对象键（票 08）：Rust 传 executionId+itemId，
             // 幂等 sn 由 sidecar 派生，请求本身不再携带 sn。
+            assert_eq!(request.per_article_max_points, 3_200);
+            assert_eq!(request.execution_max_points, 16_000);
             let started_projection = fixture
                 .store
                 .get_publish_execution(&fixture.workspace.id, "session-b", &started.id)
@@ -4674,6 +4721,10 @@ mod tests {
         let submit_outcome = provider
             .submit(PublishOrderRequest {
                 route,
+                per_article_max_points:
+                    crate::distribution_spend_limits::DEFAULT_PER_ARTICLE_MAX_POINTS,
+                execution_max_points:
+                    crate::distribution_spend_limits::DEFAULT_PER_EXECUTION_MAX_POINTS,
                 kind: "media".to_string(),
                 resource_id: 8,
                 title: "标题".to_string(),
@@ -4808,7 +4859,10 @@ mod tests {
 
         // 未登录（拿不到网关指纹）时无法证明配置没变：拒绝恢复。
         set_test_gateway_base(None);
-        assert_eq!(resume(&fixture, &bricked).unwrap_err(), "publish_provider_unavailable");
+        assert_eq!(
+            resume(&fixture, &bricked).unwrap_err(),
+            "publish_provider_unavailable"
+        );
         let still = fixture
             .store
             .get_publish_execution(&fixture.workspace.id, "session-13", &started.id)

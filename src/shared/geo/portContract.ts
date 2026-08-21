@@ -7,6 +7,9 @@
  * test.
  */
 
+import { cnyToPoints } from "./points";
+import { DEFAULT_DISTRIBUTION_SPEND_LIMITS } from "./distributionSpendLimits";
+
 export const GEO_PORT_CONTRACT = {
   baseline: {
     repository: "js_ai",
@@ -322,8 +325,12 @@ export const GEO_PORT_CONTRACT = {
     },
     quality: {
       // 发布率不是决策输入（用户裁决 2026-08-18）：无最低发布率门槛，
-      // 发布率未知也不过滤、不阻断确认；唯一质量硬约束是价格上限。
-      maximumPriceExclusive: 150,
+      // 发布率未知也不过滤、不阻断确认；价格按用户点数上限过滤。
+      defaultPerArticleMaxPoints:
+        DEFAULT_DISTRIBUTION_SPEND_LIMITS.perArticleMaxPoints,
+      defaultPerExecutionMaxPoints:
+        DEFAULT_DISTRIBUTION_SPEND_LIMITS.perExecutionMaxPoints,
+      limitSource: "user-setting-snapshotted-on-plan",
       priceParsedNumerically: true,
       appliedBeforeAlignmentAndQuota: true,
     },
@@ -629,22 +636,20 @@ export function scoreGeoHybridKnowledge(input: {
 }
 
 /** Mirrors the pre-alignment channel hard filter. Published rate is not a
- * decision input anywhere (user ruling 2026-08-18); the only quality bound is
- * the numeric price ceiling. */
+ * decision input anywhere (user ruling 2026-08-18); the price is converted to
+ * points and compared with the user-owned per-article cap. */
 export function isGeoChannelQualityEligible(input: {
   price?: string | null;
+  perArticleMaxPoints?: number;
 }): boolean {
   const quality = GEO_PORT_CONTRACT.channelRecall.quality;
-  if (input.price != null && input.price !== "") {
-    const numericPrice = Number(input.price);
-    if (
-      Number.isFinite(numericPrice) &&
-      numericPrice >= quality.maximumPriceExclusive
-    ) {
-      return false;
-    }
-  }
-  return true;
+  if (input.price == null || input.price.trim() === "") return false;
+  const numericPrice = Number(input.price);
+  if (!Number.isFinite(numericPrice) || numericPrice < 0) return false;
+  return (
+    cnyToPoints(numericPrice) <=
+    (input.perArticleMaxPoints ?? quality.defaultPerArticleMaxPoints)
+  );
 }
 
 /** Returns the soft 20/10 channel-kind caps after surplus fill. */

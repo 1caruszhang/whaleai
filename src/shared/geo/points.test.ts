@@ -6,7 +6,7 @@ describe("cnyToPoints", () => {
   it("converts media price to points with the service-fee multiplier", () => {
     // 与 Rust/网关同式：¥88.00 → ceil(8800 × 4 / 25) = 1408 点。
     expect(cnyToPoints(88)).toBe(1408);
-    // 默认预算示例：¥1000 → 16000 点。
+    // 换算示例：¥1000 → 16000 点。
     expect(cnyToPoints(1000)).toBe(16000);
   });
 
@@ -31,7 +31,7 @@ describe("cnyToPoints", () => {
 
 describe("pointsToCny", () => {
   it("inverts cnyToPoints for the budget round-trip", () => {
-    // 默认预算精确往返：16000 点 → ¥1000。
+    // 点数预算精确往返：16000 点 → ¥1000。
     expect(pointsToCny(16000)).toBe(1000);
     // 渠道单价示例：1408 点 → ¥88。
     expect(pointsToCny(1408)).toBe(88);

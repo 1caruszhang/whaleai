@@ -30,12 +30,12 @@ export const JS_AI_DEV_BEHAVIOR_FIXTURE = {
     ],
     channelQuality: [
       // js_ai 原判：publishedRate 69 被低成功率硬过滤（expected false）。
-      // 小鲸同学 用户裁决 2026-08-18：发布率不参与任何决策，唯一质量门是
-      // 数值价格 >=150 过滤——低成功率渠道在此期望 true。
+      // 小鲸同学当前规则：发布率不参与任何决策；默认单篇 3000 点，按
+      // 价格×1.6×10 换算，所以 ¥187.50 可进入、¥187.51 超限。
       { publishedRate: 0, price: "100", expected: true },
       { publishedRate: 69, price: "100", expected: true },
-      { publishedRate: 70, price: "149", expected: true },
-      { publishedRate: 70, price: "150", expected: false },
+      { publishedRate: 70, price: "187.50", expected: true },
+      { publishedRate: 70, price: "187.51", expected: false },
       { publishedRate: undefined, price: "99", expected: true },
     ],
     hybridScore: [

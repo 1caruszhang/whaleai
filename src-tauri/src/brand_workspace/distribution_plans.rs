@@ -333,6 +333,10 @@ impl BrandWorkspaceStore {
         request: DistributionPlanPrepareRequest,
     ) -> Result<DistributionPlanPreparation, String> {
         validate_prepare_request(&request)?;
+        // Limits are app-local user configuration owned by Rust. The Sidecar
+        // may send a stale projection for its own budgeting, but it cannot
+        // author or loosen the snapshot frozen into a distribution plan.
+        let spend_limits = crate::distribution_spend_limits::read_distribution_spend_limits();
         let workspace = self.workspace(workspace_id)?;
         let mut connection = open_database(&workspace)?;
         require_distribution_session(&connection, session_id)?;
@@ -450,6 +454,8 @@ impl BrandWorkspaceStore {
             "candidates": [],
             "selectedResourceIds": [],
             "assignments": assignments,
+            "perArticleMaxPoints": spend_limits.per_article_max_points,
+            "totalMaxPoints": spend_limits.per_execution_max_points,
             "budgetCny": request.budget_cny,
             "publishStartAt": request.publish_start_at,
             "discoverySummary": empty_discovery_summary(),
@@ -1342,6 +1348,11 @@ fn validate_discovery_against_plan(
         .get("targetAudience")
         .and_then(Value::as_str)
         .ok_or_else(|| "distribution_plan_audience_invalid".to_string())?;
+    let per_article_max_points = projection
+        .get("perArticleMaxPoints")
+        .and_then(Value::as_i64)
+        .filter(|value| *value > 0)
+        .unwrap_or(crate::distribution_spend_limits::DEFAULT_PER_ARTICLE_MAX_POINTS);
     // preferredResourceIds 快照字段保留兼容读取，但偏好路校验已改为
     // reference 前缀契约（js_ai preferenceChannels），不再消费该集合。
     let _preferred = projection
@@ -1361,6 +1372,14 @@ fn validate_discovery_against_plan(
             .get("kind")
             .and_then(Value::as_str)
             .ok_or_else(|| "distribution_plan_resource_identity_invalid".to_string())?;
+        let price = candidate
+            .get("estimatedPriceCny")
+            .and_then(Value::as_f64)
+            .filter(|value| value.is_finite() && *value >= 0.0)
+            .ok_or_else(|| "distribution_plan_resource_price_unknown".to_string())?;
+        if super::publish_scheduler::publish_channel_price_points(price) > per_article_max_points {
+            return Err("distribution_plan_resource_over_per_article_limit".to_string());
+        }
         let evidence = candidate
             .get("evidence")
             .and_then(Value::as_array)
@@ -1492,12 +1511,7 @@ fn validate_resource_snapshot(resource: &Value) -> Result<(), String> {
     if resource.get("status").and_then(Value::as_i64) != Some(2) {
         return Err("distribution_plan_resource_unavailable".to_string());
     }
-    // 发布率不是决策输入（用户裁决 2026-08-18）：低发布率资源合法。
-    if let Some(price) = parsed_price(resource.get("price")) {
-        if price >= 150.0 {
-            return Err("distribution_plan_resource_high_price".to_string());
-        }
-    }
+    // 发布率不是决策输入；价格点数上限由计划冻结的用户设置校验。
     Ok(())
 }
 
@@ -1662,6 +1676,16 @@ fn confirmation_issues(projection: &Value) -> Result<Vec<String>, String> {
         issues.push("selected-channel-duplicate".to_string());
     }
     let mut total = 0.0;
+    let mut total_points = 0_i64;
+    let per_article_max_points = projection
+        .get("perArticleMaxPoints")
+        .and_then(Value::as_i64)
+        .filter(|value| *value > 0)
+        .unwrap_or(crate::distribution_spend_limits::DEFAULT_PER_ARTICLE_MAX_POINTS);
+    let total_max_points = projection
+        .get("totalMaxPoints")
+        .and_then(Value::as_i64)
+        .filter(|value| *value > 0);
     for id in &selected_ids {
         let Some(candidate) = candidate_map.get(id) else {
             issues.push("selected-channel-outside-resource-snapshot".to_string());
@@ -1675,7 +1699,14 @@ fn confirmation_issues(projection: &Value) -> Result<Vec<String>, String> {
             issues.push("selected-channel-unavailable".to_string());
         }
         match candidate.get("estimatedPriceCny").and_then(Value::as_f64) {
-            Some(price) => total += price,
+            Some(price) => {
+                total += price;
+                let points = super::publish_scheduler::publish_channel_price_points(price);
+                total_points += points;
+                if points > per_article_max_points {
+                    issues.push("selected-channel-per-article-limit-exceeded".to_string());
+                }
+            }
             None => issues.push("selected-channel-price-unknown".to_string()),
         }
         // 发布率不是决策输入（用户裁决 2026-08-18）：不再阻断确认。
@@ -1726,7 +1757,12 @@ fn confirmation_issues(projection: &Value) -> Result<Vec<String>, String> {
         .get("budgetCny")
         .and_then(Value::as_f64)
         .unwrap_or(-1.0);
-    if budget < total {
+    let effective_total_max_points = total_max_points
+        .unwrap_or_else(|| super::publish_scheduler::publish_channel_price_points(budget.max(0.0)));
+    if budget < total
+        || super::publish_scheduler::publish_channel_price_points(budget) < total_points
+        || effective_total_max_points < total_points
+    {
         issues.push("distribution-budget-exceeded".to_string());
     }
     issues.sort();
@@ -1859,8 +1895,8 @@ fn empty_discovery_summary() -> Value {
         "inputResources": 0,
         "approvedResources": 0,
         "filteredUnavailable": 0,
-        "filteredLowPublishedRate": 0,
-        "filteredHighPrice": 0,
+        "filteredUnknownPrice": 0,
+        "filteredOverPerArticleLimit": 0,
         "alignedResources": 0,
         "recommendedResources": 0,
     })
@@ -2082,7 +2118,7 @@ mod tests {
             }]),
             discovery_summary: json!({
                 "inputResources":1,"approvedResources":1,"filteredUnavailable":0,
-                "filteredLowPublishedRate":0,"filteredHighPrice":0,
+                "filteredUnknownPrice":0,"filteredOverPerArticleLimit":0,
                 "alignedResources":1,"recommendedResources":1
             }),
             blocking_issues: json!([]),
@@ -2250,7 +2286,7 @@ mod tests {
     }
 
     #[test]
-    fn rust_confirmation_recomputes_unknown_price_blockers_only() {
+    fn discovery_rejects_channels_with_unknown_prices() {
         let (store, workspace) = setup();
         let context = store
             .distribution_planning_context(
@@ -2267,38 +2303,13 @@ mod tests {
         let preparation = store
             .prepare_distribution_plan(&workspace.id, "session-12", source)
             .unwrap();
-        let finished = store
+        let error = store
             .finish_distribution_plan_discovery(
                 &workspace.id,
                 "session-12",
                 finish_request(&preparation, Value::Null, 0),
             )
-            .unwrap();
-        assert_eq!(
-            store
-                .confirm_distribution_plan(
-                    &workspace.id,
-                    "session-other",
-                    DistributionPlanConfirmRequest {
-                        plan_id: finished["id"].as_str().unwrap().to_string(),
-                        expected_revision: finished["revision"].as_i64().unwrap(),
-                    },
-                )
-                .unwrap_err(),
-            "distribution_plan_draft_session_mismatch"
-        );
-        let error = store
-            .confirm_distribution_plan(
-                &workspace.id,
-                "session-12",
-                DistributionPlanConfirmRequest {
-                    plan_id: finished["id"].as_str().unwrap().to_string(),
-                    expected_revision: finished["revision"].as_i64().unwrap(),
-                },
-            )
             .unwrap_err();
-        assert!(error.contains("selected-channel-price-unknown"));
-        // 发布率不参与决策（用户裁决 2026-08-18）：不再产生 rate 阻断码。
-        assert!(!error.contains("selected-channel-published-rate-unknown"));
+        assert_eq!(error, "distribution_plan_resource_price_unknown");
     }
 }

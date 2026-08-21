@@ -528,6 +528,8 @@ function distributionPersistence() {
     ],
     mappingMode: "one-to-one",
     ratio: { media: 2, weMedia: 1 },
+    perArticleMaxPoints: 3_200,
+    totalMaxPoints: 16_000,
     budgetCny: 100,
     publishStartAt: "2026-08-20T01:00:00.000Z",
     providerState: "pending",
@@ -540,7 +542,8 @@ function distributionPersistence() {
       inputResources: 0,
       approvedResources: 0,
       filteredUnavailable: 0,
-      filteredHighPrice: 0,
+      filteredUnknownPrice: 0,
+      filteredOverPerArticleLimit: 0,
       alignedResources: 0,
       recommendedResources: 0,
     },
@@ -579,6 +582,12 @@ function distributionPersistence() {
       },
       async channelPreferences() {
         return undefined;
+      },
+      async spendLimits() {
+        return {
+          perArticleMaxPoints: 3_200,
+          perExecutionMaxPoints: 16_000,
+        };
       },
       async latest() {
         return current;
@@ -854,6 +863,8 @@ describe("ticket 07: client gateway transport + permit billing against the real 
       preferredResourceIds: [],
       mappingMode: "one-to-one" as const,
       ratio: { media: 2, weMedia: 1 },
+      perArticleMaxPoints: 3_200,
+      totalMaxPoints: 16_000,
       budgetCny: 100,
       publishStartAt: "2026-08-20T01:00:00.000Z",
     };

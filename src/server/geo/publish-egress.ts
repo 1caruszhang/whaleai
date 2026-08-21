@@ -55,6 +55,8 @@ export interface PublishEgressUploadInput {
 export interface PublishEgressOrderInput {
   executionId: string;
   itemId: string;
+  perArticleMaxPoints: number;
+  executionMaxPoints: number;
   kind: "media" | "we-media";
   resourceId: number;
   title: string;
@@ -118,6 +120,10 @@ export class PublishEgressService {
         input.kind,
         {
           sn,
+          executionId: input.executionId,
+          itemId: input.itemId,
+          perArticleMaxPoints: input.perArticleMaxPoints,
+          executionMaxPoints: input.executionMaxPoints,
           resourceId: input.resourceId,
           title: input.title,
           contentUrl: input.contentUrl,

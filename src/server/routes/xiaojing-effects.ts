@@ -343,6 +343,8 @@ export async function handleXiaojingEffectsRoute(
         sessionId: string;
         executionId: string;
         itemId: string;
+        perArticleMaxPoints: number;
+        executionMaxPoints: number;
         kind: string;
         resourceId: number;
         title: string;
@@ -367,6 +369,12 @@ export async function handleXiaojingEffectsRoute(
         (payload.kind !== "media" && payload.kind !== "we-media") ||
         !Number.isInteger(payload.resourceId) ||
         payload.resourceId < 1 ||
+        !Number.isInteger(payload.perArticleMaxPoints) ||
+        payload.perArticleMaxPoints < 1 ||
+        payload.perArticleMaxPoints > 160_000_000 ||
+        !Number.isInteger(payload.executionMaxPoints) ||
+        payload.executionMaxPoints < 1 ||
+        payload.executionMaxPoints > 160_000_000 ||
         typeof payload.title !== "string" ||
         !payload.title ||
         typeof payload.contentUrl !== "string" ||
@@ -384,6 +392,8 @@ export async function handleXiaojingEffectsRoute(
       ).placeOrder({
         executionId: identity.executionId,
         itemId: identity.itemId,
+        perArticleMaxPoints: payload.perArticleMaxPoints,
+        executionMaxPoints: payload.executionMaxPoints,
         kind: payload.kind,
         resourceId: payload.resourceId,
         title: payload.title,
