@@ -9,6 +9,7 @@ import {
 } from '../geo/provider-runtime';
 import {
   createKnowledgeAuthority,
+  KNOWLEDGE_EXCERPT_MAX_LENGTH,
   type FactKeyInput,
   type KnowledgeProposalInput,
 } from '../geo/knowledge-authority';
@@ -440,6 +441,11 @@ export interface RankingCompetitorConfirmationChallenge {
   issuedAfterUserMessageId: string;
 }
 
+export interface AuthorizedRankingCompetitorConfirmation
+  extends RankingCompetitorConfirmationChallenge {
+  userInstruction: string;
+}
+
 function normalizedConfirmationText(value: string): string {
   return value.trim().replace(/\s+/g, " ").toLocaleLowerCase("zh-CN");
 }
@@ -449,7 +455,24 @@ export class RankingCompetitorConfirmationGate {
   private pending: RankingCompetitorConfirmationChallenge | null = null;
 
   issue(challenge: RankingCompetitorConfirmationChallenge): void {
+    if (
+      this.pending &&
+      normalizedConfirmationText(this.pending.subject) ===
+        normalizedConfirmationText(challenge.subject) &&
+      JSON.stringify(this.pending.source) === JSON.stringify(challenge.source)
+    ) {
+      return;
+    }
     this.pending = structuredClone(challenge);
+  }
+
+  /**
+   * 部分采纳后把围栏推进到刚消费的用户消息：同一条消息不得再授权下一轮
+   * 采纳（否则消息里顺带提到的名字都能被后续调用逐个直采纳）。不能走
+   * issue()——同主体去重会把它变成空操作（生成重试正是靠该去重不移动围栏）。
+   */
+  advanceFence(userMessageId: string): void {
+    if (this.pending) this.pending.issuedAfterUserMessageId = userMessageId;
   }
 
   clear(): void {
@@ -457,14 +480,11 @@ export class RankingCompetitorConfirmationGate {
   }
 
   authorize(
-    input: { subject: string; names: string[]; userInstruction: string },
+    input: { names: string[] },
     latestUserMessage: { id: string; content: string } | null,
-  ): RankingCompetitorConfirmationChallenge {
+  ): AuthorizedRankingCompetitorConfirmation {
     const pending = this.pending;
     if (!pending) throw new Error("ranking_competitor_confirmation_not_requested");
-    if (input.subject.trim() !== pending.subject) {
-      throw new Error("ranking_competitor_confirmation_subject_mismatch");
-    }
     if (
       !latestUserMessage ||
       latestUserMessage.id === pending.issuedAfterUserMessageId
@@ -474,11 +494,8 @@ export class RankingCompetitorConfirmationGate {
     const latestInstruction = normalizedConfirmationText(
       latestUserMessage.content,
     );
-    if (
-      !latestInstruction ||
-      normalizedConfirmationText(input.userInstruction) !== latestInstruction
-    ) {
-      throw new Error("ranking_competitor_confirmation_instruction_mismatch");
+    if (!latestInstruction) {
+      throw new Error("ranking_competitor_confirmation_user_reply_required");
     }
     const missingFromUserMessage = input.names.filter(
       (name) =>
@@ -489,8 +506,34 @@ export class RankingCompetitorConfirmationGate {
         `ranking_competitor_confirmation_name_not_user_stated:${missingFromUserMessage.join("、")}`,
       );
     }
-    return structuredClone(pending);
+    return {
+      ...structuredClone(pending),
+      userInstruction: latestUserMessage.content,
+    };
   }
+}
+
+const rankingCompetitorGatesBySession = new Map<
+  string,
+  RankingCompetitorConfirmationGate
+>();
+
+/**
+ * `createXiaojingGeoServer()` 每个 Agent turn 都会重建 MCP server；竞品不足门
+ * 必须由 Session Sidecar 持有，不能绑在单轮 server factory 闭包里。按
+ * Session : Sidecar = 1 : 1，一个 sidecar 进程生命周期内最多只有一个 session
+ * 键，Map 不需要淘汰机制。
+ */
+export function sessionRankingCompetitorGate(
+  sessionId: string,
+): RankingCompetitorConfirmationGate {
+  const key = sessionId.trim();
+  if (!key) throw new Error("ranking_competitor_confirmation_session_required");
+  const existing = rankingCompetitorGatesBySession.get(key);
+  if (existing) return existing;
+  const gate = new RankingCompetitorConfirmationGate();
+  rankingCompetitorGatesBySession.set(key, gate);
+  return gate;
 }
 
 type RankingCompetitorAuthority = Pick<
@@ -516,8 +559,8 @@ function parsedStringList(raw: string | null | undefined): string[] {
 /**
  * 排行榜不足五家时的自然语言补充入口。只接受用户在当前消息中明确确认的
  * 名称；工具把原话作为 asked 来源，经同一个 KnowledgeAuthority 提议并立即
- * adopt，随后 Agent 可在同一回合重试文章生成。模型发现的名字仍走普通候选
- * 卡，不能调用本入口自动确认。
+ * adopt。调用边界从 Session Gate 取主体、从最新持久化用户消息取原话；
+ * 模型发现的名字仍走普通候选卡，不能调用本入口自动确认。
  */
 export async function confirmRankingCompetitors(
   input: { subject: string; names: string[]; userInstruction: string },
@@ -764,7 +807,7 @@ export async function createXiaojingGeoServer() {
   getXiaojingGeoProviderCapabilities();
   const { createSdkMcpServer, tool } = await import('@anthropic-ai/claude-agent-sdk');
   const { z } = await import('zod/v4');
-  const rankingCompetitorGate = new RankingCompetitorConfirmationGate();
+  const rankingCompetitorGate = sessionRankingCompetitorGate(context.sessionId);
   const latestUserMessage = async () => {
     const transcript = await loadSessionTranscript(context.sessionId);
     const latest = [...transcript.messages]
@@ -934,7 +977,7 @@ export async function createXiaojingGeoServer() {
           value: z.json(),
           unit: z.string().max(80).optional(),
           materialId: z.string().max(200).optional(),
-          excerpt: z.string().min(1).max(4_000),
+          excerpt: z.string().min(1).max(KNOWLEDGE_EXCERPT_MAX_LENGTH),
           confidence: z.number().min(0).max(1),
           profileProvenance: z.enum(['extracted', 'asked', 'inferred']).optional(),
         },
@@ -965,34 +1008,24 @@ export async function createXiaojingGeoServer() {
       ),
       tool(
         "confirm_ranking_competitors",
-        "Confirm competitor names the user explicitly supplied or explicitly accepted in their latest natural-language message after ranking generation reported fewer than five confirmed competitors. The server requires a pending insufficiency gate, checks the latest persisted user message verbatim, and rejects names absent from it. Never use model-inferred, searched, or merely mentioned names. When the valid total reaches five, this tool itself resumes the original article request and returns the article operation; do not call generate_articles again.",
+        "Confirm competitor names the user explicitly supplied in their latest natural-language message after ranking generation reported fewer than five confirmed competitors. Pass only those names: the server owns the pending Session gate, target subject, original article request, and verbatim audit text from the latest persisted user message. Names absent from that message are rejected. Never use model-inferred, searched, or merely mentioned names. When the valid total reaches five, this tool itself resumes the original article request and returns the article operation; do not call generate_articles again.",
         {
-          subject: z
-            .string()
-            .min(1)
-            .max(200)
-            .describe(
-              "The target brand subject used by its enterprise-profile facts.",
-            ),
           names: z
             .array(z.string().min(1).max(200))
             .min(1)
             .max(20)
             .describe(
-              "Only competitor names explicitly confirmed by the user in the latest message.",
-            ),
-          userInstruction: z
-            .string()
-            .min(1)
-            .max(2_000)
-            .describe(
-              "The user latest natural-language confirmation quoted verbatim for audit.",
+              "Only competitor names explicitly written by the user in the latest message.",
             ),
         },
         async (input) => {
           const latest = await latestUserMessage();
           const challenge = rankingCompetitorGate.authorize(input, latest);
-          const confirmed = await confirmRankingCompetitors(input);
+          const confirmed = await confirmRankingCompetitors({
+            subject: challenge.subject,
+            names: input.names,
+            userInstruction: challenge.userInstruction,
+          });
           if (!confirmed.readyForRanking) {
             return {
               content: [
@@ -1017,10 +1050,7 @@ export async function createXiaojingGeoServer() {
           } catch (error) {
             const requirement = rankingCompetitorRequirement(error);
             if (!requirement) throw error;
-            rankingCompetitorGate.issue({
-              ...challenge,
-              issuedAfterUserMessageId: latest!.id,
-            });
+            rankingCompetitorGate.advanceFence(latest!.id);
             return {
               content: [
                 { type: "text" as const, text: JSON.stringify(requirement) },
@@ -1406,7 +1436,6 @@ export async function createXiaojingGeoServer() {
                 kind: "confirmed-topic-plan",
                 ...(input.planId ? { planId: input.planId } : {}),
               };
-          rankingCompetitorGate.clear();
           let operation: ArticleOperationProjection;
           try {
             operation = await articleService().start({
@@ -1432,8 +1461,10 @@ export async function createXiaojingGeoServer() {
                 ],
               };
             }
+            rankingCompetitorGate.clear();
             throw error;
           }
+          rankingCompetitorGate.clear();
           return {
             content: [{ type: 'text' as const, text: JSON.stringify({ kind: 'article-operation', operation }) }],
           };

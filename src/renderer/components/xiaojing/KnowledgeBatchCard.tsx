@@ -4,6 +4,7 @@ import { useTranslation } from 'react-i18next';
 
 import { useTabApi } from '@/context/TabContext';
 import { isEnterpriseProfileField } from '../../../shared/geo/enterpriseProfile';
+import { formatCompetitorDisplayNames } from '../../../shared/geo/competitorDetails';
 import {
   buildKnowledgeFieldRows,
   KNOWLEDGE_CARD_MAX_CANDIDATES,
@@ -58,6 +59,7 @@ function serverFingerprintOf(candidate: KnowledgeCardCandidate): string {
     candidate.normalizedValueJson,
     candidate.unit ?? '',
     candidate.source.profileProvenance ?? '',
+    JSON.stringify(candidate.competitorDetails ?? []),
   ].join('|');
 }
 
@@ -520,17 +522,27 @@ interface FieldRowProps {
 }
 
 /** 候选值胶囊：胶囊承载字段值本身（已就绪列 muted、待确认列高亮），字段名在行头。 */
-function ValuePill({ text, muted }: { text: string; muted?: boolean }) {
+function ValuePill({
+  text,
+  muted,
+  wrap = false,
+}: {
+  text: string;
+  muted?: boolean;
+  wrap?: boolean;
+}) {
   return (
     <span
       title={text}
-      className={`inline-flex max-w-[280px] items-center rounded-full border px-2 py-0.5 text-xs ${
+      className={`inline-flex items-center rounded-full border px-2 py-0.5 text-xs ${
+        wrap ? 'max-w-full' : 'max-w-[280px]'
+      } ${
         muted
           ? 'border-[var(--line-subtle)] bg-[var(--paper-inset)] text-[var(--ink-muted)]'
           : 'border-[var(--line)] bg-[var(--paper)] text-[var(--ink)]'
       }`}
     >
-      <span className="truncate">{text}</span>
+      <span className={wrap ? 'whitespace-normal break-words' : 'truncate'}>{text}</span>
     </span>
   );
 }
@@ -590,6 +602,19 @@ function FieldRow({ row, stateOf, busy, onConfirmRow, onChoose, onStageEdits, on
     const raw = state.editedValue !== undefined
       ? JSON.stringify(state.editedValue)
       : candidate.normalizedValueJson;
+    // 联网补全的竞品候选把三项关键信息合并进同一枚胶囊，用户无需展开
+    // 摘录即可判断「是不是同地域、同具体业务」。用户编辑后仍按名称精确匹配：
+    // 未改名的条目保留三元组，新名称没有旧元数据则只显示名称，绝不错误挂接。
+    if (
+      row.field === 'competitors'
+      && candidate.competitorDetails?.length
+    ) {
+      const value = parseCandidateValue(raw);
+      const names = Array.isArray(value) ? value : [value];
+      if (names.every((name): name is string => typeof name === 'string')) {
+        return formatCompetitorDisplayNames(names, candidate.competitorDetails);
+      }
+    }
     return displayValueTexts(raw, candidate.unit);
   };
 
@@ -670,7 +695,12 @@ function FieldRow({ row, stateOf, busy, onConfirmRow, onChoose, onStageEdits, on
             return (
               <span key={candidate.id} className="inline-flex items-center gap-1.5">
                 {candidateValueTexts(candidate).map((text, index) => (
-                  <ValuePill key={`${candidate.id}:${index}`} text={text} muted />
+                  <ValuePill
+                    key={`${candidate.id}:${index}`}
+                    text={text}
+                    muted
+                    wrap={row.field === 'competitors'}
+                  />
                 ))}
                 <span
                   className="inline-flex items-center gap-1 text-[var(--ink-subtle)]"
@@ -737,7 +767,11 @@ function FieldRow({ row, stateOf, busy, onConfirmRow, onChoose, onStageEdits, on
                 </>
               )}
               {candidateValueTexts(candidate).map((text, index) => (
-                <ValuePill key={`${candidate.id}:${index}`} text={text} />
+                <ValuePill
+                  key={`${candidate.id}:${index}`}
+                  text={text}
+                  wrap={row.field === 'competitors'}
+                />
               ))}
               {isFailed && (
                 <button

@@ -155,7 +155,9 @@ describe('session-files reminder copy stays in sync with the system prompt', () 
     expect(prompt).toContain("generate_articles");
     expect(prompt).toContain("已确认竞品不足 5 家");
     expect(prompt).toContain("confirm_ranking_competitors");
-    expect(prompt).toContain("服务端会绑定本 Session 的不足门与最新用户消息");
+    expect(prompt).toContain("工具只传这些 names");
+    expect(prompt).toContain("服务端会绑定本 Session 的不足门、目标主体与最新持久化用户原话");
+    expect(prompt).not.toContain("userInstruction 必须");
     expect(prompt).toContain("不要再次调用 generate_articles");
     expect(prompt).toContain("plan_distribution");
     expect(prompt).toContain("prepare_publish");

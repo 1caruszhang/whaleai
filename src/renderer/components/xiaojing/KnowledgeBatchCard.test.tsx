@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { renderWithTheme as render } from '@/test/renderWithTheme';
 import { XiaojingThemeRuntime } from '@/theme';
+import { encodeCompetitorEvidence } from '../../../shared/geo/competitorDetails';
 import {
   buildKnowledgeCandidatesCardData,
   KNOWLEDGE_CARD_MAX_CANDIDATES,
@@ -198,6 +199,35 @@ describe('KnowledgeBatchCard（字段行复核卡）', () => {
     expect(screen.getByText('元音改汽车音响')).toBeInTheDocument();
     expect(screen.getByText('美声汽车音响')).toBeInTheDocument();
     expect(screen.queryByText('旭日酷车汽车音响、元音改汽车音响、美声汽车音响')).not.toBeInTheDocument();
+  });
+
+  it('联网竞品候选在确认前后都显示名称、地域与具体同类业务', async () => {
+    render(<KnowledgeBatchCard data={cardData([
+      candidateSource({
+        id: 'c-competitor-details',
+        predicate: 'enterprise-profile.competitors',
+        valueJson: '["成实外教育","为明教育"]',
+        normalizedValueJson: '["成实外教育","为明教育"]',
+        source: {
+          materialId: 'material-1',
+          excerpt: encodeCompetitorEvidence([
+            { name: '成实外教育', region: '成都', similarBusiness: '民办中学教育' },
+            { name: '为明教育', region: '成都', similarBusiness: '民办中学教育' },
+          ], '成都民办中学排名原文', 4_000),
+          confidence: 0.5,
+          profileProvenance: 'inferred',
+        },
+      }),
+    ])} />);
+
+    expect(screen.getByText('成实外教育｜成都｜民办中学教育')).toBeInTheDocument();
+    expect(screen.getByText('为明教育｜成都｜民办中学教育')).toBeInTheDocument();
+    expect(screen.queryByText(/xiaojing-competitor-details/)).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: '确认（采纳全部 1 条）' }));
+    await waitFor(() => expect(screen.getByText('已采用')).toBeInTheDocument());
+    expect(screen.getByText('成实外教育｜成都｜民办中学教育')).toBeInTheDocument();
+    expect(screen.getByText('为明教育｜成都｜民办中学教育')).toBeInTheDocument();
   });
 
   it('材料原文行零控件、徽章已就绪；整卡全原文零冲突也必须点一次确认才提交', async () => {

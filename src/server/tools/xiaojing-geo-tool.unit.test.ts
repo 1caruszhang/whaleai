@@ -14,6 +14,7 @@ import {
   publishExecutionCardProjection,
   RankingCompetitorConfirmationGate,
   rankingCompetitorRequirement,
+  sessionRankingCompetitorGate,
 } from "./xiaojing-geo-tool";
 
 describe("RankingCompetitorConfirmationGate", () => {
@@ -28,14 +29,12 @@ describe("RankingCompetitorConfirmationGate", () => {
   it("requires a prior insufficiency gate and a later verbatim user message", () => {
     const gate = new RankingCompetitorConfirmationGate();
     const input = {
-      subject: "目标品牌",
       names: ["竞品丁", "竞品戊"],
-      userInstruction: "补充竞品丁和竞品戊",
     };
     expect(() =>
       gate.authorize(input, {
         id: "user-2",
-        content: input.userInstruction,
+        content: "补充竞品丁和竞品戊",
       }),
     ).toThrow("ranking_competitor_confirmation_not_requested");
 
@@ -47,21 +46,19 @@ describe("RankingCompetitorConfirmationGate", () => {
     expect(() =>
       gate.authorize(input, {
         id: "user-1",
-        content: input.userInstruction,
+        content: "补充竞品丁和竞品戊",
       }),
     ).toThrow("ranking_competitor_confirmation_user_reply_required");
-    expect(() =>
-      gate.authorize(input, {
-        id: "user-2",
-        content: "补充竞品丁",
-      }),
-    ).toThrow("ranking_competitor_confirmation_instruction_mismatch");
     expect(
       gate.authorize(input, {
         id: "user-2",
-        content: input.userInstruction,
+        content: "补充竞品丁和竞品戊",
       }),
-    ).toMatchObject({ subject: "目标品牌", source });
+    ).toMatchObject({
+      subject: "目标品牌",
+      source,
+      userInstruction: "补充竞品丁和竞品戊",
+    });
   });
 
   it("rejects names that are not present in the latest user message", () => {
@@ -74,13 +71,83 @@ describe("RankingCompetitorConfirmationGate", () => {
     expect(() =>
       gate.authorize(
         {
-          subject: "目标品牌",
           names: ["模型搜索品牌"],
-          userInstruction: "补充竞品丁",
         },
         { id: "user-2", content: "补充竞品丁" },
       ),
     ).toThrow("ranking_competitor_confirmation_name_not_user_stated");
+  });
+
+  it("keeps the pending challenge across consecutive agent turns in one Session", () => {
+    const firstTurnGate = sessionRankingCompetitorGate("session-ranking-cross-turn");
+    firstTurnGate.clear();
+    firstTurnGate.issue({
+      subject: "目标品牌",
+      source,
+      issuedAfterUserMessageId: "user-1",
+    });
+
+    const secondTurnGate = sessionRankingCompetitorGate("session-ranking-cross-turn");
+    expect(
+      secondTurnGate.authorize(
+        {
+          names: ["竞品丁", "竞品戊"],
+        },
+        { id: "user-2", content: "补充竞品丁和竞品戊" },
+      ),
+    ).toMatchObject({ subject: "目标品牌", source });
+    secondTurnGate.clear();
+  });
+
+  it("keeps the original user-reply fence when the same generation is retried", () => {
+    const gate = new RankingCompetitorConfirmationGate();
+    gate.issue({
+      subject: "目标品牌",
+      source,
+      issuedAfterUserMessageId: "user-1",
+    });
+    gate.issue({
+      subject: "目标品牌",
+      source,
+      issuedAfterUserMessageId: "user-2",
+    });
+
+    expect(
+      gate.authorize(
+        { names: ["竞品丁", "竞品戊"] },
+        { id: "user-2", content: "补充竞品丁和竞品戊" },
+      ),
+    ).toMatchObject({ issuedAfterUserMessageId: "user-1" });
+  });
+
+  it("advances the fence past a partially consumed user message", () => {
+    // 回归：部分采纳后必须推进围栏。曾经走 issue() 推进，但同主体去重把
+    // 它变成空操作，同一条消息可以一轮一轮把「顺带提到」的名字全部直采纳。
+    const gate = new RankingCompetitorConfirmationGate();
+    gate.issue({
+      subject: "目标品牌",
+      source,
+      issuedAfterUserMessageId: "user-1",
+    });
+    gate.authorize(
+      { names: ["竞品丁"] },
+      { id: "user-2", content: "补充竞品丁，另外聊到过竞品戊" },
+    );
+    gate.advanceFence("user-2");
+
+    expect(() =>
+      gate.authorize(
+        { names: ["竞品戊"] },
+        { id: "user-2", content: "补充竞品丁，另外聊到过竞品戊" },
+      ),
+    ).toThrow("ranking_competitor_confirmation_user_reply_required");
+
+    expect(
+      gate.authorize(
+        { names: ["竞品戊"] },
+        { id: "user-3", content: "确认补上竞品戊" },
+      ),
+    ).toMatchObject({ subject: "目标品牌", source });
   });
 });
 

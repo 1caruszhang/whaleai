@@ -24,7 +24,7 @@
    - **add**：走既有 propose 语义（`user-stated` / `knowledge-update` / `asked` 待确认候选），携带材料 id 时把新候选挂回该材料最新处理 attempt 的候选快照，卡片经既有轮询/水合投影重渲染出新行。
    每次修订写 `knowledge_candidate_revisions` 完整审计（before/after 值快照 + 指令原文），不升品牌知识版本、不投送 `XIAOJING_KNOWLEDGE_DECISION` reminder（reminder 只在裁决提交时投送）。修订按候选 id 覆盖卡片本地暂存编辑（服务端胜），见 ADR 0003。
 
-5. `confirm_ranking_competitors` 是唯一自然语言直采纳例外：Session Sidecar 必须先持有由 ranking 数量门签发的待补充状态，并绑定原文章请求、品牌主体及签发时用户消息。后续调用逐字读取当前 Session 最新持久化用户消息，要求它晚于签发消息、与 `userInstruction` 相同且逐名包含待采纳名称；随后才以该原话作 `rawInput/excerpt/reason`，按 `user-stated / knowledge-update / asked` 提议数组补充并立即 `adopt-new`。目标品牌自身、workspace 名、已确认别名和 relatedBrands 会拒绝；模型推断、搜索候选和普通聊天观察不得走该入口。补足 5 家时工具直接恢复绑定的原文章请求。
+5. `confirm_ranking_competitors` 是唯一自然语言直采纳例外：Session Sidecar 必须先持有由 ranking 数量门签发的待补充状态，并绑定原文章请求、品牌主体及签发时用户消息。该状态由 Session Sidecar 持有，不得放在每轮重建的 MCP server factory 闭包中；对同一文章请求的重复生成不得移动签发时的用户消息边界，但一次部分采纳后服务端必须把该边界推进到刚消费的用户消息——同一条用户消息不得再授权下一轮采纳（否则消息里顺带提到的名字会被后续调用逐个直采纳）。工具只接收待采纳名称；服务端逐字读取当前 Session 最新持久化用户消息，要求它晚于签发消息且逐名包含待采纳名称，目标主体从 Gate 取得，并以服务端读取的原话作 `rawInput/excerpt/reason`，按 `user-stated / knowledge-update / asked` 提议数组补充并立即 `adopt-new`。目标品牌自身、workspace 名、已确认别名和 relatedBrands 会拒绝；模型推断、搜索候选和普通聊天观察不得走该入口。补足 5 家时工具直接恢复绑定的原文章请求。
 
 除上述 ranking 竞品不足的窄例外外，裁决入口固定为聊天内的结构化卡片：材料导入（`import_pasted_material` /
 `import_website_material` / `retry_brand_material` 的工具结果）渲染一张字段行复核卡
