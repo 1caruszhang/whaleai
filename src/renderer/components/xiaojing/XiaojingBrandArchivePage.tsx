@@ -22,7 +22,11 @@ import type {
   BrandKnowledgeHistoryVersion,
 } from "../../../shared/geo/brandHistory";
 import type { EnterpriseProfileField } from "../../../shared/geo/enterpriseProfile";
-import { canonicalEnterpriseProfileField } from "../../../shared/geo/enterpriseProfile";
+import { canonicalEnterpriseProfileField, PROFILE_PREDICATE_PREFIX } from "../../../shared/geo/enterpriseProfile";
+import {
+  decodeCompetitorEvidence,
+  formatCompetitorFactValue,
+} from '../../../shared/geo/competitorDetails';
 
 interface Props {
   workspace: BrandWorkspace | null;
@@ -46,8 +50,6 @@ const ARTIFACT_STATUS_LABELS: Record<string, string> = {
   succeeded: "已成功",
   partial: "部分成功",
 };
-
-const PROFILE_PREDICATE_PREFIX = "enterprise-profile.";
 
 /**
  * 「当前档案」看板的语义 widget 分格：13 类 Profile 字段按关注点聚合，
@@ -118,10 +120,17 @@ const PROFILE_WIDGETS: ProfileWidgetDef[] = [
 ];
 
 function profileFieldOf(factKey: string): EnterpriseProfileField | null {
+  let predicate = factKey;
+  try {
+    const parsed = JSON.parse(factKey) as { predicate?: unknown };
+    if (typeof parsed.predicate === 'string') predicate = parsed.predicate;
+  } catch {
+    // 历史兼容：早期快照直接用 predicate 作为 factKey。
+  }
   return canonicalEnterpriseProfileField(
-    factKey.startsWith(PROFILE_PREDICATE_PREFIX)
-      ? factKey.slice(PROFILE_PREDICATE_PREFIX.length)
-      : factKey,
+    predicate.startsWith(PROFILE_PREDICATE_PREFIX)
+      ? predicate.slice(PROFILE_PREDICATE_PREFIX.length)
+      : predicate,
   );
 }
 
@@ -174,9 +183,18 @@ function FactValue({ fact }: { fact: BrandKnowledgeHistoryFact }) {
     parsed = undefined;
   }
   if (Array.isArray(parsed)) {
-    const items = parsed.map((item) =>
+    let items = parsed.map((item) =>
       typeof item === "string" ? item : JSON.stringify(item),
     );
+    if (
+      profileFieldOf(fact.factKey) === 'competitors'
+      && parsed.every((item): item is string => typeof item === 'string')
+    ) {
+      items = formatCompetitorFactValue(
+        parsed,
+        fact.sources.map((source) => source.excerpt),
+      );
+    }
     if (items.length === 0) {
       return <p className="text-sm text-[var(--ink-subtle)]">—</p>;
     }
@@ -267,7 +285,7 @@ function ProfileWidget({
                 >
                   {labelOf(fact.factKey)} · {source.origin}
                   {source.materialId ? ` · ${source.materialId}` : ""}：
-                  {source.excerpt}
+                  {decodeCompetitorEvidence(source.excerpt).evidence}
                 </li>
               )),
             )}

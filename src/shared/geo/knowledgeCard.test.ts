@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
+import { encodeCompetitorEvidence } from './competitorDetails';
 import {
   buildKnowledgeCandidatesCardData,
   buildKnowledgeFieldRows,
@@ -168,6 +169,47 @@ describe('knowledge candidates card contract', () => {
     }));
     expect(projected.source.excerpt).toBe(`${'依'.repeat(KNOWLEDGE_CARD_EXCERPT_MAX_CHARS)}…`);
     expect('valueJson' in projected).toBe(false);
+  });
+
+  it('projects versioned competitor display details without leaking the metadata marker', () => {
+    const projected = toKnowledgeCardCandidate(source({
+      predicate: 'enterprise-profile.competitors',
+      valueJson: '["成实外教育","为明教育"]',
+      normalizedValueJson: '["成实外教育","为明教育"]',
+      source: {
+        materialId: 'material-1',
+        excerpt: encodeCompetitorEvidence([
+          { name: '成实外教育', region: '成都', similarBusiness: '民办中学教育' },
+          { name: '为明教育', region: '成都', similarBusiness: '民办中学教育' },
+        ], '成都民办中学排名提到成实外教育和为明教育', 4_000),
+        confidence: 0.5,
+        profileProvenance: 'inferred',
+      },
+    }));
+
+    expect(projected.competitorDetails).toEqual([
+      { name: '成实外教育', region: '成都', similarBusiness: '民办中学教育' },
+      { name: '为明教育', region: '成都', similarBusiness: '民办中学教育' },
+    ]);
+    expect(projected.source.excerpt).toBe('成都民办中学排名提到成实外教育和为明教育');
+    expect(projected.source.excerpt).not.toContain('xiaojing-competitor-details');
+  });
+
+  it('strips the metadata marker from malformed headers instead of leaking it into the excerpt', () => {
+    // 头部被截断/坏 JSON 时拿不到展示元数据，但审计标记（DESIGN.md：不得
+    // 出现在值或来源证据 UI 中）不能跟着原始摘录漏进卡片。
+    const projected = toKnowledgeCardCandidate(source({
+      predicate: 'enterprise-profile.competitors',
+      source: {
+        materialId: 'material-1',
+        excerpt: '[[xiaojing-competitor-details:v1]]{"name":"成实外教育"\n成都民办中学排名提到成实外教育',
+        confidence: 0.5,
+        profileProvenance: 'inferred',
+      },
+    }));
+    expect(projected.competitorDetails).toBeUndefined();
+    expect(projected.source.excerpt).toBe('成都民办中学排名提到成实外教育');
+    expect(projected.source.excerpt).not.toContain('xiaojing-competitor-details');
   });
 
   it('groups candidates into fixed-order field rows, merging same-field candidates', () => {

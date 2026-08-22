@@ -452,15 +452,15 @@ describe('MaterialImportService', () => {
 
 describe("competitor enrichment (js_ai enrich real competitors)", () => {
   const searchText =
-    "鲸跃科技的主要竞争对手包括云帆信息，并与星河智能直接竞争；供应商华创精密为其提供芯片。";
+    "成都的云帆信息经营智能客服，鲸跃科技的主要竞争对手包括云帆信息；成都的星河智能也经营智能客服，并与星河智能直接竞争；供应商华创精密为其提供芯片。";
   const enrichmentResponse = JSON.stringify({
     competitors: [
-      { name: '云帆信息', sourceExcerpt: '主要竞争对手包括云帆信息' },
-      { name: '星河智能', sourceExcerpt: '与星河智能直接竞争' },
+      { name: '云帆信息', region: '成都', similarBusiness: '智能客服', sourceExcerpt: '主要竞争对手包括云帆信息' },
+      { name: '星河智能', region: '成都', similarBusiness: '智能客服', sourceExcerpt: '与星河智能直接竞争' },
       // 名字确实在语料中，但模型把供应关系改写成竞争关系；摘录非原文必须拒绝。
-      { name: '华创精密', sourceExcerpt: '主要竞争对手包括华创精密' },
-      { name: '幻影科技', sourceExcerpt: '检索结果中不存在的公司' },
-      { name: '鲸跃科技', sourceExcerpt: '鲸跃科技的主要竞争对手' },
+      { name: '华创精密', region: '成都', similarBusiness: '芯片供应', sourceExcerpt: '主要竞争对手包括华创精密' },
+      { name: '幻影科技', region: '成都', similarBusiness: '智能客服', sourceExcerpt: '检索结果中不存在的公司' },
+      { name: '鲸跃科技', region: '成都', similarBusiness: '智能客服', sourceExcerpt: '鲸跃科技的主要竞争对手' },
     ],
   });
 
@@ -516,6 +516,31 @@ describe("competitor enrichment (js_ai enrich real competitors)", () => {
     });
     // 依据合并保留逐名检索摘录，供卡片低置信组展示。
     expect(competitorsCall?.[0].source.excerpt).toContain('云帆信息：主要竞争对手包括云帆信息');
+    expect(competitorsCall?.[0].source.excerpt).toContain('xiaojing-competitor-details:v1');
+    expect(competitorsCall?.[0].source.excerpt).toContain('"region":"成都"');
+    expect(competitorsCall?.[0].source.excerpt).toContain('"similarBusiness":"智能客服"');
+  });
+
+  it('rejects online candidates that omit region or concrete similar business', async () => {
+    const port = new FakeMaterialPort();
+    const current = service(port, {
+      completeResponses: [extractionResponse(), JSON.stringify({
+        competitors: [
+          { name: '云帆信息', similarBusiness: '智能客服', sourceExcerpt: '主要竞争对手包括云帆信息' },
+          { name: '星河智能', region: '成都', sourceExcerpt: '与星河智能直接竞争' },
+          { name: '远山科技', region: '成都', similarBusiness: '智能客服', sourceExcerpt: '与远山科技直接竞争' },
+        ],
+      })],
+      search: async () => `${searchText}；成都的远山科技经营智能客服，与远山科技直接竞争。`,
+    });
+
+    const result = await current.value.importPastedText('公司资料');
+
+    expect(result.ok).toBe(true);
+    const competitorsCall = current.propose.mock.calls.find(
+      ([input]) => input.key.predicate === 'enterprise-profile.competitors',
+    );
+    expect(competitorsCall?.[0].value).toEqual(['远山科技']);
   });
 
   it('drops lookalike short-name typo variants of the brand from enriched suggestions', async () => {
@@ -525,11 +550,11 @@ describe("competitor enrichment (js_ai enrich real competitors)", () => {
     const current = service(port, {
       completeResponses: [extractionResponse(), JSON.stringify({
         competitors: [
-          { name: '鲸悦科技', sourceExcerpt: '竞争对手包括鲸悦科技' },
-          { name: '云帆信息', sourceExcerpt: '与云帆信息直接竞争' },
+          { name: '鲸悦科技', region: '成都', similarBusiness: '智能客服', sourceExcerpt: '竞争对手包括鲸悦科技' },
+          { name: '云帆信息', region: '成都', similarBusiness: '智能客服', sourceExcerpt: '与云帆信息直接竞争' },
         ],
       })],
-      search: async () => '鲸跃科技的主要竞争对手包括鲸悦科技；与云帆信息直接竞争。',
+      search: async () => '成都的鲸悦科技经营智能客服，是鲸跃科技的主要竞争对手；成都的云帆信息经营智能客服，与云帆信息直接竞争。',
     });
     const result = await current.value.importPastedText('公司资料');
 
@@ -562,6 +587,64 @@ describe("competitor enrichment (js_ai enrich real competitors)", () => {
     ]);
   });
 
+  it('rejects top embedded in english words as a ranking signal', async () => {
+    // 回归：旧模式 `top\s*\d*` 会把 laptop 里的 "top" 当榜单信号；单词边界 +
+    // 至少一位数字后才算 Top N 榜单信号。
+    const port = new FakeMaterialPort();
+    const current = service(port, {
+      completeResponses: [
+        extractionResponse(),
+        JSON.stringify({
+          competitors: [
+            {
+              name: '云帆信息',
+              region: '成都',
+              similarBusiness: '智能客服',
+              sourceExcerpt: '云帆信息与某laptop维修点为邻',
+            },
+          ],
+        }),
+      ],
+      search: async () => '成都的云帆信息经营智能客服，云帆信息与某laptop维修点为邻。',
+    });
+
+    const result = await current.value.importPastedText('公司资料');
+
+    expect(result).toMatchObject({ ok: true });
+    const competitorsCall = current.propose.mock.calls.find(
+      ([input]) => input.key.predicate === 'enterprise-profile.competitors',
+    );
+    expect(competitorsCall?.[0].value).toEqual([]);
+  });
+
+  it('accepts top-with-digits ranking signals like top10', async () => {
+    const port = new FakeMaterialPort();
+    const current = service(port, {
+      completeResponses: [
+        extractionResponse(),
+        JSON.stringify({
+          competitors: [
+            {
+              name: '云帆信息',
+              region: '成都',
+              similarBusiness: '智能客服',
+              sourceExcerpt: '成都智能客服top10榜单收录云帆信息',
+            },
+          ],
+        }),
+      ],
+      search: async () => '成都的云帆信息经营智能客服，成都智能客服top10榜单收录云帆信息。',
+    });
+
+    const result = await current.value.importPastedText('公司资料');
+
+    expect(result.ok).toBe(true);
+    const competitorsCall = current.propose.mock.calls.find(
+      ([input]) => input.key.predicate === 'enterprise-profile.competitors',
+    );
+    expect(competitorsCall?.[0].value).toEqual(['云帆信息']);
+  });
+
   it("keeps an empty competitor row visible when the search provider fails", async () => {
     const port = new FakeMaterialPort();
     const current = service(port, {
@@ -583,14 +666,17 @@ describe("competitor enrichment (js_ai enrich real competitors)", () => {
     expect(port.trace.at(-1)).toMatch(/finish:text-1:awaiting-confirmation/);
   });
 
-  it('does not search when eight confirmed competitors already exist', async () => {
+  it('does not search when ten confirmed competitors already exist', async () => {
     const port = new FakeMaterialPort();
     const current = service(port, {
       inspect: async (key) => {
         if (key.predicate !== 'enterprise-profile.competitors') return null;
         return {
           key: { subject: '鲸跃科技', predicate: key.predicate, scopeJson: '{}', identity: 'brand|competitors|{}||' },
-          normalizedValueJson: JSON.stringify(['甲品牌', '乙品牌', '丙品牌', '丁品牌', '戊品牌', '己品牌', '庚品牌', '辛品牌']),
+          normalizedValueJson: JSON.stringify([
+            '甲品牌', '乙品牌', '丙品牌', '丁品牌', '戊品牌',
+            '己品牌', '庚品牌', '辛品牌', '壬品牌', '癸品牌',
+          ]),
           unit: null,
           version: 3,
           confirmedBy: 'desktop-user',
@@ -605,6 +691,36 @@ describe("competitor enrichment (js_ai enrich real competitors)", () => {
     expect(result).toMatchObject({ ok: true });
     expect(current.search).not.toHaveBeenCalled();
     expect(current.complete).toHaveBeenCalledTimes(1);
+  });
+
+  it('proposes only new names; the authority array-merge keeps confirmed competitors', async () => {
+    // 已确认权威值由 KnowledgeAuthority propose 的数组增量合并契约保住
+    // （current 在前、新增去重追加，见 knowledge-authority 单测）：提议 value
+    // 只含联网新增名，已确认名称不以「待确认」形态重复出现。
+    const port = new FakeMaterialPort();
+    const current = service(port, {
+      completeResponses: [extractionResponse(), enrichmentResponse],
+      inspect: async (key) => key.predicate === 'enterprise-profile.competitors'
+        ? {
+            key: { subject: '鲸跃科技', predicate: key.predicate, scopeJson: '{}', identity: 'brand|competitors|{}||' },
+            normalizedValueJson: JSON.stringify(['天立教育', '丹秋教育', '领川教育']),
+            unit: null,
+            version: 3,
+            confirmedBy: 'desktop-user',
+            confirmedAt: '2026-08-15T00:00:00Z',
+            sources: [],
+          }
+        : null,
+      search: async () => searchText,
+    });
+
+    const result = await current.value.importPastedText('公司资料');
+
+    expect(result.ok).toBe(true);
+    const competitorsCall = current.propose.mock.calls.find(
+      ([input]) => input.key.predicate === 'enterprise-profile.competitors',
+    );
+    expect(competitorsCall?.[0].value).toEqual(['云帆信息', '星河智能']);
   });
 
   it("keeps an empty competitor row visible when no search capability is injected", async () => {
@@ -636,7 +752,9 @@ describe("competitor enrichment (js_ai enrich real competitors)", () => {
       search: async () => {
         call += 1;
         if (call === 2) throw new Error('search hiccup');
-        return call === 1 ? '主要竞争对手包括云帆信息' : '与星河智能直接竞争';
+        return call === 1
+          ? '成都的云帆信息经营智能客服，主要竞争对手包括云帆信息'
+          : '成都的星河智能经营智能客服，与星河智能直接竞争';
       },
     });
     const result = await current.value.importPastedText('公司资料');
@@ -644,18 +762,20 @@ describe("competitor enrichment (js_ai enrich real competitors)", () => {
     expect(result.ok).toBe(true);
     // js_ai 三互补 query：排行榜形、口碑形、品牌点名形；榜单语料的国际大牌
     // 由富化提示词的画像锚定与榜单警示过滤。
-    expect(current.search!.mock.calls.map(([query]) => query)).toEqual([
-      '成都新都 医美 排行榜 十大品牌 对比',
-      '成都新都 医美 哪家好 推荐 口碑',
-      '鲸跃科技 主要竞争对手 同行',
-    ]);
+    const onlinePrompts = current.search!.mock.calls.map(([query]) => query);
+    expect(onlinePrompts).toHaveLength(3);
+    expect(onlinePrompts[0]).toContain('成都新都 医美 排行榜');
+    expect(onlinePrompts[1]).toContain('成都新都 医美 哪家好');
+    expect(onlinePrompts[2]).toContain('鲸跃科技 主要竞争对手');
+    expect(onlinePrompts.every((prompt) => prompt.includes('最多给出 10 家候选'))).toBe(true);
+    expect(onlinePrompts.every((prompt) => prompt.includes('竞品名称、所在地域'))).toBe(true);
     const competitorsCall = current.propose.mock.calls.find(
       ([input]) => input.key.predicate === 'enterprise-profile.competitors',
     );
     expect(competitorsCall?.[0].value).toEqual(['云帆信息', '星河智能']);
   });
 
-  it('prefers structured doubao-search sources and dedupes across queries by url', async () => {
+  it('uses the online model exclusively even when the legacy web leg is available', async () => {
     const port = new FakeMaterialPort();
     const withArea = JSON.stringify({ facts: [
       { field: 'industry', value: '医美', provenance: 'extracted', sourceExcerpt: '行业：医美' },
@@ -663,61 +783,78 @@ describe("competitor enrichment (js_ai enrich real competitors)", () => {
     ] });
     const current = service(port, {
       completeResponses: [withArea, enrichmentResponse],
-      searchSources: async (query) => {
-        if (query.includes('排行榜')) {
-          return [
-            { title: '医美十大品牌榜', url: 'https://rank.example/1', summary: '国际设备品牌与连锁榜单' },
-            { title: '新都医美哪家好', url: 'https://local.example/1', summary: '主要竞争对手包括云帆信息' },
-          ];
-        }
-        return [
-          // 跨 query 的同一 URL 只进语料一次。
-          { title: '新都医美哪家好', url: 'https://local.example/1', summary: '主要竞争对手包括云帆信息' },
-          { title: '本地口碑讨论', url: 'https://local.example/2', summary: '与星河智能直接竞争' },
-        ];
-      },
+      search: async () => searchText,
+      // 此方法即使由 provider 注入，材料竞品流程也不得再调用。
+      searchSources: async () => { throw new Error('legacy web leg must not run'); },
     });
     const result = await current.value.importPastedText('公司资料');
 
     expect(result.ok).toBe(true);
-    // 结构化召回可用时不走 enable_search 生成语料。
-    expect(current.search).not.toHaveBeenCalled();
-    expect(current.searchSources).toHaveBeenCalledTimes(3);
+    expect(current.search).toHaveBeenCalledTimes(3);
+    expect(current.searchSources).not.toHaveBeenCalled();
     const promptOf = (index: number) =>
       (current.complete.mock.calls[index] as unknown as [
         readonly { role: string; content: string }[],
       ])[0][1].content;
     const enrichmentPrompt = promptOf(current.complete.mock.calls.length - 1);
-    // 语料 = 标题 + 摘要逐条拼接（无 LLM 改写），URL 去重后 3 条。
-    expect(enrichmentPrompt).toContain('医美十大品牌榜');
     expect(enrichmentPrompt).toContain('主要竞争对手包括云帆信息');
     expect(enrichmentPrompt).toContain('与星河智能直接竞争');
-    const corpus = enrichmentPrompt.split('## 检索结果')[1] ?? '';
-    expect(corpus.match(/医美十大品牌榜/g)).toHaveLength(1);
-    expect(corpus.match(/新都医美哪家好/g)).toHaveLength(1);
     const competitorsCall = current.propose.mock.calls.find(
       ([input]) => input.key.predicate === 'enterprise-profile.competitors',
     );
     expect(competitorsCall?.[0].value).toEqual(['云帆信息', '星河智能']);
   });
 
-  it('falls back to the generated corpus when structured search fails entirely', async () => {
+  it('accepts literal local ranking evidence returned by the ranking search query', async () => {
+    const port = new FakeMaterialPort();
+    const withArea = JSON.stringify({ facts: [
+      { field: 'industry', value: '民办中学', provenance: 'extracted', sourceExcerpt: '行业：民办中学' },
+      { field: 'serviceArea', value: '成都', provenance: 'extracted', sourceExcerpt: '服务成都' },
+    ] });
+    const rankingExcerpt = '成都民办中学排名：成实外教育、为明教育';
+    const equipmentExcerpt = '教学设备品牌排行榜：希沃';
+    const current = service(port, {
+      completeResponses: [withArea, JSON.stringify({
+        competitors: [
+          { name: '成实外教育', region: '成都', similarBusiness: '民办中学教育', sourceExcerpt: rankingExcerpt },
+          { name: '为明教育', region: '成都', similarBusiness: '民办中学教育', sourceExcerpt: rankingExcerpt },
+          { name: '希沃', region: '全国', similarBusiness: '教学设备', sourceExcerpt: equipmentExcerpt },
+        ],
+      })],
+      search: async (query) => query.includes('排行榜')
+        ? `成实外教育位于成都，开展民办中学教育。为明教育位于成都，开展民办中学教育。${rankingExcerpt}；${equipmentExcerpt}，面向全国提供教学设备。`
+        : '',
+    });
+
+    const result = await current.value.importPastedText('行业：民办中学，服务成都');
+
+    expect(result.ok).toBe(true);
+    const competitorsCall = current.propose.mock.calls.find(
+      ([input]) => input.key.predicate === 'enterprise-profile.competitors',
+    );
+    expect(competitorsCall?.[0].value).toEqual(['成实外教育', '为明教育']);
+  });
+
+  it('does not revive the legacy web leg when the online model fails', async () => {
     const port = new FakeMaterialPort();
     const current = service(port, {
-      completeResponses: [extractionResponse(), enrichmentResponse],
-      searchSources: async () => { throw new Error('doubao-search unavailable'); },
-      search: async () => searchText,
+      completeResponses: [extractionResponse()],
+      searchSources: async () => [{
+        title: '旧检索结果',
+        url: 'https://legacy.example/result',
+        summary: searchText,
+      }],
+      search: async () => { throw new Error('online model unavailable'); },
     });
     const result = await current.value.importPastedText('公司资料');
 
     expect(result.ok).toBe(true);
-    // 结构化全军覆没 → 回落 enable_search 生成语料，反虚构过滤照常生效。
-    expect(current.searchSources).toHaveBeenCalledTimes(1);
     expect(current.search).toHaveBeenCalledTimes(1);
+    expect(current.searchSources).not.toHaveBeenCalled();
     const competitorsCall = current.propose.mock.calls.find(
       ([input]) => input.key.predicate === 'enterprise-profile.competitors',
     );
-    expect(competitorsCall?.[0].value).toEqual(["云帆信息", "星河智能"]);
+    expect(competitorsCall?.[0].value).toEqual([]);
   });
 
   it('hydrates the enrichment profile from confirmed authority facts when the material lacks them', async () => {

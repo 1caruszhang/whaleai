@@ -19,15 +19,19 @@ import {
   type MaterialProcessSuccess as SharedMaterialProcessSuccess,
 } from '../../shared/geo/materials';
 import { toKnowledgeCardCandidate } from '../../shared/geo/knowledgeCard';
+import {
+  encodeCompetitorEvidence,
+  type CompetitorDisplayDetail,
+} from '../../shared/geo/competitorDetails';
 import { buildSsrfGuardedDispatcher, isUrlSchemeSafe } from '../utils/ssrf';
 import { withAbortSignal } from '../utils/cancellation';
 import { managementApi, managementApiBytes } from '../utils/management-api-client';
 import { GatewayBillingError, type GeoBillingPermitPort } from './billing-permit';
 import type { KnowledgeAuthority, KnowledgeCandidate } from './knowledge-authority';
+import { KNOWLEDGE_EXCERPT_MAX_LENGTH } from './knowledge-authority';
 import { GeoUpstreamHttpError } from './provider-capabilities';
 import type {
   GeoKeywordSearchCapability,
-  GeoKeywordSearchSource,
   GeoTextCapability,
 } from './provider-capabilities';
 
@@ -42,10 +46,10 @@ const WEBSITE_TIMEOUT_MS = 15_000;
  */
 const DEFAULT_EXTRACTION_TIMEOUT_MS = 10 * 60_000;
 /**
- * js_ai 契约：ranking 陈列位 1 为本品牌、2–6 为真实竞品（5 家），加 3 家缓冲
- * （随机陈列与去重损耗），竞品富化目标 8 家。
+ * ranking 陈列位 1 为本品牌、2–6 为真实竞品（5 家）。第一阶段
+ * 给用户最多 10 家带地域/同类业务的联网候选，留出确认与去重空间。
  */
-const COMPETITOR_ENRICHMENT_TARGET = 8;
+const COMPETITOR_ENRICHMENT_TARGET = 10;
 
 const TEXT_EXTENSIONS = new Set([
   'txt', 'md', 'markdown', 'csv', 'json', 'html', 'htm', 'xml', 'log',
@@ -453,24 +457,25 @@ function competitorEnrichmentPrompt(input: {
     '',
     `从下方检索结果中找出最多 ${input.deficit} 个真实存在的直接竞争品牌（四个条件同时满足）。`,
     '规则：只允许输出在检索结果文本中字面出现的公司/品牌名，检索结果未提及的不得输出；'
-    + '每个名字必须给出 sourceExcerpt（检索结果中包含该名字的原文片段，不超过 200 字）；'
+    + '每家必须输出 region（所在地域）、similarBusiness（与目标品牌重合的具体业务）和 sourceExcerpt'
+    + '（检索结果中包含该名字的原文片段，不超过 200 字）；'
+    + 'region 和 similarBusiness 也必须从检索结果逐字复制，不得归纳、改写或补写；'
     + '数量不足时按实际数量输出，检索结果里没有同层级本地同行就输出空数组——宁缺毋滥，凑不够不硬凑。',
-    '输出：{"competitors":[{"name":"公司名","sourceExcerpt":"原文片段"}]}',
+    '输出：{"competitors":[{"name":"公司名","region":"所在地域","similarBusiness":"具体同类业务","sourceExcerpt":"原文片段"}]}',
     '',
     '## 检索结果',
     input.searchResult,
   ].join('\n');
 }
 
-interface CompetitorSuggestion {
-  name: string;
+interface CompetitorSuggestion extends CompetitorDisplayDetail {
   sourceExcerpt: string;
 }
 
 const MATERIAL_COMPETITOR_SIGNAL =
   "(?:竞品|竞争对手|竞争者|直接竞争|二选一|比价|对比|替代(?:方案|选项)?)";
-const WEB_COMPETITOR_SIGNAL =
-  "(?:竞品|竞争对手|竞争者|直接竞争|同行|同类(?:品牌|机构|门店|服务商)?|二选一|比价|对比|替代(?:方案|选项)?|哪家好|推荐|口碑)";
+const ONLINE_COMPETITOR_SIGNAL =
+  "(?:竞品|竞争对手|竞争者|直接竞争|同行|同类(?:品牌|机构|门店|服务商)?|二选一|比价|对比|替代(?:方案|选项)?|哪家好|推荐|口碑|排行榜|排名|榜单|十佳|前十|十大(?:品牌|机构|门店|学校|企业)?|\\btop\\s*\\d+)";
 const NON_COMPETITOR_RELATION =
   "(?:前东家|曾任职于|供职于|曾任|出身于|工作于|师承|合作(?:方|商|伙伴|品牌)?|战略合作|供应商|供货商|经销(?:商|品牌)?|代理(?:商|品牌)?|客户|甲方|设备品牌|仪器品牌|器材品牌|平台渠道|母公司|子公司|兄弟品牌|同集团|隶属于|投资方)";
 
@@ -497,6 +502,18 @@ function namedRelation(
   ).test(excerpt);
 }
 
+/** 地域/业务可以在同一句的相邻分句中说明，允许跨逗号但不跨句号或分号。 */
+function hasNamedContext(excerpt: string, name: string, value: string): boolean {
+  const escapedName = escapeRegExp(name.trim());
+  const escapedValue = escapeRegExp(value.trim());
+  if (!escapedName || !escapedValue) return false;
+  const gap = "[^。！？；;\n]{0,120}";
+  return new RegExp(
+    `(?:${escapedName})${gap}(?:${escapedValue})|(?:${escapedValue})${gap}(?:${escapedName})`,
+    'i',
+  ).test(excerpt);
+}
+
 function hasCompetitorEvidence(
   excerpt: string,
   name: string,
@@ -511,6 +528,12 @@ function hasCompetitorEvidence(
 
 function normalizeEvidenceText(value: string): string {
   return value.toLocaleLowerCase('zh-CN').replace(/\s+/g, ' ').trim();
+}
+
+/** 竞品名的唯一键口径：富化解析、已知/排除名单与 process() 合并去重共用，
+ * 与 competitorDetails 的元数据按名匹配（toLocaleLowerCase('zh-CN')）一致。 */
+function normalizeCompetitorKey(value: string): string {
+  return value.trim().toLocaleLowerCase('zh-CN');
 }
 
 function parseCompetitorSuggestions(
@@ -531,19 +554,32 @@ function parseCompetitorSuggestions(
     if (suggestions.length >= limits.deficit) break;
     if (!item || typeof item !== 'object' || Array.isArray(item)) continue;
     const holder = item as Record<string, unknown>;
-    const name = typeof holder.name === "string" ? holder.name.trim() : "";
+    const name = typeof holder.name === "string" ? holder.name.trim().slice(0, 60) : "";
+    const region = typeof holder.region === 'string' && holder.region.trim()
+      ? holder.region.trim().slice(0, 40)
+      : '';
+    const similarBusiness = typeof holder.similarBusiness === 'string'
+      && holder.similarBusiness.trim()
+      ? holder.similarBusiness.trim().slice(0, 100)
+      : '';
     const sourceExcerpt =
       typeof holder.sourceExcerpt === "string"
         ? holder.sourceExcerpt.trim().slice(0, 4_000)
         : "";
     if (
       !name ||
+      !region ||
+      !similarBusiness ||
       !sourceExcerpt ||
+      !haystack.includes(normalizeEvidenceText(region)) ||
+      !haystack.includes(normalizeEvidenceText(similarBusiness)) ||
+      !hasNamedContext(searchResult, name, region) ||
+      !hasNamedContext(searchResult, name, similarBusiness) ||
       !haystack.includes(normalizeEvidenceText(sourceExcerpt)) ||
-      !hasCompetitorEvidence(sourceExcerpt, name, WEB_COMPETITOR_SIGNAL)
+      !hasCompetitorEvidence(sourceExcerpt, name, ONLINE_COMPETITOR_SIGNAL)
     )
       continue;
-    const normalized = name.toLowerCase();
+    const normalized = normalizeCompetitorKey(name);
     // 反虚构：名字必须字面出现在检索文本中，且不与已知竞品重复；排除名单
     // （品牌自身/别名/关联主体）按双向子串匹配——目标品牌「九味牛」要连
     // 「成都九味牛食品」一起拦下（js_ai dedupeAndFilterCompetitors 契约）；
@@ -556,7 +592,7 @@ function parseCompetitorSuggestions(
     )) continue;
     if (seen.has(normalized)) continue;
     seen.add(normalized);
-    suggestions.push({ name, sourceExcerpt });
+    suggestions.push({ name, region, similarBusiness, sourceExcerpt });
   }
   return suggestions;
 }
@@ -970,7 +1006,7 @@ export class MaterialImportService {
     private readonly extraction: GeoTextCapability,
     private readonly authority: Pick<KnowledgeAuthority, 'propose' | 'inspect'>,
     private readonly websiteDeps: WebsiteFetchDependencies = {},
-    private readonly keywordSearch?: Pick<GeoKeywordSearchCapability, 'search' | 'searchSources'>,
+    private readonly keywordSearch?: Pick<GeoKeywordSearchCapability, 'search'>,
     private readonly extractionTimeoutMs: number = DEFAULT_EXTRACTION_TIMEOUT_MS,
     /** 网关计费（票 07）：材料导入 20 点/份，失败份退回；缺省跳过。 */
     private readonly permits?: GeoBillingPermitPort,
@@ -1031,8 +1067,8 @@ export class MaterialImportService {
 
   /**
    * js_ai material-to-facts 契约的 "enrich real competitors"：品牌整体竞品
-   * （本次抽取 + 已确认权威值）不足 ranking 的 5 家陈列位时，用真实检索结果
-   * 补足。富化名一律 inferred（低置信）并携带检索原文摘录；与材料已抽出的
+   * （本次抽取 + 已确认权威值）不足 10 家备选时，用联网模型返回的可核验
+   * 语料补足。富化名一律 inferred（低置信）并携带检索原文摘录；与材料已抽出的
    * 竞品合并为同一条候选，避免同键多条候选顺序采纳时互相覆盖。检索或解析
    * 失败不影响其他字段，但 process() 随后仍会产出可补充的 competitors 必审行。
    */
@@ -1053,7 +1089,7 @@ export class MaterialImportService {
       logOutcome({ status: 'skipped', errorCode: 'keyword_search_unavailable' });
       return null;
     }
-    const normalize = (value: string) => value.trim().toLowerCase();
+    const normalize = normalizeCompetitorKey;
     const brandCompetitors = new Set<string>();
     const knownCompetitors = new Set<string>();
     const excludedNames = new Set<string>([normalize(context.brandName)]);
@@ -1139,71 +1175,38 @@ export class MaterialImportService {
     } catch {
       // 画像补齐失败不阻断富化，提示词按未知降级。
     }
-    // js_ai 检索腿契约：3 个互补 query（排行榜形召回全景、口碑形召回本地同行
-    // 讨论页、品牌点名形）；榜单语料混有的国际大牌由富化提示词的画像锚定与
-    // 榜单警示过滤（js_ai 验证形态）。
+    // 联网模型单路径：3 个互补 query（排行榜形召回全景、口碑形召回
+    // 本地同行、品牌点名形补足直接对手），都由 keyword-search 槽位的
+    // enable_search 模型完成。不再分叉到 searchSources/web_leg，避免两条召回链
+    // 的证据形态与可用性漂移。
     const areaIndustry = [serviceArea, industry].filter(Boolean).join(' ');
+    const researchBrief = [
+      '请联网检索目标品牌的真实直接竞品，最多给出 10 家候选。',
+      `目标品牌：${context.brandName}。`,
+      `所在地域：${serviceArea || '未知，必须从公开资料识别其实际经营地'}。`,
+      `具体业务：${[...products].join('、') || industry || '未知，必须先查清目标品牌业务'}。`,
+      '每家必须同时写明竞品名称、所在地域、与目标重合的具体业务、支撑竞争关系的原文证据与来源链接。',
+      '只取同地域、同赛道、同体量且客户会二选一的实体；排除前东家、合作商、供应商、客户、设备品牌、平台和目标品牌自身。',
+      '不得凭记忆凑数；查不到就少给。',
+    ].join('\n');
     const queries = areaIndustry
       ? [
-          `${areaIndustry} 排行榜 十大品牌 对比`,
-          `${areaIndustry} 哪家好 推荐 口碑`,
-          `${context.brandName} 主要竞争对手 同行`,
+          `${researchBrief}\n检索重点：${areaIndustry} 排行榜、十大品牌、对比榜单。`,
+          `${researchBrief}\n检索重点：${areaIndustry} 哪家好、推荐、口碑和本地同行。`,
+          `${researchBrief}\n检索重点：${context.brandName} 主要竞争对手与替代选项。`,
         ]
-      : [`${context.brandName} 主要竞争对手 同行品牌`];
+      : [`${researchBrief}\n检索重点：${context.brandName} 主要竞争对手、同行品牌和替代选项。`];
     // this.keywordSearch 的非空收窄进闭包即失效，提为局部常量供逐 query 调用。
     const keywordSearch = this.keywordSearch;
-    // 语料优先豆包搜索结构化召回（逐条 Title/Summary 纯检索结果、无 LLM 改写，
-    // 跨 query 按 URL 去重——js_ai doubaoSearchProbe 契约）；能力缺失或全部
-    // 失败时回落 enable_search 生成语料。逐 query 容错，部分失败不拖垮整轮。
-    const generatedCorpus = async (): Promise<string> =>
-      (await Promise.all(queries.map(async (query) => {
-        try {
-          return await keywordSearch.search(query, { signal });
-        } catch {
-          return '';
-        }
-      }))).join('\n');
-    const searchSources = keywordSearch.searchSources;
-    const searchResult =
-      typeof searchSources === "function"
-        ? await (async () => {
-            let failed = 0;
-            const results = await Promise.all(
-              queries.map((query) =>
-                searchSources
-                  .call(keywordSearch, query, { signal })
-                  .catch(() => {
-                    failed += 1;
-                    return [] as GeoKeywordSearchSource[];
-                  }),
-              ),
-            );
-            const seen = new Set<string>();
-            const corpus: string[] = [];
-            for (const sources of results) {
-              for (const source of sources) {
-                if (seen.has(source.url)) continue;
-                seen.add(source.url);
-                corpus.push(
-                  [source.title, source.summary, `来源：${source.url}`]
-                    .filter(Boolean)
-                    .join("\n"),
-                );
-              }
-            }
-          if (corpus.length > 0) return corpus.join('\n');
-          if (failed > 0) {
-            // 固定码降级投影（脱敏契约同 materialLogProjection）：结构化召回
-            // 调用失败时回落生成语料，可诊断但不阻断主导入。合法零结果不记。
-            console.log(`[materials] ${JSON.stringify({
-              operation: 'competitor-search',
-              status: 'degraded',
-              errorCode: 'doubao_search_unavailable',
-            })}`);
-          }
-          return await generatedCorpus();
-        })()
-      : await generatedCorpus();
+    // 逐 query 容错：一条联网回答失败不拖垮其他两条；三条都失败则安全
+    // 回落为空竞品待用户补充，不用未验证名称硬凑。
+    const searchResult = (await Promise.all(queries.map(async (query) => {
+      try {
+        return await keywordSearch.search(query, { signal });
+      } catch {
+        return '';
+      }
+    }))).join('\n');
     if (!searchResult.trim()) {
       logOutcome({ status: 'skipped', errorCode: 'search_corpus_empty' });
       return null;
@@ -1242,14 +1245,25 @@ export class MaterialImportService {
       return null;
     }
     logOutcome({ status: 'ok', count: suggestions.length });
+    // 提议 value 只含本次新增名称：KnowledgeAuthority propose 对数组字段做
+    // 增量合并（current 在前、新增去重追加），既有权威值由该契约保住，
+    // 不在待确认候选里重复呈现。材料抽出的名字在 process() 合并处加入。
+    const evidence = suggestions
+      .map((suggestion) => `${suggestion.name}：${suggestion.sourceExcerpt}`)
+      .join(' … ');
     return {
       field: 'competitors',
       value: suggestions.map((suggestion) => suggestion.name),
       provenance: 'inferred',
-      sourceExcerpt: suggestions
-        .map((suggestion) => `${suggestion.name}：${suggestion.sourceExcerpt}`)
-        .join(' … ')
-        .slice(0, 4_000),
+      sourceExcerpt: encodeCompetitorEvidence(
+        suggestions.map(({ name, region, similarBusiness }) => ({
+          name,
+          region,
+          similarBusiness,
+        })),
+        evidence,
+        KNOWLEDGE_EXCERPT_MAX_LENGTH,
+      ),
       confidence: 0.5,
       scope: { kind: 'brand' },
     };
@@ -1351,7 +1365,10 @@ export class MaterialImportService {
           facts[mergeIndex] = {
             ...base,
             ...enrichedCompetitors,
-            value: [...baseNames, ...enrichedCompetitors.value as string[]],
+            value: [...new Map(
+              [...baseNames, ...enrichedCompetitors.value as string[]]
+                .map((name) => [normalizeCompetitorKey(name), name.trim()]),
+            ).values()],
           };
         } else {
           facts.push(enrichedCompetitors);

@@ -9,7 +9,12 @@ import { unwrapToolResultText } from '../toolResult';
 import {
   canonicalEnterpriseProfileField,
   ENTERPRISE_PROFILE_FIELDS,
+  PROFILE_PREDICATE_PREFIX,
 } from './enterpriseProfile';
+import {
+  decodeCompetitorEvidence,
+  type CompetitorDisplayDetail,
+} from './competitorDetails';
 
 export type KnowledgeCardDecision =
   | 'keep-current'
@@ -55,6 +60,8 @@ export interface KnowledgeCardCandidate {
   baseVersion: number;
   origin: string;
   source: KnowledgeCardSource;
+  /** 仅用于竞品确认卡展示；权威事实值仍是纯名称数组。 */
+  competitorDetails?: CompetitorDisplayDetail[];
   current?: KnowledgeCardCurrent | null;
 }
 
@@ -166,6 +173,9 @@ function projectExcerpt(excerpt: string): string {
 export function toKnowledgeCardCandidate(
   candidate: KnowledgeCardCandidateSource,
 ): KnowledgeCardCandidate {
+  const competitorSource = knowledgeFieldKeyOfPredicate(candidate.key.predicate) === 'competitors'
+    ? decodeCompetitorEvidence(candidate.source.excerpt)
+    : { details: [], evidence: candidate.source.excerpt };
   return {
     id: candidate.id,
     workspaceId: candidate.workspaceId,
@@ -184,7 +194,7 @@ export function toKnowledgeCardCandidate(
     origin: candidate.origin,
     source: {
       materialId: candidate.source.materialId ?? null,
-      excerpt: projectExcerpt(candidate.source.excerpt),
+      excerpt: projectExcerpt(competitorSource.evidence),
       confidence: candidate.source.confidence,
       profileProvenance:
         candidate.source.profileProvenance === "extracted"
@@ -193,6 +203,9 @@ export function toKnowledgeCardCandidate(
           ? candidate.source.profileProvenance
           : null,
     },
+    ...(competitorSource.details.length > 0
+      ? { competitorDetails: competitorSource.details }
+      : {}),
     current: candidate.current
       ? {
         normalizedValueJson: candidate.current.normalizedValueJson,
@@ -258,8 +271,6 @@ export function buildKnowledgeCandidatesCardData(
     overflowByField,
   };
 }
-
-const PROFILE_PREDICATE_PREFIX = 'enterprise-profile.';
 
 /** predicate → 字段行分组键：已知 Profile 字段归一为规范字段 token，其余保持 predicate 原文。 */
 export function knowledgeFieldKeyOfPredicate(predicate: string): string {

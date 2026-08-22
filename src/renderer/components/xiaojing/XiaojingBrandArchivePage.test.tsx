@@ -2,6 +2,7 @@ import { fireEvent, render, screen, waitFor, within } from "@testing-library/rea
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { BrandWorkspace } from "@/api/brandWorkspaceClient";
+import { encodeCompetitorEvidence } from '../../../shared/geo/competitorDetails';
 import XiaojingBrandArchivePage from "./XiaojingBrandArchivePage";
 
 const mocks = vi.hoisted(() => ({ load: vi.fn() }));
@@ -140,6 +141,51 @@ describe("XiaojingBrandArchivePage", () => {
 
     // 历史版本的事实不混入当前档案（v6 独有的行业字段默认不可见）。
     expect(screen.queryByText("GEO 营销工具")).not.toBeInTheDocument();
+  });
+
+  it('已确认竞品在品牌档案中持久显示三元组，证据不泄露内部标记', async () => {
+    const evidence = encodeCompetitorEvidence([
+      { name: '成实外教育', region: '成都', similarBusiness: '民办中学教育' },
+      { name: '为明教育', region: '成都', similarBusiness: '民办中学教育' },
+    ], '成都民办中学联网竞品证据', 4_000);
+    mocks.load.mockResolvedValue({
+      workspaceId: 'brand-17',
+      knowledgeVersions: [{
+        version: 8,
+        actorSessionId: 'session-knowledge',
+        createdAt: '2026-08-16T00:00:00Z',
+        facts: [{
+          factKey: JSON.stringify({
+            subject: '鲸跃科技',
+            predicate: 'enterprise-profile.competitors',
+            scope: {},
+            effectiveFrom: null,
+            effectiveTo: null,
+          }),
+          factVersion: 1,
+          normalizedValueJson: '["成实外教育","为明教育"]',
+          sources: [{
+            materialId: 'material-8',
+            excerpt: evidence,
+            origin: 'user-approved-material',
+            createdAt: '2026-08-16T00:00:00Z',
+          }],
+        }],
+        usedBy: [],
+      }],
+      artifacts: [],
+    });
+
+    render(<XiaojingBrandArchivePage workspace={workspace} />);
+
+    const current = await screen.findByRole('region', { name: '当前档案' });
+    const competitive = within(current).getByRole('region', { name: '竞品与关联品牌' });
+    expect(within(competitive).getByText('成实外教育｜成都｜民办中学教育')).toBeInTheDocument();
+    expect(within(competitive).getByText('为明教育｜成都｜民办中学教育')).toBeInTheDocument();
+
+    fireEvent.click(within(competitive).getByRole('button', { name: /证据 1/ }));
+    expect(within(competitive).getByText(/成都民办中学联网竞品证据/)).toBeInTheDocument();
+    expect(within(competitive).queryByText(/xiaojing-competitor-details/)).not.toBeInTheDocument();
   });
 
   it("来源证据默认不渲染，点击卡片角落入口显式展开", async () => {

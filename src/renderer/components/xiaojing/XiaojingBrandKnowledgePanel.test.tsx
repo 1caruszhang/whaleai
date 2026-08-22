@@ -1,6 +1,7 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { encodeCompetitorEvidence } from '../../../shared/geo/competitorDetails';
 import XiaojingBrandKnowledgePanel from './XiaojingBrandKnowledgePanel';
 import { KNOWLEDGE_DECIDED_EVENT } from './KnowledgeBatchCard';
 
@@ -109,6 +110,39 @@ describe('XiaojingBrandKnowledgePanel', () => {
     // 非 Profile 字段保持 predicate 原文。
     expect(screen.getByText('鲸跃科技 / crm.seatCount')).toBeInTheDocument();
     expect(screen.queryByText(/enterprise-profile\./)).not.toBeInTheDocument();
+  });
+
+  it('已确认竞品在当前权威投影中仍显示名称、地域与同类业务', async () => {
+    mocks.load.mockResolvedValue({
+      workspaceId: 'brand-17',
+      knowledgeVersions: [{
+        version: 7,
+        actorSessionId: 'session-b',
+        createdAt: '2026-08-16T00:00:00Z',
+        facts: [{
+          factKey: factKey('鲸跃科技', 'enterprise-profile.competitors'),
+          factVersion: 1,
+          normalizedValueJson: '["成实外教育","为明教育"]',
+          sources: [{
+            materialId: 'material-1',
+            excerpt: encodeCompetitorEvidence([
+              { name: '成实外教育', region: '成都', similarBusiness: '民办中学教育' },
+              { name: '为明教育', region: '成都', similarBusiness: '民办中学教育' },
+            ], '联网竞品证据', 4_000),
+            origin: 'user-approved-material',
+            createdAt: '2026-08-16T00:00:00Z',
+          }],
+        }],
+        usedBy: [],
+      }],
+      artifacts: [],
+    });
+
+    render(<XiaojingBrandKnowledgePanel workspaceId="brand-17" />);
+    fireEvent.click(screen.getByRole('button', { name: /品牌知识/ }));
+
+    expect(await screen.findByText('成实外教育｜成都｜民办中学教育、为明教育｜成都｜民办中学教育')).toBeInTheDocument();
+    expect(screen.queryByText(/xiaojing-competitor-details/)).not.toBeInTheDocument();
   });
 
   it('refreshes when a confirmation card commits decisions', async () => {

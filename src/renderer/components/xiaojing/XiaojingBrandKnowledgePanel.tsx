@@ -14,7 +14,11 @@ import type {
   BrandHistoryProjection,
   BrandKnowledgeHistoryFact,
 } from "../../../shared/geo/brandHistory";
-import { canonicalEnterpriseProfileField } from "../../../shared/geo/enterpriseProfile";
+import { formatCompetitorFactValue } from '../../../shared/geo/competitorDetails';
+import {
+  canonicalEnterpriseProfileField,
+  PROFILE_PREDICATE_PREFIX,
+} from "../../../shared/geo/enterpriseProfile";
 import { KNOWLEDGE_DECIDED_EVENT } from "./KnowledgeBatchCard";
 
 interface Props {
@@ -42,9 +46,24 @@ function parseFactKey(factKey: string): FactLabel {
   return { subject: factKey.slice(0, 80), predicate: "" };
 }
 
-function displayFactValue(raw: string, unit?: string | null): string {
+function displayFactValue(fact: BrandKnowledgeHistoryFact, predicate: string): string {
+  const { normalizedValueJson: raw, unit } = fact;
   try {
     const value: unknown = JSON.parse(raw);
+    if (
+      canonicalEnterpriseProfileField(
+        predicate.startsWith(PROFILE_PREDICATE_PREFIX)
+          ? predicate.slice(PROFILE_PREDICATE_PREFIX.length)
+          : predicate,
+      ) === 'competitors'
+      && Array.isArray(value)
+      && value.every((item): item is string => typeof item === 'string')
+    ) {
+      return formatCompetitorFactValue(
+        value,
+        fact.sources.map((source) => source.excerpt),
+      ).join('、');
+    }
     const rendered = typeof value === "string"
       ? value
       : Array.isArray(value)
@@ -58,8 +77,10 @@ function displayFactValue(raw: string, unit?: string | null): string {
 
 /** predicate → 可读标签：企业 Profile 字段映射 i18n 字段名（大小写不敏感归一），其余保留原文。 */
 function factPredicateLabel(predicate: string, t: TFunction): string {
-  if (predicate.startsWith('enterprise-profile.')) {
-    const canonical = canonicalEnterpriseProfileField(predicate.slice('enterprise-profile.'.length));
+  if (predicate.startsWith(PROFILE_PREDICATE_PREFIX)) {
+    const canonical = canonicalEnterpriseProfileField(
+      predicate.slice(PROFILE_PREDICATE_PREFIX.length),
+    );
     if (canonical) return t(`knowledgeCard.fields.${canonical}`);
   }
   return predicate;
@@ -75,7 +96,7 @@ function FactItem({ fact }: { fact: BrandKnowledgeHistoryFact }) {
         {label.predicate ? ` / ${factPredicateLabel(label.predicate, t)}` : ""}
       </p>
       <p className="mt-1 break-words text-[var(--ink-muted)]">
-        {displayFactValue(fact.normalizedValueJson, fact.unit)}
+        {displayFactValue(fact, label.predicate)}
       </p>
       <p className="mt-1 text-[var(--ink-subtle)]">
         fact v{fact.factVersion} · {fact.sources.length} 份依据

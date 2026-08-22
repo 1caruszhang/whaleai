@@ -389,6 +389,12 @@ function mergeArraySupplement(
   return { valueJson: normalizedValueJson, normalizedValueJson, unit: value.unit };
 }
 
+/**
+ * 候选审计摘录的长度闸门（propose 与 MCP 工具 schema 同源）。竞品展示
+ * 元数据头等编码产物必须在本预算内自截（见 competitorDetails 编码契约）。
+ */
+export const KNOWLEDGE_EXCERPT_MAX_LENGTH = 4_000;
+
 export class KnowledgeAuthority {
   constructor(
     private readonly identity: { workspaceId: string; sessionId: string },
@@ -399,7 +405,7 @@ export class KnowledgeAuthority {
     const key = normalizeFactKey(input.key);
     const value = normalizeFactValue(input.value, input.unit);
     const excerpt = input.source.excerpt.trim();
-    if (!excerpt || excerpt.length > 4_000)
+    if (!excerpt || excerpt.length > KNOWLEDGE_EXCERPT_MAX_LENGTH)
       throw new Error("source excerpt must be 1-4000 characters");
     if (
       !Number.isFinite(input.source.confidence) ||
@@ -573,7 +579,7 @@ export class KnowledgeAuthority {
             ...merged,
             source: {
               materialId: input.materialId ?? null,
-              excerpt: reason.slice(0, 4_000),
+              excerpt: reason.slice(0, KNOWLEDGE_EXCERPT_MAX_LENGTH),
               confidence: 1,
               profileProvenance: "asked" as const,
             },

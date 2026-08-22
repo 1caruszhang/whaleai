@@ -28,6 +28,9 @@ export const REQUIRED_ENTERPRISE_PROFILE_FIELDS = [
 
 export type ProfileProvenance = 'extracted' | 'asked' | 'inferred';
 
+/** 知识 predicate 的企业 Profile 命名空间；展示/分组侧统一从这里取前缀。 */
+export const PROFILE_PREDICATE_PREFIX = 'enterprise-profile.';
+
 export const PROFILE_PROVENANCE_RANK: Readonly<Record<ProfileProvenance, number>> = {
   extracted: 3,
   asked: 2,
