@@ -6,6 +6,7 @@ import {
   channelNameCore,
   clampTopicNumbers,
   fuzzyMatchScore,
+  isMultiTenantPlatformUrl,
   normalizeChannelName,
   parseGlobalRecallResult,
   preferenceEntryMatches,
@@ -30,6 +31,33 @@ describe("channel recall ported from js_ai", () => {
     // 品牌家族 + 渠道字重叠走模糊分（≥0.4 疑似命中），严格分不放行。
     expect(fuzzyMatchScore(source, "搜狐网健康（GEO）")).toBeGreaterThan(0.4);
     expect(strictMatchScore(source, "毫不相关名字")).toBe(0);
+  });
+
+  it("exempts portal domains hosting self-media accounts as multi-tenant platforms", () => {
+    // 搜狐号/网易号/企鹅号(公众号)/凤凰号内容分别挂在门户注册域名
+    // sohu.com/163.com/qq.com/ifeng.com 下，域名相等同样不构成渠道证据。
+    expect(
+      isMultiTenantPlatformUrl("https://www.sohu.com/a/860745823_121124921"),
+    ).toBe(true);
+    expect(
+      isMultiTenantPlatformUrl("https://m.sohu.com/a/860745823_121124921"),
+    ).toBe(true);
+    expect(
+      isMultiTenantPlatformUrl("https://www.163.com/dy/article/HQEQKFSM.html"),
+    ).toBe(true);
+    expect(
+      isMultiTenantPlatformUrl("https://news.qq.com/rain/a/202608A0.html"),
+    ).toBe(true);
+    expect(isMultiTenantPlatformUrl("https://news.ifeng.com/c/8RwZa7k")).toBe(
+      true,
+    );
+    // 公众号文章页随 qq.com 后缀一并覆盖。
+    expect(isMultiTenantPlatformUrl("https://mp.weixin.qq.com/s/abc123")).toBe(
+      true,
+    );
+    // 自有域名媒体站与后缀边界外的主机不豁免。
+    expect(isMultiTenantPlatformUrl("https://www.redchinaweb.cn")).toBe(false);
+    expect(isMultiTenantPlatformUrl("https://sohu.example.com")).toBe(false);
   });
 
   it("extracts channel core names by stripping platform qualifier suffixes", () => {
@@ -63,6 +91,32 @@ describe("channel recall ported from js_ai", () => {
     ).toBe(0.8);
     // 默认（偏好路用户手输）保留品牌家族兜底语义。
     expect(fuzzyMatchScore(source, "白城融媒（今日头条）")).toBe(0.5);
+  });
+
+  it("does not treat platform-brand qualifiers as channel evidence for sohu/163 sources", () => {
+    // sohu.com/163.com 来源 → 品牌「搜狐/网易」；搜狐号/网易号资源的限定后缀
+    // 不算渠道身份，平台品牌兜底 0.5 分同样关闭——同名不同号不误挂。
+    const sohu = {
+      title: "搜狐美食垂类精选",
+      url: "https://www.sohu.com/a/860745823_121124921",
+    };
+    expect(
+      fuzzyMatchScore(sohu, "白城融媒（搜狐号）", {
+        multiTenantPlatform: true,
+      }),
+    ).toBe(0);
+    // 默认（偏好路用户手输）保留品牌家族兜底语义。
+    expect(fuzzyMatchScore(sohu, "白城融媒（搜狐号）")).toBe(0.5);
+    const netease = {
+      title: "网易号生活精选",
+      url: "https://www.163.com/dy/article/HQEQKFSM.html",
+    };
+    expect(
+      fuzzyMatchScore(netease, "南郡新闻（网易号）", {
+        multiTenantPlatform: true,
+      }),
+    ).toBe(0);
+    expect(fuzzyMatchScore(netease, "南郡新闻（网易号）")).toBe(0.5);
   });
 
   it("resolves the preference list as (defaults − excluded) + additions", () => {

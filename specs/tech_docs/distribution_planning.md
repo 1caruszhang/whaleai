@@ -32,7 +32,7 @@ prepare 后所有上述输入、Provider 非 secret 状态、候选资源白名�
 
 匹配器与名单合成逻辑在 `src/shared/geo/channelRecall.ts`（js_ai sourceAlignment/preferenceChannels/globalRecall 的忠实移植：`strictMatchScore`、`fuzzyMatchScore`（品牌域名表+子串+去后缀+Jaccard）、`resolvePreferenceChannels`、`buildGlobalRecallPrompt`/`parseGlobalRecallResult`/`clampTopicNumbers`）。
 
-**多租户平台域名豁免（2026-08-26 修复被动/主动误判）**：toutiao.com、douyin.com、kuaishou.com、xiaohongshu.com、bilibili.com、zhihu.com、weibo.com、mp.weixin.qq.com、baijiahao.baidu.com 上任意账号页/文章页/频道页共享同一注册域名，域名相等不构成「同一渠道」证据（此前头条号资源被错误对齐到全部头条文章引用与「今日头条美食垂类频道」全局召回）。被动/主动路的域名对齐在这些平台上失效，只保留名称对齐；`isMultiTenantPlatformUrl` 为判定入口，契约字段 `channelRecall.alignment.multiTenantDomainExempt`。被动名称对齐用资源核心名（去掉尾部（官方头条号）类限定）做包含匹配。
+**多租户平台域名豁免（2026-08-26 修复被动/主动误判；2026-08-27 扩名单）**：toutiao.com、douyin.com、kuaishou.com、xiaohongshu.com、bilibili.com、zhihu.com、weibo.com、qq.com、baijiahao.baidu.com、sohu.com、163.com、ifeng.com 上任意账号页/文章页/频道页共享同一注册域名，域名相等不构成「同一渠道」证据（此前头条号资源被错误对齐到全部头条文章引用与「今日头条美食垂类频道」全局召回）。2026-08-27 扩入门户系账号平台：sohu.com（搜狐号）/163.com（网易号）为用户确认的缺口，qq.com（企鹅号/公众号，覆盖原单列的 mp.weixin.qq.com）/ifeng.com（凤凰号）随同评估补入——账号内容挂在门户注册域名下，被动域名对齐与主动品牌兜底（搜狐/网易/腾讯/凤凰）两条误挂路径与头条系完全相同；代价是这些门户从「误挂」变「空窗」，账号级召回（标题作者后缀正式化/URL 模式解析/池内目录召回）另行落地。被动/主动路的域名对齐在这些平台上失效，只保留名称对齐；`isMultiTenantPlatformUrl` 为判定入口，契约字段 `channelRecall.alignment.multiTenantDomainExempt`。被动名称对齐用资源核心名（去掉尾部（官方头条号）类限定）做包含匹配。
 
 **多租户来源的品牌家族兜底分豁免（2026-08-27 冲突检测修复）**：`fuzzyMatchScore` 的品牌分支此前以资源全名判定「属该品牌家族」，且渠道字零重叠时给 0.5 兜底分——限定后缀含品牌（如「白城融媒（今日头条）」）的无关账号被平台级推荐（toutiao.com URL → 品牌「今日头条」）成批误挂（实测 17/30 资源误命中）。修复：主动路对多租户来源传 `multiTenantPlatform: true`，品牌进入条件改用 `channelNameCore`（核心名），零重叠时兜底 0.5 → 0；偏好路用户手输条目保持默认品牌家族语义。修复后同一实测只剩 1/30 合理命中（同频道字重叠）。
 

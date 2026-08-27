@@ -290,6 +290,82 @@ describe("Ticket 12 distribution plan contract", () => {
     expect(toutiaoFood.pathHits).toContain("active");
   });
 
+  it("does not align portal-hosted sohu/163 account domains as channel evidence", () => {
+    const result = buildDistributionCandidates({
+      industry: "餐饮",
+      targetAudience: "餐饮加盟创业者",
+      questionSources: [
+        {
+          id: "probe:q-1:1",
+          questionId: "q-1",
+          question: "干蒸菜加盟靠谱吗？",
+          title: "干蒸菜市场观察_厨房小记",
+          url: "https://www.sohu.com/a/460012345_123456",
+          articleIds: ["article-showcase"],
+        },
+        {
+          id: "probe:q-2:1",
+          questionId: "q-2",
+          question: "餐饮加盟有哪些坑？",
+          title: "餐饮加盟避坑实录",
+          url: "https://www.163.com/dy/article/HQEQKFSM.html",
+          articleIds: ["article-news"],
+        },
+      ],
+      activeSources: [
+        // 平台级推荐（163.com URL → 品牌「网易」）：网易号资源不应靠品牌兜底误挂。
+        {
+          title: "网易号生活精选",
+          url: "https://www.163.com/dy/article/HQEQKFSM.html",
+          articleIds: ["article-news"],
+        },
+        // 多租户来源上的同名账号：名称对齐仍命中。
+        {
+          title: "厨房小记",
+          url: "https://www.sohu.com",
+          articleIds: ["article-news"],
+        },
+      ],
+      preferenceChannels: [],
+      perArticleMaxPoints: 3_200,
+      articles,
+      resources: [
+        // 与搜狐引用同域名、名称无关的搜狐号：被动域名对齐必须失效，
+        // 主动来源（品牌「搜狐」零渠道字重叠）也不得兜底 → 不进候选。
+        resource("media", {
+          id: 21,
+          name: "济南时报（搜狐号）",
+          status: 2,
+          price: "60",
+          entrance_link: "https://www.sohu.com/a/460999999_654321",
+        }),
+        // 引用标题含核心名「厨房小记」的搜狐号：被动/主动名称对齐仍命中。
+        resource("media", {
+          id: 22,
+          name: "厨房小记（搜狐号）",
+          status: 2,
+          price: "60",
+          entrance_link: "https://www.sohu.com",
+        }),
+        // 网易号资源：被动（163.com 引用域名对齐）与主动（品牌「网易」兜底）
+        // 两条误挂路径都必须失效 → 不进候选。
+        resource("media", {
+          id: 23,
+          name: "白城融媒（网易号）",
+          status: 2,
+          price: "60",
+          entrance_link: "https://www.163.com",
+        }),
+      ],
+    });
+    const byId = new Map(result.candidates.map((c) => [c.resourceId, c]));
+    expect(byId.get(21)).toBeUndefined();
+    const kitchen = byId.get(22)!;
+    expect(kitchen.pathHits).toContain("passive");
+    expect(kitchen.pathHits).toContain("active");
+    expect(byId.get(23)).toBeUndefined();
+  });
+
   it("filters unavailable and channels over the user per-article point limit before alignment", () => {
     const result = candidateResult([
       resource("media", {

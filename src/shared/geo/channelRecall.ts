@@ -131,6 +131,11 @@ export function domainToBrand(domain: string | undefined): string | undefined {
  * 注册域名（toutiao.com 上同时存在几万个互不相关的头条号），注册域名相等
  * 不构成「同一渠道」的证据。这些平台上的被动/主动域名对齐必须失效，只保留
  * 名称对齐。自有域名媒体站（如红餐网）不受影响。
+ *
+ * 2026-08-27 扩入门户系账号平台：sohu.com（搜狐号）、163.com（网易号）、
+ * qq.com（企鹅号/公众号，覆盖原单列的 mp.weixin.qq.com）、ifeng.com（凤凰号）
+ * ——账号内容挂在门户注册域名下，域名对齐与品牌兜底（搜狐/网易/腾讯/凤凰）
+ * 误挂路径与头条系相同。
  */
 const MULTI_TENANT_HOST_SUFFIXES: readonly string[] = [
   "toutiao.com",
@@ -140,8 +145,11 @@ const MULTI_TENANT_HOST_SUFFIXES: readonly string[] = [
   "bilibili.com",
   "zhihu.com",
   "weibo.com",
-  "mp.weixin.qq.com",
+  "qq.com",
   "baijiahao.baidu.com",
+  "sohu.com",
+  "163.com",
+  "ifeng.com",
 ];
 
 /** URL/裸域名是否落在多租户平台上（host 等于后缀或以 `.后缀` 结尾）。 */
