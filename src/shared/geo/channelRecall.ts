@@ -19,6 +19,8 @@ export interface RecallSource {
   url?: string;
   /** 该来源适配的文章（被动=问题映射，主动=topicNumbers 解析结果）。 */
   articleIds?: string[];
+  /** 主动路 LLM 推荐理由（原始回答的关键信息，展示用；截断保序）。 */
+  reason?: string;
 }
 
 /** 偏好名单条目（js_ai preferenceChannels 契约，至少 name 与 domain 之一）。 */
@@ -113,9 +115,7 @@ const DOMAIN_TO_BRAND: ReadonlyArray<{ pattern: string; brand: string }> = [
 ];
 
 /** 域名/URL → 品牌名（用于按品牌家族匹配而非逐字 Jaccard）。 */
-export function domainToBrand(
-  domain: string | undefined,
-): string | undefined {
+export function domainToBrand(domain: string | undefined): string | undefined {
   if (!domain) return undefined;
   const lower = domain.toLowerCase();
   for (const { pattern, brand } of DOMAIN_TO_BRAND) {
@@ -124,9 +124,57 @@ export function domainToBrand(
   return undefined;
 }
 
+// ── 多租户平台域名（渠道身份与平台域名解耦） ──────────────────────────────
+
+/**
+ * 多租户 UGC/账号平台 host 后缀：平台上任意账号页、文章页、频道页共享同一
+ * 注册域名（toutiao.com 上同时存在几万个互不相关的头条号），注册域名相等
+ * 不构成「同一渠道」的证据。这些平台上的被动/主动域名对齐必须失效，只保留
+ * 名称对齐。自有域名媒体站（如红餐网）不受影响。
+ */
+const MULTI_TENANT_HOST_SUFFIXES: readonly string[] = [
+  "toutiao.com",
+  "douyin.com",
+  "kuaishou.com",
+  "xiaohongshu.com",
+  "bilibili.com",
+  "zhihu.com",
+  "weibo.com",
+  "mp.weixin.qq.com",
+  "baijiahao.baidu.com",
+];
+
+/** URL/裸域名是否落在多租户平台上（host 等于后缀或以 `.后缀` 结尾）。 */
+export function isMultiTenantPlatformUrl(
+  value: string | null | undefined,
+): boolean {
+  if (!value) return false;
+  try {
+    const hostname = new URL(
+      value.includes("://") ? value : `https://${value}`,
+    ).hostname
+      .toLocaleLowerCase("en-US")
+      .replace(/^www\./, "");
+    return MULTI_TENANT_HOST_SUFFIXES.some(
+      (suffix) => hostname === suffix || hostname.endsWith(`.${suffix}`),
+    );
+  } catch {
+    return false;
+  }
+}
+
 // ── 名称匹配（js_ai sourceAlignment，策略逐条移植） ────────────────────────
 
-const SUFFIX_STRIP = ["门户", "网", "平台", "官网", "首页", "频道", "中心", "在线"];
+const SUFFIX_STRIP = [
+  "门户",
+  "网",
+  "平台",
+  "官网",
+  "首页",
+  "频道",
+  "中心",
+  "在线",
+];
 
 function stripSuffixes(name: string): string {
   let result = name;
@@ -176,22 +224,53 @@ const NOISE_CHARS = new Set(
   ),
 );
 
+/**
+ * 渠道核心名：去掉尾部平台限定后缀（（官方头条号）/（今日头条）/（GEO）等）。
+ * 多租户平台上限定后缀只描述宿主平台，不是渠道身份；品牌/名称匹配必须用
+ * 核心名，否则「蓝色河畔（今日头条）」会被当成「今日头条」家族成员。
+ */
+export function channelNameCore(name: string): string {
+  let core = name.trim();
+  for (;;) {
+    const stripped = core.replace(/[（(][^（）()]*[）)]\s*$/, "").trim();
+    if (stripped === core || stripped.length === 0) break;
+    core = stripped;
+  }
+  return core;
+}
+
+/** fuzzyMatchScore 的调用侧语义开关。 */
+export interface FuzzyMatchOptions {
+  /**
+   * 来源落在多租户平台（toutiao/douyin/公众号等）时为 true：平台品牌家族
+   * （如 URL toutiao.com →「今日头条」）不再单独构成名称证据——品牌兜底
+   * 0.5 分与「资源名限定后缀含品牌」的进入条件都以核心名判定，防止
+   * 「XX融媒（今日头条）」这类账号被平台级推荐误挂。偏好路用户手输
+   * 条目保持默认（品牌家族可命中）。
+   */
+  multiTenantPlatform?: boolean;
+}
+
 /** 宽容匹配分（0–1，≥0.4 视为疑似命中）：品牌域名 → 子串 → 去后缀 → Jaccard。 */
 export function fuzzyMatchScore(
   source: RecallSource,
   resourceName: string,
+  options?: FuzzyMatchOptions,
 ): number {
   const srcDomain = source.url ?? "";
   const srcTitle = source.title ?? "";
   const resLower = resourceName.toLowerCase();
   const srcLower = srcTitle.toLowerCase();
   const domainLower = srcDomain.toLowerCase();
+  const multiTenant = options?.multiTenantPlatform === true;
+  // 多租户来源：品牌进入条件用资源核心名（限定后缀里的品牌不算）。
+  const brandScope = multiTenant ? channelNameCore(resLower) : resLower;
 
   const brand = domainToBrand(srcDomain) ?? domainToBrand(srcTitle);
-  if (brand && resLower.includes(brand.toLowerCase())) {
+  if (brand && brandScope.includes(brand.toLowerCase())) {
     const srcChannel = stripBrand(srcTitle, brand);
     if (srcChannel) {
-      const resChannel = stripBrand(resourceName, brand);
+      const resChannel = stripBrand(brandScope, brand);
       if (
         !resChannel ||
         srcChannel === resChannel ||
@@ -217,7 +296,8 @@ export function fuzzyMatchScore(
         if (ratio > 0) return 0.5 + 0.3 * ratio;
       }
     }
-    return 0.5;
+    // 多租户平台来源：无渠道级字重叠时平台品牌不兜底（0.5 → 0）。
+    return multiTenant ? 0 : 0.5;
   }
 
   if (domainLower && resLower.includes(domainLower)) return 1.0;
@@ -282,7 +362,12 @@ export function normalizeChannelName(value: string): string {
 
 // ── 偏好名单（js_ai preferenceChannels，名单与语义逐条一致） ───────────────
 
-/** 内置精选名单：产品侧人工策展的「常在召回」渠道，精确名匹配。 */
+/**
+ * 内置精选名单：产品侧人工策展的「常在召回」渠道，精确名匹配。
+ * 2026-08-27 用户裁决：恢复 js_ai 原始十项（用户预置名单）；候选快照里
+ * 未见的名字（咸宁网主站等）是否在全池存在，由下一次计划运行的偏好路
+ * 逐名命中结果验证（右侧面板偏好召回块 ✓=同名资源在池且价内）。
+ */
 export const DEFAULT_PREFERENCE_CHANNELS: ReadonlyArray<PreferenceChannelEntry> =
   [
     { name: "蓝色河畔（GEO排名）", exact: true },
@@ -311,11 +396,15 @@ export function resolvePreferenceChannels(
     (entry.domain !== undefined &&
       excluded.has(entry.domain.trim().toLowerCase()));
 
-  const kept = DEFAULT_PREFERENCE_CHANNELS.filter((entry) => !isExcluded(entry));
+  const kept = DEFAULT_PREFERENCE_CHANNELS.filter(
+    (entry) => !isExcluded(entry),
+  );
   const additional = (settings?.additionalPreferenceChannels ?? [])
     .filter(
       (entry) =>
-        !!entry && typeof entry.name === "string" && entry.name.trim().length > 0,
+        !!entry &&
+        typeof entry.name === "string" &&
+        entry.name.trim().length > 0,
     )
     .map((entry) => ({
       name: entry.name.trim(),
@@ -338,7 +427,11 @@ export function resolvePreferenceChannels(
     if (reg && seenDomain.has(reg)) continue;
     seenName.add(nameKey);
     if (reg) seenDomain.add(reg);
-    merged.push({ name: entry.name, exact: entry.exact === true, domain: entry.domain });
+    merged.push({
+      name: entry.name,
+      exact: entry.exact === true,
+      domain: entry.domain,
+    });
   }
   return merged;
 }
@@ -375,6 +468,8 @@ export interface ParsedRecallChannel {
   name: string;
   url: string;
   topicNumbers: number[];
+  /** LLM 推荐理由（原始回答关键信息；空串表示模型未给出）。 */
+  reason: string;
 }
 
 function parseJsonLoose(text: string): unknown {
@@ -410,6 +505,11 @@ export function parseGlobalRecallResult(text: string): ParsedRecallChannel[] {
     const rawUrl = typeof record.url === "string" ? record.url.trim() : "";
     if (!rawUrl) continue;
     if (!registeredDomain(rawUrl)) continue;
+    // 推荐理由是主动路原始回答的关键信息（面板展示用）；截断防止投影膨胀。
+    const reason =
+      typeof record.reason === "string"
+        ? record.reason.trim().slice(0, 200)
+        : "";
     const topicNumbers = Array.isArray(record.topicNumbers)
       ? [
           ...new Set(
@@ -424,7 +524,7 @@ export function parseGlobalRecallResult(text: string): ParsedRecallChannel[] {
           ),
         ]
       : [];
-    out.push({ name, url: rawUrl, topicNumbers });
+    out.push({ name, url: rawUrl, topicNumbers, reason });
   }
   return out;
 }
@@ -455,7 +555,9 @@ export function buildGlobalRecallPrompt(input: {
     deduped.push(trimmed);
     if (deduped.length >= MAX_RECALL_TOPICS) break;
   }
-  const topicBlock = deduped.map((topic, index) => `[${index + 1}]${topic}`).join(" ");
+  const topicBlock = deduped
+    .map((topic, index) => `[${index + 1}]${topic}`)
+    .join(" ");
   const industry = (input.industry ?? "").trim() || "(未提供)";
   const keywords = (input.derivedKeywords ?? [])
     .filter((keyword) => typeof keyword === "string" && keyword.trim())

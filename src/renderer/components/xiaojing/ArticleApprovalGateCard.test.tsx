@@ -13,6 +13,7 @@ const mocks = vi.hoisted(() => ({
   loadLatest: vi.fn(),
   edit: vi.fn(),
   approve: vi.fn(),
+  retry: vi.fn(),
 }));
 
 vi.mock("@/context/TabContext", () => ({
@@ -25,6 +26,7 @@ vi.mock("@/api/articleGenerationClient", () => ({
   loadLatestArticleOperation: mocks.loadLatest,
   editArticle: mocks.edit,
   approveArticle: mocks.approve,
+  retryArticle: mocks.retry,
 }));
 
 import ArticleApprovalGateCard, {
@@ -106,6 +108,7 @@ beforeEach(() => {
   mocks.loadLatest.mockReset().mockResolvedValue(null);
   mocks.edit.mockReset();
   mocks.approve.mockReset();
+  mocks.retry.mockReset();
 });
 
 describe("ArticleApprovalGateCard", () => {
@@ -436,5 +439,107 @@ describe("ArticleApprovalGateCard", () => {
     expect(
       within(card).queryByRole("button", { name: /批准并继续/ }),
     ).not.toBeInTheDocument();
+  });
+
+  // 回归（2026-08-26 线上报障）：ranking 稿确定性门拒绝后停在 revision=0、
+  // 无版本行；此前卡片仍提供「查看正文」，点开必然命中 article_version_not_found。
+  it("offers per-article retry instead of body viewing for a revision-0 failed article", () => {
+    const failed = makeArticle({
+      status: "generation_failed",
+      revision: 0,
+      approvedRevision: null,
+      failureReason:
+        "article_generation_ranking_output_invalid:第 1 家必须是目标品牌，第 2–6 家必须完整使用五家已确认竞品",
+      currentVersion: null,
+    });
+    render(
+      <ArticleApprovalGateCard
+        data={{ kind: "article-operation", operation: makeOperation([failed]) }}
+      />,
+    );
+    const card = screen.getByRole("region", { name: "文章审核批准" });
+    expect(
+      within(card).queryByRole("button", { name: /查看正文/ }),
+    ).not.toBeInTheDocument();
+    expect(within(card).getByText(/指南 · 生成失败/)).toBeInTheDocument();
+    expect(within(card).getByText(/第 1 家必须是目标品牌/)).toBeInTheDocument();
+    expect(
+      within(card).getByRole("button", { name: /重试本篇/ }),
+    ).toBeInTheDocument();
+  });
+
+  it("retries the failed article with exact revision and adopts the regenerated draft", async () => {
+    const failed = makeArticle({
+      status: "generation_failed",
+      revision: 0,
+      approvedRevision: null,
+      failureReason: "article_generation_ranking_output_invalid:实体集合不符",
+      currentVersion: null,
+    });
+    const recovered = makeArticle({
+      status: "draft_ready",
+      revision: 1,
+      approvedRevision: null,
+      failureReason: null,
+      currentVersion: {
+        revision: 1,
+        title: "成都车载音响选购指南",
+        bodyPath: "operations/operation-17/articles/article-1/v1.md",
+        bodySha256: "hash-1",
+        origin: "generated",
+        basedOnRevision: null,
+        review: null,
+        createdAt: "2026-08-18T00:02:00Z",
+        approvedAt: null,
+      },
+    });
+    mocks.retry.mockResolvedValue(recovered);
+    render(
+      <ArticleApprovalGateCard
+        data={{ kind: "article-operation", operation: makeOperation([failed]) }}
+      />,
+    );
+    const card = screen.getByRole("region", { name: "文章审核批准" });
+
+    fireEvent.click(within(card).getByRole("button", { name: /重试本篇/ }));
+    await waitFor(() => expect(mocks.retry).toHaveBeenCalledTimes(1));
+    expect(mocks.retry).toHaveBeenCalledWith(
+      mocks.apiPost,
+      { workspaceId: "brand-17", sessionId: "session-17" },
+      { operationId: "operation-17", articleId: "article-1", expectedRevision: 0 },
+    );
+    await waitFor(() =>
+      expect(within(card).getByText(/草稿待审核/)).toBeInTheDocument(),
+    );
+    expect(
+      within(card).getByRole("button", { name: /批准并继续（1 篇）/ }),
+    ).toBeInTheDocument();
+  });
+
+  it("surfaces a retry error without losing the retry affordance", async () => {
+    const failed = makeArticle({
+      status: "generation_failed",
+      revision: 0,
+      approvedRevision: null,
+      failureReason: "provider_unavailable",
+      currentVersion: null,
+    });
+    mocks.retry.mockRejectedValue(new Error("article_generation_revision_conflict"));
+    render(
+      <ArticleApprovalGateCard
+        data={{ kind: "article-operation", operation: makeOperation([failed]) }}
+      />,
+    );
+    const card = screen.getByRole("region", { name: "文章审核批准" });
+
+    fireEvent.click(within(card).getByRole("button", { name: /重试本篇/ }));
+    await waitFor(() =>
+      expect(
+        within(card).getByText("article_generation_revision_conflict"),
+      ).toBeInTheDocument(),
+    );
+    expect(
+      within(card).getByRole("button", { name: /重试本篇/ }),
+    ).toBeInTheDocument();
   });
 });

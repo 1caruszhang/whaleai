@@ -25,6 +25,22 @@ function fullOptimization(
   return projectionOf(id, plan, plan.status, plan.pendingConfirmation);
 }
 
+/** 前置步骤全部完成、目标步骤就绪的操作（用于内容生产段）。 */
+function operationWithStepReady(
+  id: string,
+  stepId: string,
+): GeoOperationProjection {
+  const operation = fullOptimization(id);
+  const target = operation.steps.findIndex((step) => step.id === stepId);
+  if (target < 0) throw new Error(`step not found: ${stepId}`);
+  for (const [index, step] of operation.steps.entries()) {
+    if (index < target) step.status = "succeeded";
+    else if (index === target) step.status = "ready";
+    else step.status = "pending";
+  }
+  return operation;
+}
+
 function projectionOf(
   id: string,
   plan: ReturnType<typeof planGeoOperation>,
@@ -118,6 +134,22 @@ class FakeService implements GeoOperationProgressService {
     });
   }
 
+  async reportStepProgress(input: {
+    operationId: string;
+    expectedRevision: number;
+    stepId: string;
+    progress: { current: number; total: number };
+  }) {
+    const { operation, step } = this.stepOf(input.operationId, input.stepId);
+    this.calls.push(["progress", input.stepId, operation.revision]);
+    if (step.status !== "running") {
+      throw new Error("geo_operation_step_not_progressable");
+    }
+    step.progress = { ...input.progress };
+    operation.revision += 1;
+    return structuredClone(operation);
+  }
+
   async recordConfirmedStep(input: { operationId: string; expectedRevision: number; stepId: string }) {
     return this.mutate(
       input.operationId,
@@ -201,5 +233,80 @@ describe("GeoOperationProgressRecorder", () => {
     expect(operation.steps.find((step) => step.id === "collect-materials")?.status).toBe("pending");
     expect(operation.steps.find((step) => step.id === "confirm-knowledge")?.status).toBe("pending");
     expect(service.operations[0].revision).toBe(1);
+  });
+
+  it("article-generation-started begins the generate-articles step without completing it", async () => {
+    const service = new FakeService();
+    service.operations = [operationWithStepReady("op-1", "generate-articles")];
+
+    await new GeoOperationProgressRecorder(service).record(identity, "article-generation-started");
+
+    expect(service.calls.map(([action, stepId]) => `${action}:${stepId}`)).toEqual([
+      "begin:generate-articles",
+    ]);
+    const step = service.operations[0].steps.find((item) => item.id === "generate-articles");
+    expect(step?.status).toBe("running");
+    // 确认门保持未到，不能被 started 里程碑提前停靠。
+    expect(
+      service.operations[0].steps.find((item) => item.id === "confirm-articles")?.status,
+    ).toBe("pending");
+  });
+
+  it("articles-generated completes a running step and parks the approval gate", async () => {
+    const service = new FakeService();
+    const operation = operationWithStepReady("op-1", "generate-articles");
+    operation.steps.find((item) => item.id === "generate-articles")!.status = "running";
+    service.operations = [operation];
+
+    await new GeoOperationProgressRecorder(service).record(identity, "articles-generated");
+
+    expect(service.calls.map(([action, stepId]) => `${action}:${stepId}`)).toEqual([
+      "complete:generate-articles",
+    ]);
+    expect(
+      service.operations[0].steps.find((item) => item.id === "generate-articles")?.status,
+    ).toBe("succeeded");
+    expect(
+      service.operations[0].steps.find((item) => item.id === "confirm-articles")?.status,
+    ).toBe("awaiting-confirmation");
+  });
+
+  it("articles-approved only confirms the gate when generation already completed", async () => {
+    const service = new FakeService();
+    const operation = operationWithStepReady("op-1", "generate-articles");
+    operation.steps.find((item) => item.id === "generate-articles")!.status = "succeeded";
+    operation.steps.find((item) => item.id === "confirm-articles")!.status = "awaiting-confirmation";
+    service.operations = [operation];
+
+    await new GeoOperationProgressRecorder(service).record(identity, "articles-approved");
+
+    expect(service.calls.map(([action, stepId]) => `${action}:${stepId}`)).toEqual([
+      "confirm:confirm-articles",
+    ]);
+  });
+
+  it("reportStepProgress updates only operations whose step is running", async () => {
+    const service = new FakeService();
+    const active = operationWithStepReady("op-active", "generate-articles");
+    active.steps.find((item) => item.id === "generate-articles")!.status = "running";
+    const idle = operationWithStepReady("op-idle", "generate-articles");
+    service.operations = [active, idle];
+    const activeRevisionBefore = active.revision;
+
+    await new GeoOperationProgressRecorder(service).reportStepProgress(
+      identity,
+      "generate-articles",
+      { current: 2, total: 5 },
+    );
+
+    expect(service.calls).toEqual([
+      ["progress", "generate-articles", activeRevisionBefore],
+    ]);
+    expect(
+      service.operations[0].steps.find((item) => item.id === "generate-articles")?.progress,
+    ).toEqual({ current: 2, total: 5 });
+    expect(
+      service.operations[1].steps.find((item) => item.id === "generate-articles")?.progress,
+    ).toBeNull();
   });
 });

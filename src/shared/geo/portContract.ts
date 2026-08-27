@@ -307,11 +307,19 @@ export const GEO_PORT_CONTRACT = {
       passiveDomainCap: 3,
       activeDomainCap: 2,
       nameFallbackCap: 1,
+      // 多租户平台（toutiao/douyin/xiaohongshu/bilibili/zhihu/weibo/kuaishou/
+      // 公众号/百家号）上注册域名对任意账号/文章/频道页相同，域名相等不构成
+      // 渠道对齐证据；这些平台只保留名称对齐（核心名包含匹配）。
+      multiTenantDomainExempt: true,
     },
     passiveRecall: {
       oneIndependentSearchPerQuestion: true,
-      perQuestionCap: 15,
-      perRegisteredDomainCap: 3,
+      // 按问题配额而非总截断：每问最多 10 条引用，所有已确认问题都能进入
+      // 被动证据；随后按「渠道（注册域名）出现在多少个不同问题」降序取前
+      // 50——跨问重复出现的渠道（多问交集）排前，单问独占渠道靠后。
+      perQuestionCap: 10,
+      totalCap: 50,
+      rankBy: "cross-question-registered-domain-frequency-desc",
       defaultMode: "ai_search",
     },
     fallbackTopN: 50,
@@ -891,8 +899,25 @@ export function computeGeoNextPublishAt(input: {
 }
 
 /**
- * Pure ADR-0030 coverage floor: one occurrence per type for small batches and
- * two for batches of at least five topics, without mutating caller input.
+ * 整批内容类型覆盖下限（用户裁决 2026-08-26）：guide 与 ranking 各至少 3
+ * 篇、其余类型各至少 2 篇，合计至少 12 篇。主题过少导致结构上限（每主题
+ * 最多 5 类）放不下时按现有规则尽力补齐，不失败。
+ */
+export const GEO_CONTENT_TYPE_COVERAGE_MINIMUMS: Record<
+  GeoContentType,
+  number
+> = {
+  guide: 3,
+  showcase: 2,
+  ranking: 3,
+  news: 2,
+  news_light: 2,
+};
+
+/**
+ * Pure coverage floor: backfills each content type up to
+ * GEO_CONTENT_TYPE_COVERAGE_MINIMUMS (guide/ranking 3, others 2; 12 items in
+ * total) without mutating caller input.
  */
 export function enforceGeoContentTypeCoverage(
   recommendations: readonly {
@@ -900,7 +925,6 @@ export function enforceGeoContentTypeCoverage(
     types: readonly GeoContentType[];
   }[],
 ): Array<{ topicId: string; types: GeoContentType[] }> {
-  const minimumPerType = recommendations.length >= 5 ? 2 : 1;
   const result = recommendations.map((recommendation) => ({
     topicId: recommendation.topicId,
     types: [...recommendation.types],
@@ -908,7 +932,7 @@ export function enforceGeoContentTypeCoverage(
 
   for (const contentType of GEO_PORT_CONTRACT.contentTypes) {
     let needed =
-      minimumPerType -
+      GEO_CONTENT_TYPE_COVERAGE_MINIMUMS[contentType] -
       result.filter((recommendation) =>
         recommendation.types.includes(contentType),
       ).length;

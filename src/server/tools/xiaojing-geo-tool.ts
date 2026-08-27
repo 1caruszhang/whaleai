@@ -54,7 +54,7 @@ import type { QuestionPoolProjection } from '../../shared/geo/questionPool';
 import { cnyToPoints, pointsToCny } from '../../shared/geo/points';
 import { GEO_PORT_CONTRACT } from '../../shared/geo/portContract';
 import type { GeoContentType } from '../../shared/geo/portContract';
-import { recordGeoOperationMilestone } from '../geo/operation-progress';
+import { recordGeoOperationMilestone, reportGeoOperationStepProgress } from '../geo/operation-progress';
 import {
   createGeoOperationService,
   type GeoOperationCreateInput,
@@ -1374,6 +1374,11 @@ export async function createXiaojingGeoServer() {
             }
             productLine = first;
           }
+          // 执行段先行 begin：题库挖掘是真实 provider 工作，进度条从
+          // ready 推进到 running，避免长耗时期间条上无事发生。必须在
+          // 输入解析（含缺省产品线回读）之后触发——纯校验失败不应把
+          // 步骤留在 running。
+          await recordGeoOperationMilestone(identity, 'question-pool-generation-started');
           const pool: QuestionPoolProjection = await questionPoolService().generate({
             ...identity,
             productLine,
@@ -1396,10 +1401,13 @@ export async function createXiaojingGeoServer() {
         },
         async (input): Promise<{ content: Array<{ type: 'text'; text: string }> }> => {
           const identity = stageIdentity();
+          // 执行段先行 begin：主题规划是真实 provider 工作。
+          await recordGeoOperationMilestone(identity, 'topic-plan-started');
           const plan: TopicPlanProjection = await topicPlanService().generate({
             ...identity,
             ...(input.questionPoolId ? { questionPoolId: input.questionPoolId } : {}),
           });
+          await recordGeoOperationMilestone(identity, 'topic-plan-generated');
           return {
             content: [{ type: 'text' as const, text: JSON.stringify({ kind: 'topic-plan', plan }) }],
           };
@@ -1424,6 +1432,7 @@ export async function createXiaojingGeoServer() {
           if ((input.planId ? 1 : 0) + (input.direct ? 1 : 0) !== 1) {
             throw new Error('generate_articles requires exactly one of planId or direct');
           }
+          const identity = stageIdentity();
           const source: ArticleOperationSource = input.direct
             ? {
                 kind: "direct",
@@ -1436,11 +1445,21 @@ export async function createXiaojingGeoServer() {
                 kind: "confirmed-topic-plan",
                 ...(input.planId ? { planId: input.planId } : {}),
               };
+          // 执行段先行 begin：文章生成是全程最长的真实工作段，进度条从
+          // 工具开始即进入 running，逐篇落定由 onArticleSettled 回报 N/M。
+          await recordGeoOperationMilestone(identity, 'article-generation-started');
           let operation: ArticleOperationProjection;
           try {
             operation = await articleService().start({
-              ...stageIdentity(),
+              ...identity,
               source,
+              onArticleSettled: (settled, total) => {
+                // Fire-and-forget：并发逐篇回报不得串行等待管理端口往返。
+                void reportGeoOperationStepProgress(identity, 'generate-articles', {
+                  current: settled,
+                  total,
+                });
+              },
             });
           } catch (error) {
             const requirement = rankingCompetitorRequirement(error);
@@ -1465,8 +1484,45 @@ export async function createXiaojingGeoServer() {
             throw error;
           }
           rankingCompetitorGate.clear();
+          // 生成收尾：complete 执行段，确认门（审核并批准文章）就地停靠。
+          await recordGeoOperationMilestone(identity, 'articles-generated');
           return {
             content: [{ type: 'text' as const, text: JSON.stringify({ kind: 'article-operation', operation }) }],
+          };
+        },
+        { alwaysLoad: true },
+      ),
+      tool(
+        'get_article_operation',
+        'Read one article operation by operationId (or the latest when omitted) and return the same envelope that renders the article approval card in chat. Use it when the user asks to re-show the approval card or check article generation status; the approval card re-renders from this result, so never re-run generate_articles just to recover the card. Read-only: it never generates, edits, approves or decides anything.',
+        {
+          operationId: z.string().min(1).max(120).optional(),
+        },
+        async (input): Promise<{ content: Array<{ type: 'text'; text: string }> }> => {
+          const identity = stageIdentity();
+          const operation = input.operationId
+            ? await articleService().operation({
+                ...identity,
+                operationId: input.operationId,
+              })
+            : await articleService().latest(identity);
+          if (!operation) {
+            return {
+              content: [
+                {
+                  type: 'text' as const,
+                  text: JSON.stringify({ kind: 'article-operation-not-found' }),
+                },
+              ],
+            };
+          }
+          return {
+            content: [
+              {
+                type: 'text' as const,
+                text: JSON.stringify({ kind: 'article-operation', operation }),
+              },
+            ],
           };
         },
         { alwaysLoad: true },
@@ -1481,7 +1537,8 @@ export async function createXiaojingGeoServer() {
           weMediaRatio: z.number().min(0).max(100).optional(),
           budgetPoints: z.number().min(0).max(160_000_000).optional()
             .describe('Total budget cap in points (预算点数上限). Default: product default.'),
-          publishStartAt: z.string().datetime().optional(),
+          publishStartAt: z.string().datetime().optional()
+            .describe('Publish start time (发布开始时间), ISO 8601. Omit to publish immediately once the user authorizes; pass a future timestamp only for deliberate scheduled publishing.'),
         },
         async (input): Promise<{ content: Array<{ type: 'text'; text: string }> }> => {
           const identity = stageIdentity();
@@ -1517,8 +1574,9 @@ export async function createXiaojingGeoServer() {
                 input.budgetPoints,
                 spendLimits.perExecutionMaxPoints,
               ),
-              publishStartAt:
-                input.publishStartAt ?? new Date(Date.now() + 3_600_000).toISOString(),
+              // 确认即发：默认开始时间取当前时间——用户授权启动后到期项立即被
+              // 调度器认领执行；只有显式传入未来时间才是定时发布。
+              publishStartAt: input.publishStartAt ?? new Date().toISOString(),
             },
           });
           // 工具结果是聊天转录的一部分：只回「卡片初始渲染 + agent 复述」

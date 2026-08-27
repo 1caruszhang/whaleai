@@ -39,6 +39,15 @@ export const GEO_OPERATION_STEP_STATUSES = [
 export type GeoOperationStepStatus =
   (typeof GEO_OPERATION_STEP_STATUSES)[number];
 
+/**
+ * 运行中工作步骤的量化进度（如逐篇生成「3/5」）。只由 Sidecar 在步骤
+ * running 期间上报；确认门与未开始步骤恒为 null。
+ */
+export interface GeoOperationStepProgress {
+  current: number;
+  total: number;
+}
+
 export const GEO_OPERATION_CAPABILITIES = [
   "brand-material-import",
   "brand-knowledge",
@@ -127,6 +136,7 @@ export interface GeoOperationStep {
   retryUnit: GeoOperationRetryUnit;
   condition: GeoOperationStepCondition | null;
   confirmation: GeoOperationConfirmation | null;
+  progress?: GeoOperationStepProgress | null;
 }
 
 export interface GeoOperationCheckpoint {
@@ -232,6 +242,7 @@ function steps(definitions: readonly StepDefinition[]): GeoOperationStep[] {
     retryUnit: step.retryUnit ?? "operation",
     condition: step.condition ?? null,
     confirmation: step.confirmation ?? null,
+    progress: null,
   }));
 }
 
@@ -682,6 +693,23 @@ export function geoOperationPhaseStatus(
         step.status === "ready",
     )?.status ?? "pending"
   );
+}
+
+/**
+ * 当前真实活动 = 首个 running 工作步骤。确认门按状态机只会
+ * pending → awaiting-confirmation → succeeded，因此 running 必然是
+ * 正在执行的业务步骤（如逐篇生成文章）。
+ */
+export function runningGeoOperationStep(
+  steps: readonly GeoOperationStep[],
+): GeoOperationStep | null {
+  return steps.find((step) => step.status === "running") ?? null;
+}
+
+/** 进度文案：有量化进度时输出「生成文章 3/5」，否则只输出步骤名。 */
+export function formatGeoStepProgressNote(step: GeoOperationStep): string {
+  if (!step.progress) return step.title;
+  return `${step.title} ${step.progress.current}/${step.progress.total}`;
 }
 
 /** Deterministic fallback for tests and non-Agent import surfaces only. */

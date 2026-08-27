@@ -85,7 +85,28 @@ function BootCommitMarker() {
   return null;
 }
 
-const App = React.lazy(() => import('./App'));
+// A dev-server restart orphans the HMR timestamps (?t=...) the webview still
+// holds, so the lazy import rejects with "Failed to fetch dynamically imported
+// module". In dev, retry exactly once via a full reload (fresh index.html →
+// fresh module graph); if the reload itself fails to boot App, fall through to
+// the AppErrorBoundary. Prod keeps the original failure untouched.
+const LAZY_APP_RELOADED_KEY = 'renderer.lazyAppReloaded';
+
+const App = React.lazy(async () => {
+  try {
+    const appModule = await import('./App');
+    sessionStorage.removeItem(LAZY_APP_RELOADED_KEY);
+    return appModule;
+  } catch (error) {
+    if (!import.meta.env.DEV || sessionStorage.getItem(LAZY_APP_RELOADED_KEY)) {
+      throw error;
+    }
+    sessionStorage.setItem(LAZY_APP_RELOADED_KEY, '1');
+    window.location.reload();
+    // Keep React on the Suspense fallback while the reload is in flight.
+    return new Promise<typeof import('./App')>(() => {});
+  }
+});
 
 // 鲸杉geo只有一个主产品窗口；Theme runtime owns its renderer bridge.
 root.render(

@@ -111,9 +111,7 @@ function projection(
         ],
         fitReasons: ["行业分类匹配汽车", "内容类型 guide 可发布"],
         risks: ["报价未提供"],
-        uncertainties: [
-          "价格未知，不能进入已确认分发计划",
-        ],
+        uncertainties: ["价格未知，不能进入已确认分发计划"],
         resourceSnapshot: snapshot,
       },
     ],
@@ -139,9 +137,7 @@ function projection(
       alignedResources: 1,
       recommendedResources: 1,
     },
-    blockingIssues: [
-      "selected-channel-price-unknown",
-    ],
+    blockingIssues: ["selected-channel-price-unknown"],
     createdAt: "2026-08-15T00:00:00Z",
     updatedAt: "2026-08-15T00:01:00Z",
     confirmedAt: null,
@@ -175,11 +171,18 @@ describe("XiaojingDistributionPlanPanel read-only projection", () => {
       await within(panel).findByText(/汽车产业观察（已选）/),
     ).toBeInTheDocument();
     // 渠道推荐行只剩四要素：类型标签+渠道名、所需点数、召回路命中、适配。
-    expect(within(panel).getByText(/媒体 · 汽车产业观察/)).toBeInTheDocument();
+    // （四路复盘中同名渠道 chip 也会出现，取 all 断言。）
+    expect(
+      within(panel).getAllByText(/媒体 · 汽车产业观察/).length,
+    ).toBeGreaterThan(0);
     expect(within(panel).getByText(/所需点数：点数待定/)).toBeInTheDocument();
     expect(within(panel).getByText(/召回路命中：/)).toBeInTheDocument();
-    expect(within(panel).getByText(/被动召回（真实问题来源域名命中）/)).toBeInTheDocument();
-    expect(within(panel).getByText(/适配：行业分类匹配汽车/)).toBeInTheDocument();
+    expect(
+      within(panel).getByText(/被动召回（真实问题来源域名命中）/),
+    ).toBeInTheDocument();
+    expect(
+      within(panel).getByText(/适配：行业分类匹配汽车/),
+    ).toBeInTheDocument();
     // ¥ 报价、Provider 状态、权重与发布率等其余字段不再展示。
     expect(panel.textContent ?? "").not.toContain("¥");
     expect(within(panel).queryByText(/报价/)).not.toBeInTheDocument();
@@ -247,7 +250,9 @@ describe("XiaojingDistributionPlanPanel read-only projection", () => {
     expect(within(panel).queryByRole("checkbox")).not.toBeInTheDocument();
     expect(within(panel).queryByRole("combobox")).not.toBeInTheDocument();
     expect(within(panel).queryByLabelText("目标人群")).not.toBeInTheDocument();
-    expect(within(panel).queryByLabelText("编辑预算（元）")).not.toBeInTheDocument();
+    expect(
+      within(panel).queryByLabelText("编辑预算（元）"),
+    ).not.toBeInTheDocument();
   });
 
   it("renders confirmed plans as immutable and directs pending ones to the chat card", async () => {
@@ -262,8 +267,12 @@ describe("XiaojingDistributionPlanPanel read-only projection", () => {
     expect(
       await within(panel).findByText(/分发计划尚未确认/),
     ).toBeInTheDocument();
-    expect(within(panel).queryByText(/汽车产业观察（已选）/)).not.toBeInTheDocument();
-    expect(within(panel).queryByText(/新能源车主选音响/)).not.toBeInTheDocument();
+    expect(
+      within(panel).queryByText(/汽车产业观察（已选）/),
+    ).not.toBeInTheDocument();
+    expect(
+      within(panel).queryByText(/新能源车主选音响/),
+    ).not.toBeInTheDocument();
     expect(within(panel).queryByText(/确认已阻断/)).not.toBeInTheDocument();
     unmount();
 
@@ -326,5 +335,135 @@ describe("XiaojingDistributionPlanPanel read-only projection", () => {
       <XiaojingDistributionPlanPanel workspaceId="brand-12" refreshKey={1} />,
     );
     await waitFor(() => expect(mocks.latest).toHaveBeenCalledTimes(2));
+  });
+
+  it("shows per-path recall sources with matched highlighting before confirmation", async () => {
+    mocks.latest.mockResolvedValue(
+      projection({
+        status: "draft",
+        questionSources: [
+          {
+            id: "probe:q1:1",
+            questionId: "q1",
+            question: "汽车音响怎么选",
+            title: "真实行业报告",
+            url: "https://source.example/report",
+            articleIds: ["article-1"],
+            siteName: "汽车产业观察网",
+          },
+          {
+            id: "probe:q2:1",
+            questionId: "q2",
+            question: "新能源保养去哪",
+            title: "未命中的引用",
+            url: "https://other.example/post",
+            articleIds: [],
+          },
+        ],
+        activeRecallSources: [
+          {
+            title: "汽车垂直资讯站",
+            url: "https://auto.example.org",
+            articleIds: ["article-1"],
+            reason: "汽车行业垂直媒体，覆盖售后与门店话题",
+          },
+          {
+            title: "未命中的推荐渠道",
+            url: "https://news.example.com",
+            articleIds: [],
+          },
+        ],
+        preferenceChannelNames: ["汽车产业观察", "未命中偏好号"],
+        candidates: [
+          {
+            ...projection().candidates[0]!,
+            evidence: [
+              {
+                path: "passive",
+                weight: 0.4,
+                label: "真实问题来源「真实行业报告」与资源池渠道对齐",
+                reference: "q1",
+                url: "https://source.example/report",
+                articleIds: ["article-1"],
+              },
+              {
+                path: "active",
+                weight: 0.2,
+                label: "全局召回推荐渠道「汽车垂直资讯站」与本资源对齐",
+                reference: "recall:汽车垂直资讯站",
+                url: "https://auto.example.org",
+                articleIds: ["article-1"],
+              },
+              {
+                path: "fallback",
+                weight: 0.1,
+                label: "超级媒介结构化类目匹配行业「汽车」",
+                reference: "industry:汽车",
+                url: "https://source.example",
+                articleIds: [],
+              },
+              {
+                path: "preference",
+                weight: 0.3,
+                label: "偏好名单命中「汽车产业观察」",
+                reference: "preference:汽车产业观察",
+                url: "https://source.example",
+                articleIds: [],
+              },
+            ],
+          },
+        ],
+      }),
+    );
+    render(<XiaojingDistributionPlanPanel workspaceId="brand-12" />);
+    const panel = await screen.findByRole("region", {
+      name: "渠道发现与分发计划",
+    });
+
+    expect(await within(panel).findByText("四路召回结果")).toBeInTheDocument();
+    // 被动路按渠道分组：组名优先用豆包 site_name（有站点名的组不再显示
+    // 裸域名），组头带 N 条引用 · M 个问题，组内引用是 {问题，标题（url 链接）}。
+    expect(within(panel).getAllByText(/✓ 汽车产业观察网/).length).toBe(1);
+    expect(within(panel).queryAllByText(/✓ source\.example/).length).toBe(0);
+    expect(within(panel).getAllByText(/1 条引用 · 覆盖 1 个问题/).length).toBe(
+      2,
+    );
+    expect(within(panel).getByText(/问题：汽车音响怎么选/)).toBeInTheDocument();
+    const cited = within(panel).getByRole("link", { name: "真实行业报告" });
+    expect(cited).toHaveAttribute("href", "https://source.example/report");
+    expect(within(panel).getByText(/未命中的引用/)).toBeInTheDocument();
+    expect(within(panel).getByText(/问题：新能源保养去哪/)).toBeInTheDocument();
+    // 其余路保持行/chip：主动来源命中 ✓ 并显示 LLM 推荐理由，未命中灰显。
+    expect(within(panel).getByText(/✓ 汽车垂直资讯站/)).toBeInTheDocument();
+    expect(
+      within(panel).getByText(/理由：汽车行业垂直媒体，覆盖售后与门店话题/),
+    ).toBeInTheDocument();
+    expect(within(panel).getByText(/未命中的推荐渠道/)).toBeInTheDocument();
+    // 分组标签明确「召回来源」与「匹配渠道」两种形态。
+    expect(
+      within(panel).getAllByText(/召回来源/).length,
+    ).toBeGreaterThanOrEqual(4);
+    expect(
+      within(panel).getAllByText(/匹配渠道（/).length,
+    ).toBeGreaterThanOrEqual(4);
+    expect(within(panel).getAllByText(/媒体 · 汽车产业观察/).length).toBe(4);
+    // fallback 是规则路：展示行业/人群输入，行业规则命中。
+    expect(within(panel).getByText(/行业类目「汽车」/)).toBeInTheDocument();
+    expect(
+      within(panel).getByText(/目标人群「新能源车主」/),
+    ).toBeInTheDocument();
+    // 偏好名单快照来源与未命中名单同屏（偏好 chip 精确名，避免与被动组名
+    // 「汽车产业观察网」前缀混淆）。
+    expect(
+      within(panel).getByText((_, element) =>
+        Boolean(
+          element?.tagName === "SPAN" &&
+            element.textContent === "✓ 汽车产业观察",
+        ),
+      ),
+    ).toBeInTheDocument();
+    expect(within(panel).getByText(/未命中偏好号/)).toBeInTheDocument();
+    // 未确认计划不出现候选点数行（复盘区不含价格）。
+    expect(within(panel).queryByText(/所需点数/)).not.toBeInTheDocument();
   });
 });

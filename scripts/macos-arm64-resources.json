@@ -1,0 +1,106 @@
+{
+  "schemaVersion": 1,
+  "targetTriple": "aarch64-apple-darwin",
+  "architecture": "arm64",
+  "toolchain": {
+    "tauriCli": "2.11.4",
+    "tauriRust": "2.11.2"
+  },
+  "identity": {
+    "package": "xiaojing",
+    "crate": "xiaojing",
+    "binary": "xiaojing",
+    "productName": "鲸杉geo",
+    "identifier": "com.xiaojing.geo",
+    "protocol": "xiaojing",
+    "dataRoot": "~/Library/Application Support/Xiaojing"
+  },
+  "sessionSidecar": {
+    "kind": "bundled-node-resource",
+    "entrypoint": "server-dist.js",
+    "nodeExecutable": "nodejs/bin/node",
+    "tauriExternalBin": [],
+    "targetTripleSuffix": null
+  },
+  "downloads": {
+    "node": {
+      "version": "24.14.0",
+      "url": "https://nodejs.org/dist/v24.14.0/node-v24.14.0-darwin-arm64.tar.gz",
+      "sha256": "a1a54f46a750d2523d628d924aab61758a51c9dad3e0238beb14141be9615dd3",
+      "cacheFile": "node-v24.14.0-darwin-arm64.tar.gz"
+    }
+  },
+  "npmPackages": {
+    "claudeNative": {
+      "name": "@anthropic-ai/claude-agent-sdk-darwin-arm64",
+      "version": "0.3.220",
+      "url": "https://registry.npmjs.org/@anthropic-ai/claude-agent-sdk-darwin-arm64/-/claude-agent-sdk-darwin-arm64-0.3.220.tgz",
+      "cacheFile": "claude-agent-sdk-darwin-arm64-0.3.220.tgz",
+      "integrity": "sha512-7VxlbEosK7DODiOnsjoVd0DSJzbnaPrM2jelMHI0y8zx1UnLS3WC6EFUXbvy74F2sXqEznh2tzn7EKWInaRN6Q==",
+      "binarySha256": "8addc857f3fe64d5a0368af9ee50321b50afb4a6918ba3ef018ab84f5dbbe081",
+      "stagePath": "claude-agent-sdk"
+    },
+    "sharp": {
+      "name": "sharp",
+      "version": "0.34.5",
+      "url": "https://registry.npmjs.org/sharp/-/sharp-0.34.5.tgz",
+      "cacheFile": "sharp-0.34.5.tgz",
+      "integrity": "sha512-Ou9I5Ft9WNcCbXrU9cMgPBcCK8LiwLqcbywW3t4oDV37n1pzpuNLsYiAV8eODnjbtQlSDwZ2cUEeQz4E54Hltg==",
+      "stagePath": "sharp-runtime/node_modules/sharp"
+    },
+    "sharpNative": {
+      "name": "@img/sharp-darwin-arm64",
+      "version": "0.34.5",
+      "url": "https://registry.npmjs.org/@img/sharp-darwin-arm64/-/sharp-darwin-arm64-0.34.5.tgz",
+      "cacheFile": "sharp-darwin-arm64-0.34.5.tgz",
+      "integrity": "sha512-imtQ3WMJXbMY4fxb/Ndp6HBTNVtWCUI0WdobyheGf5+ad6xX8VIDO8u2xE4qc/fr08CKG/7dDseFtn6M6g/r3w==",
+      "stagePath": "sharp-runtime/node_modules/@img/sharp-darwin-arm64"
+    },
+    "sharpLibvips": {
+      "name": "@img/sharp-libvips-darwin-arm64",
+      "version": "1.2.4",
+      "url": "https://registry.npmjs.org/@img/sharp-libvips-darwin-arm64/-/sharp-libvips-darwin-arm64-1.2.4.tgz",
+      "cacheFile": "sharp-libvips-darwin-arm64-1.2.4.tgz",
+      "integrity": "sha512-zqjjo7RatFfFoP0MkQ51jfuFZBnVE2pRiaydKJ1G/rHZvnsrHAOcQALIi9sA5co5xenQdTugCvtb1cuf78Vf4g==",
+      "stagePath": "sharp-runtime/node_modules/@img/sharp-libvips-darwin-arm64"
+    },
+    "colour": {
+      "name": "@img/colour",
+      "version": "1.1.0",
+      "url": "https://registry.npmjs.org/@img/colour/-/colour-1.1.0.tgz",
+      "cacheFile": "colour-1.1.0.tgz",
+      "integrity": "sha512-Td76q7j57o/tLVdgS746cYARfSyxk8iEfRxewL9h4OMzYhbW4TAcppl0mT4eyqXddh6L/jwoM75mo7ixa/pCeQ==",
+      "stagePath": "sharp-runtime/node_modules/@img/colour"
+    },
+    "detectLibc": {
+      "name": "detect-libc",
+      "version": "2.1.2",
+      "url": "https://registry.npmjs.org/detect-libc/-/detect-libc-2.1.2.tgz",
+      "cacheFile": "detect-libc-2.1.2.tgz",
+      "integrity": "sha512-Btj2BOOO83o3WyH59e8MgXsxEQVcarkUOpEYrubB0urwnN10yQ364rsiByU11nZlqWYZm05i/of7io4mzihBtQ==",
+      "stagePath": "sharp-runtime/node_modules/detect-libc"
+    },
+    "semver": {
+      "name": "semver",
+      "version": "7.7.3",
+      "url": "https://registry.npmjs.org/semver/-/semver-7.7.3.tgz",
+      "cacheFile": "semver-7.7.3.tgz",
+      "integrity": "sha512-SdsKMrI9TdgjdweUSR9MweHA4EJ8YxHn8DFaDisvhVlUOe4BF1tLD7GAj0lIqWVl+dPb/rExr0Btby5loQm20Q==",
+      "stagePath": "sharp-runtime/node_modules/semver"
+    }
+  },
+  "requiredStagedPaths": [
+    "nodejs/bin/node",
+    "claude-agent-sdk/claude",
+    "sharp-runtime/node_modules/sharp/package.json",
+    "sharp-runtime/node_modules/@img/sharp-darwin-arm64/package.json",
+    "sharp-runtime/node_modules/@img/sharp-libvips-darwin-arm64/package.json",
+    "sharp-runtime/node_modules/@img/colour/package.json",
+    "sharp-runtime/node_modules/detect-libc/package.json",
+    "sharp-runtime/node_modules/semver/package.json"
+  ],
+  "requiredMachOArm64Paths": [
+    "nodejs/bin/node",
+    "claude-agent-sdk/claude"
+  ]
+}

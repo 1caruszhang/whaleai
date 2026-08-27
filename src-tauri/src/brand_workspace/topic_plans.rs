@@ -3,7 +3,7 @@ use rusqlite::TransactionBehavior;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 
-const POLICY_VERSION: &str = "xiaojing-content-prompt-v2";
+const POLICY_VERSION: &str = "xiaojing-content-prompt-v3";
 const MAX_ITEMS: usize = 50;
 const MAX_CONFIRMED_ITEMS: usize = 20;
 

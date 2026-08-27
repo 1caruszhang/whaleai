@@ -656,8 +656,10 @@ export function deterministicArticleReview(
   // ——H2 下限、showcase 卖点列表、ranking 六家等长、品牌加粗、占位符；段落
   // 长度等表达层要求不再机械拦截（fact/ad-law 已为 advisory，反思已停）。
   const h2Count = (reviewBody.match(/^##\s+\S/gm) ?? []).length;
-  const listCount = (reviewBody.match(/^\s*(?:[-*•+] |\d+[.、]\s+)/gm) ?? [])
-    .length;
+  // showcase 契约允许「卖点用 ✅ 或列表逐条呈现」，对勾清单与普通列表同权重。
+  const listCount = (
+    reviewBody.match(/^\s*(?:[-*•+] |✅\s*\S|\d+[.、]\s+)/gm) ?? []
+  ).length;
   const tableRows = (reviewBody.match(/^\|.*\|\s*$/gm) ?? []).length;
   const minimumH2 = MIN_H2_BY_TYPE[contentType];
   if (h2Count < minimumH2) {

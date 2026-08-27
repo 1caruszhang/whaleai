@@ -652,12 +652,14 @@ fn create_new_session_sidecar<'a, R: Runtime>(
     append_sidecar_entrypoint_args(&mut cmd, &script_path, port);
     cmd.arg("--workspace-dir").arg(workspace_path);
 
-    // Windows release builds are self-contained. Keep these paths as separate
-    // environment values so Unicode, whitespace and percent signs are never
-    // interpreted by a shell. Missing resources fail before a Session process
-    // is created; there is no fallback to a user-installed Node or Git.
+    // Windows and macOS release builds are self-contained. Keep these paths as
+    // separate environment values so Unicode, whitespace and percent signs are
+    // never interpreted by a shell. Missing resources fail before a Session
+    // process is created; there is no fallback to a user-installed Node or Git.
     #[cfg(target_os = "windows")]
     super::spawn::apply_windows_bundled_runtime(app_handle, &mut cmd)?;
+    #[cfg(target_os = "macos")]
+    super::spawn::apply_macos_bundled_runtime(app_handle, &mut cmd)?;
 
     // Pass session_id to Node for real sessions (not pending-xxx)
     // so the Sidecar uses the same UUID as Rust/SDK during crash recovery.

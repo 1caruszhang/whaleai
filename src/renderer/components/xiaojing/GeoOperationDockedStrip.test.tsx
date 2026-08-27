@@ -89,10 +89,15 @@ describe("GeoOperationDockedStrip", () => {
     );
     expect(dock.getAttribute("data-geo-operation-dock")).toBe("operation-17");
     expect(screen.getByText("完整 GEO 优化")).toBeInTheDocument();
+    // 工作步骤 running 时状态行报真实执行（正在收集品牌材料），
+    // 不再把未到的确认门误标为「当前」。
     expect(
-      screen.getByText(/进行中 · 1\/8 道闸门 · 当前：确认品牌知识变更/),
+      screen.getByText(/进行中 · 正在收集品牌材料/),
     ).toBeInTheDocument();
     expect(container.querySelector("[data-geo-gate-progress]")).not.toBeNull();
+    expect(
+      container.querySelector("[data-geo-step-progress='collect-materials']"),
+    ).not.toBeNull();
     // 点击定位携带首个非终态操作的 id。
     fireEvent.click(dock);
     expect(onLocate).toHaveBeenCalledWith("operation-17");

@@ -76,7 +76,15 @@ const runningOperation = (() => {
     revision: 5,
     steps: plan.steps.map((step, index) => ({
       ...step,
-      status: index === 0 ? 'succeeded' : index === 1 ? 'running' : step.status,
+      // 停在知识确认门：认可计划、收集材料、提取事实已完成，第四步
+      // （confirm-knowledge 确认门）待确认——工作步骤无 running，状态行
+      // 按「N/M 道闸门 · 当前：…」播报，而非执行期的「正在…」文案。
+      status:
+        index <= 2
+          ? "succeeded"
+          : index === 3
+            ? "awaiting-confirmation"
+            : step.status,
     })),
   } as unknown as GeoOperationProjection;
 })();

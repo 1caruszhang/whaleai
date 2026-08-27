@@ -163,7 +163,7 @@ describe("topic/type/title shared contract", () => {
     ).toThrow("topic_plan_question_coverage_incomplete");
   });
 
-  it("keeps per-type reasons and applies the js_ai five-type coverage floor", () => {
+  it("keeps per-type reasons and applies the twelve-article coverage floor", () => {
     const recommendations = parseAndEnforceTypeRecommendations(
       JSON.stringify([
         {
@@ -181,9 +181,10 @@ describe("topic/type/title shared contract", () => {
       ]),
       topics,
     );
+    // 两个主题时 12 篇下限受「每主题最多五类」结构上限约束，补齐到 10 篇。
     expect(recommendations.map((recommendation) => recommendation.types)).toEqual([
-      ["guide", "showcase", "news"],
-      ["guide", "ranking", "news_light"],
+      ["guide", "showcase", "ranking", "news", "news_light"],
+      ["guide", "showcase", "ranking", "news", "news_light"],
     ]);
     for (const recommendation of recommendations) {
       for (const type of recommendation.types) {

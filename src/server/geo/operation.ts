@@ -7,6 +7,7 @@ import {
   type GeoOperationProjection,
   type GeoOperationReference,
   type GeoOperationStep,
+  type GeoOperationStepProgress,
 } from "../../shared/geo/operation";
 import { managementApi } from "../utils/management-api-client";
 
@@ -19,6 +20,7 @@ type GeoOperationPersistenceAction =
   | "start-step"
   | "checkpoint"
   | "complete-step"
+  | "report-step-progress"
   | "skip-step"
   | "confirm-step"
   | "fail-step"
@@ -61,6 +63,7 @@ interface GeoOperationMutationRequest {
   error?: GeoOperationError;
   artifactRefs?: GeoOperationReference[];
   replacementSteps?: GeoOperationStep[];
+  stepProgress?: GeoOperationStepProgress;
   queueReason?: string;
   queuePosition?: number;
   expectedExecutionGeneration?: number;
@@ -249,6 +252,21 @@ export class GeoOperationService {
     checkpoint: GeoOperationCheckpoint;
   }): Promise<GeoOperationProjection> {
     return this.mutate({ ...input, action: "checkpoint" });
+  }
+
+  reportStepProgress(input: {
+    operationId: string;
+    expectedRevision: number;
+    stepId: string;
+    progress: GeoOperationStepProgress;
+  }): Promise<GeoOperationProjection> {
+    return this.mutate({
+      operationId: input.operationId,
+      expectedRevision: input.expectedRevision,
+      action: "report-step-progress",
+      stepId: input.stepId,
+      stepProgress: input.progress,
+    });
   }
 
   markRecovering(input: {

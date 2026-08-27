@@ -2,7 +2,7 @@
   "name": "xiaojing",
   "description": "鲸杉geo GEO 营销工作台",
   "type": "module",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "packageManager": "npm@11.13.0",
   "engines": {
     "node": ">=22.0.0"

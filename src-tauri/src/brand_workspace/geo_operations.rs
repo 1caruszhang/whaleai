@@ -113,6 +113,15 @@ pub struct GeoOperationConfirmation {
     pub summary: String,
 }
 
+/// 量化进度（如逐篇生成「3/5」）。只在步骤 running 期间有意义；
+/// 历史 JSON 行没有该字段，serde 缺省为 None。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GeoOperationStepProgress {
+    pub current: i64,
+    pub total: i64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct GeoOperationStep {
@@ -127,6 +136,8 @@ pub struct GeoOperationStep {
     pub condition: Option<String>,
     #[serde(default)]
     pub confirmation: Option<GeoOperationConfirmation>,
+    #[serde(default)]
+    pub progress: Option<GeoOperationStepProgress>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -236,6 +247,8 @@ pub struct GeoOperationMutationRequest {
     pub artifact_refs: Vec<GeoOperationReference>,
     #[serde(default)]
     pub replacement_steps: Option<Vec<GeoOperationStep>>,
+    #[serde(default)]
+    pub step_progress: Option<GeoOperationStepProgress>,
     #[serde(default)]
     pub queue_reason: Option<String>,
     #[serde(default)]
@@ -550,7 +563,12 @@ impl BrandWorkspaceStore {
         }
         if matches!(
             request.action.as_str(),
-            "update-queue" | "start-step" | "checkpoint" | "complete-step" | "fail-step"
+            "update-queue"
+                | "start-step"
+                | "checkpoint"
+                | "complete-step"
+                | "report-step-progress"
+                | "fail-step"
         ) && operation.execution_sidecar_generation.is_some()
             && operation.execution_sidecar_generation != request.sidecar_generation
         {
@@ -667,6 +685,7 @@ impl BrandWorkspaceStore {
             error: None,
             artifact_refs: vec![request.evidence_ref],
             replacement_steps: None,
+            step_progress: None,
             queue_reason: None,
             queue_position: None,
             expected_execution_generation: None,
@@ -841,6 +860,21 @@ fn apply_action(
             validate_checkpoint(operation, &checkpoint)?;
             operation.checkpoint = Some(checkpoint);
         }
+        // 量化进度上报：只允许 running 步骤接收（如逐篇生成 N/M），
+        // 不改状态、不推进入口，进度条据此实时移动。
+        "report-step-progress" => {
+            require_status(&operation.status, &["running"])?;
+            let step = operation_step_mut(operation, request.step_id.as_deref())?;
+            if step.status != "running" {
+                return Err("geo_operation_step_not_progressable".to_string());
+            }
+            let progress = request
+                .step_progress
+                .clone()
+                .ok_or_else(|| "geo_operation_step_progress_required".to_string())?;
+            validate_step_progress(&progress)?;
+            step.progress = Some(progress);
+        }
         "complete-step" => {
             require_status(&operation.status, &["running"])?;
             let step = operation_step_mut(operation, request.step_id.as_deref())?;
@@ -961,6 +995,7 @@ fn apply_action(
                 .find(|step| step.status == "running")
             {
                 step.status = "ready".to_string();
+                step.progress = None;
             }
             operation.status = "ready".to_string();
             operation.execution_generation += 1;
@@ -1002,6 +1037,7 @@ fn apply_action(
                 .find(|step| step.status == "failed")
             {
                 step.status = "ready".to_string();
+                step.progress = None;
             }
             operation.execution_generation += 1;
             operation.execution_sidecar_generation = None;
@@ -1399,6 +1435,10 @@ fn validate_steps(steps: &[GeoOperationStep]) -> Result<(), String> {
                 )
             })
             || step.requires_confirmation != step.confirmation.is_some()
+            || step
+                .progress
+                .as_ref()
+                .is_some_and(|progress| validate_step_progress(progress).is_err())
         {
             return Err("geo_operation_step_invalid".to_string());
         }
@@ -1412,6 +1452,14 @@ fn validate_steps(steps: &[GeoOperationStep]) -> Result<(), String> {
         {
             return Err("geo_operation_irreversible_gate_invalid".to_string());
         }
+    }
+    Ok(())
+}
+
+fn validate_step_progress(progress: &GeoOperationStepProgress) -> Result<(), String> {
+    if !(1..=100_000).contains(&progress.total) || !(0..=progress.total).contains(&progress.current)
+    {
+        return Err("geo_operation_step_progress_invalid".to_string());
     }
     Ok(())
 }
@@ -1574,6 +1622,7 @@ fn validate_mutation(request: &GeoOperationMutationRequest) -> Result<(), String
             | "start-step"
             | "checkpoint"
             | "complete-step"
+            | "report-step-progress"
             | "skip-step"
             | "confirm-step"
             | "attest-external-gate"
@@ -1595,6 +1644,9 @@ fn validate_mutation(request: &GeoOperationMutationRequest) -> Result<(), String
     }
     if let Some(steps) = request.replacement_steps.as_ref() {
         validate_steps(steps)?;
+    }
+    if let Some(progress) = request.step_progress.as_ref() {
+        validate_step_progress(progress)?;
     }
     if request
         .expected_execution_generation
@@ -1742,6 +1794,7 @@ mod tests {
             retry_unit: "operation".into(),
             condition: None,
             confirmation: gate,
+            progress: None,
         }
     }
 
@@ -1762,6 +1815,7 @@ mod tests {
             error: None,
             artifact_refs: vec![],
             replacement_steps: None,
+            step_progress: None,
             queue_reason: None,
             queue_position: None,
             expected_execution_generation: Some(operation.execution_generation),
@@ -1842,6 +1896,87 @@ mod tests {
             .mutate_geo_operation(mutation(&workspace, &first, "pause", None))
             .unwrap_err()
             .contains("revision_conflict"));
+    }
+
+    #[test]
+    fn report_step_progress_updates_running_step_and_rejects_bad_input() {
+        let (store, workspace) = fixture();
+        let operation = store
+            .create_geo_operation(GeoOperationCreateRequest {
+                workspace_id: workspace.id.clone(),
+                session_id: "session-operation".into(),
+                kind: "article-generation".into(),
+                goal: "生成三篇文章".into(),
+                status: "ready".into(),
+                steps: vec![
+                    step("generate", "content-production", "ready", None),
+                    step(
+                        "review",
+                        "content-production",
+                        "pending",
+                        Some(confirmation("article-approval", "brand-workspace")),
+                    ),
+                ],
+                input_refs: vec![],
+                pending_confirmation: None,
+                source_operation_id: None,
+            })
+            .unwrap();
+        let running = store
+            .mutate_geo_operation(mutation(
+                &workspace,
+                &operation,
+                "start-step",
+                Some("generate"),
+            ))
+            .unwrap();
+        assert_eq!(running.status, "running");
+
+        let mut out_of_range = mutation(
+            &workspace,
+            &running,
+            "report-step-progress",
+            Some("generate"),
+        );
+        out_of_range.step_progress = Some(GeoOperationStepProgress {
+            current: 6,
+            total: 5,
+        });
+        assert_eq!(
+            store.mutate_geo_operation(out_of_range).unwrap_err(),
+            "geo_operation_step_progress_invalid"
+        );
+
+        let mut report = mutation(
+            &workspace,
+            &running,
+            "report-step-progress",
+            Some("generate"),
+        );
+        report.step_progress = Some(GeoOperationStepProgress {
+            current: 2,
+            total: 5,
+        });
+        let updated = store.mutate_geo_operation(report).unwrap();
+        assert_eq!(
+            updated.steps[0].progress,
+            Some(GeoOperationStepProgress {
+                current: 2,
+                total: 5
+            })
+        );
+        assert_eq!(updated.status, "running");
+
+        // 确认门不处于 running，进度上报必须被状态机拒绝。
+        let mut wrong_step = mutation(&workspace, &updated, "report-step-progress", Some("review"));
+        wrong_step.step_progress = Some(GeoOperationStepProgress {
+            current: 1,
+            total: 5,
+        });
+        assert_eq!(
+            store.mutate_geo_operation(wrong_step).unwrap_err(),
+            "geo_operation_step_not_progressable"
+        );
     }
 
     #[test]
@@ -2343,6 +2478,7 @@ mod tests {
             error: None,
             artifact_refs: vec![],
             replacement_steps: None,
+            step_progress: None,
             queue_reason: None,
             queue_position: None,
             expected_execution_generation: Some(second.execution_generation),

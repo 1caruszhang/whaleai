@@ -4,10 +4,24 @@
  * 结果分段呈现，含加载/错误态。
  */
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import ToolUse from './ToolUse';
 import type { ToolUseSimple } from '@/types/chat';
+import type { ArticleOperationProjection } from '../../shared/geo/articleGeneration';
+
+// 批准卡渲染需要 Tab 上下文与文章 client；通用过程行用例不触发它们。
+vi.mock('@/context/TabContext', () => ({
+  useTabApi: () => ({ apiPost: vi.fn() }),
+  useTabState: () => ({ sessionId: 'session-1' }),
+}));
+vi.mock('@/api/articleGenerationClient', () => ({
+  loadArticleBody: vi.fn(),
+  loadLatestArticleOperation: vi.fn(() => Promise.resolve(null)),
+  editArticle: vi.fn(),
+  approveArticle: vi.fn(),
+  retryArticle: vi.fn(),
+}));
 
 afterEach(() => cleanup());
 
@@ -85,5 +99,93 @@ describe('ToolUse 通用过程行', () => {
     render(<ToolUse tool={tool({ result: wrappedResultText({ text: long }) })} />);
     fireEvent.click(screen.getByRole('button', { name: /查看 GEO 操作/ }));
     expect(screen.getByText(/已截断显示/)).toBeInTheDocument();
+  });
+});
+
+// 回归（2026-08-26 线上报障）：confirm_ranking_competitors 补足竞品后恢复
+// 生成，返回与 generate_articles 相同的 article-operation 信封；此前批准卡
+// 只按 generate_articles 工具名分发，该信封落入通用折叠行，用户看不到卡片。
+describe('ToolUse 批准卡按信封分发', () => {
+  const operation = {
+    id: 'operation-19',
+    workspaceId: 'brand-19',
+    createdBySessionId: 'session-1',
+    sourceKind: 'confirmed-topic-plan',
+    topicPlanId: 'plan-1',
+    topicPlanRevision: 2,
+    knowledgeVersion: 13,
+    policyVersion: 'xiaojing-content-prompt-v3',
+    status: 'running',
+    articles: [{
+      id: 'article-19',
+      operationId: 'operation-19',
+      workspaceId: 'brand-19',
+      sourcePlanItemId: 'item-1',
+      knowledgeVersion: 13,
+      contentType: 'ranking',
+      topic: '对比主题',
+      requestedTitle: '对比清单草稿',
+      constraints: '',
+      plannedFacts: [],
+      status: 'draft_ready',
+      revision: 1,
+      approvedRevision: null,
+      failureReason: null,
+      generationAttempt: 1,
+      currentVersion: null,
+      approvedVersion: null,
+      createdAt: '2026-08-26T07:40:23Z',
+      updatedAt: '2026-08-26T07:43:58Z',
+    }],
+    createdAt: '2026-08-26T07:40:23Z',
+    updatedAt: '2026-08-26T07:43:58Z',
+  } as unknown as ArticleOperationProjection;
+
+  it('renders the approval card from the confirm_ranking_competitors envelope', () => {
+    render(
+      <ToolUse
+        tool={tool({
+          name: 'mcp__xiaojing-geo__confirm_ranking_competitors',
+          result: wrappedResultText({ kind: 'article-operation', operation }),
+        })}
+      />,
+    );
+    expect(
+      screen.getByRole('region', { name: '文章审核批准' }),
+    ).toBeInTheDocument();
+  });
+
+  it('renders the approval card from the get_article_operation envelope', () => {
+    render(
+      <ToolUse
+        tool={tool({
+          name: 'mcp__xiaojing-geo__get_article_operation',
+          result: wrappedResultText({ kind: 'article-operation', operation }),
+        })}
+      />,
+    );
+    expect(
+      screen.getByRole('region', { name: '文章审核批准' }),
+    ).toBeInTheDocument();
+  });
+
+  it('keeps non-envelope competitor results as labelled process rows', () => {
+    render(
+      <ToolUse
+        tool={tool({
+          name: 'mcp__xiaojing-geo__confirm_ranking_competitors',
+          result: wrappedResultText({
+            kind: 'ranking-competitors-required',
+            confirmedCount: 0,
+            missingCount: 5,
+            instruction: '还差 5 家',
+          }),
+        })}
+      />,
+    );
+    expect(
+      screen.queryByRole('region', { name: '文章审核批准' }),
+    ).not.toBeInTheDocument();
+    expect(screen.getByText('确认排行榜竞品')).toBeInTheDocument();
   });
 });

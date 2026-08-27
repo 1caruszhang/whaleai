@@ -20,6 +20,8 @@ const XIAOJING_GEO_TOOL_LABEL_KEYS: Record<string, string> = {
   'mcp__xiaojing-geo__import_website_material': 'process.tools.importWebsiteMaterial',
   'mcp__xiaojing-geo__retry_brand_material': 'process.tools.retryBrandMaterial',
   'mcp__xiaojing-geo__inspect_geo_probe_samples': 'process.tools.inspectGeoProbeSamples',
+  'mcp__xiaojing-geo__confirm_ranking_competitors': 'process.tools.confirmRankingCompetitors',
+  'mcp__xiaojing-geo__get_article_operation': 'process.tools.getArticleOperation',
 };
 
 /** 返回 chat 命名空间下的标签 key；未登记工具返回 null，调用方回退原始名称。 */

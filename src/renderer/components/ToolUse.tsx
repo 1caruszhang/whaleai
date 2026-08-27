@@ -53,7 +53,9 @@ export default function ToolUse({ tool }: ToolUseProps): React.JSX.Element {
     const planCard = parseTopicPlanGateCard(tool.result);
     if (planCard) return <TopicPlanGateCard data={planCard} />;
   }
-  if (tool.name === 'mcp__xiaojing-geo__generate_articles' && tool.result) {
+  // 按信封 kind 分发而非工具名：confirm_ranking_competitors 恢复生成时
+  // 返回与 generate_articles 相同的 article-operation 信封，都必须渲染批准卡。
+  if (tool.name.startsWith('mcp__xiaojing-geo__') && tool.result) {
     const articleCard = parseArticleApprovalGateCard(tool.result);
     if (articleCard) return <ArticleApprovalGateCard data={articleCard} />;
   }

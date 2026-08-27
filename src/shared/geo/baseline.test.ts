@@ -43,6 +43,53 @@ describe("GEO real baseline evidence", () => {
     ]);
   });
 
+  it("keeps site_name separate from the citation title when present", () => {
+    const parsed = parseGeoProbeProviderResponse({
+      output: [
+        {
+          type: "doubao_app_call",
+          blocks: [
+            {
+              results: [
+                {
+                  text_card: {
+                    title: "干蒸菜加盟避坑指南",
+                    site_name: "和泽加盟网",
+                    url: "https://hezegd.com/shangxun/Article-q6BNR-3527.html",
+                  },
+                },
+                {
+                  // 只有 site_name 时：作为站点名保留，标题不填。
+                  text_card: {
+                    site_name: "夕霞阁官网",
+                    url: "https://www.xixiage.cn/",
+                  },
+                },
+              ],
+            },
+            {
+              type: "output_text",
+              text: "干蒸菜加盟需要重点核查供应链。",
+            },
+          ],
+        },
+      ],
+    });
+    expect(parsed.citations).toEqual([
+      {
+        title: "干蒸菜加盟避坑指南",
+        siteName: "和泽加盟网",
+        url: "https://hezegd.com/shangxun/Article-q6BNR-3527.html",
+        provenance: "structured-provider",
+      },
+      {
+        siteName: "夕霞阁官网",
+        url: "https://www.xixiage.cn/",
+        provenance: "structured-provider",
+      },
+    ]);
+  });
+
   it("extracts the answer from a doubao_app_call whose only carrier is typed blocks", () => {
     const parsed = parseGeoProbeProviderResponse({
       output: [
@@ -100,10 +147,12 @@ describe("GEO real baseline evidence", () => {
   });
 
   it("keeps mention, recommendation and citation evidence independent", () => {
-    const cited = [{
-      url: "https://example.cn/a",
-      provenance: "structured-provider" as const,
-    }];
+    const cited = [
+      {
+        url: "https://example.cn/a",
+        provenance: "structured-provider" as const,
+      },
+    ];
     expect(
       analyzeGeoProbeAnswer("鲸跃汽车出现在对比名单中。", ["鲸跃汽车"], cited),
     ).toMatchObject({
@@ -112,7 +161,11 @@ describe("GEO real baseline evidence", () => {
       hasCitationEvidence: true,
     });
     expect(
-      analyzeGeoProbeAnswer("不建议选择鲸跃汽车，需关注投诉风险。", ["鲸跃汽车"], []),
+      analyzeGeoProbeAnswer(
+        "不建议选择鲸跃汽车，需关注投诉风险。",
+        ["鲸跃汽车"],
+        [],
+      ),
     ).toMatchObject({
       brandMentioned: true,
       brandRecommended: false,
@@ -152,7 +205,11 @@ describe("GEO real baseline evidence", () => {
 
   it("flags a negative cue near the brand as a suspected negative, even alongside praise", () => {
     expect(
-      analyzeGeoProbeAnswer("不建议选择鲸跃汽车，需关注投诉风险。", ["鲸跃汽车"], []),
+      analyzeGeoProbeAnswer(
+        "不建议选择鲸跃汽车，需关注投诉风险。",
+        ["鲸跃汽车"],
+        [],
+      ),
     ).toMatchObject({
       brandMentioned: true,
       brandRecommended: false,
@@ -160,14 +217,22 @@ describe("GEO real baseline evidence", () => {
     });
     // 正负并存：推荐判定仍被负面线索压过，但 suspectedNegative 独立标记。
     expect(
-      analyzeGeoProbeAnswer("鲸跃汽车口碑较好，但投诉风险需留意。", ["鲸跃汽车"], []),
+      analyzeGeoProbeAnswer(
+        "鲸跃汽车口碑较好，但投诉风险需留意。",
+        ["鲸跃汽车"],
+        [],
+      ),
     ).toMatchObject({
       brandMentioned: true,
       brandRecommended: false,
       suspectedNegative: true,
     });
     // 旧行为缺省：干净回答不带新字段，旧数据缺字段即缺省。
-    const clean = analyzeGeoProbeAnswer("综合资质与口碑，推荐鲸跃汽车。", ["鲸跃汽车"], []);
+    const clean = analyzeGeoProbeAnswer(
+      "综合资质与口碑，推荐鲸跃汽车。",
+      ["鲸跃汽车"],
+      [],
+    );
     expect(clean).not.toHaveProperty("suspectedNegative");
     expect(clean).not.toHaveProperty("competitorMentions");
   });

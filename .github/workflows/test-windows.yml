@@ -1,9 +1,14 @@
 name: Test (Windows, manual)
 
-# The Windows rust leg bills Actions minutes at 2x and cannot execute tests
-# headlessly (WebView2 loader entry points), so it is compile-only and manual:
-# run it before producing a Windows internal-unsigned candidate or after
+# The Windows rust leg bills Actions minutes at 2x and stays manual: run it
+# before producing a Windows internal-unsigned candidate or after
 # Windows-touching rust changes. Automatic gates live in test.yml (Linux).
+# 2026-08-26 root cause: test binaries previously died pre-main with
+# STATUS_ENTRYPOINT_NOT_FOUND — NOT WebView2, but comctl32 binding to the 5.82
+# assembly because test exes carried no Common-Controls v6 manifest (fixed in
+# src-tauri/build.rs via /MANIFESTDEPENDENCY; regression test in
+# src-tauri/tests/windows_linkage.rs). Test execution on Windows is therefore
+# possible again when needed.
 on:
   workflow_dispatch:
 
@@ -36,8 +41,9 @@ jobs:
           touch src-tauri/resources/nodejs/.gitkeep
           touch src-tauri/resources/portable-git/.gitkeep
           npm run build:server
-      # The Windows test binary links WebView2 loader entry points a headless
-      # runner cannot resolve (STATUS_ENTRYPOINT_NOT_FOUND), so only compile
-      # the test targets; execution is covered by the Linux leg in test.yml.
+      # Keep compile-only for the manual gate (billing); execution now works
+      # on Windows since the Common-Controls v6 manifest fix in
+      # src-tauri/build.rs — see the header comment. Execution gates stay in
+      # the Linux leg of test.yml.
       - run: cargo test --manifest-path src-tauri/Cargo.toml --no-run
       - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings

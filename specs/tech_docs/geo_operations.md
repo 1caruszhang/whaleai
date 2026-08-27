@@ -15,6 +15,8 @@ Ticket 16 只建立 GEO 领域编排，不建立通用 Workflow Engine、`GeoRun
 Operation 状态为 `ready / queued / running / awaiting-confirmation / paused / recovering / succeeded / failed / cancelled`。步骤状态为 `pending / ready / running / awaiting-confirmation / succeeded / failed / skipped`。
 
 - 开始 exact ready step 时递增 `executionGeneration`；完成后只激活下一个既有步骤。最后一步完成才进入 `succeeded`，不存在把全部步骤一次性改成成功的通用入口。
+- running 的工作步骤可携带量化进度 `progress: {current, total}`（如文章逐篇 N/M）：由 Sidecar 的 `report-step-progress` mutation 带 revision CAS 上报，只作用于恰为 running 的步骤；`begin`/`retry`/`recover` 等重置执行路径会清空 `progress`。进度上报是 best-effort 投影增强，失败不影响业务结果。
+- 里程碑桥（Sidecar `operation-progress.ts`）的 `*-started` 里程碑只 begin（步骤推进到 running，让进度条立刻反映真实工作），完成类里程碑把 running 步骤收尾并放行对应确认门。`*-started` 必须在工具输入校验之后、真实 Provider 工作之前触发——纯校验失败不得把步骤留在 running；工具失败后 running 步骤由 agent 原地重试的成功里程碑收敛，用户取消或操作级 retry 兜底，不存在自动 fail-step。
 - running Operation 只有保存 `safeToResume=true` 的结构化 checkpoint 后才能暂停或进入 `recovering`；进程恢复时先持久化该显式状态，再由 `resume` 把 running step 放回 ready 并递增 execution generation。checkpoint 只含当前/已完成 step identity 和已持久化 unit refs，不复制 Provider 正文、密钥或请求体。
 - retry 只接受带 `retryable=true` 的结构化失败，并继续使用 exact artifact/unit owner 的最小重试语义。取消是终态；失败记录 terminal time，但可通过 revision CAS 进入新的 execution generation。
 - 控制类动作（pause/resume/retry/cancel）转换失败时，Rust 错误文本携带当前状态与该状态下合法的控制动作（如 `geo_operation_transition_invalid:ready (valid control actions: pause, cancel)`）；Agent 工具 `control_geo_operation` 把失败包装为 `ok:false` 结构化结果并附恢复指引（先 `inspect_geo_operations` 取最新 revision），不依赖裸 throw 的 isError 单行文本。

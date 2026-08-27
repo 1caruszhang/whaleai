@@ -9,6 +9,7 @@ import {
 import { useTabApi, useTabState } from "@/context/TabContext";
 import { isPendingSessionId } from "../../../shared/constants";
 import type {
+  DistributionAssignment,
   DistributionPlanEditInput,
   DistributionPlanProjection,
 } from "../../../shared/geo/distributionPlan";
@@ -122,6 +123,45 @@ export function parseDistributionGateCard(
 
 const KIND_LABEL = { media: "媒体", "we-media": "自媒体" } as const;
 
+/**
+ * 勾选集变化后对账分配（对齐聊天修订 gate-revision 的取消选择语义）：
+ * 分配指向未选渠道的文章按候选顺序改派到其他已选、未占用、可用且价格
+ * 已知的渠道；无候选可改派时置 unassigned。否则确认时服务端会以
+ * article-channel-not-selected 阻断，并把该状态持久化进计划。
+ */
+function reconcileAssignments(
+  selectedIds: number[],
+  assignments: DistributionAssignment[],
+  candidates: GateCandidate[],
+): DistributionAssignment[] {
+  const selected = new Set(selectedIds);
+  const used = new Set<number>();
+  for (const assignment of assignments) {
+    if (assignment.resourceId !== null && selected.has(assignment.resourceId))
+      used.add(assignment.resourceId);
+  }
+  const freeChannel = (): number | null => {
+    const candidate = candidates.find(
+      (item) =>
+        selected.has(item.resourceId) &&
+        !used.has(item.resourceId) &&
+        item.availability.state === "available" &&
+        candidatePricePoints(item) !== null,
+    );
+    if (!candidate) return null;
+    used.add(candidate.resourceId);
+    return candidate.resourceId;
+  };
+  return assignments.map((assignment) => {
+    if (assignment.resourceId !== null && selected.has(assignment.resourceId))
+      return assignment;
+    const resourceId = freeChannel();
+    if (resourceId === null)
+      return { ...assignment, resourceId: null, reason: "unassigned" };
+    return { ...assignment, resourceId, reason: "weighted-score" };
+  });
+}
+
 export default function DistributionGateCard({
   data,
 }: {
@@ -133,6 +173,7 @@ export default function DistributionGateCard({
   const [selectedIds, setSelectedIds] = useState<number[]>(
     () => plan.candidates.map((candidate) => candidate.resourceId),
   );
+  const selectedIdsRef = useRef(selectedIds);
   const [confirmed, setConfirmed] = useState(data.plan.status === "confirmed");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -144,13 +185,23 @@ export default function DistributionGateCard({
   // 服务端胜（票 38）：服务端渠道选择变化（聊天增删渠道）时采信服务端，
   // 否则保留本地勾选；其余字段（预算/排期/阻断项）始终采信服务端。
   const mergeRefreshed = useCallback((latest: DistributionPlanProjection) => {
-    setPlan(latest);
     if (latest.status === "confirmed") setConfirmed(true);
     const serverSelection = latest.selectedResourceIds.join(",");
     if (serverSelection !== serverSelectionRef.current) {
       serverSelectionRef.current = serverSelection;
+      selectedIdsRef.current = latest.selectedResourceIds;
       setSelectedIds(latest.selectedResourceIds);
+      setPlan(latest);
+      return;
     }
+    // 保留本地勾选时，服务端新到的分配可能指向本地已取消的渠道
+    //（如聊天侧改派）：同样对账，避免确认时 article-channel-not-selected。
+    const reconciled = reconcileAssignments(
+      selectedIdsRef.current,
+      latest.assignments,
+      latest.candidates,
+    );
+    setPlan({ ...latest, assignments: reconciled });
   }, []);
   useGateCardRefresh<DistributionPlanProjection>({
     enabled: !confirmed && hasRealSession,
@@ -164,6 +215,20 @@ export default function DistributionGateCard({
       }),
     onChange: mergeRefreshed,
   });
+
+  // 勾选/取消勾选时同步对账分配：取消持有分配的渠道时把文章改派到
+  // 其他已选候选（无则置 unassigned），避免确认时报 article-channel-not-selected。
+  const toggleChannel = useCallback((resourceId: number, checked: boolean) => {
+    const next = checked
+      ? [...selectedIdsRef.current, resourceId]
+      : selectedIdsRef.current.filter((id) => id !== resourceId);
+    selectedIdsRef.current = next;
+    setSelectedIds(next);
+    setPlan((prev) => ({
+      ...prev,
+      assignments: reconcileAssignments(next, prev.assignments, prev.candidates),
+    }));
+  }, []);
 
   const confirm = async () => {
     if (!sessionId || !hasRealSession || busy || selectedIds.length === 0) return;
@@ -253,11 +318,7 @@ export default function DistributionGateCard({
                     aria-label={`选择渠道 ${candidate.name}`}
                     checked={checked}
                     onChange={(event) =>
-                      setSelectedIds((current) =>
-                        event.target.checked
-                          ? [...current, candidate.resourceId]
-                          : current.filter((id) => id !== candidate.resourceId),
-                      )
+                      toggleChannel(candidate.resourceId, event.target.checked)
                     }
                     className="mt-1"
                   />

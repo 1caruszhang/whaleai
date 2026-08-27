@@ -51,7 +51,9 @@
       "readSessionFile": "Read session file",
       "importWebsiteMaterial": "Import website material",
       "retryBrandMaterial": "Retry material extraction",
-      "inspectGeoProbeSamples": "Inspect GEO probe samples"
+      "inspectGeoProbeSamples": "Inspect GEO probe samples",
+      "confirmRankingCompetitors": "Confirm ranking competitors",
+      "getArticleOperation": "Read article operation"
     }
   },
   "knowledgeCard": {

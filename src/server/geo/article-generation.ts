@@ -336,6 +336,12 @@ export class ArticleGenerationService {
     workspaceId: string;
     sessionId: string;
     source: ArticleOperationSource;
+    /**
+     * 逐篇落定钩子（同步）：每篇文章生成结束（成功或失败）后调用，
+     * 参数为已落定篇数与总篇数。供上层把真实进度回报给
+     * GeoOperation 步骤（进度条随 N/M 移动）；钩子不得抛错阻断批次。
+     */
+    onArticleSettled?: (settled: number, total: number) => void;
   }): Promise<ArticleOperationProjection> {
     this.assertIdentity(input);
     const source =
@@ -345,6 +351,16 @@ export class ArticleGenerationService {
     const operation = await this.persistence.start(source);
     // 叙事视角种子按操作洗牌发牌（同批不重复直到发尽，ADR-0006 §3）。
     const seeds = dealNarrativeSeeds(operation.articles.length);
+    const total = operation.articles.length;
+    let settled = 0;
+    const reportSettled = () => {
+      settled += 1;
+      try {
+        input.onArticleSettled?.(settled, total);
+      } catch {
+        // 进度回报是旁路观测，绝不阻断生成批次。
+      }
+    };
     // 计费（票 07）：文章生成 20 点/篇，一操作一张批量 permit（并发 5 路
     // 逐篇回报，避免逐篇 permit 撞每账号 2 并发准入）。permitId 绑定
     // operation：恢复重跑（同 operation 重放）不二次预扣；批内未回报单位
@@ -352,6 +368,7 @@ export class ArticleGenerationService {
     if (!this.permits) {
       await mapWithArticleConcurrency(operation.articles, async (article, index) => {
         await this.generateOne(article, "initial", seeds[index]);
+        reportSettled();
       });
       return this.persistence.getOperation(operation.id);
     }
@@ -367,6 +384,7 @@ export class ArticleGenerationService {
           permitId,
           unitIndex: index,
         });
+        reportSettled();
       });
       return await this.persistence.getOperation(operation.id);
     } finally {

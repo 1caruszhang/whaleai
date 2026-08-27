@@ -155,18 +155,24 @@ export const JS_AI_DEV_BEHAVIOR_FIXTURE = {
   },
   contentTypeCoverage: [
     {
-      id: "small-batch-one-per-type",
+      id: "small-batch-fills-to-five-type-structure-cap",
       input: [
         { topicId: "t1", types: ["guide"] },
         { topicId: "t2", types: ["guide"] },
       ],
       expected: [
-        { topicId: "t1", types: ["guide", "showcase", "news"] },
-        { topicId: "t2", types: ["guide", "ranking", "news_light"] },
+        {
+          topicId: "t1",
+          types: ["guide", "showcase", "ranking", "news", "news_light"],
+        },
+        {
+          topicId: "t2",
+          types: ["guide", "showcase", "ranking", "news", "news_light"],
+        },
       ],
     },
     {
-      id: "large-batch-two-per-type",
+      id: "large-batch-guide-heavy-backfills-to-twelve-floor",
       input: [
         { topicId: "t1", types: ["guide"] },
         { topicId: "t2", types: ["guide"] },
@@ -176,10 +182,27 @@ export const JS_AI_DEV_BEHAVIOR_FIXTURE = {
       ],
       expected: [
         { topicId: "t1", types: ["guide", "showcase", "news"] },
-        { topicId: "t2", types: ["guide", "showcase", "news_light"] },
+        { topicId: "t2", types: ["guide", "showcase", "news"] },
         { topicId: "t3", types: ["guide", "ranking", "news_light"] },
-        { topicId: "t4", types: ["guide", "ranking"] },
-        { topicId: "t5", types: ["guide", "news"] },
+        { topicId: "t4", types: ["guide", "ranking", "news_light"] },
+        { topicId: "t5", types: ["guide", "ranking"] },
+      ],
+    },
+    {
+      id: "mixed-batch-lands-exactly-on-twelve-floor",
+      input: [
+        { topicId: "t1", types: ["showcase"] },
+        { topicId: "t2", types: ["news"] },
+        { topicId: "t3", types: ["news_light"] },
+        { topicId: "t4", types: ["ranking"] },
+        { topicId: "t5", types: ["news"] },
+      ],
+      expected: [
+        { topicId: "t1", types: ["showcase", "guide", "ranking"] },
+        { topicId: "t2", types: ["news", "guide", "news_light"] },
+        { topicId: "t3", types: ["news_light", "guide"] },
+        { topicId: "t4", types: ["ranking", "showcase"] },
+        { topicId: "t5", types: ["news", "ranking"] },
       ],
     },
   ],

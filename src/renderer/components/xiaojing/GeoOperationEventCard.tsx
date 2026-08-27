@@ -36,8 +36,7 @@ import { unwrapToolResultText } from "../../../shared/toolResult";
 import GeoOperationGatePanels from "./GeoOperationGatePanels";
 import GeoGateProgressStrip, {
   deriveGateSegments,
-  findCurrentGate,
-  isGateDone,
+  formatGeoOperationProgressLine,
 } from "./GeoGateProgressStrip";
 
 export interface GeoOperationEventCardData {
@@ -398,10 +397,6 @@ function OperationArticle({ operation }: { operation: GeoOperationProjection }) 
     [apiPost, busyAction, identity, live.id, live.revision],
   );
 
-  const completed = live.steps.filter(
-    (step) => step.status === "succeeded" || step.status === "skipped",
-  ).length;
-
   const showPause = live.status === "running" && !!live.checkpoint?.safeToResume;
   const showResume = live.status === "paused" || live.status === "recovering";
   const showRetry =
@@ -423,15 +418,11 @@ function OperationArticle({ operation }: { operation: GeoOperationProjection }) 
   if (!fullMode && !isHost) return null;
 
   // 轻量条按闸门报进度（只显示门，不复述步骤）；无确认门的计划回退步数。
+  // 执行期优先报真实工作步骤（如「正在生成文章 3/5」），完整卡保持步数。
   const gateSegments = deriveGateSegments(live.steps);
-  const currentGate = findCurrentGate(gateSegments);
-  const gateDone = gateSegments.filter(isGateDone).length;
-  const progressLine =
-    fullMode || gateSegments.length === 0
-      ? `${completed}/${live.steps.length} 步`
-      : `${gateDone}/${gateSegments.length} 道闸门${
-          currentGate ? ` · 当前：${currentGate.title}` : ""
-        }`;
+  const progressLine = formatGeoOperationProgressLine(live.steps, {
+    fullCard: fullMode,
+  });
 
   // 计划认可门是本卡的主操作：停靠时认可面板提到卡头（目标行之后、
   // 步骤重播之前），沿用知识确认卡「整卡确认常驻卡头、不藏在长列表

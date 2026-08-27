@@ -273,6 +273,37 @@ describe("article review gate", () => {
     );
   });
 
+  it("counts ✅ checklist lines as showcase selling-point list items", () => {
+    const checkmarkBody = [
+      "# 品牌详情",
+      "",
+      "## 品牌概况",
+      "品牌专注于本地服务。",
+      "",
+      "## 核心优势",
+      "✅ 去厨师化运营：制作流程标准化拆解。",
+      "✅ 统一原料供给：核心原料品质稳定。",
+      "",
+      "## 服务范围",
+      "覆盖多类团餐场景。",
+    ].join("\n");
+    expect(
+      deterministicArticleReview(checkmarkBody, facts, "showcase").filter(
+        (issue) => issue.severity === "blocking",
+      ),
+    ).toEqual([]);
+
+    const proseOnlyBody = checkmarkBody.replace(/✅ /g, "");
+    expect(deterministicArticleReview(proseOnlyBody, facts, "showcase")).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          severity: "blocking",
+          message: expect.stringContaining("卖点栏目"),
+        }),
+      ]),
+    );
+  });
+
   it("enforces the js_ai six-entry parallel ranking structure deterministically", () => {
     expect(deterministicArticleReview(structuredBody, facts, "ranking")).toEqual(
       expect.arrayContaining([

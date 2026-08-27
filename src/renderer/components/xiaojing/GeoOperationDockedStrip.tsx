@@ -19,8 +19,7 @@ import type { GeoOperationProjection } from "../../../shared/geo/operation";
 import { GEO_OPERATION_STATUS_LABEL, TERMINAL } from "./GeoOperationEventCard";
 import GeoGateProgressStrip, {
   deriveGateSegments,
-  findCurrentGate,
-  isGateDone,
+  formatGeoOperationProgressLine,
 } from "./GeoGateProgressStrip";
 
 function GeoOperationDockedStrip({
@@ -112,17 +111,9 @@ function GeoOperationDockedStrip({
 
   if (!live) return null;
   const gateSegments = deriveGateSegments(live.steps);
-  const currentGate = findCurrentGate(gateSegments);
-  const gateDone = gateSegments.filter(isGateDone).length;
-  const completed = live.steps.filter(
-    (step) => step.status === "succeeded" || step.status === "skipped",
-  ).length;
-  const progressLine =
-    gateSegments.length > 0
-      ? `${gateDone}/${gateSegments.length} 道闸门${
-          currentGate ? ` · 当前：${currentGate.title}` : ""
-        }`
-      : `${completed}/${live.steps.length} 步`;
+  // 状态行与进度卡共用同一条派生：执行期优先报真实执行
+  // （如「正在生成文章 3/5」），详见 formatGeoOperationProgressLine。
+  const progressLine = formatGeoOperationProgressLine(live.steps);
 
   return (
     <button

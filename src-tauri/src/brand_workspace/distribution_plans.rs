@@ -29,6 +29,9 @@ pub struct DistributionQuestionSource {
     pub question: String,
     pub title: String,
     pub url: String,
+    /// 引用的站点名（豆包 site_name）；面板渠道显示名优先用它。
+    #[serde(default)]
+    pub site_name: Option<String>,
     #[serde(default)]
     pub article_ids: Vec<String>,
 }
@@ -112,6 +115,13 @@ pub struct DistributionPlanDiscoveryFinishRequest {
     pub assignments: Value,
     pub discovery_summary: Value,
     pub blocking_issues: Value,
+    /// 召回输入快照（右侧面板四路召回展示）：主动路全局召回的原始渠道；
+    /// 旧 Sidecar 不发送时投影保持缺省。
+    #[serde(default)]
+    pub active_recall_sources: Option<Value>,
+    /// 偏好路生效名单名字快照（内置名单+用户 overlay 合成）。
+    #[serde(default)]
+    pub preference_channel_names: Option<Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -330,9 +340,17 @@ impl BrandWorkspaceStore {
         &self,
         workspace_id: &str,
         session_id: &str,
-        request: DistributionPlanPrepareRequest,
+        mut request: DistributionPlanPrepareRequest,
     ) -> Result<DistributionPlanPreparation, String> {
         validate_prepare_request(&request)?;
+        // 站点名只是展示增强；空串或超长视为脏数据丢弃而非拒单。
+        for source in &mut request.question_sources {
+            if let Some(site_name) = source.site_name.as_deref() {
+                if site_name.trim().is_empty() || site_name.chars().count() > 120 {
+                    source.site_name = None;
+                }
+            }
+        }
         // Limits are app-local user configuration owned by Rust. The Sidecar
         // may send a stale projection for its own budgeting, but it cannot
         // author or loosen the snapshot frozen into a distribution plan.
@@ -622,6 +640,22 @@ impl BrandWorkspaceStore {
             "blockingIssues",
             request.blocking_issues.clone(),
         )?;
+        // 召回输入快照（右侧面板四路召回展示）：新 Sidecar 携带则落进投影；
+        // 旧 Sidecar 缺省时保持原状（字段可缺省）。
+        if let Some(active_recall_sources) = &request.active_recall_sources {
+            set_projection_field(
+                &mut projection,
+                "activeRecallSources",
+                active_recall_sources.clone(),
+            )?;
+        }
+        if let Some(preference_channel_names) = &request.preference_channel_names {
+            set_projection_field(
+                &mut projection,
+                "preferenceChannelNames",
+                preference_channel_names.clone(),
+            )?;
+        }
         set_projection_field(&mut projection, "updatedAt", json!(now))?;
         reject_secret_shaped_data(&projection)?;
         transaction
@@ -2022,6 +2056,7 @@ mod tests {
                 question: question.question.clone(),
                 title: format!("探测来源{}", index + 1),
                 url: format!("https://probe-{index}.example.com/source"),
+                site_name: (index == 0).then(|| "示例站点".to_string()),
                 article_ids: Vec::new(),
             })
             .collect()
@@ -2122,6 +2157,10 @@ mod tests {
                 "alignedResources":1,"recommendedResources":1
             }),
             blocking_issues: json!([]),
+            active_recall_sources: Some(json!([
+                {"title":"汽车 GEO 产业观察","url":"https://probe-0.example.com","articleIds":["article-1"]}
+            ])),
+            preference_channel_names: Some(json!(["汽车产业观察（官方头条号）"])),
         }
     }
 
@@ -2283,6 +2322,15 @@ mod tests {
             .unwrap();
         assert_eq!(finished["resourceSnapshot"][0]["name"], "汽车 GEO 产业观察");
         assert_eq!(finished["candidates"][0]["evidence"][0]["reference"], "q1");
+        // 召回输入快照随发现结果落进投影（右侧面板四路召回展示）。
+        assert_eq!(
+            finished["activeRecallSources"][0]["title"],
+            "汽车 GEO 产业观察"
+        );
+        assert_eq!(
+            finished["preferenceChannelNames"][0],
+            "汽车产业观察（官方头条号）"
+        );
     }
 
     #[test]

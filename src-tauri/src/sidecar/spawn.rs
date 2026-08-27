@@ -118,6 +118,67 @@ pub(super) fn apply_windows_bundled_runtime<R: Runtime>(
     Ok(())
 }
 
+/// Runtime resources owned by one packaged macOS arm64 Session Sidecar.
+///
+/// macOS ships git via the system (/usr/bin/git) and needs no PortableGit or
+/// CLAUDE_CODE_GIT_BASH_PATH equivalent; only the Claude native executable and
+/// the sharp runtime are admitted from the app bundle's Contents/Resources.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg(any(target_os = "macos", test))]
+pub(super) struct MacosBundledRuntimeLayout {
+    pub claude_executable: PathBuf,
+    pub sharp_node_modules: PathBuf,
+}
+
+#[cfg(any(target_os = "macos", test))]
+pub(super) fn macos_bundled_runtime_layout(
+    resources: &std::path::Path,
+) -> MacosBundledRuntimeLayout {
+    MacosBundledRuntimeLayout {
+        claude_executable: resources.join("claude-agent-sdk").join("claude"),
+        sharp_node_modules: resources.join("sharp-runtime").join("node_modules"),
+    }
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn validate_macos_bundled_runtime_layout(layout: &MacosBundledRuntimeLayout) -> Result<(), String> {
+    let required = [
+        (
+            "claude-agent-sdk/claude",
+            layout.claude_executable.as_path(),
+        ),
+        (
+            "sharp-runtime/node_modules",
+            layout.sharp_node_modules.as_path(),
+        ),
+    ];
+    for (relative, path) in required {
+        if !path.exists() {
+            return Err(format!(
+                "macOS arm64 runtime resource missing: {relative}. Reinstall the application."
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+pub(super) fn apply_macos_bundled_runtime<R: Runtime>(
+    app_handle: &AppHandle<R>,
+    command: &mut std::process::Command,
+) -> Result<(), String> {
+    let resources = app_handle
+        .path()
+        .resource_dir()
+        .map_err(|_| "macOS arm64 runtime resource directory is unavailable".to_string())?;
+    let layout = macos_bundled_runtime_layout(&resources);
+    validate_macos_bundled_runtime_layout(&layout)?;
+
+    command.env("XIAOJING_CLAUDE_CODE_EXECUTABLE", layout.claude_executable);
+    command.env("NODE_PATH", layout.sharp_node_modules);
+    Ok(())
+}
+
 /// Diagnose why Node executable was not found and return a user-friendly error message.
 pub(super) fn diagnose_node_not_found<R: Runtime>(app_handle: &AppHandle<R>) -> String {
     let mut details = Vec::new();
@@ -407,6 +468,38 @@ mod windows_runtime_layout_tests {
         let layout = windows_bundled_runtime_layout(temp.path());
         let error = validate_windows_bundled_runtime_layout(&layout).unwrap_err();
         assert!(error.contains("claude-agent-sdk/claude.exe"));
+        assert!(!error.contains(&temp.path().to_string_lossy().to_string()));
+    }
+}
+
+#[cfg(test)]
+mod macos_runtime_layout_tests {
+    use super::{macos_bundled_runtime_layout, validate_macos_bundled_runtime_layout};
+
+    #[test]
+    fn layout_preserves_unicode_spaces_and_long_segments() {
+        let long_segment = "长路径".repeat(48);
+        let root = std::path::PathBuf::from("/Applications/鲸杉 geo 测试.app/Contents")
+            .join(long_segment)
+            .join("Resources");
+        let layout = macos_bundled_runtime_layout(&root);
+
+        assert_eq!(
+            layout.claude_executable,
+            root.join("claude-agent-sdk").join("claude")
+        );
+        assert_eq!(
+            layout.sharp_node_modules,
+            root.join("sharp-runtime").join("node_modules")
+        );
+    }
+
+    #[test]
+    fn validation_fails_closed_without_every_required_resource() {
+        let temp = tempfile::tempdir().unwrap();
+        let layout = macos_bundled_runtime_layout(temp.path());
+        let error = validate_macos_bundled_runtime_layout(&layout).unwrap_err();
+        assert!(error.contains("claude-agent-sdk/claude"));
         assert!(!error.contains(&temp.path().to_string_lossy().to_string()));
     }
 }

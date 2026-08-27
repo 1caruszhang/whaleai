@@ -3,6 +3,7 @@ import {
   ChevronDown,
   ChevronRight,
   Loader2,
+  RotateCcw,
   SquarePen,
 } from "lucide-react";
 import { useCallback, useState } from "react";
@@ -12,6 +13,7 @@ import {
   editArticle,
   loadArticleBody,
   loadLatestArticleOperation,
+  retryArticle,
 } from "@/api/articleGenerationClient";
 import { useTabApi, useTabState } from "@/context/TabContext";
 import { isPendingSessionId } from "../../../shared/constants";
@@ -133,6 +135,9 @@ function ArticleRow({
   const review = article.currentVersion?.review ?? null;
   const bodyReady = bodyCache !== null && bodyCache.revision === article.revision;
   const canEdit = article.status === "draft_ready" && bodyReady;
+  // revision=0（无版本行）的失败稿没有正文可读，提供「查看正文」只会命中
+  // article_version_not_found；恢复入口是单篇重试而不是读正文。
+  const hasVersion = article.currentVersion !== null;
 
   const ensureBody = async () => {
     if (bodyReady || loadingBody) return;
@@ -207,6 +212,30 @@ function ArticleRow({
     }
   };
 
+  const retryFailed = async () => {
+    if (busy || article.status !== "generation_failed") return;
+    setBusy(true);
+    setError(null);
+    try {
+      // 同步执行到新版本落盘：成功回到 draft_ready（卡内可展开/编辑/批准），
+      // 仍失败则返回 generation_failed 与新的 failure_reason。
+      const updated = await retryArticle(
+        apiPost,
+        { workspaceId: operation.workspaceId, sessionId: sessionId ?? "" },
+        {
+          operationId: operation.id,
+          articleId: article.id,
+          expectedRevision: article.revision,
+        },
+      );
+      onArticleChange(updated);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
     <article className="rounded-lg border border-[var(--line-subtle)] bg-[var(--paper)] p-2">
       <p className="text-sm font-medium leading-5">
@@ -231,21 +260,41 @@ function ArticleRow({
         </ul>
       )}
       <div className="mt-2 flex flex-wrap gap-2">
-        <button
-          type="button"
-          onClick={toggleBody}
-          disabled={editing}
-          className="flex items-center gap-1 rounded px-2 py-1 text-xs text-[var(--accent)] disabled:opacity-50"
-          aria-expanded={expanded}
-          aria-label={`查看正文 ${article.currentVersion?.title ?? article.requestedTitle}`}
-        >
-          {expanded ? (
-            <ChevronDown className="h-3 w-3" />
-          ) : (
-            <ChevronRight className="h-3 w-3" />
-          )}
-          {expanded ? "收起正文" : "查看正文"}
-        </button>
+        {hasVersion && (
+          <button
+            type="button"
+            onClick={toggleBody}
+            disabled={editing}
+            className="flex items-center gap-1 rounded px-2 py-1 text-xs text-[var(--accent)] disabled:opacity-50"
+            aria-expanded={expanded}
+            aria-label={`查看正文 ${article.currentVersion?.title ?? article.requestedTitle}`}
+          >
+            {expanded ? (
+              <ChevronDown className="h-3 w-3" />
+            ) : (
+              <ChevronRight className="h-3 w-3" />
+            )}
+            {expanded ? "收起正文" : "查看正文"}
+          </button>
+        )}
+        {article.status === "generation_failed" && (
+          <button
+            type="button"
+            onClick={() => {
+              void retryFailed();
+            }}
+            disabled={busy}
+            className="flex items-center gap-1 rounded px-2 py-1 text-xs text-[var(--accent)] disabled:opacity-50"
+            aria-label={`重试本篇 ${article.currentVersion?.title ?? article.requestedTitle}`}
+          >
+            {busy ? (
+              <Loader2 className="h-3 w-3 animate-spin" />
+            ) : (
+              <RotateCcw className="h-3 w-3" />
+            )}
+            重试本篇
+          </button>
+        )}
         {canEdit && !editing && (
           <button
             type="button"
@@ -444,7 +493,7 @@ export default function ArticleApprovalGateCard({
         </button>
       ) : hasTerminalFailure ? (
         <p className="mt-2 rounded-lg bg-[var(--paper-inset)] p-2 text-xs leading-4 text-[var(--ink-muted)]">
-          仍有文章被风险阻断或生成失败；可在对话中让小鲸修改后重新生成。
+          仍有文章被风险阻断或生成失败；生成失败的篇目可在上方逐篇重试，风险阻断的稿件可在对话中让小鲸修改后重新生成。
         </p>
       ) : (
         <p className="mt-2 rounded-lg bg-[var(--paper-inset)] p-2 text-xs leading-4 text-[var(--ink-muted)]">

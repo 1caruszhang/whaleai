@@ -177,8 +177,13 @@ describe("GEO port contract", () => {
         passiveDomainCap: 3,
         activeDomainCap: 2,
         nameFallbackCap: 1,
+        multiTenantDomainExempt: true,
       },
-      passiveRecall: { perQuestionCap: 15, perRegisteredDomainCap: 3 },
+      passiveRecall: {
+        perQuestionCap: 10,
+        totalCap: 50,
+        rankBy: "cross-question-registered-domain-frequency-desc",
+      },
       fallbackTopN: 50,
       recommendation: {
         max: 30,

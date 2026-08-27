@@ -1,0 +1,57 @@
+name: Build macOS internal-unsigned (manual)
+
+# 一键产出 INTERNAL-UNSIGNED macOS arm64 安装包（DMG 候选）：
+#   手动触发 → GitHub macos-14 runner（Apple Silicon）按指南
+#   specs/guides/macos_arm64_internal_beta.md 的固定输入构建 →
+#   产物（DMG + candidate.json 含 SHA-256）上传为 Actions artifact。
+# macOS runner 按 10x 分钟计费，与 Windows 构建一致保持手动触发；
+# 构建脚本内置完整门禁（资源摘要校验 / 静态契约 / 类型检查 / lint）。
+# 产物仅供内测分发：私有仓库 artifact 下载需要仓库权限，不对外发布。
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-macos-internal-unsigned-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: macos-14
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      # rustup 在 runner 上预装；rust-toolchain.toml 锁定版本，rustup show 负责装齐。
+      - name: Install pinned Rust toolchain and macOS arm64 target
+        run: |
+          rustup show
+          rustup target add aarch64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install npm dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Prepare pinned macOS arm64 resources (digest-checked)
+        run: bash scripts/prepare-macos-arm64.sh
+
+      - name: Build internal-unsigned candidate (with full gates)
+        run: bash scripts/build-macos-arm64.sh internal-unsigned
+
+      - name: Upload candidate artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: xiaojing-macos-internal-unsigned
+          path: artifacts/macos-arm64/internal-unsigned/
+          retention-days: 30
+          if-no-files-found: error

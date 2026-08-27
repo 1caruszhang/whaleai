@@ -51,7 +51,9 @@
       "readSessionFile": "读取会话文件",
       "importWebsiteMaterial": "导入网站材料",
       "retryBrandMaterial": "重试材料抽取",
-      "inspectGeoProbeSamples": "查看探测样本"
+      "inspectGeoProbeSamples": "查看探测样本",
+      "confirmRankingCompetitors": "确认排行榜竞品",
+      "getArticleOperation": "读取文章操作"
     }
   },
   "knowledgeCard": {

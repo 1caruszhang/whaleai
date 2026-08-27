@@ -108,29 +108,31 @@ function persistence() {
   const plans = new Map<string, DistributionPlanProjection>();
   let sequence = 0;
   const port: DistributionPlanPersistencePort = {
-    context: vi.fn(async (): Promise<DistributionPlanningContext> => ({
-      articleOperationId: "article-operation",
-      knowledgeVersion: 1,
-      industry: "汽车改装",
-      articles: [
-        {
-          id: "article-1",
-          operationId: "article-operation",
-          approvedRevision: 1,
-          title: "汽车行业观察",
-          topic: "新能源车售后",
-          contentType: "news" as const,
-        },
-      ],
-      questions: [
-        {
-          id: "q-1",
-          question: "新能源车售后怎么选？",
-          articleIds: ["article-1"],
-        },
-      ],
-      derivedKeywords: ["汽车音响", "改装"],
-    })),
+    context: vi.fn(
+      async (): Promise<DistributionPlanningContext> => ({
+        articleOperationId: "article-operation",
+        knowledgeVersion: 1,
+        industry: "汽车改装",
+        articles: [
+          {
+            id: "article-1",
+            operationId: "article-operation",
+            approvedRevision: 1,
+            title: "汽车行业观察",
+            topic: "新能源车售后",
+            contentType: "news" as const,
+          },
+        ],
+        questions: [
+          {
+            id: "q-1",
+            question: "新能源车售后怎么选？",
+            articleIds: ["article-1"],
+          },
+        ],
+        derivedKeywords: ["汽车音响", "改装"],
+      }),
+    ),
     channelPreferences: vi.fn(async () => undefined),
     spendLimits: vi.fn(async () => ({
       perArticleMaxPoints: 3_200,
@@ -164,6 +166,8 @@ function persistence() {
         assignments: input.assignments,
         discoverySummary: input.discoverySummary,
         blockingIssues: input.blockingIssues,
+        activeRecallSources: input.activeRecallSources,
+        preferenceChannelNames: input.preferenceChannelNames,
       };
       plans.set(input.planId, next);
       return structuredClone(next);
@@ -424,7 +428,11 @@ describe("DistributionPlanningService billing permits (ticket 07)", () => {
     return {
       calls,
       port: {
-        async apply(input: { permitId: string; operation: string; units: number }) {
+        async apply(input: {
+          permitId: string;
+          operation: string;
+          units: number;
+        }) {
           calls.push({ kind: "apply", ...input });
           return {
             permitId: input.permitId,
@@ -480,10 +488,17 @@ describe("DistributionPlanningService billing permits (ticket 07)", () => {
       operation: "distribution_planning",
       units: 1,
     });
-    expect(permits.calls[0].permitId).toMatch(/^dist:article-operation:[0-9a-f]{16}$/);
+    expect(permits.calls[0].permitId).toMatch(
+      /^dist:article-operation:[0-9a-f]{16}$/,
+    );
     expect(permits.calls).toEqual([
       permits.calls[0],
-      { kind: "report", permitId: permits.calls[0].permitId, unit: 0, outcome: "success" },
+      {
+        kind: "report",
+        permitId: permits.calls[0].permitId,
+        unit: 0,
+        outcome: "success",
+      },
     ]);
   });
 
@@ -491,7 +506,9 @@ describe("DistributionPlanningService billing permits (ticket 07)", () => {
     const { port } = persistence();
     const permits = permitPort();
     const search = keywordSearch();
-    search.probeQuestion.mockRejectedValue(new Error("keyword-search 上游请求失败"));
+    search.probeQuestion.mockRejectedValue(
+      new Error("keyword-search 上游请求失败"),
+    );
     const service = billedService(port, permits.port, search);
 
     const result = await service.start({
@@ -505,7 +522,12 @@ describe("DistributionPlanningService billing permits (ticket 07)", () => {
     expect(result.status).toBeDefined();
     expect(permits.calls).toEqual([
       permits.calls[0],
-      { kind: "report", permitId: permits.calls[0].permitId, unit: 0, outcome: "failure" },
+      {
+        kind: "report",
+        permitId: permits.calls[0].permitId,
+        unit: 0,
+        outcome: "failure",
+      },
     ]);
   });
 
@@ -515,16 +537,30 @@ describe("DistributionPlanningService billing permits (ticket 07)", () => {
     const search = keywordSearch();
     const service = billedService(port, permits.port, search);
 
-    await service.start({ workspaceId: "workspace", sessionId: "session", source });
+    await service.start({
+      workspaceId: "workspace",
+      sessionId: "session",
+      source,
+    });
     const firstPermitId = permits.calls[0].permitId;
-    const resourceCallsBefore = (provider().listResources as ReturnType<typeof vi.fn>).mock;
+    const resourceCallsBefore = (
+      provider().listResources as ReturnType<typeof vi.fn>
+    ).mock;
     expect(resourceCallsBefore).toBeDefined();
 
     // 同一来源恢复重跑：重放同一 permitId，不产生第二笔申请。
     const secondPersistence = persistence();
     const secondPermits = permitPort();
-    const service2 = billedService(secondPersistence.port, secondPermits.port, search);
-    await service2.start({ workspaceId: "workspace", sessionId: "session", source });
+    const service2 = billedService(
+      secondPersistence.port,
+      secondPermits.port,
+      search,
+    );
+    await service2.start({
+      workspaceId: "workspace",
+      sessionId: "session",
+      source,
+    });
     expect(secondPermits.calls[0]).toMatchObject({
       kind: "apply",
       permitId: firstPermitId,
@@ -533,9 +569,19 @@ describe("DistributionPlanningService billing permits (ticket 07)", () => {
 
     // 浏览/读取面（latest/get/context/edit/confirm）零 permit 调用。
     const readPermits = permitPort();
-    const readService = billedService(persistence().port, readPermits.port, search);
-    await readService.latest({ workspaceId: "workspace", sessionId: "session" });
-    await readService.context({ workspaceId: "workspace", sessionId: "session" });
+    const readService = billedService(
+      persistence().port,
+      readPermits.port,
+      search,
+    );
+    await readService.latest({
+      workspaceId: "workspace",
+      sessionId: "session",
+    });
+    await readService.context({
+      workspaceId: "workspace",
+      sessionId: "session",
+    });
     expect(readPermits.calls).toEqual([]);
   });
 });

@@ -260,4 +260,107 @@ describe("DistributionGateCard channel recommendation rows", () => {
     };
     expect(payload.edit.budgetCny).toBe(1000);
   });
+
+  // 取消勾选持有分配的渠道时对账分配（修复 article-channel-not-selected）：
+  // 文章按候选顺序改派到其他已选未占用候选；无候选可用时置 unassigned。
+  function multiChannelPlan(): DistributionPlanProjection {
+    const articles = [
+      { id: "article-1", operationId: "articles-1", approvedRevision: 3, title: "篇一", topic: "汽车音响", contentType: "guide" as const },
+      { id: "article-2", operationId: "articles-1", approvedRevision: 3, title: "篇二", topic: "车载支架", contentType: "guide" as const },
+    ];
+    const candidates = [
+      candidate({ resourceId: 8 }),
+      candidate({
+        resourceId: 9,
+        kind: "we-media",
+        name: "车主生活圈",
+        evidence: [],
+      }),
+      candidate({
+        resourceId: 10,
+        kind: "we-media",
+        name: "新能源观察",
+        evidence: [],
+      }),
+    ];
+    return plan({
+      articles,
+      candidates,
+      selectedResourceIds: [8, 9, 10],
+      assignments: [
+        { articleId: "article-1", resourceId: 8, reason: "source-evidence", scheduledAt: "2026-08-20T02:00:00Z" },
+        { articleId: "article-2", resourceId: 9, reason: "content-fit", scheduledAt: "2026-08-20T02:00:00Z" },
+      ],
+    });
+  }
+
+  it("reassigns the article when unchecking its assigned channel", async () => {
+    mocks.edit.mockResolvedValue({ revision: 2 });
+    mocks.confirm.mockResolvedValue({});
+    render(
+      <DistributionGateCard
+        data={{ kind: "distribution-plan", plan: multiChannelPlan() }}
+      />,
+    );
+    const card = screen.getByRole("region", { name: "分发计划确认" });
+
+    // 取消勾选渠道 8（article-1 的分配指向它）。
+    fireEvent.click(within(card).getByRole("checkbox", { name: "选择渠道 汽车产业观察" }));
+    fireEvent.click(
+      within(card).getByRole("button", { name: /确认分发计划/ }),
+    );
+    await waitFor(() => expect(mocks.edit).toHaveBeenCalled());
+    const payload = mocks.edit.mock.calls[0]?.[2] as {
+      edit: {
+        selectedResourceIds: number[];
+        assignments: { articleId: string; resourceId: number | null }[];
+      };
+    };
+    expect(payload.edit.selectedResourceIds).toEqual([9, 10]);
+    expect(payload.edit.assignments).toEqual([
+      // article-1 改派到下一个已选未占用候选（渠道 10）。
+      expect.objectContaining({ articleId: "article-1", resourceId: 10 }),
+      expect.objectContaining({ articleId: "article-2", resourceId: 9 }),
+    ]);
+  });
+
+  it("marks the article unassigned when no selected channel is free", async () => {
+    mocks.edit.mockResolvedValue({ revision: 2 });
+    mocks.confirm.mockResolvedValue({});
+    const twoArticles = [
+      { id: "article-1", operationId: "articles-1", approvedRevision: 3, title: "篇一", topic: "汽车音响", contentType: "guide" as const },
+      { id: "article-2", operationId: "articles-1", approvedRevision: 3, title: "篇二", topic: "车载支架", contentType: "guide" as const },
+    ];
+    render(
+      <DistributionGateCard
+        data={{
+          kind: "distribution-plan",
+          plan: plan({
+            articles: twoArticles,
+            candidates: [candidate({ resourceId: 8 }), candidate({ resourceId: 9, name: "车主生活圈", kind: "we-media", evidence: [] })],
+            selectedResourceIds: [8, 9],
+            assignments: [
+              { articleId: "article-1", resourceId: 8, reason: "source-evidence", scheduledAt: "2026-08-20T02:00:00Z" },
+              { articleId: "article-2", resourceId: 9, reason: "content-fit", scheduledAt: "2026-08-20T02:00:00Z" },
+            ],
+          }),
+        }}
+      />,
+    );
+    const card = screen.getByRole("region", { name: "分发计划确认" });
+
+    // 渠道 9 已被 article-2 占用且不可复用：article-1 只能置 unassigned。
+    fireEvent.click(within(card).getByRole("checkbox", { name: "选择渠道 汽车产业观察" }));
+    fireEvent.click(
+      within(card).getByRole("button", { name: /确认分发计划/ }),
+    );
+    await waitFor(() => expect(mocks.edit).toHaveBeenCalled());
+    const payload = mocks.edit.mock.calls[0]?.[2] as {
+      edit: { assignments: { articleId: string; resourceId: number | null; reason: string }[] };
+    };
+    expect(payload.edit.assignments).toEqual([
+      expect.objectContaining({ articleId: "article-1", resourceId: null, reason: "unassigned" }),
+      expect.objectContaining({ articleId: "article-2", resourceId: 9 }),
+    ]);
+  });
 });

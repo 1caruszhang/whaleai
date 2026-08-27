@@ -31,6 +31,8 @@ export interface GeoBaselineEngineAvailability {
 export interface GeoProbeCitation {
   url: string;
   title?: string;
+  /** 站点名（豆包 url_citation 的 site_name）：渠道显示名优先用它而非裸域名。 */
+  siteName?: string;
   provenance: "structured-provider" | "answer-link";
 }
 
@@ -148,7 +150,10 @@ function rawAnswerFromProvider(value: unknown): string {
     for (const block of blocks) {
       if (!block || typeof block !== "object") continue;
       const blockHolder = block as Record<string, unknown>;
-      if (blockHolder.type === "output_text" && typeof blockHolder.text === "string") {
+      if (
+        blockHolder.type === "output_text" &&
+        typeof blockHolder.text === "string"
+      ) {
         if (blockHolder.text.trim()) parts.push(blockHolder.text.trim());
       }
     }
@@ -180,9 +185,17 @@ function structuredCitations(value: unknown): GeoProbeCitation[] {
     }
     const holder = node as Record<string, unknown>;
     let title: string | undefined;
-    for (const key of ["title", "site_name", "sitename", "name"]) {
+    for (const key of ["title", "name"]) {
       if (typeof holder[key] === "string" && holder[key].trim()) {
         title = holder[key].trim();
+        break;
+      }
+    }
+    // site_name 是站点级名称，与文章标题分开保留（渠道显示名优先站点名）。
+    let siteName: string | undefined;
+    for (const key of ["site_name", "sitename"]) {
+      if (typeof holder[key] === "string" && holder[key].trim()) {
+        siteName = holder[key].trim();
         break;
       }
     }
@@ -197,6 +210,7 @@ function structuredCitations(value: unknown): GeoProbeCitation[] {
           citations.push({
             url,
             ...(title ? { title } : {}),
+            ...(siteName ? { siteName } : {}),
             provenance: "structured-provider",
           });
         }
@@ -256,7 +270,11 @@ function normalizedBrandNames(values: readonly string[]): string[] {
   );
 }
 
-function relevantExcerpt(answer: string, index: number, length: number): string {
+function relevantExcerpt(
+  answer: string,
+  index: number,
+  length: number,
+): string {
   const start = Math.max(0, index - 60);
   const end = Math.min(answer.length, index + length + 80);
   return answer.slice(start, end).replace(/\s+/g, " ").trim();
@@ -363,7 +381,9 @@ export function aggregateGeoBaselineUnits(
     (unit) => unit.analysis?.hasCitationEvidence === true,
   );
   const rate = (count: number) =>
-    succeeded.length === 0 ? null : Math.round((count / succeeded.length) * 100);
+    succeeded.length === 0
+      ? null
+      : Math.round((count / succeeded.length) * 100);
   return {
     total: units.length,
     completed: succeeded.length + failed.length,

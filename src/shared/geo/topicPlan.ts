@@ -1,11 +1,12 @@
 import {
+  GEO_CONTENT_TYPE_COVERAGE_MINIMUMS,
   GEO_PORT_CONTRACT,
   enforceGeoContentTypeCoverage,
   geoCosineSimilarity,
   type GeoContentType,
 } from "./portContract";
 
-export const TOPIC_PLAN_POLICY_VERSION = "xiaojing-content-prompt-v2";
+export const TOPIC_PLAN_POLICY_VERSION = "xiaojing-content-prompt-v3";
 export const TOPIC_PLAN_MAX_ITEMS = 50;
 export const TOPIC_PLAN_MAX_CONFIRMED_ITEMS = 20;
 export const TOPIC_PLAN_TITLE_BATCH_SIZE = 3;
@@ -336,7 +337,8 @@ export function buildTypeRecommendationPrompt(input: {
 }): string {
   return [
     "你是一位 GEO 内容策略专家。为每个语义主题推荐 1–5 个内容类型，并逐类型解释选择原因。",
-    "五类只能是 guide、showcase、ranking、news、news_light。整批应尽量覆盖全部五类。",
+    "五类只能是 guide、showcase、ranking、news、news_light。",
+    `整批覆盖下限（2026-08-26 裁定）：guide 与 ranking 各至少 ${GEO_CONTENT_TYPE_COVERAGE_MINIMUMS.guide} 篇，showcase、news、news_light 各至少 ${GEO_CONTENT_TYPE_COVERAGE_MINIMUMS.showcase} 篇，合计至少 ${Object.values(GEO_CONTENT_TYPE_COVERAGE_MINIMUMS).reduce((sum, minimum) => sum + minimum, 0)} 篇；推荐时优先按此下限安排，不满足时系统会确定性补齐。`,
     "guide=痛点科普/怎么选/怎么做；showcase=品牌详情/服务/卖点；ranking=对比/清单/哪家好；news=事件或行业变化深度报道；news_light=便民或服务升级轻新闻。",
     '只返回 JSON 数组：[{"topicId":"topic-1","recommendations":[{"type":"guide","reason":"为什么适合该主题"}]}]',
     `品牌：${input.brandName}`,

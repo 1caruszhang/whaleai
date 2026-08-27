@@ -10,7 +10,9 @@ import {
   buildDistributionCandidates,
   distributionPlanBlockingIssues,
   normalizeDistributionResource,
+  selectPassiveSources,
   validateDistributionPlanStartInput,
+  type DistributionActiveRecallSource,
   type DistributionPlanEditInput,
   type DistributionPlanProjection,
   type DistributionPlanStartInput,
@@ -74,6 +76,9 @@ export interface DistributionPlanPersistencePort {
     assignments: DistributionPlanProjection["assignments"];
     discoverySummary: DistributionPlanProjection["discoverySummary"];
     blockingIssues: string[];
+    /** 召回输入快照（右侧面板四路召回展示）：主动路原始渠道 + 偏好生效名单。 */
+    activeRecallSources: DistributionActiveRecallSource[];
+    preferenceChannelNames: string[];
   }): Promise<DistributionPlanProjection>;
   edit(input: {
     planId: string;
@@ -239,14 +244,6 @@ function unavailableSnapshot(): DistributionProviderSnapshot {
   };
 }
 
-function hostOf(url: string): string | null {
-  try {
-    return new URL(url).hostname;
-  } catch {
-    return null;
-  }
-}
-
 export class DistributionPlanningService {
   private readonly resourceCache: Partial<
     Record<
@@ -359,25 +356,9 @@ export class DistributionPlanningService {
     await Promise.all(
       Array.from({ length: Math.min(2, questions.length) }, worker),
     );
-    const sources: DistributionQuestionSource[] = [];
-    const seen = new Set<string>();
-    for (const outcome of collected) {
-      for (const [index, citation] of outcome.citations.entries()) {
-        const url = citation.url.trim();
-        if (!/^https?:\/\//i.test(url)) continue;
-        if (!seen.add(`${outcome.question.id}:${url}`)) continue;
-        sources.push({
-          id: `probe:${outcome.question.id}:${index + 1}`,
-          questionId: outcome.question.id,
-          question: outcome.question.question,
-          title: citation.title?.trim() || hostOf(url) || "已验证来源",
-          url,
-          articleIds: outcome.question.articleIds,
-        });
-        if (sources.length >= 100) return { sources, outcomes };
-      }
-    }
-    return { sources, outcomes };
+    // 被动来源选样（契约 passiveRecall）：每问 10 条、跨问渠道频次降序、
+    // 总量前 50——所有问题都能进入证据，多问交集渠道排前。
+    return { sources: selectPassiveSources(collected), outcomes };
   }
 
   /**
@@ -422,6 +403,7 @@ export class DistributionPlanningService {
       return channels.map((channel) => ({
         title: channel.name,
         url: channel.url,
+        reason: channel.reason,
         articleIds: clampTopicNumbers(
           channel.topicNumbers,
           deduped.length,
@@ -518,6 +500,18 @@ export class DistributionPlanningService {
       const questionSources = probeOutcome.sources;
       const preferenceChannels: PreferenceChannelEntry[] =
         resolvePreferenceChannels(preferenceSettings);
+      // 召回输入快照（右侧面板四路召回展示）：主动路原始渠道与偏好生效名单
+      // 随发现结果一起落进投影，供用户对照「召回了什么 vs 匹配了什么」。
+      const activeRecallSources: DistributionActiveRecallSource[] =
+        activeSources.map((source) => ({
+          title: source.title,
+          url: source.url ?? null,
+          articleIds: source.articleIds ?? [],
+          reason: source.reason ?? null,
+        }));
+      const preferenceChannelNames = preferenceChannels.map(
+        (entry) => entry.name,
+      );
       const preparation = await this.persistence.prepare({
         ...source,
         questionSources,
@@ -560,6 +554,8 @@ export class DistributionPlanningService {
             "channel-candidate-unavailable",
             "article-channel-unassigned",
           ],
+          activeRecallSources,
+          preferenceChannelNames,
         });
         await settleDiscovery(probeOutcome.outcomes, false);
         return this.persistence.get(base.id);
@@ -630,6 +626,8 @@ export class DistributionPlanningService {
         assignments,
         discoverySummary: discovery.summary,
         blockingIssues,
+        activeRecallSources,
+        preferenceChannelNames,
       });
       await settleDiscovery(probeOutcome.outcomes, true);
       // Exact identity read: a concurrent Session may have created a newer plan.

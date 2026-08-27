@@ -452,8 +452,9 @@ describe("GeoOperationEventCard", () => {
     expect(
       within(strip as HTMLElement).getByText("计划").className,
     ).toContain("text-[var(--accent)]");
+    // 首个工作步骤 running：状态行报真实执行，闸门不再被误标为「当前」。
     expect(
-      screen.getByText(/进行中 · 1\/8 道闸门 · 当前：确认品牌知识变更/),
+      screen.getByText(/进行中 · 正在收集品牌材料/),
     ).toBeInTheDocument();
     // 段 = 确认门：8 段两字短名齐全，只按闸门显示。
     for (const label of [

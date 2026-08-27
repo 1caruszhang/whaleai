@@ -358,7 +358,9 @@ describe("TopicPlanService", () => {
     expect(new Set(plan.items.map((item) => item.contentType))).toEqual(
       new Set(["guide", "showcase", "ranking", "news", "news_light"]),
     );
-    expect(plan.items).toHaveLength(6);
+    // 12 篇下限（guide/ranking 各 3、其余各 2）在两主题下受每主题最多五类
+    // 的结构上限约束，确定性补齐到 2×5=10 篇。
+    expect(plan.items).toHaveLength(10);
     expect(plan.items.every((item) => item.typeSelectionReason.length > 0)).toBe(true);
     expect(
       plan.items.every(

@@ -104,3 +104,15 @@ export function approveArticle(
     { ...identity, ...input },
   ).then(requireArticle);
 }
+
+/** 单篇重试（同步执行到新版本落盘）：generation_failed 的文章逐篇恢复，不重跑整批。 */
+export function retryArticle(
+  apiPost: ArticleApiPost,
+  identity: { workspaceId: string; sessionId: string },
+  input: { operationId: string; articleId: string; expectedRevision: number },
+): Promise<ArticleProjection> {
+  return apiPost<ArticleResponse>(
+    "/api/xiaojing/articles/retry",
+    { ...identity, ...input },
+  ).then(requireArticle);
+}

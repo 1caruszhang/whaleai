@@ -1,6 +1,8 @@
 import { GEO_PORT_CONTRACT, type GeoContentType } from "./portContract";
 import {
+  channelNameCore,
   fuzzyMatchScore,
+  isMultiTenantPlatformUrl,
   preferenceEntryMatches,
   registeredDomain,
   type PreferenceChannelEntry,
@@ -24,6 +26,12 @@ export const DISTRIBUTION_RESOURCE_PAGE_SIZE = 200;
 export const DISTRIBUTION_RESOURCE_MAX_PAGES = 1_000;
 export const DISTRIBUTION_MAX_CANDIDATES =
   GEO_PORT_CONTRACT.channelRecall.recommendation.max;
+/** 被动路每问引用上限（豆包逐问探测后、进入计划前）。 */
+export const PASSIVE_PER_QUESTION_CITATION_CAP =
+  GEO_PORT_CONTRACT.channelRecall.passiveRecall.perQuestionCap;
+/** 被动路进入计划的来源总数上限（按跨问渠道频次排序后截取）。 */
+export const PASSIVE_SOURCE_TOTAL_CAP =
+  GEO_PORT_CONTRACT.channelRecall.passiveRecall.totalCap;
 export type DistributionChannelKind = "media" | "we-media";
 export type DistributionRecallPath =
   keyof typeof GEO_PORT_CONTRACT.channelRecall.paths;
@@ -40,6 +48,17 @@ export interface DistributionQuestionSource {
   title: string;
   url: string;
   articleIds: string[];
+  /** 引用的站点名（豆包 site_name）；渠道显示名优先用它而非裸域名。 */
+  siteName?: string;
+}
+
+/** 主动路全局召回的原始渠道快照（LLM 联网推荐、匹配资源池之前；只读展示用）。 */
+export interface DistributionActiveRecallSource {
+  title: string;
+  url: string | null;
+  articleIds: string[];
+  /** LLM 推荐理由（原始回答关键信息，≤200 字；展示用）。 */
+  reason?: string | null;
 }
 
 export interface DistributionPlanStartInput {
@@ -171,6 +190,10 @@ export interface DistributionPlanProjection {
   industry: string;
   targetAudience: string;
   questionSources: DistributionQuestionSource[];
+  /** 主动路全局召回的原始渠道（匹配资源池之前）；旧计划可能缺省。 */
+  activeRecallSources?: DistributionActiveRecallSource[];
+  /** 偏好路生效名单快照（内置名单+用户 overlay 合成时的名字）；旧计划可能缺省。 */
+  preferenceChannelNames?: string[];
   preferredResourceIds: number[];
   mappingMode: DistributionPlanStartInput["mappingMode"];
   ratio: DistributionPlanStartInput["ratio"];
@@ -443,10 +466,13 @@ function audienceOverlap(
 function nameMatches(sourceTitle: string, resourceName: string): boolean {
   const source = sourceTitle.trim().toLocaleLowerCase("zh-CN");
   const resource = resourceName.trim().toLocaleLowerCase("zh-CN");
+  if (source.length < 3 || resource.length < 3) return false;
+  // 标题包含全名或核心名（引用标题「xxx_济南时报」应命中「济南时报（官方头条号）」）。
+  const core = channelNameCore(resource);
+  const names =
+    core.length >= 3 && core !== resource ? [resource, core] : [resource];
   return (
-    source.length >= 3 &&
-    resource.length >= 3 &&
-    (source.includes(resource) || resource.includes(source))
+    names.some((name) => source.includes(name)) || resource.includes(source)
   );
 }
 
@@ -605,6 +631,98 @@ export function normalizeDistributionResource(
   };
 }
 
+function hostOf(url: string): string | null {
+  try {
+    return new URL(url).hostname;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 被动来源选样（js_ai 对齐 + 2026-08-27 用户裁决）：
+ * 1. 每问最多 `perQuestionCap`（10）条引用，按问题内原序——所有已确认问题
+ *    都能进入被动证据，不再被先到者占满总量；
+ * 2. 渠道 = 引用 URL 的注册域名；按「渠道出现在多少个不同问题」降序、
+ *    同渠道引用数降序、原始出现序升续排——跨问重复出现的渠道（多问交集）
+ *    排前；
+ * 3. 取前 `totalCap`（50）条作为 questionSources。
+ */
+export function selectPassiveSources(
+  collected: ReadonlyArray<{
+    question: {
+      id: string;
+      question: string;
+      articleIds: string[];
+    };
+    citations: ReadonlyArray<{
+      url: string;
+      title?: string;
+      siteName?: string;
+    }>;
+  }>,
+): DistributionQuestionSource[] {
+  const seen = new Set<string>();
+  type Row = {
+    questionId: string;
+    question: string;
+    articleIds: string[];
+    title: string;
+    siteName: string | undefined;
+    url: string;
+    channel: string;
+    order: number;
+  };
+  const rows: Row[] = [];
+  for (const outcome of collected) {
+    let taken = 0;
+    for (const citation of outcome.citations) {
+      if (taken >= PASSIVE_PER_QUESTION_CITATION_CAP) break;
+      const url = citation.url.trim();
+      if (!/^https?:\/\//i.test(url)) continue;
+      if (!seen.add(`${outcome.question.id}:${url}`)) continue;
+      const host = hostOf(url) ?? url;
+      const siteName = citation.siteName?.trim() || undefined;
+      rows.push({
+        questionId: outcome.question.id,
+        question: outcome.question.question,
+        articleIds: outcome.question.articleIds,
+        title: citation.title?.trim() || siteName || host,
+        siteName,
+        url,
+        channel: registeredDomain(url) ?? host,
+        order: rows.length,
+      });
+      taken += 1;
+    }
+  }
+  const channelQuestions = new Map<string, Set<string>>();
+  const channelHits = new Map<string, number>();
+  for (const row of rows) {
+    const questions = channelQuestions.get(row.channel) ?? new Set<string>();
+    questions.add(row.questionId);
+    channelQuestions.set(row.channel, questions);
+    channelHits.set(row.channel, (channelHits.get(row.channel) ?? 0) + 1);
+  }
+  const ranked = [...rows].sort(
+    (left, right) =>
+      (channelQuestions.get(right.channel)?.size ?? 0) -
+        (channelQuestions.get(left.channel)?.size ?? 0) ||
+      (channelHits.get(right.channel) ?? 0) -
+        (channelHits.get(left.channel) ?? 0) ||
+      left.order - right.order,
+  );
+  return ranked.slice(0, PASSIVE_SOURCE_TOTAL_CAP).map((row, index) => ({
+    id: `probe:${row.questionId}:${index + 1}`,
+    questionId: row.questionId,
+    question: row.question,
+    title: row.title,
+    url: row.url,
+    articleIds: row.articleIds,
+    ...(row.siteName ? { siteName: row.siteName } : {}),
+  }));
+}
+
 function pathEvidence(
   path: DistributionRecallPath,
   label: string,
@@ -677,10 +795,14 @@ export function buildDistributionCandidates(input: {
       const resourceDomain = registeredDomain(resource.entranceLink);
       for (const source of input.questionSources) {
         const sourceDomain = registeredDomain(source.url);
-        if (
-          (resourceDomain && sourceDomain === resourceDomain) ||
-          nameMatches(source.title, resource.name)
-        ) {
+        // 多租户平台（头条/抖音/公众号等）上文章引用与账号共享注册域名，
+        // 域名相等不构成被动对齐证据，只保留名称对齐。
+        const domainAligned =
+          resourceDomain !== null &&
+          sourceDomain === resourceDomain &&
+          !isMultiTenantPlatformUrl(source.url) &&
+          !isMultiTenantPlatformUrl(resource.entranceLink);
+        if (domainAligned || nameMatches(source.title, resource.name)) {
           evidence.push(
             pathEvidence(
               "passive",
@@ -697,12 +819,23 @@ export function buildDistributionCandidates(input: {
           ? mediaCode !== null && resource.channelType === mediaCode
           : weMediaCode !== null && resource.industryCategory === weMediaCode;
       const audienceMatch = audienceOverlap(input.targetAudience, resource);
-      // 主动路（ADR-0031 全局召回）：LLM 联网推荐的渠道，域名优先、名称模糊回落。
+      // 主动路（ADR-0031 全局召回）：LLM 联网推荐的渠道，域名优先、名称模糊回落；
+      // 多租户平台域名（toutiao.com 等）不构成渠道身份，同样只认名称对齐，
+      // 且平台品牌家族（今日头条等）不再兜底——品牌分支按核心名判定。
       for (const source of input.activeSources) {
         const sourceDomain = registeredDomain(source.url);
+        const multiTenantSource = isMultiTenantPlatformUrl(source.url);
         const domainHit =
-          resourceDomain !== null && sourceDomain === resourceDomain;
-        if (domainHit || fuzzyMatchScore(source, resource.name) >= 0.4) {
+          resourceDomain !== null &&
+          sourceDomain === resourceDomain &&
+          !multiTenantSource &&
+          !isMultiTenantPlatformUrl(resource.entranceLink);
+        if (
+          domainHit ||
+          fuzzyMatchScore(source, resource.name, {
+            multiTenantPlatform: multiTenantSource,
+          }) >= 0.4
+        ) {
           evidence.push(
             pathEvidence(
               "active",
@@ -774,6 +907,11 @@ export function buildDistributionCandidates(input: {
             const merged = `${existing.label}；${item.label}`;
             existing.label =
               merged.length > 200 ? `${merged.slice(0, 200)}…` : merged;
+          }
+          // reference 逗号合并（Rust 确认门按前缀+逗号解析）：面板四路召回
+          // 展示靠它把每个召回来源关联回命中的渠道；fallback 是单条规则路，
+          // reference 必须保持 `industry:`/`audience:` 原样，不合并。
+          if (item.path !== "fallback") {
             existing.reference = `${existing.reference},${item.reference}`;
           }
         }

@@ -117,7 +117,7 @@ describe("GeoGateProgressStrip", () => {
       screen
         .getByText("计划")
         .closest("[data-geo-gate-progress='op-1']")
-        ?.querySelectorAll(":scope > div > div:first-child") ?? [],
+        ?.querySelectorAll("[data-geo-gate-segment] > div:first-child") ?? [],
     );
     expect(bars).toHaveLength(3);
     expect(bars[0]?.className).toContain("bg-[var(--accent)]");
@@ -180,7 +180,7 @@ describe("GeoGateProgressStrip", () => {
     );
 
     const bars = Array.from(
-      document.querySelectorAll("[data-geo-gate-progress='op-1'] > div > div:first-child"),
+      document.querySelectorAll("[data-geo-gate-segment] > div:first-child"),
     );
     expect(bars).toHaveLength(2);
     for (const bar of bars) {
@@ -191,5 +191,76 @@ describe("GeoGateProgressStrip", () => {
       gateStep("acknowledge-plan", "succeeded", "plan-ack"),
       gateStep("confirm-knowledge", "skipped", "knowledge-change"),
     ]))).toBeNull();
+  });
+
+  it("renders a determinate progress line for a running work step", () => {
+    const running = { ...workStep("generate-articles"), status: "running" as const, title: "生成文章", progress: { current: 3, total: 5 } };
+    const { container, rerender } = render(
+      <GeoGateProgressStrip
+        operationId="op-1"
+        steps={[
+          gateStep("acknowledge-plan", "succeeded", "plan-ack"),
+          running,
+          gateStep("confirm-articles", "pending", "article-approval"),
+        ]}
+      />,
+    );
+
+    // 条下出现「生成文章 3/5」进度行，填充按 60% 宽度表达。
+    const line = container.querySelector("[data-geo-step-progress='generate-articles']");
+    expect(line).not.toBeNull();
+    expect(screen.getByText("生成文章 3/5")).toBeInTheDocument();
+    expect(
+      (line as HTMLElement).querySelector("[data-geo-step-progress-fill]")?.getAttribute("style"),
+    ).toContain("width: 60%");
+
+    // 进度推进后宽度随之更新（同一 DOM 节点 transition）。
+    rerender(
+      <GeoGateProgressStrip
+        operationId="op-1"
+        steps={[
+          gateStep("acknowledge-plan", "succeeded", "plan-ack"),
+          { ...running, progress: { current: 5, total: 5 } },
+          gateStep("confirm-articles", "pending", "article-approval"),
+        ]}
+      />,
+    );
+    expect(
+      container
+        .querySelector("[data-geo-step-progress='generate-articles'] [data-geo-step-progress-fill]")
+        ?.getAttribute("style"),
+    ).toContain("width: 100%");
+  });
+
+  it("renders a pulsing progress line for a running step without numbers", () => {
+    render(
+      <GeoGateProgressStrip
+        operationId="op-1"
+        steps={[
+          gateStep("acknowledge-plan", "succeeded", "plan-ack"),
+          { ...workStep("generate-question-pool"), status: "running" as const, title: "生成问题机会" },
+          gateStep("confirm-question-selection", "pending", "question-selection"),
+        ]}
+      />,
+    );
+    const fill = document.querySelector(
+      "[data-geo-step-progress='generate-question-pool'] [data-geo-step-progress-fill]",
+    );
+    expect(fill?.className).toContain("animate-pulse");
+    expect(screen.getByText("生成问题机会")).toBeInTheDocument();
+  });
+
+  it("omits the progress line when no work step is running", () => {
+    render(
+      <GeoGateProgressStrip
+        operationId="op-1"
+        steps={[
+          gateStep("acknowledge-plan", "succeeded", "plan-ack"),
+          { ...workStep("generate-articles"), status: "ready" as const },
+          gateStep("confirm-articles", "pending", "article-approval"),
+        ]}
+      />,
+    );
+    expect(document.querySelector("[data-geo-step-progress]")).toBeNull();
   });
 });

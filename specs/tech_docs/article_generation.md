@@ -8,7 +8,7 @@
 
 - Node `ArticleGenerationService` 拥有一次 operation 的业务编排、五类 prompt、并发 5、Provider 调用和生成后审校。它不拥有正文文件、revision 或批准状态。
 - Rust `BrandWorkspaceStore` 拥有 operation spec、逐篇状态机、attempt、revision CAS、正文文件、hash、review audit 与批准 artifact。所有 mutation 携带 exact `operationId / articleId / expectedRevision`；claim token 防止迟到 Provider 结果覆盖当前版本。
-- `latest` 只用于品牌级 UI 恢复，绝不能作为新建 operation 的完成回读。Node 创建后必须通过 Rust `get_article_operation(operationId)` 读取自身；另一个 Session 即使在生成期间创建了更新 operation，也不能改变当前请求的返回身份。
+- `latest` 只用于恢复场景（品牌级 UI 恢复与聊天批准卡恢复），绝不能作为新建 operation 的完成回读。Node 创建后必须通过 Rust `get_article_operation(operationId)` 读取自身；另一个 Session 即使在生成期间创建了更新 operation，也不能改变当前请求的返回身份。聊天恢复入口是只读工具 `get_article_operation`：用户要求重新呈现批准卡或查询生成状态时，按 `operationId` 读取（缺省回落 `latest`，只做展示恢复），返回与 `generate_articles` 相同的 `article-operation` 信封重渲染批准卡；查无此操作返回 `article-operation-not-found`。该工具不生成、不编辑、不批准，绝不能靠重新 `generate_articles` 找回卡片。
 - Renderer 只沿当前 Tab 的 Session 控制面创建、读取和操作文章。projection 不含正文；正文只在用户打开单篇时按 exact article/version 读取。
 - `createdBySessionId` 只记录 provenance。同品牌已提交的其他 Session 可以读取和继续该 operation；Session transcript 不是 operation spec 或正文 authority。
 

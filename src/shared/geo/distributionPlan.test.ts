@@ -6,6 +6,7 @@ import {
   assignDistributionChannels,
   buildDistributionCandidates,
   normalizeDistributionResource,
+  selectPassiveSources,
   validateDistributionPlanStartInput,
   type DistributionArticleSnapshot,
   type DistributionPlanProjection,
@@ -183,6 +184,112 @@ describe("Ticket 12 distribution plan contract", () => {
     expect(active.evidence[0].articleIds).toEqual(["article-news"]);
   });
 
+  it("does not align shared multi-tenant platform domains as channel evidence", () => {
+    const result = buildDistributionCandidates({
+      industry: "餐饮",
+      targetAudience: "餐饮加盟创业者",
+      questionSources: [
+        {
+          id: "probe:q-1:1",
+          questionId: "q-1",
+          question: "餐饮加盟有哪些坑？",
+          title: "闭店率直逼80%!昔日餐饮顶流跌落神坛_有趣的橙子sGq",
+          url: "http://m.toutiao.com/group/7660280796321759780/",
+          articleIds: ["article-news"],
+        },
+        {
+          id: "probe:q-2:1",
+          questionId: "q-2",
+          question: "干蒸菜加盟靠谱吗？",
+          title: "红餐网盘点干蒸菜市场",
+          url: "https://www.redchinaweb.cn/article/1",
+          articleIds: ["article-showcase"],
+        },
+      ],
+      activeSources: [
+        {
+          title: "今日头条美食垂类频道",
+          url: "https://www.toutiao.com/channel/food",
+          articleIds: ["article-news"],
+        },
+        {
+          title: "南郡新闻",
+          url: "https://www.toutiao.com/article/7628893842158223878/",
+          articleIds: ["article-news"],
+        },
+      ],
+      preferenceChannels: [],
+      perArticleMaxPoints: 3_200,
+      articles,
+      resources: [
+        // 同在 toutiao.com 的无关头条号：被动（引用文章在 m.toutiao.com）与
+        // 主动（美食垂类频道）的域名对齐都必须失效，且无名称证据 → 不进候选。
+        resource("media", {
+          id: 11,
+          name: "济南时报（官方头条号）",
+          status: 2,
+          price: "60",
+          entrance_link: "https://www.toutiao.com/article/7647701690547782170/",
+        }),
+        // 引用标题含核心名「有趣的橙子sGq」的头条号：被动名称对齐仍命中。
+        resource("media", {
+          id: 12,
+          name: "有趣的橙子sGq（头条号）",
+          status: 2,
+          price: "60",
+          entrance_link: "https://www.toutiao.com/c/user/token/abc/",
+        }),
+        // 主动召回同名账号：名称子串对齐仍命中。
+        resource("media", {
+          id: 13,
+          name: "南郡新闻（官方头条号）",
+          status: 2,
+          price: "60",
+          entrance_link: "https://www.toutiao.com/article/7628893842158223878/",
+        }),
+        // 自有域名媒体站：被动域名对齐不受多租户门影响。
+        resource("media", {
+          id: 14,
+          name: "红餐网",
+          status: 2,
+          price: "120",
+          entrance_link: "https://www.redchinaweb.cn",
+        }),
+        // 名称带平台品牌限定后缀的头条号：多租户来源的平台品牌兜底分
+        // （0.5）不再作为主动路证据——同名不同号不误挂。
+        resource("media", {
+          id: 15,
+          name: "白城融媒（今日头条）",
+          status: 2,
+          price: "60",
+          entrance_link: "https://www.toutiao.com/c/user/token/bc/",
+        }),
+        // 渠道字面真实重叠（美食频道家族）：主动路名称证据仍命中。
+        resource("media", {
+          id: 16,
+          name: "今日头条美食（GEO）",
+          status: 2,
+          price: "60",
+          entrance_link: "https://www.toutiao.com/c/user/token/ms/",
+        }),
+      ],
+    });
+    const byId = new Map(result.candidates.map((c) => [c.resourceId, c]));
+    expect(byId.get(11)).toBeUndefined();
+    const orange = byId.get(12)!;
+    expect(orange.pathHits).toContain("passive");
+    expect(orange.pathHits).not.toContain("active");
+    const nanjun = byId.get(13)!;
+    expect(nanjun.pathHits).toContain("active");
+    expect(nanjun.pathHits).not.toContain("passive");
+    const redcan = byId.get(14)!;
+    expect(redcan.pathHits).toContain("passive");
+    // 品牌限定后缀（（今日头条））不算渠道身份：白城融媒无任何名称证据。
+    expect(byId.get(15)).toBeUndefined();
+    const toutiaoFood = byId.get(16)!;
+    expect(toutiaoFood.pathHits).toContain("active");
+  });
+
   it("filters unavailable and channels over the user per-article point limit before alignment", () => {
     const result = candidateResult([
       resource("media", {
@@ -257,7 +364,9 @@ describe("Ticket 12 distribution plan contract", () => {
         remark: "AI",
       }),
     ]);
-    expect(result.candidates.map((candidate) => candidate.resourceId)).toEqual([2]);
+    expect(result.candidates.map((candidate) => candidate.resourceId)).toEqual([
+      2,
+    ]);
     expect(result.candidates[0].publishedRate).toBe(0);
     expect(result.summary.filteredUnknownPrice).toBe(1);
   });
@@ -470,5 +579,104 @@ describe("Ticket 12 distribution plan contract", () => {
       publishStartAt: "2026-08-20T09:00:00+08:00",
     });
     expect(edited.blockingIssues).toEqual(["distribution-budget-exceeded"]);
+  });
+});
+
+describe("passive source selection (per-question quota + cross-question ranking)", () => {
+  it("caps citations per question at 10 so later questions still get slots", () => {
+    const citations = Array.from({ length: 15 }, (_, index) => ({
+      url: `https://q-a.example.com/post/${index}`,
+      title: `引用 ${index}`,
+    }));
+    const sources = selectPassiveSources([
+      {
+        question: {
+          id: "q-1",
+          question: "问题一",
+          articleIds: ["article-news"],
+        },
+        citations,
+      },
+      {
+        question: { id: "q-2", question: "问题二", articleIds: [] },
+        citations: [
+          { url: "https://q-b.example.com/only", title: "问题二引用" },
+        ],
+      },
+    ]);
+    expect(
+      sources.filter((source) => source.questionId === "q-1"),
+    ).toHaveLength(10);
+    expect(
+      sources.filter((source) => source.questionId === "q-2"),
+    ).toHaveLength(1);
+  });
+
+  it("ranks channels cited by more distinct questions first", () => {
+    const sources = selectPassiveSources([
+      {
+        question: { id: "q-1", question: "问题一", articleIds: [] },
+        citations: [
+          { url: "https://solo-site.com/a", title: "单问渠道" },
+          { url: "https://shared-site.com/a", title: "跨问渠道" },
+        ],
+      },
+      {
+        question: { id: "q-2", question: "问题二", articleIds: [] },
+        citations: [{ url: "https://shared-site.com/b", title: "跨问渠道2" }],
+      },
+    ]);
+    expect(sources.map((source) => source.title)).toEqual([
+      "跨问渠道",
+      "跨问渠道2",
+      "单问渠道",
+    ]);
+  });
+
+  it("keeps site names and uses them as the title fallback", () => {
+    const sources = selectPassiveSources([
+      {
+        question: { id: "q-1", question: "问题一", articleIds: [] },
+        citations: [
+          {
+            url: "https://hezegd.com/a",
+            title: "干蒸菜加盟避坑指南",
+            siteName: "和泽加盟网",
+          },
+          // 只有 site_name：作为标题兜底，避免显示裸域名。
+          { url: "https://xixiage.cn/", siteName: "夕霞阁官网" },
+        ],
+      },
+    ]);
+    expect(sources[0]).toMatchObject({
+      title: "干蒸菜加盟避坑指南",
+      siteName: "和泽加盟网",
+    });
+    expect(sources[1]).toMatchObject({
+      title: "夕霞阁官网",
+      siteName: "夕霞阁官网",
+    });
+  });
+
+  it("keeps only the top 50 sources and dedupes question+url pairs", () => {
+    const collected = Array.from({ length: 7 }, (_, questionIndex) => ({
+      question: {
+        id: `q-${questionIndex + 1}`,
+        question: `问题 ${questionIndex + 1}`,
+        articleIds: [],
+      },
+      citations: Array.from({ length: 10 }, (_, citeIndex) => ({
+        url: `https://site-${questionIndex}.example.com/p/${citeIndex}`,
+        title: `引用 ${questionIndex}-${citeIndex}`,
+      })),
+    }));
+    collected.push({
+      question: { id: "q-1", question: "问题 1", articleIds: [] },
+      citations: [{ url: "https://site-0.example.com/p/0", title: "重复引用" }],
+    });
+    const sources = selectPassiveSources(collected);
+    expect(sources).toHaveLength(50);
+    expect(new Set(sources.map((source) => source.id)).size).toBe(50);
+    expect(sources.some((source) => source.title === "重复引用")).toBe(false);
   });
 });

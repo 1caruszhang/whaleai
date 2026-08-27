@@ -153,6 +153,9 @@ describe('session-files reminder copy stays in sync with the system prompt', () 
     expect(prompt).toContain("businessFocus");
     expect(prompt).toContain("plan_topics");
     expect(prompt).toContain("generate_articles");
+    // 批准卡重新呈现走只读 get_article_operation，不允许靠重新生成找回卡片。
+    expect(prompt).toContain("get_article_operation");
+    expect(prompt).toContain("绝不能靠重新生成整批来找回卡片");
     expect(prompt).toContain("已确认竞品不足 5 家");
     expect(prompt).toContain("confirm_ranking_competitors");
     expect(prompt).toContain("工具只传这些 names");

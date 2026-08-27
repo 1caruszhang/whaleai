@@ -56,6 +56,12 @@ artifacts/windows-x64/
 .windows-x64-cache/
 src-tauri/resources/windows-x64-staging.json
 
+# macOS arm64 build outputs（本地生成物不进版本库，见
+# specs/guides/macos_arm64_internal_beta.md §固定构建输入）
+artifacts/macos-arm64/
+.macos-arm64-cache/
+src-tauri/resources/macos-arm64-staging.json
+
 # Test coverage
 coverage/
 
