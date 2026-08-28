@@ -96,6 +96,9 @@ function plan(id: string): DistributionPlanProjection {
       filteredOverPerArticleLimit: 0,
       alignedResources: 0,
       recommendedResources: 0,
+      alignedByPath: { passive: 0, active: 0, fallback: 0, preference: 0 },
+      citationDomains: 0,
+      citationDomainPoolHits: 0,
     },
     blockingIssues: [],
     createdAt: "2026-08-15T00:00:00.000Z",
@@ -168,6 +171,9 @@ function persistence() {
         blockingIssues: input.blockingIssues,
         activeRecallSources: input.activeRecallSources,
         preferenceChannelNames: input.preferenceChannelNames,
+        passiveAlignedChannels: input.passiveAlignedChannels,
+        citationSiteNames: input.citationSiteNames,
+        preferenceMatchedChannels: input.preferenceMatchedChannels,
       };
       plans.set(input.planId, next);
       return structuredClone(next);
@@ -299,11 +305,123 @@ describe("DistributionPlanningService", () => {
       name: "汽车日报",
       estimatedPriceCny: 88,
       publishedRate: 90,
-      recommendationWeight: 0.7,
+      recommendationWeight: 0.9,
     });
     expect(result.candidates[0].resourceSnapshot.name).toBe("汽车日报");
     expect(port.get).toHaveBeenCalledWith("plan-1");
     expect(port.latest).not.toHaveBeenCalled();
+  });
+
+  it("injects L3 page-author resolution into question sources and degrades silently on failure", async () => {
+    const { port } = persistence();
+    // 被动探测返回多租户（抖音）引用且标题无账号尾缀 → 进入 L3 抓取。
+    const search = keywordSearch();
+    search.probeQuestion = vi.fn(async () => ({
+      rawEvidence: {
+        output: [
+          {
+            content: [
+              {
+                type: "output_text",
+                text: "回答正文",
+                annotations: [
+                  {
+                    type: "url_citation",
+                    url_citation: {
+                      url: "https://www.iesdouyin.com/share/video/7675535591",
+                      title: "团餐合作模式避坑干货",
+                    },
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      },
+      snapshot: {} as never,
+    }));
+    const pageFetch = vi.fn(
+      async () =>
+        '<html><script type="application/ld+json">{"@type":"VideoObject","author":{"@type":"Person","name":"饭饭餐饮"}}</script></html>',
+    );
+    const service = new DistributionPlanningService(
+      { workspaceId: "workspace", sessionId: "session" },
+      port,
+      provider(),
+      search,
+      () => new Date("2026-08-15T00:00:00.000Z"),
+      undefined,
+      pageFetch,
+    );
+    await service.start({
+      workspaceId: "workspace",
+      sessionId: "session",
+      source,
+    });
+    expect(pageFetch).toHaveBeenCalledTimes(1);
+    expect(port.prepare).toHaveBeenCalledWith(
+      expect.objectContaining({
+        questionSources: [
+          expect.objectContaining({
+            url: "https://www.iesdouyin.com/share/video/7675535591",
+            resolvedAccountName: "饭饭餐饮",
+          }),
+        ],
+      }),
+    );
+
+    // 抓取失败（null）：静默降级，来源不带 resolvedAccountName。
+    const failingFetch = vi.fn(async () => null);
+    const { port: port2 } = persistence();
+    const service2 = new DistributionPlanningService(
+      { workspaceId: "workspace", sessionId: "session" },
+      port2,
+      provider(),
+      search,
+      () => new Date("2026-08-15T00:00:00.000Z"),
+      undefined,
+      failingFetch,
+    );
+    await service2.start({
+      workspaceId: "workspace",
+      sessionId: "session",
+      source,
+    });
+    const stored = vi.mocked(port2.prepare).mock.calls[0]![0];
+    expect(stored.questionSources[0]?.url).toBe(
+      "https://www.iesdouyin.com/share/video/7675535591",
+    );
+    expect(stored.questionSources[0]?.resolvedAccountName).toBeUndefined();
+  });
+
+  it("passes preferenceMatchedChannels through finishDiscovery (Q12, 2026-08-28)", async () => {
+    const { port } = persistence();
+    const service = new DistributionPlanningService(
+      { workspaceId: "workspace", sessionId: "session" },
+      port,
+      provider(),
+      keywordSearch(),
+      () => new Date("2026-08-15T00:00:00.000Z"),
+    );
+    await service.start({
+      workspaceId: "workspace",
+      sessionId: "session",
+      source,
+    });
+    // 偏好命中清单在配额前逐名单项计算并随投影落库（内置十项）；
+    // 每项一行，未命中项 matched=false（名单录错/渠道下架型）如实透传。
+    expect(port.finishDiscovery).toHaveBeenCalledWith(
+      expect.objectContaining({
+        preferenceMatchedChannels: expect.any(Array),
+      }),
+    );
+    const call = vi.mocked(port.finishDiscovery).mock.calls[0]![0];
+    const rows = call.preferenceMatchedChannels ?? [];
+    expect(rows.length).toBeGreaterThan(0);
+    for (const row of rows) {
+      expect(row.entryName).toBeTruthy();
+      expect(typeof row.matched).toBe("boolean");
+    }
   });
 
   it("coalesces concurrent resource loads, caches for 30 minutes, and refetches after TTL", async () => {

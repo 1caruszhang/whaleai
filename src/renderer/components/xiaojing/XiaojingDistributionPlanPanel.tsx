@@ -40,6 +40,8 @@ export interface RecallSourceChip {
   url?: string | null;
   /** 被动路专属：引用的站点名（豆包 site_name）。 */
   siteName?: string | null;
+  /** 被动路专属：L3 页面作者解析注入的账号名（多租户引用）。 */
+  resolvedAccountName?: string | null;
   /** 主动路专属：LLM 推荐理由（原始回答关键信息）。 */
   reason?: string | null;
 }
@@ -49,11 +51,23 @@ export interface RecallPathView {
   path: DistributionRecallPath;
   label: string;
   sources: RecallSourceChip[];
+  /** 对齐渠道数（推荐截断之前；被动路来自 passiveAlignedChannels 投影）。 */
+  alignedCount: number;
+  /** 进入最终推荐集（30 配额内）的渠道数。 */
+  recommendedCount: number;
   matchedChannels: Array<{
     key: string;
     name: string;
     kindLabel: string;
     evidence: string;
+    /** 被动路专属：账户级证据标注（账号名 / L1 标识）。 */
+    accounts?: string[];
+    /** 被动路专属：对齐引用/覆盖问题计数（`N 条引用 · 覆盖 M 个问题`）。 */
+    stats?: string;
+    /** 对齐但未进推荐时 false（中性样式，不是失败）。 */
+    recommended?: boolean;
+    /** 变体家族折叠后的同胞数（>1 时 chip 显示 ×N；2026-08-28）。 */
+    variantCount?: number;
   }>;
 }
 
@@ -91,6 +105,7 @@ export interface PassiveChannelGroup {
 
 export function groupPassiveSourcesByChannel(
   sources: ReadonlyArray<RecallSourceChip>,
+  siteNames?: Record<string, string>,
 ): PassiveChannelGroup[] {
   const groups = new Map<string, PassiveChannelGroup>();
   for (const source of sources) {
@@ -113,12 +128,20 @@ export function groupPassiveSourcesByChannel(
     group.matched = group.matched || source.matched;
   }
   for (const group of groups.values()) {
-    // 组名优先级：豆包 site_name（组内一致时）> 品牌表 > 注册域名；
-    // 组内账号后缀一致时附带（如「今日头条 · 深氪新消费」）。
-    const siteNames = [
+    // 组名优先级（契约 citationDisplayNameChain）：豆包 site_name（组内一致时）
+    // > 池反查/标题尾缀映射（citationSiteNames）> 品牌表 > 注册域名；
+    // 组内账号（标题尾缀或 L3 解析）一致时附带（如「今日头条 · 深氪新消费」）。
+    const doubaoSiteNames = [
       ...new Set(
         group.citations
           .map((citation) => citation.siteName?.trim())
+          .filter((name): name is string => Boolean(name)),
+      ),
+    ];
+    const resolvedNames = [
+      ...new Set(
+        group.citations
+          .map((citation) => citation.resolvedAccountName?.trim())
           .filter((name): name is string => Boolean(name)),
       ),
     ];
@@ -130,11 +153,20 @@ export function groupPassiveSourcesByChannel(
           .filter((suffix): suffix is string => suffix !== null),
       ),
     ];
-    const account = suffixes.length === 1 ? suffixes[0] : undefined;
+    const mapped =
+      group.domain && siteNames?.[group.domain]
+        ? siteNames[group.domain]
+        : undefined;
+    const account =
+      suffixes.length === 1
+        ? suffixes[0]
+        : resolvedNames.length === 1
+          ? resolvedNames[0]
+          : undefined;
     const base =
-      siteNames.length === 1
-        ? (siteNames[0] as string)
-        : (brand ?? group.domain ?? "未知渠道");
+      doubaoSiteNames.length === 1
+        ? (doubaoSiteNames[0] as string)
+        : (mapped ?? brand ?? group.domain ?? "未知渠道");
     group.label = account ? `${base} · ${account}` : base;
   }
   return [...groups.values()].sort(
@@ -156,20 +188,38 @@ export function buildRecallPathViews(
   const matchedRecallTitles = new Set<string>();
   const matchedPreferenceNames = new Set<string>();
   const matchedFallbackRules = new Set<string>();
-  const matchedChannels = new Map<
-    DistributionRecallPath,
-    RecallPathView["matchedChannels"]
+  // 匹配渠道按变体家族折叠（2026-08-28 用户裁决 Q13）：同家族成员合并为一个
+  // chip（×N），证据拼接进 title。旧计划无 variantFamily 时每候选自成一组。
+  const folds = new Map<
+    string,
+    {
+      path: DistributionRecallPath;
+      foldKey: string;
+      name: string;
+      kindLabel: string;
+      candidates: Set<string>;
+      labels: string[];
+    }
   >();
   for (const candidate of plan.candidates) {
+    const foldKey =
+      candidate.variantFamily ?? `${candidate.kind}:${candidate.resourceId}`;
     for (const evidence of candidate.evidence) {
-      const list = matchedChannels.get(evidence.path) ?? [];
-      list.push({
-        key: `${candidate.kind}:${candidate.resourceId}`,
-        name: candidate.name,
-        kindLabel: KIND_LABEL[candidate.kind],
-        evidence: evidence.label,
-      });
-      matchedChannels.set(evidence.path, list);
+      const mapKey = `${evidence.path}#${foldKey}`;
+      let fold = folds.get(mapKey);
+      if (!fold) {
+        fold = {
+          path: evidence.path,
+          foldKey,
+          name: candidate.name,
+          kindLabel: KIND_LABEL[candidate.kind],
+          candidates: new Set<string>(),
+          labels: [],
+        };
+        folds.set(mapKey, fold);
+      }
+      fold.candidates.add(`${candidate.kind}:${candidate.resourceId}`);
+      fold.labels.push(evidence.label);
       for (const part of evidence.reference.split(",")) {
         const reference = part.trim();
         if (evidence.path === "passive" && reference) {
@@ -184,28 +234,90 @@ export function buildRecallPathViews(
       }
     }
   }
+  const matchedChannels = new Map<
+    DistributionRecallPath,
+    RecallPathView["matchedChannels"]
+  >();
+  for (const fold of folds.values()) {
+    const list = matchedChannels.get(fold.path) ?? [];
+    list.push({
+      key: fold.foldKey,
+      name: fold.name,
+      kindLabel: fold.kindLabel,
+      evidence: [...new Set(fold.labels)].join("；"),
+      variantCount: fold.candidates.size,
+    });
+    matchedChannels.set(fold.path, list);
+  }
   const view = (
     path: DistributionRecallPath,
     sources: RecallSourceChip[],
+    counts?: { aligned: number; recommended: number },
   ): RecallPathView => ({
     path,
     label: PATH_LABEL[path],
     sources,
+    alignedCount: counts?.aligned ?? matchedChannels.get(path)?.length ?? 0,
+    recommendedCount:
+      counts?.recommended ?? matchedChannels.get(path)?.length ?? 0,
     matchedChannels: matchedChannels.get(path) ?? [],
   });
-  return [
-    view(
-      "passive",
-      plan.questionSources.map((source) => ({
-        key: source.id,
-        title: source.title,
-        subtitle: hostOfUrl(source.url),
-        matched: matchedQuestions.has(source.questionId),
-        question: source.question,
-        url: source.url,
-        siteName: source.siteName ?? null,
-      })),
-    ),
+  // 被动路（2026-08-27 用户裁决）：匹配渠道区以对齐渠道列表（≤50，推荐截断
+  // 之前）为权威——recommended=false 只表示被 30 推荐挤出，不是对齐失败；
+  // 旧计划无该字段时回落到仅数推荐集里的被动证据。
+  const passiveAligned = plan.passiveAlignedChannels ?? [];
+  const passiveRecommendedFromCandidates = matchedChannels.get("passive") ?? [];
+  const passiveView = view(
+    "passive",
+    plan.questionSources.map((source) => ({
+      key: source.id,
+      title: source.title,
+      subtitle: hostOfUrl(source.url),
+      matched: matchedQuestions.has(source.questionId),
+      question: source.question,
+      url: source.url,
+      siteName: source.siteName ?? null,
+      resolvedAccountName: source.resolvedAccountName ?? null,
+    })),
+    passiveAligned.length > 0
+      ? {
+          aligned: passiveAligned.length,
+          recommended: passiveAligned.filter((channel) => channel.recommended)
+            .length,
+        }
+      : {
+          aligned: passiveRecommendedFromCandidates.length,
+          recommended: passiveRecommendedFromCandidates.length,
+        },
+  );
+  if (passiveAligned.length > 0) {
+    passiveView.matchedChannels = passiveAligned.map((channel) => {
+      const variantNote =
+        channel.variantCount > 1 ? ` · 同名变体 ×${channel.variantCount}` : "";
+      const priceNote =
+        channel.priceMinCny !== null && channel.priceMaxCny !== null
+          ? ` · ¥${channel.priceMinCny}${
+              channel.priceMaxCny !== channel.priceMinCny
+                ? `-${channel.priceMaxCny}`
+                : ""
+            }`
+          : "";
+      return {
+        key: `${channel.kind}:${channel.resourceId}`,
+        name: channel.name,
+        kindLabel: KIND_LABEL[channel.kind],
+        evidence: channel.accounts.length
+          ? `${channel.citations} 条引用 · 覆盖 ${channel.questions} 个问题 · 账号 ${channel.accounts.join("、")}`
+          : `${channel.citations} 条引用 · 覆盖 ${channel.questions} 个问题`,
+        accounts: channel.accounts,
+        stats: `${channel.citations} 条引用 · 覆盖 ${channel.questions} 个问题${variantNote}${priceNote}`,
+        recommended: channel.recommended,
+        variantCount: channel.variantCount,
+      };
+    });
+  }
+  const views: RecallPathView[] = [
+    passiveView,
     view(
       "active",
       (plan.activeRecallSources ?? []).map((source) => ({
@@ -240,6 +352,45 @@ export function buildRecallPathViews(
       })),
     ),
   ];
+  // 偏好命中清单（Q12，2026-08-28）：配额前逐名单项一行（代表+价格+✓=进入
+  // 推荐；matched=false = 价内池未见同名，如实展示）。旧计划无该字段时回落
+  // 到从推荐集反推的 matchedPreferenceNames 口径。
+  const preferenceRows = plan.preferenceMatchedChannels ?? [];
+  if (preferenceRows.length > 0) {
+    const preferenceView = views[3]!;
+    preferenceView.alignedCount = preferenceRows.filter(
+      (row) => row.matched,
+    ).length;
+    preferenceView.recommendedCount = preferenceRows.filter(
+      (row) => row.recommended,
+    ).length;
+    preferenceView.sources = preferenceView.sources.map((source) => {
+      const row = preferenceRows.find((item) => item.entryName === source.title);
+      return row ? { ...source, matched: row.matched } : source;
+    });
+    preferenceView.matchedChannels = preferenceRows.map((row) => ({
+      key: `preference-match:${row.entryName}`,
+      name: row.matched
+        ? (row.representativeName ?? row.entryName)
+        : row.entryName,
+      kindLabel: "名单",
+      evidence: row.matched
+        ? `命中家族代表${
+            row.variantCount > 1 ? `（同名变体 ×${row.variantCount}）` : ""
+          }`
+        : "价内资源池未见同名渠道",
+      stats: row.matched
+        ? `${
+            row.representativePriceCny !== null
+              ? `¥${row.representativePriceCny}`
+              : "价格未知"
+          }${row.variantCount > 1 ? ` · 变体 ×${row.variantCount}` : ""}`
+        : undefined,
+      recommended: row.matched ? row.recommended : false,
+      variantCount: row.variantCount > 1 ? row.variantCount : undefined,
+    }));
+  }
+  return views;
 }
 
 /** 四路召回复盘：来源 chip 命中高亮，匹配渠道 accent 高亮；无交互，纯展示。 */
@@ -255,10 +406,18 @@ function RecallBreakdown({ plan }: { plan: DistributionPlanProjection }) {
           className="rounded-lg bg-[var(--paper-inset)] p-2"
         >
           <p className="flex items-center justify-between">
-            <span className="font-medium">{item.label}</span>
+            <span className="font-medium">
+              {item.label}
+              {item.path === "preference" &&
+                (plan.preferenceChannelNames?.length ?? 0) > 0 && (
+                  <span className="ml-1 text-xs font-normal text-[var(--ink-subtle)]">
+                    （内置验证名单）
+                  </span>
+                )}
+            </span>
             <span className="text-[var(--ink-subtle)]">
-              来源 {item.sources.length} · 匹配渠道{" "}
-              {item.matchedChannels.length}
+              来源 {item.sources.length} · 对齐渠道 {item.alignedCount} ·
+              进入推荐 {item.recommendedCount}
             </span>
           </p>
           {item.path === "passive" ? (
@@ -270,7 +429,10 @@ function RecallBreakdown({ plan }: { plan: DistributionPlanProjection }) {
                   召回来源（按渠道分组，跨问覆盖多的渠道在前）：
                 </p>
                 <ul className="mt-0.5 space-y-1">
-                  {groupPassiveSourcesByChannel(item.sources).map((group) => (
+                  {groupPassiveSourcesByChannel(
+                    item.sources,
+                    plan.citationSiteNames,
+                  ).map((group) => (
                     <li
                       key={group.key}
                       className={`rounded border px-1.5 py-1 ${
@@ -390,19 +552,83 @@ function RecallBreakdown({ plan }: { plan: DistributionPlanProjection }) {
           {item.matchedChannels.length > 0 && (
             <div className="mt-1">
               <p className="text-[var(--ink-subtle)]">
-                匹配渠道（资源池命中，与上方召回来源经证据对齐关联）：
+                {item.path === "passive"
+                  ? "对齐渠道（资源池命中；✓=进入推荐，其余为被推荐配额挤出而非对齐失败）："
+                  : "匹配渠道（资源池命中，与上方召回来源经证据对齐关联）："}
               </p>
-              <div className="mt-0.5 flex flex-wrap gap-1">
-                {item.matchedChannels.map((channel) => (
-                  <span
-                    key={channel.key}
-                    className="rounded border border-[var(--accent)] bg-[var(--accent-warm-subtle)] px-1.5 py-0.5 font-medium text-[var(--accent)]"
-                    title={channel.evidence}
-                  >
-                    {channel.kindLabel} · {channel.name}
-                  </span>
-                ))}
-              </div>
+              {item.path === "fallback" ? (
+                // 保底优先席位三档分组（2026-08-28 用户裁决）：垂类∩GEO >
+                // 垂类 > GEO 标记，档位从证据 label 推导（展示口径，纯只读）。
+                (() => {
+                  const tierOf = (evidence: string): string => {
+                    const industry = evidence.includes("结构化类目匹配");
+                    const geo = evidence.includes("官方 GEO 标记");
+                    if (industry && geo) return "垂类∩GEO";
+                    if (industry) return "垂类";
+                    if (geo) return "GEO 标记";
+                    return "其他规则";
+                  };
+                  const groups = ["垂类∩GEO", "垂类", "GEO 标记", "其他规则"];
+                  return groups.map((group) => {
+                    const members = item.matchedChannels.filter((channel) =>
+                      tierOf(channel.evidence).includes(
+                        group === "其他规则" ? "其他规则" : group,
+                      ),
+                    );
+                    if (members.length === 0) return null;
+                    return (
+                      <div key={group} className="mt-0.5">
+                        <span className="text-xs text-[var(--ink-subtle)]">
+                          {group}（{members.length}）：
+                        </span>
+                        <div className="mt-0.5 flex flex-wrap gap-1">
+                          {members.map((channel) => (
+                            <span
+                              key={channel.key}
+                              className={`rounded border px-1.5 py-0.5 font-medium ${
+                                channel.recommended === false
+                                  ? "border-[var(--line-subtle)] text-[var(--ink-muted)]"
+                                  : "border-[var(--accent)] bg-[var(--accent-warm-subtle)] text-[var(--accent)]"
+                              }`}
+                              title={channel.evidence}
+                            >
+                              {channel.recommended === false ? "" : "✓ "}
+                              {channel.kindLabel} · {channel.name}
+                              {channel.variantCount && channel.variantCount > 1
+                                ? ` ×${channel.variantCount}`
+                                : ""}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                    );
+                  });
+                })()
+              ) : (
+                <div className="mt-0.5 flex flex-wrap gap-1">
+                  {item.matchedChannels.map((channel) => (
+                    <span
+                      key={channel.key}
+                      className={`rounded border px-1.5 py-0.5 font-medium ${
+                        channel.recommended === false
+                          ? "border-[var(--line-subtle)] text-[var(--ink-muted)]"
+                          : "border-[var(--accent)] bg-[var(--accent-warm-subtle)] text-[var(--accent)]"
+                      }`}
+                      title={channel.evidence}
+                    >
+                      {channel.recommended === false ? "" : "✓ "}
+                      {channel.kindLabel} · {channel.name}
+                      {channel.accounts && channel.accounts.length > 0
+                        ? `（账号：${channel.accounts.join("、")}）`
+                        : ""}
+                      {channel.variantCount && channel.variantCount > 1
+                        ? ` ×${channel.variantCount}`
+                        : ""}
+                      {channel.stats ? ` · ${channel.stats}` : ""}
+                    </span>
+                  ))}
+                </div>
+              )}
             </div>
           )}
         </article>

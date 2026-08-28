@@ -336,7 +336,11 @@ impl BrandWorkspaceStore {
             .filter(|value| !value.is_empty());
         if product_line.is_some_and(|line| !workspace.product_lines.iter().any(|item| item == line))
         {
-            return Err("question_pool_product_line_unknown".to_string());
+            return Err(format!(
+                "question_pool_product_line_unknown（「{}」不是已确认的产品线；合法产品线：{}）",
+                product_line.unwrap_or_default(),
+                workspace.product_lines.join("、")
+            ));
         }
         let pool_id: Option<String> = if request.pending_only {
             connection
@@ -1205,7 +1209,13 @@ fn read_question_pool_context(
         .iter()
         .any(|line| line == product_line.trim())
     {
-        return Err("question_pool_product_line_unknown".to_string());
+        // 带上合法产品线清单，让 Agent 一次自纠即命中（questionErrorCode 按
+        // 「question_pool_」前缀截取错误码，中文括号不破坏码提取）。
+        return Err(format!(
+            "question_pool_product_line_unknown（「{}」不是已确认的产品线；合法产品线：{}）",
+            product_line.trim(),
+            workspace.product_lines.join("、")
+        ));
     }
     let version: i64 = connection
         .query_row(

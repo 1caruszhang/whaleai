@@ -424,9 +424,8 @@ function OperationArticle({ operation }: { operation: GeoOperationProjection }) 
     fullCard: fullMode,
   });
 
-  // 计划认可门是本卡的主操作：停靠时认可面板提到卡头（目标行之后、
-  // 步骤重播之前），沿用知识确认卡「整卡确认常驻卡头、不藏在长列表
-  // 底部」的既定原则；其余闸门面板保持在卡尾。
+  // 计划认可门是本卡的主操作：认可面板停靠在目标行之后、步骤重播之前，
+  // 面板内的确认键按闸门卡统一规范固定页脚右下；其余闸门面板保持在卡尾。
   const showGatePanels = isHost && !terminal && !isAgentResponding;
 
   const content = (

@@ -287,15 +287,17 @@ export const GEO_PORT_CONTRACT = {
         weight: 0.4,
         signal: "real-per-question-citations",
       },
+      // 2026-08-28 用户裁决：权重自 0.4/0.3/0.15/0.15 调整——保底（垂类规则路）
+      // 升至 0.3，主动降至 0.2，偏好降至 0.1；被动 0.4 不变。
       active: {
         number: 2,
         weight: 0.2,
         signal: "global-topic-channel-recommendation",
       },
-      fallback: { number: 3, weight: 0.1, signal: "keyword-to-approved-pool" },
+      fallback: { number: 3, weight: 0.3, signal: "keyword-to-approved-pool" },
       preference: {
         number: 4,
-        weight: 0.3,
+        weight: 0.1,
         signal: "human-curated-approved-pool",
       },
     },
@@ -314,22 +316,138 @@ export const GEO_PORT_CONTRACT = {
     },
     passiveRecall: {
       oneIndependentSearchPerQuestion: true,
-      // 按问题配额而非总截断：每问最多 10 条引用，所有已确认问题都能进入
-      // 被动证据；随后按「渠道（注册域名）出现在多少个不同问题」降序取前
-      // 50——跨问重复出现的渠道（多问交集）排前，单问独占渠道靠后。
+      // 按问题配额而非总截断（2026-08-27 用户裁决二轮）：每问最多 10 条引用，
+      // 所有探测问题的引用全量返回（旧 totalCap=50 总量帽废除）；随后按
+      // 「渠道（注册域名）出现在多少个不同问题」降序排展示顺序——跨问重复
+      // 出现的渠道（多问交集）排前，单问独占渠道靠后。被动路对齐渠道列表
+      // 上限 alignedChannelCap=50（按跨问覆盖>引用数排序），与全局推荐
+      // 上限（recommendation.max=30）互不影响。
       perQuestionCap: 10,
-      totalCap: 50,
+      alignedChannelCap: 50,
       rankBy: "cross-question-registered-domain-frequency-desc",
       defaultMode: "ai_search",
     },
+    // 账户级对齐（2026-08-27 用户裁决：多租户引用对齐到具体账号，三层解析、
+    // 全部第一方、不依赖供应商账号字段）：L1 URL 内嵌账号标识 > L2 引用标题
+    // 尾缀账号名（平台一致性门）> L3 引用页面作者解析（server 抓页注入，
+    // 限量并发、失败静默降级到平台名）。注册域名相等永远不构成账户身份。
+    accountResolution: {
+      layer1: "url-embedded-account-id",
+      layer2: "title-suffix-account-name-platform-gated",
+      layer3: {
+        pageAuthorFetch: {
+          limit: 20,
+          timeoutMs: 8_000,
+          dedupeBy: "url",
+          failure: "silent-degrade-to-platform-name",
+        },
+      },
+    },
+    // 引用站点显示名解析链（组名优先级；池反查=超级媒介资源 entranceLink
+    // 域名→渠道名的动态映射，多租户域名因一域名多渠道不参与）。
+    citationDisplayNameChain: [
+      "doubao-site-name",
+      "pool-domain-lookup",
+      "brand-table",
+      "title-suffix-site-name",
+      "registered-domain",
+    ],
     fallbackTopN: 50,
     geoInclusionHardFilterScope: "fallback-only",
     recommendation: {
       max: 30,
       mediaQuota: 20,
       weMediaQuota: 10,
+      // 保底优先席位（2026-08-28 用户裁决改随机采样）：垂类池（t0∪t1）
+      // 随机取满 fallbackVerticalQuota 席，单 GEO 池（t2）随机补足 max 内
+      // 剩余席位；池尽回流整体排序，t3+ 不占保留席。随机避免固定渠道霸榜。
+      fallbackVerticalQuota: 26,
       surplusFill: true,
-      rank: ["weighted-path-score-desc", "hit-count-desc", "name-asc"],
+      // 2026-08-28 用户裁决：排序链加入 junk 压制（随机号商品靠后）、垂类名
+      // 命中（名称含行业/人群词优先，兑现「大渠道子频道尽量垂类」）与被动
+      // 覆盖度（同分时覆盖问题多者优先，替代拼音序）。
+      rank: [
+        "weighted-path-score-desc",
+        "hit-count-desc",
+        "fallback-tier-asc",
+        "junk-resale-last",
+        "vertical-name-match-first",
+        "passive-question-coverage-desc",
+        "passive-citation-count-desc",
+        "name-asc",
+      ],
+    },
+    // 变体家族（2026-08-28 用户裁决 Q13）：池内同一渠道常被重复挂牌/多套餐
+    // （列举网 7 变体、蓝色河畔 5 变体），大渠道下还有真实子频道（学习强国
+    // 92 条）。两级结构：家族=核心名+主平台族（跨平台同名分家）；包=规格词
+    // 尾块（数据驱动：后缀跨 ≥10 个不同核心名=通用规格词）或无尾块 → 默认包，
+    // 身份词尾块按尾块值分子频道包。同包择 1 代表（非junk → 有证据 →
+    // geo_platforms 多 → 价低 → id 小），家族 ≤2 席进推荐；展示按家族折叠。
+    variantFamily: {
+      familyKey: "stripped-core-plus-primary-platform-family",
+      packKey: "qualifier-suffix-to-default-pack",
+      qualifierSuffixCoreThreshold: 10,
+      packRepresentative: [
+        "non-junk-first",
+        "evidence-weight-desc",
+        "geo-platforms-desc",
+        "price-asc",
+        "resource-id-asc",
+      ],
+      familyQuota: 2,
+      displayFold: "all-four-paths",
+    },
+    // 多租户名称匹配全分支核心名限定 + 平台官方型通道（2026-08-28 用户裁决
+    // Q1/Q3a）：多租户来源的全部名称分支（子串/去后缀/Jaccard）只比对核心名，
+    // 括号后缀里的平台词永不算名字证据；平台级来源只经官方型通道命中
+    // 「entrance 根路径 ∧ 域名族 ∧ 核心名含平台品牌」的资源（全池 ~89 条），
+    // 账号渠道永不承接平台级信号。资源平台族第一信号=媒介盒子 platform
+    // 枚举（自媒体 100% 携带，与域名一致率实测 99.3%）。
+    multiTenantNameMatching: {
+      nameScope: "channel-name-core-all-branches",
+      platformFamilySource: [
+        "provider-platform-enum",
+        "entrance-domain",
+        "name-suffix-alias",
+      ],
+      platformOfficialGate: "root-entrance-and-brand-in-core",
+    },
+    // 主动路名称匹配收严（2026-08-28 用户裁决：「只要真正正确的渠道」）：
+    // Jaccard 字符交集档整体退出主动路（残留误配实测：中国团餐网→中国妈妈网
+    // 0.5、今日头条美食频道→美妆头条 0.4——字符有交集但完全不同机构）；
+    // 只认 包含关系（1.0/0.8）+ 共享前缀 ≥4 字（界面新闻主站↔界面新闻消费
+    // 板块）+ 品牌分支强重叠/非多租户品牌兜底（36氪→36氪（百家号））。
+    // 域名相等与平台官方型通道不变。fuzzyMatchScore（含 Jaccard）保留给
+    // 偏好路用户手输条目（人工输入需要容错）。
+    // 池侧域名信号（2026-08-28 用户裁决：URL 字段参与匹配）：entrance_link +
+    // case_link（收录案例链接）双 URL 的注册域名，多租户域剔除。case_link 全池
+    // 100% 有值、98.3% 与 entrance 同域、16,107 条独立域；7,599 条资源 entrance
+    // 为空时它是唯一域名信号（八方资源网型）。主动/被动域名对齐与池反查共用。
+    resourceDomainSignals: ["entrance-link", "case-link"],
+    // 域名歧义防护：域名下核心名经包含关系全连通=唯一域（实测 6,131/7,135），
+    // 域名命中直接放行；歧义域（ppwll.cn 式跨机构聚合域，1,004 个）要求名称
+    // 佐证（主动 activeNameMatchScore≥0.8 / 被动平台门控 nameMatches），
+    // 宁可放弃无佐证的真匹配也不放行跨机构误判。
+    activeNameMatching: {
+      minScore: 0.8,
+      jaccardTiers: "excluded",
+      prefixRule: "shared-prefix-gte-4-chars",
+    },
+    // 随机号商品压制（2026-08-28 用户裁决 Q11）：名称含 随机/打包/千粉/百粉/
+    // 水军/套餐N家 的转售商品（全池 211 条）不剔除、可对齐可展示，但排序
+    // 靠后且不作包/家族代表（除非全组皆 junk）。`包收录` 是正规特性不算。
+    junkResaleSuppression: {
+      pattern: "随机|打包|千粉|百粉|水军|套餐N家|N家媒体",
+      action: "sort-last-and-never-representative",
+    },
+    // 偏好匹配与命中清单（2026-08-28 用户裁决 Q12）：exact 语义=核心名相等
+    // （池子挂牌名后缀漂移不再静默断链）；命中清单在推荐配额之前按名单逐项
+    // 计算（每项一行代表：全名逐字命中者优先，否则包代表规则），随投影落库
+    // ——旧「从推荐集反推」口径下偏好 0.15 权重永远进不了 top30、面板恒显 0。
+    preferenceMatching: {
+      exactSemantics: "core-name-equality",
+      matchedListProjection: "preferenceMatchedChannels",
+      matchedListScope: "pre-quota",
     },
     quality: {
       // 发布率不是决策输入（用户裁决 2026-08-18）：无最低发布率门槛，
@@ -988,7 +1106,10 @@ export function mergeGeoChannelPathHits(
       if (!existing.pathHits.includes(hit.path)) {
         existing.pathHits.push(hit.path);
         existing.hitCount = existing.pathHits.length;
-        existing.score += weights[hit.path].weight;
+        // toFixed(10) 归一与 buildDistributionCandidates 同口径，避免 0.2+0.4 浮点尾差。
+        existing.score = Number(
+          (existing.score + weights[hit.path].weight).toFixed(10),
+        );
       }
       continue;
     }

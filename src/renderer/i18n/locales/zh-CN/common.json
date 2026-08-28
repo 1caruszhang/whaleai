@@ -1,6 +1,10 @@
 {
   "xiaojingSidebar": {
     "ariaLabel": "鲸杉geo品牌与会话",
+    "collapseSidebar": "折叠侧栏",
+    "expandSidebar": "展开侧栏",
+    "resizeHandle": "调整侧栏宽度",
+    "resizeHint": "拖动调整宽度，双击恢复默认",
     "currentBrand": "当前品牌",
     "createBrand": "创建品牌",
     "noBrand": "尚未创建品牌",
@@ -53,6 +57,10 @@
       "ready": "就绪"
     },
     "productLineHint": "只需填写品牌名；产品线（领域）会在你导入资料并确认品牌知识时自动确认。"
+  },
+  "xiaojingWorkbench": {
+    "resizeHandle": "调整 GEO 工作台宽度",
+    "resizeHint": "拖动调整宽度，双击恢复默认"
   },
   "account": {
     "loginSubtitle": "付费内测版 · 手机号登录后使用",

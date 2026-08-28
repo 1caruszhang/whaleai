@@ -1,6 +1,10 @@
 {
   "xiaojingSidebar": {
     "ariaLabel": "Jingshan GEO brands and sessions",
+    "collapseSidebar": "Collapse sidebar",
+    "expandSidebar": "Expand sidebar",
+    "resizeHandle": "Resize sidebar width",
+    "resizeHint": "Drag to resize, double-click to reset",
     "currentBrand": "Current brand",
     "createBrand": "Create brand",
     "noBrand": "No brand yet",
@@ -53,6 +57,10 @@
       "ready": "Ready"
     },
     "productLineHint": "Just the brand name — product lines (domains) are confirmed automatically when you import material and confirm brand knowledge."
+  },
+  "xiaojingWorkbench": {
+    "resizeHandle": "Resize GEO workbench width",
+    "resizeHint": "Drag to resize, double-click to reset"
   },
   "account": {
     "loginSubtitle": "Paid beta · sign in with your phone number",

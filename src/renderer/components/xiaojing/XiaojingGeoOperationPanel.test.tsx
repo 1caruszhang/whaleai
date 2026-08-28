@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type {
@@ -415,7 +415,9 @@ describe("XiaojingGeoOperationPanel", () => {
     );
     expect(await screen.findByText("监测另一个操作")).toBeInTheDocument();
 
-    // 触发一次轮询刷新（同列表返回），聚焦必须保持在手动选择上。
+    // 触发一次轮询刷新（同列表返回），聚焦必须保持在手动选择上。先冲刷
+    // passive effects，确保 visibilitychange 监听器已挂载再派发事件。
+    await act(async () => {});
     document.dispatchEvent(new Event("visibilitychange"));
     await waitFor(() => expect(mocks.load).toHaveBeenCalledTimes(2));
     expect(screen.getByText("监测另一个操作")).toBeInTheDocument();
@@ -707,6 +709,8 @@ describe("XiaojingGeoOperationPanel", () => {
 
     render(<XiaojingGeoOperationPanel workspace={workspace} />);
     expect(await screen.findByText("直接生成一篇知识文章")).toBeInTheDocument();
+    // 冲刷 passive effects：visibilitychange 监听器挂载完成后事件才可靠派发。
+    await act(async () => {});
     document.dispatchEvent(new Event("visibilitychange"));
     await Promise.resolve();
     expect(mocks.load).toHaveBeenCalledTimes(1);

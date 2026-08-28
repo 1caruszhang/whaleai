@@ -810,6 +810,43 @@ describe("embedding 错误分类与透出", () => {
     expect(down).toHaveBeenCalledTimes(3);
   });
 
+  it("chat 补全路径对网络层错误自愈重试（文章生成 fetch failed 修复，2026-08-27）", async () => {
+    // 首次网络层失败（undici TypeError: fetch failed），第二次成功——
+    // openAiChat 内部退避重试自愈，不再整篇落 generation_failed。
+    const sleep = silentSleep();
+    let calls = 0;
+    const flakyFetch = vi.fn(async () => {
+      calls += 1;
+      if (calls === 1) throw new TypeError("fetch failed");
+      return jsonResponse({ choices: [{ message: { content: "正文" } }] });
+    });
+    const capabilities = createGeoProviderCapabilities(directSecrets, {
+      fetch: flakyFetch as typeof fetch,
+      sleep,
+    });
+
+    const content = await capabilities.generation.complete([
+      { role: "user", content: "generate" },
+    ]);
+
+    expect(content).toBe("正文");
+    expect(calls).toBe(2);
+    // 持续网络失败：1 次原始 + 2 次重试后仍抛（重试不吞错）。
+    const alwaysDown = vi.fn(async () => {
+      throw new TypeError("fetch failed");
+    });
+    const failing = createGeoProviderCapabilities(directSecrets, {
+      fetch: alwaysDown as typeof fetch,
+      sleep: silentSleep(),
+    });
+    const failure = await failing.generation
+      .complete([{ role: "user", content: "g" }])
+      .catch((e) => e);
+    // 外层错误分类器会包装为 Geo 上游错误族，但底层网络原因保留可溯。
+    expect(failure.message).toContain("fetch failed");
+    expect(alwaysDown).toHaveBeenCalledTimes(3);
+  });
+
   it("透出的上游错误体先脱敏密钥", async () => {
     const failFetch = vi.fn(async () =>
       jsonResponse({ error: { message: "bad key ark-test leaked" } }, 400),

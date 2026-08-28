@@ -395,11 +395,15 @@ describe('MaterialRequestCard', () => {
       target: { value: '公司全称：鲸跃科技' },
     });
     fireEvent.click(screen.getByRole('button', { name: '保存并抽取粘贴资料' }));
-    expect(await screen.findByText(/正在保存并抽取/)).toBeInTheDocument();
+    // 提交中的行状态在点击的 act 冲刷后同步可见；不 await 这个瞬时态——
+    // 它依赖提交回诺微任务与断言的执行顺序，负载下会偶发翻转。
+    expect(screen.getByText(/正在保存并抽取/)).toBeInTheDocument();
     // 提交成功后表单收起，但三条上传路径必须能从卡头重新展开（ADR 0005）。
-    expect(
-      screen.queryByPlaceholderText('粘贴企业介绍、产品资料或品牌事实'),
-    ).not.toBeInTheDocument();
+    await waitFor(() =>
+      expect(
+        screen.queryByPlaceholderText('粘贴企业介绍、产品资料或品牌事实'),
+      ).not.toBeInTheDocument(),
+    );
 
     fireEvent.click(screen.getByRole('button', { name: '继续添加品牌材料' }));
 

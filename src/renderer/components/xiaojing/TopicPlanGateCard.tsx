@@ -1,4 +1,4 @@
-import { CheckCircle2, Loader2 } from "lucide-react";
+import { Loader2 } from "lucide-react";
 import { useCallback, useMemo, useState } from "react";
 
 import {
@@ -13,6 +13,7 @@ import type {
   TopicPlanProjection,
 } from "../../../shared/geo/topicPlan";
 import { unwrapToolResultText } from "../../../shared/toolResult";
+import GateCardFooter, { GateCardSuccess } from "./GateCardFooter";
 import { useGateCardRefresh } from "./useGateCardRefresh";
 
 /**
@@ -222,7 +223,7 @@ export default function TopicPlanGateCard({
         <span className="ml-auto">已批准 {approvedIds.size}/{plan.items.length}</span>
       </div>
 
-      <div className="mt-2 space-y-2">
+      <div className="mt-2 max-h-[60vh] space-y-2 overflow-y-auto pr-1">
         {plan.items.map((item) => {
           const checked = approvedIds.has(item.id);
           return (
@@ -267,32 +268,28 @@ export default function TopicPlanGateCard({
         })}
       </div>
 
-      {confirmed ? (
-        <p className="mt-2 flex items-center gap-2 rounded-lg bg-[var(--success-bg)] p-2 text-sm text-[var(--success)]">
-          <CheckCircle2 className="h-4 w-4" />
-          内容计划已确认（{approvedIds.size} 项）；小鲸会继续生成文章。
-        </p>
-      ) : (
-        <button
-          type="button"
-          onClick={() => {
-            void confirm();
-          }}
-          disabled={busy || approvedIds.size === 0 || !hasRealSession}
-          className="mt-2 flex w-full items-center justify-center gap-1.5 rounded-md bg-[var(--button-primary-bg)] px-3 py-2 text-sm font-medium text-[var(--button-primary-text)] disabled:opacity-50"
-        >
-          {busy && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
-          确认内容计划（{approvedIds.size}）
-        </button>
-      )}
       {error && (
         <p role="alert" className="mt-2 break-words rounded-lg bg-[var(--error-bg)] p-2 text-xs text-[var(--error)]">
           {error}
         </p>
       )}
-      <p className="mt-1 text-xs leading-4 text-[var(--ink-subtle)]">
-        这是系统维护的确认卡片，不是用户发送的消息；只有你在此批准并确认的计划项才会进入文章生成。
-      </p>
+      <GateCardFooter note="确认后进入文章生成">
+        {confirmed ? (
+          <GateCardSuccess>内容计划已确认（{approvedIds.size}）</GateCardSuccess>
+        ) : (
+          <button
+            type="button"
+            onClick={() => {
+              void confirm();
+            }}
+            disabled={busy || approvedIds.size === 0 || !hasRealSession}
+            className="flex items-center gap-1.5 rounded-md bg-[var(--button-primary-bg)] px-3 py-1.5 text-sm font-medium text-[var(--button-primary-text)] disabled:opacity-50"
+          >
+            {busy && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+            确认内容计划（{approvedIds.size}）
+          </button>
+        )}
+      </GateCardFooter>
     </section>
   );
 }

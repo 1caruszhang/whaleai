@@ -19,7 +19,8 @@ fn common_controls_v6_symbols_resolve() {
     // 带 Common-Controls v6 依赖 → 6.0（符号存在）；缺失 → 系统 5.82。
     let comctl32: HMODULE = unsafe { LoadLibraryA(c"comctl32.dll".as_ptr().cast()) };
     assert!(!comctl32.is_null(), "comctl32.dll failed to load");
-    let proc = |name: &std::ffi::CStr| unsafe { GetProcAddress(comctl32, name.as_ptr().cast()) }.is_some();
+    let proc =
+        |name: &std::ffi::CStr| unsafe { GetProcAddress(comctl32, name.as_ptr().cast()) }.is_some();
     // 这两个符号只存在于 Common-Controls 6.0 程序集；缺 manifest 时拿到
     // 5.82 版则解析失败。
     assert!(

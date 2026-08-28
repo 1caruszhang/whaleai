@@ -125,8 +125,10 @@ export const JS_AI_DEV_BEHAVIOR_FIXTURE = {
         name: "甲媒体",
         pathHits: ["passive", "active"],
         hitCount: 2,
-        score: 0.6000000000000001,
+        score: 0.6,
       },
+      // 2026-08-28 权重调整后 fallback+preference=0.4 与 passive 单路同分，
+      // hitCount 2 优先（排序语义不变，仅数值与顺序变化）。
       {
         resourceId: 2,
         kind: "we-media",

@@ -38,6 +38,7 @@ function projection(
     publishSpeed: null,
     publishedAverageMinutes: null,
     platform: null,
+    geoPlatforms: [],
   };
   return {
     id: "plan-exact",
@@ -96,7 +97,7 @@ function projection(
           providerStatus: 2,
           basis: "supermedia-approved-resource",
         },
-        recommendationWeight: 0.7,
+        recommendationWeight: 0.85,
         hitCount: 3,
         pathHits: ["passive", "active", "fallback"],
         evidence: [
@@ -136,6 +137,9 @@ function projection(
       filteredOverPerArticleLimit: 0,
       alignedResources: 1,
       recommendedResources: 1,
+      alignedByPath: { passive: 0, active: 0, fallback: 1, preference: 0 },
+      citationDomains: 0,
+      citationDomainPoolHits: 0,
     },
     blockingIssues: ["selected-channel-price-unknown"],
     createdAt: "2026-08-15T00:00:00Z",
@@ -388,7 +392,7 @@ describe("XiaojingDistributionPlanPanel read-only projection", () => {
               },
               {
                 path: "active",
-                weight: 0.2,
+                weight: 0.3,
                 label: "全局召回推荐渠道「汽车垂直资讯站」与本资源对齐",
                 reference: "recall:汽车垂直资讯站",
                 url: "https://auto.example.org",
@@ -396,7 +400,7 @@ describe("XiaojingDistributionPlanPanel read-only projection", () => {
               },
               {
                 path: "fallback",
-                weight: 0.1,
+                weight: 0.15,
                 label: "超级媒介结构化类目匹配行业「汽车」",
                 reference: "industry:汽车",
                 url: "https://source.example",
@@ -404,7 +408,7 @@ describe("XiaojingDistributionPlanPanel read-only projection", () => {
               },
               {
                 path: "preference",
-                weight: 0.3,
+                weight: 0.15,
                 label: "偏好名单命中「汽车产业观察」",
                 reference: "preference:汽车产业观察",
                 url: "https://source.example",
@@ -421,6 +425,12 @@ describe("XiaojingDistributionPlanPanel read-only projection", () => {
     });
 
     expect(await within(panel).findByText("四路召回结果")).toBeInTheDocument();
+    // 三分口径（2026-08-27 二轮裁决）：每路都是
+    // 「来源 N · 对齐渠道 A · 进入推荐 M」，不再把对齐与推荐压成一个数。
+    expect(
+      within(panel).getAllByText(/来源 \d+ · 对齐渠道 \d+ · 进入推荐 \d+/)
+        .length,
+    ).toBe(4);
     // 被动路按渠道分组：组名优先用豆包 site_name（有站点名的组不再显示
     // 裸域名），组头带 N 条引用 · M 个问题，组内引用是 {问题，标题（url 链接）}。
     expect(within(panel).getAllByText(/✓ 汽车产业观察网/).length).toBe(1);
@@ -439,13 +449,17 @@ describe("XiaojingDistributionPlanPanel read-only projection", () => {
       within(panel).getByText(/理由：汽车行业垂直媒体，覆盖售后与门店话题/),
     ).toBeInTheDocument();
     expect(within(panel).getByText(/未命中的推荐渠道/)).toBeInTheDocument();
-    // 分组标签明确「召回来源」与「匹配渠道」两种形态。
+    // 分组标签明确「召回来源」与「匹配/对齐渠道」两种形态：被动路是
+    // 「对齐渠道（…✓=进入推荐…）」，其余三路是「匹配渠道（…）」。
     expect(
       within(panel).getAllByText(/召回来源/).length,
     ).toBeGreaterThanOrEqual(4);
     expect(
       within(panel).getAllByText(/匹配渠道（/).length,
-    ).toBeGreaterThanOrEqual(4);
+    ).toBeGreaterThanOrEqual(3);
+    expect(within(panel).getAllByText(/对齐渠道（/).length).toBeGreaterThanOrEqual(
+      1,
+    );
     expect(within(panel).getAllByText(/媒体 · 汽车产业观察/).length).toBe(4);
     // fallback 是规则路：展示行业/人群输入，行业规则命中。
     expect(within(panel).getByText(/行业类目「汽车」/)).toBeInTheDocument();
@@ -465,5 +479,89 @@ describe("XiaojingDistributionPlanPanel read-only projection", () => {
     expect(within(panel).getByText(/未命中偏好号/)).toBeInTheDocument();
     // 未确认计划不出现候选点数行（复盘区不含价格）。
     expect(within(panel).queryByText(/所需点数/)).not.toBeInTheDocument();
+  });
+
+  it("folds same-family matched channels with ×N and renders preference matched rows (2026-08-28 Q12/Q13)", async () => {
+    const base = projection().candidates[0]!;
+    mocks.latest.mockResolvedValue(
+      projection({
+        status: "draft",
+        preferenceChannelNames: ["列举网（AI包收录）", "安庆新闻网"],
+        preferenceMatchedChannels: [
+          {
+            entryName: "列举网（AI包收录）",
+            matched: true,
+            representativeName: "列举网",
+            representativePriceCny: 4,
+            variantCount: 3,
+            recommended: false,
+          },
+          {
+            entryName: "安庆新闻网",
+            matched: false,
+            representativeName: null,
+            representativePriceCny: null,
+            variantCount: 0,
+            recommended: false,
+          },
+        ],
+        candidates: [
+          // 同家族两个候选 → 匹配渠道 chip 折叠为一枚 ×2。
+          {
+            ...base,
+            resourceId: 11,
+            name: "汽车产业观察",
+            variantFamily: "汽车产业观察|own",
+          },
+          {
+            ...base,
+            resourceId: 12,
+            name: "汽车产业观察（可发GEO）",
+            variantFamily: "汽车产业观察|own",
+          },
+        ],
+        passiveAlignedChannels: [
+          {
+            resourceId: 11,
+            kind: "media",
+            name: "汽车产业观察",
+            estimatedPriceCny: 88,
+            citations: 2,
+            questions: 2,
+            accounts: [],
+            recommended: true,
+            variantCount: 2,
+            priceMinCny: 4,
+            priceMaxCny: 9,
+          },
+        ],
+      }),
+    );
+    render(<XiaojingDistributionPlanPanel workspaceId="brand-12" />);
+    const panel = await screen.findByRole("region", {
+      name: "渠道发现与分发计划",
+    });
+    await within(panel).findByText("四路召回结果");
+    // 同家族折叠：同路径的两枚候选合并为一枚 ×2 chip。
+    const folded = within(panel).getAllByText(/汽车产业观察 ×2/);
+    expect(folded.length).toBeGreaterThanOrEqual(1);
+    // 被动对齐行：同名变体与价格区间随行。
+    expect(within(panel).getByText(/同名变体 ×2/)).toBeInTheDocument();
+    expect(within(panel).getAllByText(/¥4-9/).length).toBeGreaterThanOrEqual(1);
+    // 偏好命中清单（配额前）：命中行带代表名+价格（未进推荐 → 无 ✓），
+    // 未命中行如实显示「价内资源池未见同名渠道」。
+    expect(
+      within(panel).getAllByText(/列举网（AI包收录）/).length,
+    ).toBeGreaterThanOrEqual(1);
+    expect(
+      within(panel).getAllByText(/¥4/).length,
+    ).toBeGreaterThanOrEqual(1);
+    // 未命中行的说明在 chip title（价内资源池未见同名渠道），行本体灰显。
+    expect(
+      within(panel).getByTitle(/价内资源池未见同名渠道/),
+    ).toBeInTheDocument();
+    expect(
+      within(panel).getAllByText(/安庆新闻网/).length,
+    ).toBeGreaterThanOrEqual(1);
   });
 });

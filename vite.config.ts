@@ -60,8 +60,12 @@ export default defineConfig({
   server: {
     port: 5173,
     proxy: {
-      // All API endpoints under /api/ (excludes source files like /api/*.ts)
-      '^/api/(?!.*\\.(ts|tsx|js|jsx)$)': {
+      // All API endpoints under /api/ (excludes source files like /api/*.ts).
+      // 正则按「含查询串的完整 URL」匹配（http-proxy 语义）：HMR 会给模块
+      // URL 追加 ?t=<ts>，排除分支必须容忍扩展名后跟 `?` 或行尾，否则
+      // /api/*Client.ts?t=… 会被代理到后端（tauri dev 下 ECONNREFUSED），
+      // 整条动态导入链（App.tsx）随之渲染失败。
+      '^/api/(?!.*\\.(?:ts|tsx|js|jsx)(?:\\?|$))': {
         target: 'http://localhost:3000',
         changeOrigin: true,
         rewrite: (path) => path, // Keep path as-is

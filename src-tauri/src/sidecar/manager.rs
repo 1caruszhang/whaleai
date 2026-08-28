@@ -1466,11 +1466,12 @@ impl SidecarManager {
     /// after a desktop Tab detaches, so deletion refusals can name the
     /// user-facing blocking reason instead of a collapsed "in-use".
     pub fn session_persistent_owner_reason(&self, session_id: &str) -> Option<&'static str> {
-        self.session_owners(session_id).find_map(|owner| match owner {
-            SidecarOwner::BackgroundCompletion(_) => Some("busy-replying"),
-            SidecarOwner::GeoMonitor(_) => Some("monitor-active"),
-            _ => None,
-        })
+        self.session_owners(session_id)
+            .find_map(|owner| match owner {
+                SidecarOwner::BackgroundCompletion(_) => Some("busy-replying"),
+                SidecarOwner::GeoMonitor(_) => Some("monitor-active"),
+                _ => None,
+            })
     }
 
     /// Snapshot the Session identities protected by non-Tab Sidecar owners.

@@ -1150,8 +1150,10 @@ mod tests {
                 params![session_id, now],
             )
             .unwrap();
-        for (id, status) in [("cand-pending", "awaiting-confirmation"), ("cand-adopted", "adopted")]
-        {
+        for (id, status) in [
+            ("cand-pending", "awaiting-confirmation"),
+            ("cand-adopted", "adopted"),
+        ] {
             connection
                 .execute(
                     "INSERT INTO knowledge_fact_candidates

@@ -8,6 +8,8 @@ import {
   MessageSquarePlus,
   MessagesSquare,
   MoreHorizontal,
+  PanelLeftClose,
+  PanelLeftOpen,
   Pencil,
   Plus,
   Trash2,
@@ -34,8 +36,19 @@ import { useCloseLayer } from '@/hooks/useCloseLayer';
 import xiaojingLogo from '@/assets/brand/xiaojing-logo.png';
 import type { BrandWorkspaceState } from '@/hooks/useBrandWorkspaces';
 import { useResolvedTheme } from '@/theme';
+import { useColumnDrag } from '@/hooks/useColumnDrag';
+import {
+  effectiveSidebarMax,
+  getColumnWidths,
+  readCollapsedFlag,
+  SIDEBAR_COLLAPSED_STORAGE_KEY,
+  SIDEBAR_WIDTH_DEFAULT,
+  SIDEBAR_WIDTH_MIN,
+  writeCollapsedFlag,
+} from '@/utils/columnLayout';
 import type { Tab } from '@/types/tab';
 import type { GeoSessionStatus } from '../../../shared/geo/notification';
+import ColumnResizer from './ColumnResizer';
 
 const GEO_STATUS_PRIORITY: readonly GeoSessionStatus[] = [
   'awaiting-confirmation',
@@ -110,6 +123,58 @@ export default memo(function XiaojingSidebar({
   const workspaceGeoStatus = GEO_STATUS_PRIORITY.find((status) => (
     sessions.some((session) => session.geoStatus === status)
   ));
+
+  // 三栏拖宽 + 左栏折叠：宽度是全局一份（columnLayout store）；拖拽期间
+  // 只更新本地 state（侧栏树自包含、逐帧重渲染可接受），松手/键盘步进/
+  // 双击复位才提交到 store 与 localStorage。
+  const [collapsed, setCollapsed] = useState(() => readCollapsedFlag(SIDEBAR_COLLAPSED_STORAGE_KEY));
+  const {
+    shownWidth: shownSidebarWidth,
+    applyDelta: applySidebarDelta,
+    commit: commitSidebarWidth,
+    reset: resetSidebarWidth,
+    beginDragAt,
+  } = useColumnDrag({
+    side: 'sidebar',
+    minPx: SIDEBAR_WIDTH_MIN,
+    defaultPx: SIDEBAR_WIDTH_DEFAULT,
+    effectiveMax: () => effectiveSidebarMax(getColumnWidths().workbench, window.innerWidth),
+  });
+
+  const toggleCollapsed = useCallback(() => {
+    setCollapsed((value) => {
+      const next = !value;
+      writeCollapsedFlag(SIDEBAR_COLLAPSED_STORAGE_KEY, next);
+      return next;
+    });
+  }, []);
+
+  const startSidebarResize = useCallback(() => {
+    // 折叠态拖动分隔线 = 直接展开到默认宽并继续拖宽。
+    if (!collapsed) return;
+    setCollapsed(false);
+    writeCollapsedFlag(SIDEBAR_COLLAPSED_STORAGE_KEY, false);
+    beginDragAt(SIDEBAR_WIDTH_DEFAULT);
+  }, [collapsed, beginDragAt]);
+
+  const sidebarResizer = (
+    <ColumnResizer
+      ariaLabel={t('xiaojingSidebar.resizeHandle')}
+      hintLabel={t('xiaojingSidebar.resizeHint')}
+      onResizeBy={applySidebarDelta}
+      onResizeCommit={commitSidebarWidth}
+      onResizeStart={startSidebarResize}
+      onReset={resetSidebarWidth}
+    />
+  );
+
+  const collapsedNavButtonClass = (active: boolean) => (
+    `flex h-8 w-8 items-center justify-center rounded-lg ${
+      active
+        ? 'bg-[var(--accent-warm-subtle)] text-[var(--ink)]'
+        : 'text-[var(--ink-secondary)] hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]'
+    }`
+  );
 
   const closeCreateDialog = useCallback(() => {
     if (busy) return;
@@ -252,12 +317,96 @@ export default memo(function XiaojingSidebar({
     }
   }, [brandDeletionPreview, busy, onDeleteBrand, t]);
 
+  // 折叠窄条（与右栏工作台折叠同款语言）：品牌头像 + 主导航图标 + 底部
+  // 用户头像；折叠态拖动分隔线即展开（见 startSidebarResize）。分支必须
+  // 放在全部钩子之后，避免折叠/展开切换改变钩子数量。
+  if (collapsed) {
+    return (
+      <>
+        <aside
+          aria-label={t('xiaojingSidebar.ariaLabel')}
+          className="relative z-40 flex h-screen w-12 shrink-0 flex-col items-center border-r border-[var(--line)] bg-[var(--xiaojing-sidebar-bg)] py-2 text-[var(--ink)]"
+          data-xiaojing-sidebar="collapsed"
+        >
+          <div className="custom-titlebar h-11 w-full shrink-0" data-tauri-drag-region />
+          <button
+            type="button"
+            onClick={toggleCollapsed}
+            aria-label={t('xiaojingSidebar.expandSidebar')}
+            title={t('xiaojingSidebar.expandSidebar')}
+            className="mt-1 flex h-8 w-8 items-center justify-center rounded-lg text-[var(--ink-muted)] hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
+          >
+            <PanelLeftOpen className="h-4 w-4" />
+          </button>
+          <span
+            title={currentWorkspace?.name}
+            className="mt-4 flex h-8 w-8 items-center justify-center rounded-lg bg-[var(--accent-warm-subtle)] text-sm font-semibold text-[var(--accent)]"
+          >
+            {currentWorkspace?.name.slice(0, 1) || '鲸'}
+          </span>
+          <nav
+            aria-label={t('xiaojingSidebar.primaryNav')}
+            className="mt-4 flex flex-col items-center gap-1"
+            data-xiaojing-primary-nav
+          >
+            <button
+              type="button"
+              onClick={onOpenBrandArchive}
+              aria-label={t('xiaojingSidebar.brandArchive')}
+              aria-current={activeTab?.view === 'brand-archive' ? 'page' : undefined}
+              className={collapsedNavButtonClass(activeTab?.view === 'brand-archive')}
+            >
+              <Archive className="h-4 w-4" />
+            </button>
+            <button
+              type="button"
+              onClick={onOpenBrandEffect}
+              aria-label={t('xiaojingSidebar.brandEffect')}
+              aria-current={activeTab?.view === 'brand-effect' ? 'page' : undefined}
+              className={collapsedNavButtonClass(activeTab?.view === 'brand-effect')}
+            >
+              <Gauge className="h-4 w-4" />
+            </button>
+          </nav>
+          <div className="mt-auto pb-1">
+            <button
+              type="button"
+              onClick={() => setAccountPanelOpen(true)}
+              aria-label={t('account.personalInfo')}
+              title={t('account.personalInfo')}
+              className="flex h-8 w-8 items-center justify-center rounded-lg text-[var(--ink-subtle)] hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
+            >
+              <UserRound className="h-4 w-4" />
+            </button>
+          </div>
+        </aside>
+        {sidebarResizer}
+        {accountPanelOpen && <AccountPanelDialog onClose={() => setAccountPanelOpen(false)} />}
+      </>
+    );
+  }
+
   return (
-    <aside aria-label={t('xiaojingSidebar.ariaLabel')} className="relative z-40 flex h-screen w-[248px] shrink-0 flex-col border-r border-[var(--line)] bg-[var(--xiaojing-sidebar-bg)] text-[var(--ink)]" data-xiaojing-sidebar>
+    <>
+    <aside
+      aria-label={t('xiaojingSidebar.ariaLabel')}
+      style={{ width: shownSidebarWidth }}
+      className="relative z-40 flex h-screen shrink-0 flex-col border-r border-[var(--line)] bg-[var(--xiaojing-sidebar-bg)] text-[var(--ink)]"
+      data-xiaojing-sidebar="expanded"
+    >
       <div className="custom-titlebar h-11 shrink-0" data-tauri-drag-region />
       <div className="flex items-center gap-3 px-4 pb-5 pt-2">
         <div className="flex h-10 w-10 items-center justify-center overflow-hidden rounded-xl bg-white shadow-sm"><img src={xiaojingLogo} alt="" className="h-9 w-9 object-contain" /></div>
         <div className="min-w-0"><p className="theme-product-wordmark truncate text-base font-semibold">{resolvedTheme.hero.productName}</p><p className="mt-0.5 truncate text-xs font-medium text-[var(--accent)]">{resolvedTheme.hero.slogans[themeLocale]}</p></div>
+        <button
+          type="button"
+          onClick={toggleCollapsed}
+          aria-label={t('xiaojingSidebar.collapseSidebar')}
+          title={t('xiaojingSidebar.collapseSidebar')}
+          className="ml-auto flex h-7 w-7 shrink-0 items-center justify-center rounded-lg text-[var(--ink-muted)] hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
+        >
+          <PanelLeftClose className="h-4 w-4" />
+        </button>
       </div>
 
       <div className="px-3">
@@ -377,5 +526,7 @@ export default memo(function XiaojingSidebar({
         document.body,
       )}
     </aside>
+    {sidebarResizer}
+    </>
   );
 });

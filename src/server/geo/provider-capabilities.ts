@@ -132,6 +132,8 @@ export interface GeoDistributionResource {
   publish_speed?: number | null;
   published_avg?: number | null;
   platform?: number | null;
+  /** 官方 GEO 收录标记（2026-08-27 上线）：渠道在哪些 AI 平台有收录表现。 */
+  geo_platforms?: { id: number; label: string; screenshot: string | null }[] | null;
   [key: string]: unknown;
 }
 
@@ -514,6 +516,11 @@ async function upstreamHttpFailure(
   return fallback;
 }
 
+/** openAiChat 请求级超时：挂死连接（曾出现 2 分 12 秒才断）到期中断重试。 */
+const OPENAI_CHAT_TIMEOUT_MS = 120_000;
+/** 网络层/429/5xx 重试退避（2026-08-27 排查结论：无重试放大瞬时抖动）。 */
+const OPENAI_CHAT_RETRY_DELAYS_MS: readonly number[] = [500, 1_500];
+
 async function openAiChat(
   fetchImpl: typeof fetch,
   slot: "extraction" | "generation" | "reflection",
@@ -528,35 +535,81 @@ async function openAiChat(
     topP?: number;
   },
 ): Promise<string> {
-  const response = await fetchImpl(endpoint, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      model,
-      messages,
-      stream: false,
-      ...(options?.maxTokens !== undefined
-        ? { max_tokens: options.maxTokens }
-        : {}),
-      ...(options?.temperature !== undefined
-        ? { temperature: options.temperature }
-        : {}),
-      ...(options?.topP !== undefined ? { top_p: options.topP } : {}),
-    }),
-    signal: options?.signal,
+  const body = JSON.stringify({
+    model,
+    messages,
+    stream: false,
+    ...(options?.maxTokens !== undefined
+      ? { max_tokens: options.maxTokens }
+      : {}),
+    ...(options?.temperature !== undefined
+      ? { temperature: options.temperature }
+      : {}),
+    ...(options?.topP !== undefined ? { top_p: options.topP } : {}),
   });
-  if (!response.ok) throw safeUpstreamFailure(slot, response.status);
-  const payload = (await response.json()) as {
-    choices?: Array<{ message?: { content?: string } }>;
-  };
-  const content = payload.choices?.[0]?.message?.content;
-  if (typeof content !== "string" || content.length === 0) {
-    throw new Error(`${slot} 返回了无效响应`);
+  let lastError: unknown;
+  for (
+    let attempt = 0;
+    attempt <= OPENAI_CHAT_RETRY_DELAYS_MS.length;
+    attempt += 1
+  ) {
+    if (attempt > 0) {
+      await new Promise((resolve) =>
+        setTimeout(resolve, OPENAI_CHAT_RETRY_DELAYS_MS[attempt - 1]),
+      );
+    }
+    const timeout = new AbortController();
+    const timer = setTimeout(() => timeout.abort(), OPENAI_CHAT_TIMEOUT_MS);
+    const signal =
+      options?.signal && "any" in AbortSignal
+        ? AbortSignal.any([options.signal, timeout.signal])
+        : (options?.signal ?? timeout.signal);
+    try {
+      const response = await fetchImpl(endpoint, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          "Content-Type": "application/json",
+        },
+        body,
+        signal,
+      });
+      if (response.ok) {
+        const payload = (await response.json()) as {
+          choices?: Array<{ message?: { content?: string } }>;
+        };
+        const content = payload.choices?.[0]?.message?.content;
+        if (typeof content !== "string" || content.length === 0) {
+          throw new Error(`${slot} 返回了无效响应`);
+        }
+        return content;
+      }
+      const failure = safeUpstreamFailure(slot, response.status);
+      const retryable = response.status === 429 || response.status >= 500;
+      if (!retryable || attempt === OPENAI_CHAT_RETRY_DELAYS_MS.length) {
+        throw failure;
+      }
+      lastError = failure;
+    } catch (error) {
+      if (error instanceof Error && error.message === `${slot} 返回了无效响应`) {
+        throw error;
+      }
+      const isAbort = error instanceof Error && error.name === "AbortError";
+      // 调用方主动取消不重试；本层超时触发的中断与网络层错误（undici 的
+      // TypeError: fetch failed）可重试。
+      const callerCancelled = isAbort && options?.signal?.aborted === true;
+      const retryable =
+        !callerCancelled &&
+        (error instanceof TypeError || (isAbort && timeout.signal.aborted));
+      if (!retryable || attempt === OPENAI_CHAT_RETRY_DELAYS_MS.length) {
+        throw error;
+      }
+      lastError = error;
+    } finally {
+      clearTimeout(timer);
+    }
   }
-  return content;
+  throw lastError;
 }
 
 function encodeObjectKey(objectKey: string): string {

@@ -277,7 +277,20 @@ export async function mapWithArticleConcurrency<T, R>(
 
 function safeFailureReason(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
-  return message.trim().slice(0, 1_000) || "article_generation_failed";
+  // undici 的网络层错误只有泛化的 "fetch failed"，真实原因（ECONNRESET/
+  // ETIMEDOUT/UND_ERR_SOCKET…）在 error.cause——不带上就无法事后定位。
+  const cause = error instanceof Error ? error.cause : undefined;
+  const causeText =
+    cause instanceof Error
+      ? cause.message
+      : cause !== undefined && cause !== null
+        ? String(cause)
+        : undefined;
+  const merged =
+    causeText && !message.includes(causeText)
+      ? `${message}（cause: ${causeText}）`
+      : message;
+  return merged.trim().slice(0, 1_000) || "article_generation_failed";
 }
 
 function unavailableReflection(reason: string) {
