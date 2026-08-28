@@ -952,7 +952,7 @@ describe("official geo_platforms fallback recall (2026-08-27)", () => {  const g
       channel_type: 0,
       geo_platforms: [{ id: 5, label: "文心一言", screenshot: null }],
     }),
-    // 仅人群词命中（tier 3）。
+    // 仅人群词命中（tier 3）——三轮裁决起人群不再触发保底证据，无其它路即不进候选。
     resource("media", {
       id: 24,
       name: "新能源车主生活门户",
@@ -985,7 +985,7 @@ describe("official geo_platforms fallback recall (2026-08-27)", () => {  const g
     }),
   ];
 
-  // 恒等洗牌种子（j≡i）：保留席随机采样退化为按池序取样，顺序断言可复现。
+  // 恒等洗牌种子（j≡i）：召回随机采样退化为按池序取样，顺序断言可复现。
   const geoResult = () =>
     candidateResult(geoFixture(), {
       industry: "汽车",
@@ -996,10 +996,10 @@ describe("official geo_platforms fallback recall (2026-08-27)", () => {  const g
       random: () => 0.99,
     });
 
-  it("admits official geo_platforms as a fallback trigger and ranks vertical∩GEO > vertical > GEO > audience", () => {
+  it("admits official geo_platforms as a fallback trigger and ranks vertical∩GEO > vertical > GEO; audience-only drops out", () => {
     const result = geoResult();
     expect(result.candidates.map((candidate) => candidate.resourceId)).toEqual(
-      [21, 22, 23, 24],
+      [21, 22, 23],
     );
 
     const uncategorized = result.candidates.find(
@@ -1563,9 +1563,10 @@ describe("trunk family + official-site-first + dining category fix (2026-08-28 Q
 });
 
 describe("vertical quota + new weights (2026-08-28 用户裁决)", () => {
-  it("reserves recommendation seats for industry-vertical channels despite lower weight", () => {
+  it("pure weighted merge: recalled verticals compete at 0.3, passive-hit generals at 0.4 outrank them", () => {
     // 28 个泛站：各拿 1 条被动引用（0.4）；8 个餐饮类目（码 18）垂媒：仅保底 0.3。
-    // 无配额时 top30 = 28 泛站 + 2 垂媒；垂类配额 10 席 → 8 垂媒全部进入。
+    // 三轮裁决：合并层纯加权排序，无保底占位——泛站 0.4 全部排在前，垂媒以
+    // 0.3 按名序补足前 30（8 席全量召回，进入推荐的只有 2 席）。
     const general = Array.from({ length: 28 }, (_, i) =>
       resource("media", {
         id: 300 + i,
@@ -1606,10 +1607,14 @@ describe("vertical quota + new weights (2026-08-28 用户裁决)", () => {
     const generalIn = result.candidates.filter((c) =>
       c.name.includes("泛站观察"),
     );
-    expect(verticalIn.length).toBe(8);
-    // 无自媒体候选 → 媒体配额溢流为 20+10=30：8 垂类保底 + 22 泛站。
-    expect(generalIn.length).toBe(22);
+    // 8 个垂媒全部被保底路召回（召回口径），但推荐集按权重取前 30 只含 2 席。
+    expect(result.summary.alignedByPath.fallback).toBe(8);
+    expect(verticalIn.length).toBe(2);
+    // 无自媒体候选 → 媒体配额溢流为 20+10=30：28 泛站（0.4）+ 2 垂媒（0.3）。
+    expect(generalIn.length).toBe(28);
     expect(result.candidates.length).toBe(30);
+    expect(result.candidates[0]!.recommendationWeight).toBeCloseTo(0.4, 10);
+    expect(result.candidates[29]!.recommendationWeight).toBeCloseTo(0.3, 10);
   });
 
   it("applies the recalibrated weights passive .4 / active .2 / fallback .3 / preference .1", () => {
@@ -1650,8 +1655,8 @@ describe("vertical quota + new weights (2026-08-28 用户裁决)", () => {
   });
 });
 
-describe("fallback priority seats: random sampling (2026-08-28 用户裁决)", () => {
-  it("samples the vertical pool to 26 seats randomly — seeded picks differ, same seed reproduces", () => {
+describe("fallback recall sampling (2026-08-28 三轮用户裁决：召回层随机，合并层纯加权排序)", () => {
+  it("randomly recalls 26 of 30 verticals — seeded picks differ, same seed reproduces, unsampled are not recalled", () => {
     const verticals = Array.from({ length: 30 }, (_, i) =>
       resource("media", {
         id: 600 + i,
@@ -1669,24 +1674,27 @@ describe("fallback priority seats: random sampling (2026-08-28 用户裁决)", (
       activeSources: [],
       preferenceChannels: [],
     };
-    // 种子 0.99：j 恒等于 i，洗牌为恒等 → 取排序池前 26（垂媒00-25）。
+    // 种子 0.99：j 恒等于 i，洗牌为恒等 → 按池序召回前 26（垂媒00-25）。
     const identity = candidateResult(verticals, {
       ...overrides,
       random: () => 0.99,
     });
-    // 种子 0：j 恒为 0，洗牌退化为左旋一位 → 取到 垂媒26、挤掉 垂媒00。
+    // 种子 0：j 恒为 0，洗牌退化为左旋一位 → 召回到 垂媒26、挤掉 垂媒00。
     const rotated = candidateResult(verticals, {
       ...overrides,
       random: () => 0,
     });
     const identityNames = identity.candidates.map((c) => c.name);
     const rotatedNames = rotated.candidates.map((c) => c.name);
+    // 未抽中即未被保底路召回：候选集只有 26 个，垂媒26-29 完全不在列表。
+    expect(identity.candidates).toHaveLength(26);
     expect(identityNames[0]).toBe("垂媒00");
-    expect(identityNames.indexOf("垂媒25")).toBeLessThan(26);
-    expect(identityNames.indexOf("垂媒26")).toBeGreaterThanOrEqual(26);
+    expect(identityNames).toContain("垂媒25");
+    expect(identityNames).not.toContain("垂媒26");
+    expect(rotated.candidates).toHaveLength(26);
     expect(rotatedNames[0]).toBe("垂媒01");
-    expect(rotatedNames.indexOf("垂媒26")).toBeLessThan(26);
-    expect(rotatedNames.indexOf("垂媒00")).toBeGreaterThanOrEqual(26);
+    expect(rotatedNames).toContain("垂媒26");
+    expect(rotatedNames).not.toContain("垂媒00");
     // 同种子可复现（随机采样不破坏确定性调试）。
     const rotatedAgain = candidateResult(verticals, {
       ...overrides,
@@ -1695,7 +1703,7 @@ describe("fallback priority seats: random sampling (2026-08-28 用户裁决)", (
     expect(rotatedAgain.candidates.map((c) => c.name)).toEqual(rotatedNames);
   });
 
-  it("fills remaining reserved seats with GEO-marked channels before heavier generals", () => {
+  it("recalls GEO fill up to the cap; pure-fallback ranks below passive-hit generals by weight", () => {
     const verticals = ["垂媒甲", "垂媒乙"].map((name, i) =>
       resource("media", {
         id: 610 + i,
@@ -1741,13 +1749,16 @@ describe("fallback priority seats: random sampling (2026-08-28 用户裁决)", (
       preferenceChannels: [],
     });
     const names = result.candidates.map((c) => c.name);
-    // 保留席 = 垂类随机池(2) + 单 GEO 随机补足(8)，全部排在 0.4 泛站之前；
-    // 泛站虽权重更高（被动 0.4 > 保底 0.3），但通用席在保留席之后。
-    expect(names.indexOf("垂媒甲")).toBeLessThan(10);
-    expect(names.indexOf("垂媒乙")).toBeLessThan(10);
-    for (let i = 0; i < 8; i += 1) {
-      expect(names.indexOf(`GEO站${i}`)).toBeLessThan(10);
-    }
-    expect(names.indexOf("泛站0")).toBeGreaterThanOrEqual(10);
+    // 保底召回 = 垂类(2) + GEO 补足(8)，共 10 路 fallback 证据；
+    // 合并层纯加权：泛站被动 0.4 全部排前，保底 0.3 组内按分档 垂类(t1) > GEO(t2)。
+    expect(result.summary.alignedByPath.fallback).toBe(10);
+    expect(result.candidates).toHaveLength(20);
+    expect(names.slice(0, 10)).toEqual(
+      expect.arrayContaining(Array.from({ length: 10 }, (_, i) => `泛站${i}`)),
+    );
+    expect(names.indexOf("泛站0")).toBeLessThan(10);
+    expect(names.indexOf("垂媒甲")).toBe(10);
+    expect(names.indexOf("垂媒乙")).toBe(11);
+    expect(names.indexOf("GEO站0")).toBe(12);
   });
 });

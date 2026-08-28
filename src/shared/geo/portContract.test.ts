@@ -203,7 +203,12 @@ describe("GEO port contract", () => {
         "title-suffix-site-name",
         "registered-domain",
       ],
-      fallbackTopN: 50,
+      fallbackRecall: {
+        verticalQuota: 26,
+        totalCap: 30,
+        tier0Deterministic: true,
+        audienceEvidence: false,
+      },
       recommendation: {
         max: 30,
         mediaQuota: 20,

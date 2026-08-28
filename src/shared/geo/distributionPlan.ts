@@ -994,7 +994,7 @@ export function buildDistributionCandidates(input: {
   perArticleMaxPoints: number;
   articles: DistributionArticleSnapshot[];
   resources: DistributionResourceSnapshot[];
-  /** 保留席随机采样注入（测试定苗）；缺省 Math.random。 */
+  /** 保底召回随机采样注入（测试定苗）；缺省 Math.random。 */
   random?: () => number;
 }): {
   candidates: DistributionChannelCandidate[];
@@ -1135,7 +1135,7 @@ export function buildDistributionCandidates(input: {
     left.name.localeCompare(right.name, "zh-CN") ||
     left.resourceId - right.resourceId;
 
-  const candidates = approved
+  let candidates = approved
     .flatMap((resource): DistributionChannelCandidate[] => {
       const evidence: DistributionCandidateEvidence[] = [];
       // 池侧域名信号（2026-08-28 用户裁决）：entrance + case_link 双 URL 的
@@ -1299,48 +1299,9 @@ export function buildDistributionCandidates(input: {
           );
         }
       }
-      // 保底路（js_ai path 3 语义）：结构化类目/人群/官方 GEO 标记是规则匹配，
-      // 合并为一路；GEO 收录信号是同一规则路的加强说明，不再单列一路。
-      if (industryMatch || audienceMatch || geoMarked) {
-        const signals = [
-          industryMatch
-            ? `超级媒介结构化类目匹配「${
-                [
-                  ...industryCategoryLabels(
-                    mediaCodes,
-                    MEDIA_CHANNEL_TYPE_NAMES,
-                  ),
-                  ...industryCategoryLabels(
-                    weMediaCodes,
-                    WE_MEDIA_INDUSTRY_NAMES,
-                  ),
-                ]
-                  .join("/")
-                  .trim() || input.industry}」`
-            : null,
-          audienceMatch
-            ? `渠道名称或备注匹配目标人群「${input.targetAudience}」`
-            : null,
-          geoMarked
-            ? `官方 GEO 标记：${resource.geoPlatforms.join("/")}已收录`
-            : geoIncluded(resource)
-              ? "资源名称/备注含真实 GEO 收录信号"
-              : null,
-        ].filter((signal): signal is string => signal !== null);
-        evidence.push(
-          pathEvidence(
-            "fallback",
-            signals.join("；"),
-            industryMatch
-              ? `industry:${input.industry}`
-              : audienceMatch
-                ? `audience:${input.targetAudience}`
-                : `geo:${resource.geoPlatforms.join("/")}`,
-            resource.entranceLink,
-            [],
-          ),
-        );
-      }
+      // 保底路（js_ai path 3 语义）证据不再在此全量挂载——三轮裁决（2026-08-28）
+      // 把随机采样下沉到召回层：垂类/GEO 候选先进池，经 t0 全量 + t1 随机 +
+      // t2 补足抽样后才挂 fallback 证据（见下方「保底路召回采样」块）。
       // 偏好路（js_ai preferenceChannels 契约）：内置 exact 名单 + 用户 overlay。
       const preferenceHit = input.preferenceChannels.find((entry) =>
         preferenceEntryMatches(entry, {
@@ -1386,7 +1347,9 @@ export function buildDistributionCandidates(input: {
           }
         }
       }
-      if (byPath.size === 0) return [];
+      // 垂类/GEO 候选此刻可能零证据（保底证据延迟到召回采样后挂载），保留进
+      // 抽样池；t3 人群词与无命中资源照旧出局（三轮裁决：人群不触发保底）。
+      if (byPath.size === 0 && !industryMatch && !geoMarked) return [];
       const pathHits = [...byPath.keys()].sort(
         (left, right) =>
           GEO_PORT_CONTRACT.channelRecall.paths[left].number -
@@ -1482,17 +1445,12 @@ export function buildDistributionCandidates(input: {
   // 本函数构造的候选恒带 variantFamily；?? 兜底只为满足可选类型（旧投影复用）。
   const familyOf = (candidate: DistributionChannelCandidate): string =>
     candidate.variantFamily ?? `${candidate.kind}:${candidate.resourceId}`;
-  const familyUsed = new Map<string, number>();
-  const familyAdmitted = admissible.filter((candidate) => {
-    const family = familyOf(candidate);
-    const used = familyUsed.get(family) ?? 0;
-    if (used >= familyQuota) return false;
-    familyUsed.set(family, used + 1);
-    return true;
-  });
-  // 保底优先席位（2026-08-28 用户裁决改随机采样）：垂类池（t0∪t1）随机取满
-  // fallbackVerticalQuota 席，单 GEO 池（t2）随机补足 max 内剩余席位；池尽
-  // 回流整体排序，t3+ 不占保留席。随机采样避免固定渠道长期霸榜。
+  // ── 保底路召回采样（2026-08-28 三轮用户裁决：随机采样下沉召回层，合并层
+  // 恢复纯加权排序取前 30，无任何保底占位）：t0（垂类∩GEO）确定性全量召回；
+  // t1（纯垂类）随机补足 verticalQuota 席——数据飞轮探索臂，每次运行抽到
+  // 不同子集，未抽中即本次未被保底路召回（不带 0.3 权重，多路命中者权重
+  // 回落，如被动+垂类→0.4，与主动路未召回同理）；t2（单 GEO）随机补足至
+  // totalCap 封顶；t3 人群不挂保底证据。抽样单位=包代表（家族塌缩前）。
   const random = input.random ?? Math.random;
   const fallbackTierOf = (candidate: DistributionChannelCandidate) =>
     fallbackPreferenceTier(candidate.resourceSnapshot, tierInput);
@@ -1504,46 +1462,130 @@ export function buildDistributionCandidates(input: {
     }
     return out;
   };
-  const verticalPool = shuffled(
-    familyAdmitted.filter((candidate) => fallbackTierOf(candidate) <= 1),
+  const fallbackRecall = GEO_PORT_CONTRACT.channelRecall.fallbackRecall;
+  const tier0Picks = admissible.filter(
+    (candidate) => fallbackTierOf(candidate) === 0,
   );
-  const geoPool = shuffled(
-    familyAdmitted.filter((candidate) => fallbackTierOf(candidate) === 2),
+  const tier1Pool = shuffled(
+    admissible.filter((candidate) => fallbackTierOf(candidate) === 1),
   );
-  const verticalSeats = Math.min(
-    verticalPool.length,
-    GEO_PORT_CONTRACT.channelRecall.recommendation.fallbackVerticalQuota,
+  const tier2Pool = shuffled(
+    admissible.filter((candidate) => fallbackTierOf(candidate) === 2),
   );
-  const geoSeats = Math.min(
-    geoPool.length,
-    GEO_PORT_CONTRACT.channelRecall.recommendation.max - verticalSeats,
+  const tier1Picks = tier1Pool.slice(
+    0,
+    Math.max(0, fallbackRecall.verticalQuota - tier0Picks.length),
   );
-  const fallbackPriorityPicks = [
-    ...verticalPool.slice(0, verticalSeats),
-    ...geoPool.slice(0, geoSeats),
-  ];
-  const reservedKeys = new Set(
-    fallbackPriorityPicks.map(
-      (candidate) => `${candidate.kind}:${candidate.resourceId}`,
+  const tier2Picks = tier2Pool.slice(
+    0,
+    Math.max(0, fallbackRecall.totalCap - tier0Picks.length - tier1Picks.length),
+  );
+  const fallbackEvidenceOf = (
+    resource: DistributionResourceSnapshot,
+  ): DistributionCandidateEvidence => {
+    // 三轮裁决：人群词不参与保底路——信号与 reference 只保留行业/GEO 两种
+    // 触发。`audience:` reference 分支删除（t2 候选名含人群词时会产出与快照
+    // geoPlatforms 不一致的载荷，破坏 Rust 确认门交叉校验；Rust 侧仍兼容
+    // 校验旧计划的 audience: 值）。
+    const industryHit = industryCategoryMatch(
+      resource,
+      mediaCodes,
+      weMediaCodes,
+    );
+    const geoHit = resource.geoPlatforms.length > 0;
+    const signals = [
+      industryHit
+        ? `超级媒介结构化类目匹配「${
+            [
+              ...industryCategoryLabels(mediaCodes, MEDIA_CHANNEL_TYPE_NAMES),
+              ...industryCategoryLabels(weMediaCodes, WE_MEDIA_INDUSTRY_NAMES),
+            ]
+              .join("/")
+              .trim() || input.industry}」`
+        : null,
+      geoHit
+        ? `官方 GEO 标记：${resource.geoPlatforms.join("/")}已收录`
+        : geoIncluded(resource)
+          ? "资源名称/备注含真实 GEO 收录信号"
+          : null,
+    ].filter((signal): signal is string => signal !== null);
+    return pathEvidence(
+      "fallback",
+      signals.join("；"),
+      industryHit
+        ? `industry:${input.industry}`
+        : `geo:${resource.geoPlatforms.join("/")}`,
+      resource.entranceLink,
+      [],
+    );
+  };
+  const recalledKeys = new Set(
+    [...tier0Picks, ...tier1Picks, ...tier2Picks].map(
+      (
+        candidate,
+      ): `${DistributionChannelKind}:${number}` =>
+        `${candidate.kind}:${candidate.resourceId}`,
     ),
   );
-  const quotaOrdered = [
-    ...fallbackPriorityPicks,
-    ...familyAdmitted.filter(
-      (candidate) => !reservedKeys.has(`${candidate.kind}:${candidate.resourceId}`),
-    ),
-  ];
-  const mediaCount = quotaOrdered.filter(
+  const candidateByKey = new Map(
+    candidates.map((candidate) => [
+      `${candidate.kind}:${candidate.resourceId}`,
+      candidate,
+    ] as const),
+  );
+  for (const key of recalledKeys) {
+    const candidate = candidateByKey.get(key);
+    if (!candidate) continue;
+    candidate.evidence.push(fallbackEvidenceOf(candidate.resourceSnapshot));
+    const mergedHits: DistributionRecallPath[] = [
+      ...candidate.pathHits,
+      "fallback",
+    ];
+    mergedHits.sort(
+      (left, right) =>
+        GEO_PORT_CONTRACT.channelRecall.paths[left].number -
+        GEO_PORT_CONTRACT.channelRecall.paths[right].number,
+    );
+    candidate.pathHits = mergedHits;
+    candidate.hitCount = candidate.pathHits.length;
+    candidate.recommendationWeight = Number(
+      candidate.pathHits
+        .reduce(
+          (total, path) =>
+            total + GEO_PORT_CONTRACT.channelRecall.paths[path].weight,
+          0,
+        )
+        .toFixed(10),
+    );
+  }
+  // 未被任何路召回的候选退出候选集（纯垂类/单GEO 未抽中、t3 人群无其它路）。
+  candidates = candidates.filter(
+    (candidate) => candidate.pathHits.length > 0,
+  );
+  // ── 家族限席 + 全局排序走查（三轮裁决恢复旧语义）：admissible 过滤到已
+  // 召回成员后按最终权重排序，家族 ≤2 席，再走媒体/自媒体配额取前 30。
+  const familyUsed = new Map<string, number>();
+  const familyAdmitted = admissible
+    .filter((candidate) => candidate.pathHits.length > 0)
+    .sort(compareByGlobalRank)
+    .filter((candidate) => {
+      const family = familyOf(candidate);
+      const used = familyUsed.get(family) ?? 0;
+      if (used >= familyQuota) return false;
+      familyUsed.set(family, used + 1);
+      return true;
+    });
+  const mediaCount = familyAdmitted.filter(
     (candidate) => candidate.kind === "media",
   ).length;
-  const weMediaCount = quotaOrdered.length - mediaCount;
+  const weMediaCount = familyAdmitted.length - mediaCount;
   let mediaTake = mediaQuota;
   let weMediaTake = weMediaQuota;
   if (mediaCount < mediaQuota) weMediaTake += mediaQuota - mediaCount;
   else if (weMediaCount < weMediaQuota) mediaTake += weMediaQuota - weMediaCount;
   let usedMedia = 0;
   let usedWeMedia = 0;
-  const recommended = quotaOrdered
+  const recommended = familyAdmitted
     .filter((candidate) => {
       if (candidate.kind === "media") {
         if (usedMedia >= mediaTake) return false;

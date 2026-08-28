@@ -352,17 +352,26 @@ export const GEO_PORT_CONTRACT = {
       "title-suffix-site-name",
       "registered-domain",
     ],
-    fallbackTopN: 50,
+    // 保底路召回（2026-08-28 三轮用户裁决：随机采样下沉召回层，合并层恢复
+    // 纯加权排序取前 30，无任何保底占位）：垂类∩GEO（t0）确定性全量召回；
+    // 纯垂类（t1）每次随机抽样补足 verticalQuota 席（数据飞轮探索臂——未抽中
+    // 即本次未被保底路召回，不带 0.3 权重；多路命中者未抽中时权重回落，如
+    // 被动+垂类→0.4，与主动路未召回同理）；单 GEO（t2）随机补足至 totalCap
+    // 封顶；人群词（t3）不再触发保底证据。
+    fallbackRecall: {
+      verticalQuota: 26,
+      totalCap: 30,
+      tier0Deterministic: true,
+      audienceEvidence: false,
+    },
     geoInclusionHardFilterScope: "fallback-only",
     recommendation: {
       max: 30,
       mediaQuota: 20,
       weMediaQuota: 10,
-      // 保底优先席位（2026-08-28 用户裁决改随机采样）：垂类池（t0∪t1）
-      // 随机取满 fallbackVerticalQuota 席，单 GEO 池（t2）随机补足 max 内
-      // 剩余席位；池尽回流整体排序，t3+ 不占保留席。随机避免固定渠道霸榜。
-      fallbackVerticalQuota: 26,
       surplusFill: true,
+      // 保底占位已随三轮裁决移除（2026-08-28）：合并层纯加权排序，垂类
+      // 配额语义整体迁移至 fallbackRecall（召回层）。
       // 2026-08-28 用户裁决：排序链加入 junk 压制（随机号商品靠后）、垂类名
       // 命中（名称含行业/人群词优先，兑现「大渠道子频道尽量垂类」）与被动
       // 覆盖度（同分时覆盖问题多者优先，替代拼音序）。
