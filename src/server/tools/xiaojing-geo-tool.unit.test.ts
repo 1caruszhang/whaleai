@@ -1,10 +1,18 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+import { managementApi } from "../utils/management-api-client";
+
+vi.mock("../utils/management-api-client", () => ({
+  managementApi: vi.fn(),
+}));
 
 import type { GeoOperationProjection } from '../../shared/geo/operation';
 import type { DistributionPlanProjection } from '../../shared/geo/distributionPlan';
 import type { PublishExecutionProjection } from '../../shared/geo/publishScheduler';
 import {
   accountTokenCacheFingerprint,
+  brandWorkspaceStateSummary,
+  configureXiaojingGeo,
   confirmRankingCompetitors,
   distributionPlanCardProjection,
   geoOperationControlFailure,
@@ -440,5 +448,172 @@ describe('planDistributionBudgetCny', () => {
   it('allows a lower plan budget but clamps it to the user total limit', () => {
     expect(planDistributionBudgetCny(8_000, 16_000)).toBe(500);
     expect(planDistributionBudgetCny(20_000, 16_000)).toBe(1_000);
+  });
+});
+
+describe('brandWorkspaceStateSummary', () => {
+  const api = vi.mocked(managementApi);
+  let previousSidecarId: string | undefined;
+
+  beforeEach(() => {
+    previousSidecarId = process.env.XIAOJING_SIDECAR_ID;
+    process.env.XIAOJING_SIDECAR_ID = 'sidecar-summary';
+  });
+
+  afterEach(() => {
+    if (previousSidecarId === undefined) {
+      delete process.env.XIAOJING_SIDECAR_ID;
+    } else {
+      process.env.XIAOJING_SIDECAR_ID = previousSidecarId;
+    }
+    vi.clearAllMocks();
+  });
+
+  function routeBrandWorkspace(
+    responses: Record<string, unknown>,
+  ): void {
+    api.mockImplementation(async (path: string): Promise<Record<string, unknown>> => {
+      const response = responses[path] as Record<string, unknown> | undefined;
+      if (response === undefined) {
+        return { ok: false, error: `unrouted:${path}` };
+      }
+      return response;
+    });
+  }
+
+  it('returns null without a workspace identity', async () => {
+    configureXiaojingGeo({}, { sessionId: 'summary-session' });
+    expect(await brandWorkspaceStateSummary()).toBeNull();
+  });
+
+  it('summarizes persisted cross-session state from the Rust latest ports', async () => {
+    configureXiaojingGeo({}, {
+      sessionId: 'summary-session',
+      workspace: 'C:/ws/brand-a',
+    });
+    routeBrandWorkspace({
+      '/api/brand-materials/context': {
+        ok: true,
+        context: { workspaceId: 'brand-a', brandName: '目标品牌', productLines: ['汽车音响改装'] },
+      },
+      '/api/brand-knowledge/current': {
+        ok: true,
+        current: { normalizedValueJson: '["甲","乙","丙","丁","戊"]' },
+      },
+      '/api/brand-question-pools/latest': {
+        ok: true,
+        pool: {
+          status: 'confirmed', productLine: '汽车音响改装', targetRegion: '成都',
+          questions: [{}, {}], updatedAt: '2026-08-27T10:00:00Z',
+        },
+      },
+      '/api/brand-topic-plans/latest': {
+        ok: true,
+        plan: {
+          status: 'confirmed', productLine: '汽车音响改装', topics: [{}],
+          updatedAt: '2026-08-27T11:00:00Z',
+        },
+      },
+      '/api/brand-articles/latest': {
+        ok: true,
+        operation: {
+          status: 'completed',
+          articles: [{ approvedVersion: { id: 'v' } }, { approvedVersion: null }],
+          updatedAt: '2026-08-27T12:00:00Z',
+        },
+      },
+      '/api/brand-distribution-plans/latest': {
+        ok: true,
+        plan: { status: 'confirmed', industry: '汽车后市场', updatedAt: '2026-08-27T13:00:00Z' },
+      },
+      '/api/brand-publish-scheduler/latest': {
+        ok: true,
+        execution: {
+          status: 'scheduled', publishStartAt: '2026-08-28T09:00:00Z',
+          updatedAt: '2026-08-27T14:00:00Z',
+        },
+      },
+    });
+
+    const summary = await brandWorkspaceStateSummary();
+
+    expect(summary).toMatchObject({
+      kind: 'brand-workspace-state',
+      brandName: '目标品牌',
+      productLines: ['汽车音响改装'],
+      confirmedCompetitors: ['甲', '乙', '丙', '丁', '戊'],
+      questionPool: { present: true, state: { status: 'confirmed', questionCount: 2 } },
+      topicPlan: { present: true, state: { topicCount: 1 } },
+      articles: { present: true, state: { articleCount: 2, approvedCount: 1 } },
+      distributionPlan: { present: true, state: { industry: '汽车后市场' } },
+      publish: { present: true, state: { status: 'scheduled' } },
+    });
+  });
+
+  it('degrades a failing stage to absent instead of failing the summary', async () => {
+    configureXiaojingGeo({}, {
+      sessionId: 'summary-session',
+      workspace: 'C:/ws/brand-a',
+    });
+    routeBrandWorkspace({
+      '/api/brand-materials/context': {
+        ok: true,
+        context: { workspaceId: 'brand-a', brandName: '目标品牌', productLines: [] },
+      },
+      '/api/brand-knowledge/current': {
+        ok: true,
+        current: null,
+      },
+    });
+
+    const summary = await brandWorkspaceStateSummary();
+
+    expect(summary).toMatchObject({
+      brandName: '目标品牌',
+      confirmedCompetitors: [],
+      questionPool: { present: false },
+    });
+  });
+
+  it('marks a failed knowledge read as unknown (null), not an empty competitor list', async () => {
+    configureXiaojingGeo({}, {
+      sessionId: 'summary-session',
+      workspace: 'C:/ws/brand-a',
+    });
+    // 品牌材料上下文失败 → brandName/竞品均为 null（未知），
+    // 不得与「确认过但一家都没有」（[]）混淆。
+    routeBrandWorkspace({});
+
+    const summary = await brandWorkspaceStateSummary();
+
+    expect(summary).toMatchObject({
+      brandName: null,
+      confirmedCompetitors: null,
+      questionPool: { present: false },
+    });
+  });
+
+  it('marks a failed competitor fact read as unknown even when brand context succeeds', async () => {
+    configureXiaojingGeo({}, {
+      sessionId: 'summary-session',
+      workspace: 'C:/ws/brand-a',
+    });
+    routeBrandWorkspace({
+      '/api/brand-materials/context': {
+        ok: true,
+        context: { workspaceId: 'brand-a', brandName: '目标品牌', productLines: [] },
+      },
+      '/api/brand-knowledge/current': {
+        ok: false,
+        error: 'knowledge_read_failed',
+      },
+    });
+
+    const summary = await brandWorkspaceStateSummary();
+
+    expect(summary).toMatchObject({
+      brandName: '目标品牌',
+      confirmedCompetitors: null,
+    });
   });
 });

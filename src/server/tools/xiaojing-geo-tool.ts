@@ -153,6 +153,117 @@ export function xiaojingGeoContextSnapshot(): {
   };
 }
 
+type BrandWorkspaceStageState =
+  | { present: false }
+  | { present: true; state: Record<string, unknown> };
+
+const STAGE_ABSENT: BrandWorkspaceStageState = { present: false };
+
+function stageStateFrom<T>(
+  outcome: PromiseSettledResult<T | null>,
+  project: (value: T) => Record<string, unknown>,
+): BrandWorkspaceStageState {
+  if (outcome.status !== 'fulfilled' || outcome.value === null) {
+    return STAGE_ABSENT;
+  }
+  return { present: true, state: project(outcome.value) };
+}
+
+export interface BrandWorkspaceStateSummary {
+  kind: 'brand-workspace-state';
+  /** 品牌材料上下文读取失败时为 null（未知），不是空品牌。 */
+  brandName: string | null;
+  productLines: string[];
+  /** brand scope 的已确认排行榜竞品（enterprise-profile.competitors）。
+   * null = 知识读取失败（未知，不得按不足处理）；[] = 确认过、一家都没有。 */
+  confirmedCompetitors: string[] | null;
+  questionPool: BrandWorkspaceStageState;
+  topicPlan: BrandWorkspaceStageState;
+  articles: BrandWorkspaceStageState;
+  distributionPlan: BrandWorkspaceStageState;
+  publish: BrandWorkspaceStageState;
+}
+
+/**
+ * 跨 Session 只读的品牌工作台状态摘要：BrandWorkspace 是权威 owner，各阶段
+ * 产物经 Rust `latest` 端点读取，与右侧工作台投影同源。Agent 在新 Session
+ * 里先读这里再决定是否向用户要信息；单阶段读取失败只降级为 absent，
+ * 不阻断整体摘要（只读路径，无副作用可安全重试）。
+ */
+export async function brandWorkspaceStateSummary(): Promise<BrandWorkspaceStateSummary | null> {
+  if (!context.workspace) return null;
+  const identity = stageIdentity();
+  // Port 构造可能同步 throw（如缺 Sidecar 身份）；先包成 rejected promise，
+  // 让 allSettled 按阶段降级而不是整体失败。
+  const safe = <T>(run: () => Promise<T>): Promise<T> => {
+    try {
+      return run();
+    } catch (error) {
+      return Promise.reject(error);
+    }
+  };
+  const [brandContext, pools, plans, articleOperations, distributions, publishes] =
+    await Promise.allSettled([
+      safe(() => brandMaterialPort().context()),
+      safe(() => createQuestionPoolPort(identity).latest()),
+      safe(() => createTopicPlanPort(identity).latest('confirmed')),
+      safe(() => createArticlePort(identity).latest()),
+      safe(() => createDistributionPlanPort(identity).latest()),
+      safe(() => createPublishSchedulerPort(identity).latest()),
+    ]);
+  const contextResult =
+    brandContext.status === 'fulfilled' ? brandContext.value : null;
+  let confirmedCompetitors: string[] | null = null;
+  if (contextResult) {
+    try {
+      const current = await knowledgeAuthority().inspect({
+        subject: contextResult.brandName,
+        predicate: 'enterprise-profile.competitors',
+        scope: { entityScope: 'brand' },
+      });
+      confirmedCompetitors = parsedStringList(current?.normalizedValueJson);
+    } catch {
+      // 知识读取失败保持 null（未知）：不得与「确认过但为空」混淆，
+      // 否则瞬时故障会被 prompt 规则当成不足而重新向用户征集。
+    }
+  }
+  return {
+    kind: 'brand-workspace-state',
+    brandName: contextResult?.brandName ?? null,
+    productLines: contextResult?.productLines ?? [],
+    confirmedCompetitors,
+    questionPool: stageStateFrom(pools, (pool) => ({
+      status: pool.status,
+      productLine: pool.productLine,
+      targetRegion: pool.targetRegion,
+      questionCount: pool.questions.length,
+      updatedAt: pool.updatedAt,
+    })),
+    topicPlan: stageStateFrom(plans, (plan) => ({
+      status: plan.status,
+      productLine: plan.productLine,
+      topicCount: plan.topics.length,
+      updatedAt: plan.updatedAt,
+    })),
+    articles: stageStateFrom(articleOperations, (operation) => ({
+      status: operation.status,
+      articleCount: operation.articles.length,
+      approvedCount: operation.articles.filter((article) => article.approvedVersion).length,
+      updatedAt: operation.updatedAt,
+    })),
+    distributionPlan: stageStateFrom(distributions, (plan) => ({
+      status: plan.status,
+      industry: plan.industry,
+      updatedAt: plan.updatedAt,
+    })),
+    publish: stageStateFrom(publishes, (execution) => ({
+      status: execution.status,
+      publishStartAt: execution.publishStartAt,
+      updatedAt: execution.updatedAt,
+    })),
+  };
+}
+
 function geoOperationService() {
   if (!context.workspace)
     throw new Error('GeoOperation requires an explicit workspace identity');
@@ -835,10 +946,13 @@ export async function createXiaojingGeoServer() {
     tools: [
       tool(
         'inspect_brand_context',
-        'Read the current Xiaojing brand/session identity and the registered GEO capability availability. Call this before proposing a GEO action.',
+        "Read the current Xiaojing brand/session identity, the registered GEO capability availability, and the cross-session BrandWorkspace state summary (brand name, product lines, confirmed ranking competitors, and the latest persisted artifact status per stage: question pool, topic plan, articles, distribution plan, publish execution). Call this before proposing a GEO action and before asking the user for any brand facts — prior sessions' confirmed knowledge and approved artifacts are already persisted here; only ask the user when this summary or inspect_brand_fact shows the fact is missing.",
         { reason: z.string().max(200).optional().describe('Why the current GEO context is needed.') },
         async () => ({
-          content: [{ type: 'text' as const, text: JSON.stringify(xiaojingGeoContextSnapshot()) }],
+          content: [{ type: 'text' as const, text: JSON.stringify({
+            ...xiaojingGeoContextSnapshot(),
+            workspaceState: await brandWorkspaceStateSummary(),
+          }) }],
         }),
         { alwaysLoad: true },
       ),
