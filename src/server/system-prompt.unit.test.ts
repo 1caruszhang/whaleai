@@ -20,6 +20,18 @@ describe('buildSystemPrompt', () => {
     expect(prompt).not.toMatch(/mcp__[a-z-]+__/);
   });
 
+  // 回归（跨 Session 状态盲区）：品牌事实与已确认竞品是 BrandWorkspace 持久
+  // 数据；新 Session 必须先读摘要再决定是否向用户要信息，不得重新征集。
+  it('requires reading persisted brand state before asking the user for brand facts', () => {
+    expect(prompt).toContain('品牌状态先读后问');
+    expect(prompt).toContain('inspect_brand_context');
+    expect(prompt).toContain('inspect_brand_fact');
+    expect(prompt).toContain('enterprise-profile.competitors');
+    expect(prompt).toContain('不得因换了 Session 就重新征集');
+    // 读取失败（null / present:false）是异常不是数据缺失，不得当作不足重新征集。
+    expect(prompt).toContain('绝不把读取异常当作信息不足向用户征集');
+  });
+
   it('locks the intent decision table with a full-optimization default', () => {
     expect(prompt).toContain('点名了具体环节');
     expect(prompt).toContain('没有点名环节');
