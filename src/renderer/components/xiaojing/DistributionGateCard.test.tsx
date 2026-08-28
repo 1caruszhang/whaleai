@@ -45,6 +45,7 @@ function snapshot(
     publishSpeed: null,
     publishedAverageMinutes: null,
     platform: null,
+    geoPlatforms: [],
     ...overrides,
   };
 }
@@ -139,6 +140,9 @@ function plan(
       filteredOverPerArticleLimit: 0,
       alignedResources: 1,
       recommendedResources: 1,
+      alignedByPath: { passive: 0, active: 0, fallback: 1, preference: 0 },
+      citationDomains: 0,
+      citationDomainPoolHits: 0,
     },
     blockingIssues: [],
     createdAt: "2026-08-15T00:00:00Z",
@@ -203,7 +207,7 @@ describe("DistributionGateCard channel recommendation rows", () => {
                 evidence: [
                   {
                     path: "fallback",
-                    weight: 0.2,
+                    weight: 0.15,
                     label: "结构化类目匹配",
                     reference: "industry:汽车",
                     url: null,

@@ -15,6 +15,7 @@ import {
   type KnowledgeCandidatesCardData,
   type KnowledgeFieldRow,
 } from '../../../shared/geo/knowledgeCard';
+import GateCardFooter, { GateCardSuccess } from './GateCardFooter';
 
 /** 通知右侧工作台"品牌知识·当前权威"面板刷新（同一 renderer 内的事件）。 */
 export const KNOWLEDGE_DECIDED_EVENT = 'xiaojing:knowledge-decided';
@@ -412,7 +413,7 @@ export default function KnowledgeBatchCard({ data, onDecided }: KnowledgeBatchCa
       data-knowledge-batch-card={identity.workspaceId}
       data-settled={allSettled}
     >
-      <div className="flex items-start gap-2 border-b border-[var(--line-subtle)] px-4 py-3">
+      <div className={`flex items-start gap-2 border-[var(--line-subtle)] px-4 py-3 ${open ? 'border-b' : ''}`}>
         <button
           type="button"
           aria-expanded={open}
@@ -447,18 +448,6 @@ export default function KnowledgeBatchCard({ data, onDecided }: KnowledgeBatchCa
             ? <ChevronDown className="mt-1.5 h-4 w-4 shrink-0 text-[var(--ink-muted)]" />
             : <ChevronRight className="mt-1.5 h-4 w-4 shrink-0 text-[var(--ink-muted)]" />}
         </button>
-        {/* 整卡确认常驻卡片头部：候选多、正文长时也能一眼找到主操作（GD 反馈）。 */}
-        {!allSettled && (
-          <button
-            type="button"
-            data-knowledge-confirm-cta
-            disabled={!canSubmit}
-            onClick={submitAll}
-            className="mt-1 shrink-0 rounded-md bg-[var(--button-dark-bg)] px-3 py-1.5 text-xs font-medium text-[var(--button-dark-text)] disabled:opacity-50"
-          >
-            {submitLabel}
-          </button>
-        )}
       </div>
 
       {open && (
@@ -490,16 +479,11 @@ export default function KnowledgeBatchCard({ data, onDecided }: KnowledgeBatchCa
           </p>
         )}
 
-        {allSettled ? (
-          <p className="flex items-center gap-1.5 text-xs text-[var(--success)]">
-            <Check className="h-3.5 w-3.5" />
-            {t('knowledgeCard.allSettledNote')}
-          </p>
-        ) : unresolvedConflictCount > 0 ? (
+        {unresolvedConflictCount > 0 && (
           <p className="text-xs text-[var(--warning)]">
             {t('knowledgeCard.unresolvedConflictHint', { count: unresolvedConflictCount })}
           </p>
-        ) : null}
+        )}
 
         <p className="rounded-lg bg-[var(--paper-inset)] px-3 py-2 text-xs text-[var(--ink-muted)]">
           <span className="font-medium text-[var(--ink-secondary)]">{t('knowledgeCard.impactLabel')}</span>
@@ -507,6 +491,26 @@ export default function KnowledgeBatchCard({ data, onDecided }: KnowledgeBatchCa
         </p>
       </div>
       )}
+
+      {/* 整卡确认固定页脚右下（闸门卡统一规范）：卡片折叠时页脚仍在，
+          主操作不因收起候选列表而消失；确认后原位变成功态。 */}
+      <div className="px-4 pb-3">
+        <GateCardFooter>
+          {allSettled ? (
+            <GateCardSuccess>{t('knowledgeCard.allSettledNote')}</GateCardSuccess>
+          ) : (
+            <button
+              type="button"
+              data-knowledge-confirm-cta
+              disabled={!canSubmit}
+              onClick={submitAll}
+              className="rounded-md bg-[var(--button-dark-bg)] px-3 py-1.5 text-xs font-medium text-[var(--button-dark-text)] disabled:opacity-50"
+            >
+              {submitLabel}
+            </button>
+          )}
+        </GateCardFooter>
+      </div>
     </section>
   );
 }

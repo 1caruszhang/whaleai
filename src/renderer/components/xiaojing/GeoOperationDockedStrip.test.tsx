@@ -152,6 +152,9 @@ describe("GeoOperationDockedStrip", () => {
     renderDocked();
     // 等停靠条渲染完成（live 已落地、轮询监听已挂载）再派发事件。
     await screen.findByRole("button", { name: "定位当前闸门卡片" });
+    // 冲刷 passive effects：按钮出现（DOM 提交）与 visibilitychange 监听器
+    // 挂载（effect 冲刷）之间存在窗口，负载下事件可能派发在监听器挂载前。
+    await act(async () => {});
     expect(mocks.loadGeoOperations).toHaveBeenCalledTimes(1);
 
     act(() => {

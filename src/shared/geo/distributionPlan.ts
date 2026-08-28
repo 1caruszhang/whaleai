@@ -1,10 +1,27 @@
 import { GEO_PORT_CONTRACT, type GeoContentType } from "./portContract";
 import {
+  accountKeyFromUrl,
+  accountNameFromTitle,
+  accountNameMatchesChannel,
+  activeNameMatchScore,
+  buildPoolDomainNameMap,
+  buildQualifierSuffixes,
+  buildUnambiguousDomains,
   channelNameCore,
-  fuzzyMatchScore,
+  channelNameCoreAll,
+  citationPlatformFamily,
+  cleanResourceDomains,
+  isJunkResaleListing,
   isMultiTenantPlatformUrl,
+  normalizeChannelName,
+  packKeyOf,
+  platformOfficialFamily,
   preferenceEntryMatches,
+  primaryPlatformFamily,
   registeredDomain,
+  resourcePlatformFamilies,
+  siteNameFromTitleSuffix,
+  variantFamilyKey,
   type PreferenceChannelEntry,
   type RecallSource,
 } from "./channelRecall";
@@ -29,9 +46,12 @@ export const DISTRIBUTION_MAX_CANDIDATES =
 /** 被动路每问引用上限（豆包逐问探测后、进入计划前）。 */
 export const PASSIVE_PER_QUESTION_CITATION_CAP =
   GEO_PORT_CONTRACT.channelRecall.passiveRecall.perQuestionCap;
-/** 被动路进入计划的来源总数上限（按跨问渠道频次排序后截取）。 */
-export const PASSIVE_SOURCE_TOTAL_CAP =
-  GEO_PORT_CONTRACT.channelRecall.passiveRecall.totalCap;
+/**
+ * 被动路对齐渠道列表上限（2026-08-27 用户裁决二轮）：按跨问覆盖>引用数
+ * 排序取前 50；与全局推荐上限（30）互不影响。引用本身全量返回不再截断。
+ */
+export const PASSIVE_ALIGNED_CHANNEL_CAP =
+  GEO_PORT_CONTRACT.channelRecall.passiveRecall.alignedChannelCap;
 export type DistributionChannelKind = "media" | "we-media";
 export type DistributionRecallPath =
   keyof typeof GEO_PORT_CONTRACT.channelRecall.paths;
@@ -50,6 +70,11 @@ export interface DistributionQuestionSource {
   articleIds: string[];
   /** 引用的站点名（豆包 site_name）；渠道显示名优先用它而非裸域名。 */
   siteName?: string;
+  /**
+   * L3 页面作者解析注入的账号名（server 抓引用页提取作者后回填；仅多租户
+   * 平台引用、且 L1/L2 解析不到账号时才有值）。展示与被动对齐兜底共用。
+   */
+  resolvedAccountName?: string;
 }
 
 /** 主动路全局召回的原始渠道快照（LLM 联网推荐、匹配资源池之前；只读展示用）。 */
@@ -111,6 +136,12 @@ export interface DistributionResourceSnapshot {
   price: string | null;
   publishedRate: number | null;
   entranceLink: string | null;
+  /**
+   * 收录案例链接（超级媒介 case_link，全池 100% 有值、98.3% 与 entrance
+   * 同域）；7,599 条资源 entrance 为空时它是唯一域名信号（八方资源网型）。
+   * 旧计划投影可能缺省。
+   */
+  caseLink?: string | null;
   remark: string | null;
   channelType: number | null;
   industryCategory: number | null;
@@ -119,6 +150,11 @@ export interface DistributionResourceSnapshot {
   publishSpeed: number | null;
   publishedAverageMinutes: number | null;
   platform: number | null;
+  /**
+   * 官方 GEO 收录平台标签（超级媒介 geo_platforms 结构化字段，去重保序；
+   * 空数组=未标记）。保底路的独立触发条件与分档排序输入。
+   */
+  geoPlatforms: string[];
 }
 
 export interface DistributionProviderSnapshot {
@@ -159,6 +195,8 @@ export interface DistributionChannelCandidate {
   risks: string[];
   uncertainties: string[];
   resourceSnapshot: DistributionResourceSnapshot;
+  /** 变体家族键（核心名+主平台族，2026-08-28）：面板按它折叠同家族变体；旧计划可能缺省。 */
+  variantFamily?: string;
 }
 
 export interface DistributionAssignment {
@@ -176,6 +214,62 @@ export interface DistributionDiscoverySummary {
   filteredOverPerArticleLimit: number;
   alignedResources: number;
   recommendedResources: number;
+  /** 按路分桶的对齐资源数（推荐截断之前；观测口径 2026-08-27 用户裁决）。 */
+  alignedByPath: {
+    passive: number;
+    active: number;
+    fallback: number;
+    preference: number;
+  };
+  /** 引用覆盖的不同注册域名数与其中被池反查命中的数量（反查命中率分母/分子）。 */
+  citationDomains: number;
+  citationDomainPoolHits: number;
+  /** 对齐候选覆盖的不同变体家族数（与 alignedResources 的 listing 口径并存）；旧计划可能缺省。 */
+  alignedFamilies?: number;
+}
+
+/**
+ * 被动路对齐渠道（≤PASSIVE_ALIGNED_CHANNEL_CAP，2026-08-28 起按变体家族折叠、
+ * 按跨问覆盖>引用数排序）：面板「对齐渠道」区的权威数据——对齐发生在推荐
+ * 之前，recommended=false 只表示被 30 推荐挤出，不是对齐失败。行字段取家族
+ * 代表；variantCount/价格区间描述折叠掉的同胞。
+ */
+export interface DistributionPassiveAlignedChannel {
+  resourceId: number;
+  kind: DistributionChannelKind;
+  name: string;
+  estimatedPriceCny: number | null;
+  /** 对齐引用条数（跨问去重口径：同问多条只计频次，不重复计问题）。 */
+  citations: number;
+  /** 覆盖的不同问题数（家族内成员的问题并集）。 */
+  questions: number;
+  /** 账户级证据标注（账号名或「搜狐号#122878478」形态的 L1 标识；家族并集）。 */
+  accounts: string[];
+  /** 是否进入最终推荐集（配额与权重排序之后；家族任一成员进入即为 true）。 */
+  recommended: boolean;
+  /** 折叠掉的同胞变体数（含代表自身；=1 表示无变体）。 */
+  variantCount: number;
+  /** 家族内最低/最高数值价格（全部未知价时为 null）。 */
+  priceMinCny: number | null;
+  priceMaxCny: number | null;
+}
+
+/**
+ * 偏好路命中行（配额前计算，2026-08-28 用户裁决 Q12）：每个名单项一行——
+ * 旧「从推荐集反推」口径下偏好 0.15 权重永远进不了 top30、面板恒显匹配 0。
+ * matched=false 表示核心名在价内池不存在（名单录错或渠道下架时出现），如实展示。
+ */
+export interface DistributionPreferenceMatchedChannel {
+  /** 偏好名单项原文。 */
+  entryName: string;
+  matched: boolean;
+  /** 命中家族的代表（全名逐字命中者优先，否则包代表规则）。 */
+  representativeName: string | null;
+  representativePriceCny: number | null;
+  /** 家族命中变体总数。 */
+  variantCount: number;
+  /** 是否进入最终推荐集。 */
+  recommended: boolean;
 }
 
 export interface DistributionPlanProjection {
@@ -194,6 +288,21 @@ export interface DistributionPlanProjection {
   activeRecallSources?: DistributionActiveRecallSource[];
   /** 偏好路生效名单快照（内置名单+用户 overlay 合成时的名字）；旧计划可能缺省。 */
   preferenceChannelNames?: string[];
+  /**
+   * 被动路对齐渠道列表（≤50，2026-08-27 用户裁决二轮）；旧计划可能缺省，
+   * 面板回落到仅数推荐集里的被动证据。
+   */
+  passiveAlignedChannels?: DistributionPassiveAlignedChannel[];
+  /**
+   * 引用站点显示名映射（注册域名 → 展示名，池反查+标题尾缀解析的结果）；
+   * 面板组名链：豆包 site_name > 本映射 > 品牌表 > 裸域名。旧计划可能缺省。
+   */
+  citationSiteNames?: Record<string, string>;
+  /**
+   * 偏好路命中清单（配额前逐名单项计算，每项一行代表；2026-08-28 用户裁决
+   * Q12）；旧计划可能缺省，面板回落到从推荐集反推。
+   */
+  preferenceMatchedChannels?: DistributionPreferenceMatchedChannel[];
   preferredResourceIds: number[];
   mappingMode: DistributionPlanStartInput["mappingMode"];
   ratio: DistributionPlanStartInput["ratio"];
@@ -268,6 +377,7 @@ export interface DistributionResourceInput {
   price?: string | number | null;
   published_rate?: number | null;
   entrance_link?: string | null;
+  case_link?: string | null;
   remark?: string | null;
   channel_type?: number | null;
   industry_category?: number | null;
@@ -276,131 +386,110 @@ export interface DistributionResourceInput {
   publish_speed?: number | null;
   published_avg?: number | null;
   platform?: number | null;
+  geo_platforms?:
+    | { id?: number; label?: string; screenshot?: string | null }[]
+    | null;
 }
 
-const INDUSTRY_TO_MEDIA: Readonly<Record<string, number>> = {
-  汽车: 6,
-  车辆: 6,
-  汽修: 6,
-  汽配: 6,
-  驾校: 6,
-  驾驶: 6,
-  科技: 1,
-  IT: 1,
-  互联网: 1,
-  软件: 1,
-  数码: 1,
-  电子: 1,
-  人工智能: 1,
-  财经: 11,
-  金融: 11,
-  投资: 11,
-  理财: 11,
-  证券: 11,
-  保险: 11,
-  银行: 11,
-  新闻: 12,
-  资讯: 12,
-  媒体: 12,
-  健康: 9,
-  医疗: 9,
-  医药: 9,
-  医美: 9,
-  养生: 9,
-  教育: 7,
-  培训: 7,
-  留学: 7,
-  留学移民: 7,
-  生活: 2,
-  消费: 2,
-  美食: 2,
-  餐饮: 2,
-  家政: 2,
-  时尚: 3,
-  女性: 3,
-  美妆: 3,
-  服饰: 3,
-  奢侈品: 3,
-  娱乐: 4,
-  影视: 4,
-  明星: 4,
-  音乐: 4,
-  综艺: 4,
-  游戏: 5,
-  电竞: 5,
-  旅游: 8,
-  旅行: 8,
-  酒店: 8,
-  民宿: 8,
-  房产: 10,
-  家居: 10,
-  装修: 10,
-  建材: 10,
-  文化: 16,
-  艺术: 16,
-  收藏: 16,
-  书画: 16,
-  体育: 17,
-  运动: 17,
-  健身: 17,
-  足球: 17,
-  篮球: 17,
-  食品: 18,
-  农业: 18,
-  农资: 18,
-  工业: 19,
-  制造: 19,
-  机械: 19,
-  能源: 19,
-  化工: 19,
-  母婴: 20,
-  亲子: 20,
-  孕产: 20,
-  公益: 21,
-  慈善: 21,
+// ── 超级媒介官方类目枚举与行业匹配（2026-08-28 用户裁决：按附录命名实现）──
+// 附录：频道类型（媒体 channel_type）——官方文档逐条抄录。营销专区类目
+// （套餐系列/最新秒杀/十元专区/其他频道）不是行业，不参与行业匹配；
+// 数据中出现的 0 不在官方表内（未分类），同样不匹配。
+export const MEDIA_CHANNEL_TYPE_NAMES: Readonly<Record<number, string>> = {
+  1: "IT科技", 2: "生活消费", 3: "女性时尚", 4: "娱乐休闲", 5: "游戏网站",
+  6: "汽车网站", 7: "教育培训", 8: "酒店旅游", 9: "健康医疗", 10: "房产家居",
+  11: "财经商业", 12: "新闻资讯", 13: "套餐系列", 14: "最新秒杀", 15: "十元专区",
+  16: "文化艺术", 17: "体育运动", 18: "食品餐饮", 19: "工业贸易", 20: "亲子母婴",
+  21: "慈善公益", 100: "其他频道",
 };
 
-const INDUSTRY_TO_WE_MEDIA: Readonly<Record<string, number>> = {
-  汽车: 7,
-  车辆: 7,
-  汽修: 7,
-  汽配: 7,
-  科技: 5,
-  IT: 5,
-  互联网: 5,
-  软件: 5,
-  财经: 4,
-  金融: 4,
-  投资: 4,
-  理财: 4,
-  新闻: 23,
-  资讯: 23,
-  健康: 10,
-  医疗: 10,
-  医药: 10,
-  医美: 10,
-  教育: 11,
-  培训: 11,
-  美食: 13,
-  餐饮: 13,
-  时尚: 9,
-  美妆: 9,
-  娱乐: 8,
-  影视: 8,
-  游戏: 16,
-  电竞: 16,
-  旅游: 14,
-  旅行: 14,
-  房产: 19,
-  家居: 24,
-  体育: 6,
-  运动: 6,
-  母婴: 12,
-  亲子: 12,
-  文化: 1,
-  历史: 2,
+// 附录：行业分类（自媒体 industry_category）——官方文档逐条抄录。
+export const WE_MEDIA_INDUSTRY_NAMES: Readonly<Record<number, string>> = {
+  1: "文化", 2: "历史", 3: "三农", 4: "财经", 5: "科技", 6: "体育", 7: "汽车",
+  8: "娱乐", 9: "时尚", 10: "健康", 11: "教育", 12: "母婴", 13: "美食", 14: "旅游",
+  15: "公益", 16: "游戏", 17: "动漫", 18: "社会", 19: "房产", 20: "职场", 21: "情感",
+  22: "搞笑", 23: "新闻", 24: "家居", 25: "生活", 100: "其他",
 };
 
+// 营销专区/杂项类目**按类目名**排除（码在两张表里含义不同：媒体 13=套餐系列
+// 该排除，自媒体 13=美食 是核心类目——按码排除会误杀）。
+const NON_INDUSTRY_CATEGORY_NAMES = new Set([
+  "套餐系列",
+  "最新秒杀",
+  "十元专区",
+  "其他频道",
+  "其他",
+]);
+
+// 行业词 → 类目名碎片 别名：仅当词面与类目名互不包含时兜底（如「医美」不含
+//「健康医疗」的字面）。碎片与官方类目名做包含匹配，码永远只出现在上两张表。
+const INDUSTRY_TERM_ALIASES: Readonly<Record<string, readonly string[]>> = {
+  IT: ["科技"], 数码: ["科技"], 互联网: ["科技"], 软件: ["科技"], 人工智能: ["科技"],
+  电子: ["科技"],
+  医美: ["健康", "医疗"], 医疗: ["健康", "医疗"], 医药: ["健康", "医疗"], 养生: ["健康"],
+  美妆: ["时尚"], 服饰: ["时尚"], 奢侈品: ["时尚"],
+  影视: ["娱乐"], 综艺: ["娱乐"], 明星: ["娱乐"],
+  电竞: ["游戏"],
+  民宿: ["旅游"],
+  装修: ["家居"], 建材: ["家居"],
+  金融: ["财经"], 证券: ["财经"], 保险: ["财经"], 银行: ["财经"],
+  理财: ["财经"], 投资: ["财经"],
+  媒体: ["新闻"], 资讯: ["新闻"],
+  驾校: ["汽车"], 汽修: ["汽车"], 汽配: ["汽车"], 车辆: ["汽车"], 驾驶: ["汽车"],
+  慈善: ["公益"],
+  孕产: ["母婴"],
+  收藏: ["文化"], 书画: ["文化"],
+  健身: ["体育"], 足球: ["体育"], 篮球: ["体育"],
+  农业: ["食品", "三农"], 农资: ["食品", "三农"],
+  制造: ["工业"], 机械: ["工业"], 能源: ["工业"], 化工: ["工业"], 物流: ["工业"],
+  贸易: ["工业"],
+  家政: ["生活"], 消费: ["生活"],
+  美食: ["食品"],
+  餐饮: ["美食", "食品"],
+};
+
+/**
+ * 行业输入 → 官方类目码集合（2026-08-28 用户裁决：按附录命名实现）。匹配三段：
+ * 整串包含（「美食行业」⊃「美食」）∨ 别名碎片（「医美」→ 健康/医疗，词面与
+ * 类目名互不包含的词才进别名表）∨ 共享 ≥2 字子串（中文连写词：「汽车改装」
+ * 与「汽车网站」共享「汽车」——旧单码直查表是一对一硬映射，餐饮→2 的错误
+ * 正源于此）。一个行业可命中多个类目（集合语义）。
+ */
+function matchesCategoryName(industry: string, name: string): boolean {
+  if (industry.includes(name) || name.includes(industry)) return true;
+  for (const [term, fragments] of Object.entries(INDUSTRY_TERM_ALIASES)) {
+    if (!industry.includes(term)) continue;
+    if (fragments.some((fragment) => name.includes(fragment))) return true;
+  }
+  // 类目名 2-gram ⊂ 行业串（中文复合词的最小有意义片段）。
+  for (let i = 0; i + 2 <= Array.from(name).length; i += 1) {
+    const gram = Array.from(name).slice(i, i + 2).join("");
+    if (industry.includes(gram)) return true;
+  }
+  return false;
+}
+
+export function industryCodesFor(
+  industry: string,
+  names: Readonly<Record<number, string>>,
+): Set<number> {
+  const trimmed = industry.trim();
+  const codes = new Set<number>();
+  if (!trimmed) return codes;
+  for (const [rawCode, name] of Object.entries(names)) {
+    const code = Number(rawCode);
+    if (NON_INDUSTRY_CATEGORY_NAMES.has(name)) continue;
+    if (matchesCategoryName(trimmed, name)) codes.add(code);
+  }
+  return codes;
+}
+/** 行业命中的类目名（证据 label 用官方命名，如「食品餐饮」）。 */
+export function industryCategoryLabels(
+  codes: ReadonlySet<number>,
+  names: Readonly<Record<number, string>>,
+): string[] {
+  return [...codes].map((code) => names[code]).filter(Boolean);
+}
 const CONTENT_KIND_FIT: Readonly<
   Record<GeoContentType, Record<DistributionChannelKind, number>>
 > = {
@@ -436,18 +525,6 @@ function validHttpUrl(value: string): string {
   }
 }
 
-function industryCode(
-  industry: string,
-  table: Readonly<Record<string, number>>,
-): number | null {
-  const direct = table[industry];
-  if (direct !== undefined) return direct;
-  const hit = Object.entries(table)
-    .filter(([label]) => industry.includes(label))
-    .sort((left, right) => right[0].length - left[0].length)[0];
-  return hit?.[1] ?? null;
-}
-
 function audienceOverlap(
   audience: string,
   snapshot: DistributionResourceSnapshot,
@@ -476,7 +553,9 @@ function nameMatches(sourceTitle: string, resourceName: string): boolean {
   );
 }
 
+/** 官方 geo_platforms 非空，或名称/备注含 GEO 收录关键词（旧数据兜底）。 */
 function geoIncluded(snapshot: DistributionResourceSnapshot): boolean {
+  if (snapshot.geoPlatforms.length > 0) return true;
   const text = `${snapshot.name} ${snapshot.remark ?? ""}`;
   if (
     ["豆包", "文心一言", "文心", "通义千问", "通义", "腾讯元宝", "元宝"].some(
@@ -485,6 +564,143 @@ function geoIncluded(snapshot: DistributionResourceSnapshot): boolean {
   )
     return true;
   return /\b(ai|geo|kimi|deepseek)\b/i.test(text);
+}
+
+/** 结构化行业类目匹配（媒体 channel_type / 自媒体 industry_category 对码）。 */
+function industryCategoryMatch(
+  snapshot: DistributionResourceSnapshot,
+  mediaCodes: ReadonlySet<number>,
+  weMediaCodes: ReadonlySet<number>,
+): boolean {
+  return snapshot.kind === "media"
+    ? mediaCodes.has(snapshot.channelType ?? -1)
+    : weMediaCodes.has(snapshot.industryCategory ?? -1);
+}
+
+/**
+ * 保底路候选分档（用户裁决 2026-08-27）：垂类∩官方GEO > 纯垂类 > 纯官方GEO
+ * > 仅人群词。只作为同权重同命中数候选的排序 tie-break（候选推荐与文章分配
+ * 两处一致），不改变四路按路径累加的权重语义。
+ */
+function fallbackPreferenceTier(
+  snapshot: DistributionResourceSnapshot,
+  input: {
+    mediaCodes: ReadonlySet<number>;
+    weMediaCodes: ReadonlySet<number>;
+    targetAudience: string;
+  },
+): number {
+  const industryMatch = industryCategoryMatch(
+    snapshot,
+    input.mediaCodes,
+    input.weMediaCodes,
+  );
+  const geoMarked = snapshot.geoPlatforms.length > 0;
+  if (industryMatch && geoMarked) return 0;
+  if (industryMatch) return 1;
+  if (geoMarked) return 2;
+  return audienceOverlap(input.targetAudience, snapshot) ? 3 : 4;
+}
+
+/**
+ * 垂类名命中（2026-08-28 用户裁决 Q13/S2）：资源名（含子频道尾块）含行业
+ * 或人群词。补结构化类目（channelType/industryCategory）覆盖不到的缺口——
+ * 「人民网视频（家居频道）」这类子频道名带垂类但类目码不匹配的场景；作为
+ * 排序键全局生效（与主动召回 prompt 的垂媒优先精神一致）。
+ */
+function verticalNameMatch(
+  snapshot: DistributionResourceSnapshot,
+  input: { industry: string; targetAudience: string },
+): boolean {
+  const haystack = snapshot.name.toLowerCase();
+  const terms = [
+    ...input.industry.split(/[\s,，、/]+/),
+    ...input.targetAudience.split(/[\s,，、/]+/),
+  ]
+    .map((term) => term.trim().toLowerCase())
+    .filter((term) => Array.from(term).length >= 2);
+  return terms.some((term) => haystack.includes(term));
+}
+
+/**
+ * 包/家族代表比较器（Q13，2026-08-28 用户裁决；Q15 同日修订）：非 junk →
+ * **官网（自有域名）优先**（「必有官网」：蓝色河畔这类头条+官网渠道以官网
+ * 版为家族代表）→ 证据权重 → geo_platforms 数 → 价格低 → id 小。junk 靠前
+ * 两位自动「永不代表」（除非全组皆 junk）。
+ */
+function compareWithinFamily(
+  left: DistributionChannelCandidate,
+  right: DistributionChannelCandidate,
+): number {
+  const ownSiteFirst = (candidate: DistributionChannelCandidate): number =>
+    primaryPlatformFamily(candidate.resourceSnapshot) === null ? 0 : 1;
+  return (
+    Number(isJunkResaleListing(left.name)) -
+      Number(isJunkResaleListing(right.name)) ||
+    ownSiteFirst(left) - ownSiteFirst(right) ||
+    right.recommendationWeight - left.recommendationWeight ||
+    right.resourceSnapshot.geoPlatforms.length -
+      left.resourceSnapshot.geoPlatforms.length ||
+    (left.estimatedPriceCny ?? Number.POSITIVE_INFINITY) -
+      (right.estimatedPriceCny ?? Number.POSITIVE_INFINITY) ||
+    // 基础名优先：同分时「餐饮界」代表「餐饮界首发」（主干变体让位）。
+    channelNameCoreAll(left.resourceSnapshot.name).length -
+      channelNameCoreAll(right.resourceSnapshot.name).length ||
+    left.resourceId - right.resourceId
+  );
+}
+
+/**
+ * 主干家族键（Q15，2026-08-28 用户裁决：改为同族）：对对齐候选的核心名做
+ * **包含连通聚类**——北京列举网 ⊃ 列举网、列举网geo ⊃ 列举网 即同主干，
+ * 跨平台同名（蓝色河畔（今日头条）+ 官网）也并入同族。列举网系 7 席 → ≤2
+ * 席；家族键取连通分量中最短的核心名（最泛主干）。此前「核心名全等+平台族
+ * 分家」会把 geo 词干/城市前缀/连字符段裂成多个主干。
+ */
+function assignTrunkFamilies(
+  candidates: DistributionChannelCandidate[],
+): void {
+  const cores = [
+    ...new Set(
+      candidates.map((candidate) =>
+        channelNameCoreAll(candidate.resourceSnapshot.name)
+          .trim()
+          .toLowerCase(),
+      ),
+    ),
+  ].filter((core) => core.length > 0);
+  const parent = new Map<string, string>(
+    cores.map((core) => [core, core] as const),
+  );
+  const find = (core: string): string => {
+    const root = parent.get(core)!;
+    if (root === core) return core;
+    const settled = find(root);
+    parent.set(core, settled);
+    return settled;
+  };
+  // 排序后短名在前：只需向后比较包含关系（短⊃长不成立，长⊃短才连通）。
+  const sorted = [...cores].sort(
+    (left, right) => left.length - right.length,
+  );
+  for (let i = 0; i < sorted.length; i += 1) {
+    for (let j = i + 1; j < sorted.length; j += 1) {
+      const short = sorted[i]!;
+      const long = sorted[j]!;
+      // 长度差 ≥2 才算主干包含：差 1 位（泛站观察2 ⊂ 泛站观察27）多为
+      // 数字/字母后缀的序号变体，不是渠道主干扩张。
+      if (long.includes(short) && long.length - short.length >= 2) {
+        parent.set(find(long), find(short));
+      }
+    }
+  }
+  for (const candidate of candidates) {
+    const core = channelNameCoreAll(candidate.resourceSnapshot.name)
+      .trim()
+      .toLowerCase();
+    const trunk = core ? find(core) : candidate.variantFamily ?? core;
+    candidate.variantFamily = trunk;
+  }
 }
 
 function parsePrice(value: string | null): number | null {
@@ -536,8 +752,16 @@ export function validateDistributionPlanStartInput(
     articleIds: [
       ...new Set(source.articleIds.filter((id) => articleIds.includes(id))),
     ],
+    ...(source.siteName?.trim()
+      ? { siteName: source.siteName.trim().slice(0, 120) }
+      : {}),
+    ...(source.resolvedAccountName?.trim()
+      ? { resolvedAccountName: source.resolvedAccountName.trim().slice(0, 60) }
+      : {}),
   }));
-  if (questionSources.length > 100)
+  // 全量引用上限（2026-08-27 用户裁决二轮）：20 问 × 每问 10 条 = 200 上界，
+  // 250 为纯防脏数据护栏。
+  if (questionSources.length > 250)
     throw new Error("distribution_plan_sources_invalid");
   if (
     !Number.isInteger(input.perArticleMaxPoints) ||
@@ -616,6 +840,10 @@ export function normalizeDistributionResource(
       resource.entrance_link.trim()
         ? resource.entrance_link.trim()
         : null,
+    caseLink:
+      typeof resource.case_link === "string" && resource.case_link.trim()
+        ? resource.case_link.trim()
+        : null,
     remark:
       typeof resource.remark === "string" && resource.remark.trim()
         ? resource.remark.trim()
@@ -628,6 +856,17 @@ export function normalizeDistributionResource(
     publishSpeed: numberOrNull(resource.publish_speed),
     publishedAverageMinutes: numberOrNull(resource.published_avg),
     platform: numberOrNull(resource.platform),
+    geoPlatforms: Array.isArray(resource.geo_platforms)
+      ? [
+          ...new Set(
+            resource.geo_platforms.flatMap((item) =>
+              typeof item?.label === "string" && item.label.trim()
+                ? [item.label.trim()]
+                : [],
+            ),
+          ),
+        ]
+      : [],
   };
 }
 
@@ -640,13 +879,13 @@ function hostOf(url: string): string | null {
 }
 
 /**
- * 被动来源选样（js_ai 对齐 + 2026-08-27 用户裁决）：
+ * 被动来源选样（js_ai 对齐 + 2026-08-27 用户裁决二轮）：
  * 1. 每问最多 `perQuestionCap`（10）条引用，按问题内原序——所有已确认问题
  *    都能进入被动证据，不再被先到者占满总量；
  * 2. 渠道 = 引用 URL 的注册域名；按「渠道出现在多少个不同问题」降序、
  *    同渠道引用数降序、原始出现序升续排——跨问重复出现的渠道（多问交集）
  *    排前；
- * 3. 取前 `totalCap`（50）条作为 questionSources。
+ * 3. 全量返回（旧 totalCap=50 总量帽废除）：排序只决定展示顺序，不截断。
  */
 export function selectPassiveSources(
   collected: ReadonlyArray<{
@@ -680,7 +919,11 @@ export function selectPassiveSources(
       if (taken >= PASSIVE_PER_QUESTION_CITATION_CAP) break;
       const url = citation.url.trim();
       if (!/^https?:\/\//i.test(url)) continue;
-      if (!seen.add(`${outcome.question.id}:${url}`)) continue;
+      // Set.add 恒返回集合本身，必须 has/add 分离判重（旧写法 `!seen.add()`
+      // 恒 false，去重从未生效——此前靠总量帽把重复引用截掉才未被察觉）。
+      const dedupeKey = `${outcome.question.id}:${url}`;
+      if (seen.has(dedupeKey)) continue;
+      seen.add(dedupeKey);
       const host = hostOf(url) ?? url;
       const siteName = citation.siteName?.trim() || undefined;
       rows.push({
@@ -712,7 +955,7 @@ export function selectPassiveSources(
         (channelHits.get(left.channel) ?? 0) ||
       left.order - right.order,
   );
-  return ranked.slice(0, PASSIVE_SOURCE_TOTAL_CAP).map((row, index) => ({
+  return ranked.map((row, index) => ({
     id: `probe:${row.questionId}:${index + 1}`,
     questionId: row.questionId,
     question: row.question,
@@ -751,18 +994,44 @@ export function buildDistributionCandidates(input: {
   perArticleMaxPoints: number;
   articles: DistributionArticleSnapshot[];
   resources: DistributionResourceSnapshot[];
+  /** 保留席随机采样注入（测试定苗）；缺省 Math.random。 */
+  random?: () => number;
 }): {
   candidates: DistributionChannelCandidate[];
   resourceSnapshot: DistributionResourceSnapshot[];
   summary: DistributionDiscoverySummary;
+  /** 被动路对齐渠道（≤PASSIVE_ALIGNED_CHANNEL_CAP；面板对齐渠道区数据源）。 */
+  passiveAlignedChannels: DistributionPassiveAlignedChannel[];
+  /** 引用站点显示名映射（注册域名 → 池反查/标题尾缀解析的展示名）。 */
+  citationSiteNames: Record<string, string>;
+  /** 偏好路命中清单（配额前逐名单项计算，每项一行代表）。 */
+  preferenceMatchedChannels: DistributionPreferenceMatchedChannel[];
 } {
   const unique = new Map<string, DistributionResourceSnapshot>();
   for (const resource of input.resources) {
     unique.set(`${resource.kind}:${resource.resourceId}`, resource);
   }
   const resources = [...unique.values()];
-  const mediaCode = industryCode(input.industry, INDUSTRY_TO_MEDIA);
-  const weMediaCode = industryCode(input.industry, INDUSTRY_TO_WE_MEDIA);
+  // 规格词后缀集合（Q13 数据驱动判定）：跨 ≥10 个不同核心名的括号尾块视为
+  // 通用规格词（可发GEO/包收录/官方…），变体分包的依据。
+  const qualifierSuffixes = buildQualifierSuffixes(resources);
+  // 唯一域名集合（2026-08-28 URL 防误判）：域名下核心名经包含关系全连通才算
+  // 唯一，歧义域（ppwll.cn 式跨机构聚合域）的域名命中需名称佐证。
+  const unambiguousDomains = buildUnambiguousDomains(resources);
+  // 行业→官方类目码集合（按附录命名匹配；一个行业可命中多个类目）。
+  const mediaCodes = industryCodesFor(
+    input.industry,
+    MEDIA_CHANNEL_TYPE_NAMES,
+  );
+  const weMediaCodes = industryCodesFor(
+    input.industry,
+    WE_MEDIA_INDUSTRY_NAMES,
+  );
+  const tierInput = {
+    mediaCodes,
+    weMediaCodes,
+    targetAudience: input.targetAudience,
+  };
   const contentTypes = [
     ...new Set(input.articles.map((article) => article.contentType)),
   ];
@@ -789,20 +1058,175 @@ export function buildDistributionCandidates(input: {
     approved.push(resource);
   }
 
+  // ── 观测与展示辅助（2026-08-27 用户裁决）：池反查映射、引用站点显示名、
+  // 被动对齐统计。池反查 = 资源 entranceLink 域名 → 渠道名的权威映射；
+  // miss 时回落标题尾缀站点名（` - 八方资源网` 式短尾缀）。
+  const poolDomainNames = buildPoolDomainNameMap(resources);
+  const citationDomains = new Set<string>();
+  const citationPoolHits = new Set<string>();
+  for (const source of input.questionSources) {
+    const domain = registeredDomain(source.url);
+    if (!domain) continue;
+    citationDomains.add(domain);
+    if (poolDomainNames.has(domain)) citationPoolHits.add(domain);
+  }
+  const citationSiteNames: Record<string, string> = {};
+  for (const domain of citationDomains) {
+    const pooled = poolDomainNames.get(domain);
+    if (pooled) {
+      citationSiteNames[domain] = pooled;
+      continue;
+    }
+    for (const source of input.questionSources) {
+      if (registeredDomain(source.url) !== domain) continue;
+      const suffix = siteNameFromTitleSuffix(source.title);
+      if (suffix) {
+        citationSiteNames[domain] = suffix;
+        break;
+      }
+    }
+  }
+  interface PassiveAlignmentStats {
+    citations: number;
+    questions: Set<string>;
+    accounts: Set<string>;
+  }
+  const passiveStats = new Map<string, PassiveAlignmentStats>();
+  const passiveStatsOf = (
+    resource: DistributionResourceSnapshot,
+  ): PassiveAlignmentStats => {
+    const key = `${resource.kind}:${resource.resourceId}`;
+    let stats = passiveStats.get(key);
+    if (!stats) {
+      stats = { citations: 0, questions: new Set(), accounts: new Set() };
+      passiveStats.set(key, stats);
+    }
+    return stats;
+  };
+
+  // ── 全局排序链（Q5/Q11/S2，2026-08-28 用户裁决）：权重 → 命中路径数 →
+  // 保底分档 → 随机号靠后 → 垂类名命中 → 被动覆盖问题数 → 被动引用数 →
+  // 名称。包代表重排与 quota 走查复用同一比较器，保证走查序=全局排序序。
+  const passiveCoverageOf = (candidate: {
+    kind: DistributionChannelKind;
+    resourceId: number;
+  }): { questions: number; citations: number } => {
+    const stat = passiveStats.get(`${candidate.kind}:${candidate.resourceId}`);
+    return { questions: stat?.questions.size ?? 0, citations: stat?.citations ?? 0 };
+  };
+  const verticalInput = {
+    industry: input.industry,
+    targetAudience: input.targetAudience,
+  };
+  const compareByGlobalRank = (
+    left: DistributionChannelCandidate,
+    right: DistributionChannelCandidate,
+  ): number =>
+    right.recommendationWeight - left.recommendationWeight ||
+    right.hitCount - left.hitCount ||
+    fallbackPreferenceTier(left.resourceSnapshot, tierInput) -
+      fallbackPreferenceTier(right.resourceSnapshot, tierInput) ||
+    Number(isJunkResaleListing(left.name)) -
+      Number(isJunkResaleListing(right.name)) ||
+    Number(verticalNameMatch(right.resourceSnapshot, verticalInput)) -
+      Number(verticalNameMatch(left.resourceSnapshot, verticalInput)) ||
+    passiveCoverageOf(right).questions - passiveCoverageOf(left).questions ||
+    passiveCoverageOf(right).citations - passiveCoverageOf(left).citations ||
+    left.name.localeCompare(right.name, "zh-CN") ||
+    left.resourceId - right.resourceId;
+
   const candidates = approved
     .flatMap((resource): DistributionChannelCandidate[] => {
       const evidence: DistributionCandidateEvidence[] = [];
-      const resourceDomain = registeredDomain(resource.entranceLink);
+      // 池侧域名信号（2026-08-28 用户裁决）：entrance + case_link 双 URL 的
+      // 干净注册域名集合——7,599 条资源 entrance 为空，case_link 是唯一信号。
+      const resourceDomains = new Set(cleanResourceDomains(resource));
+      // 账户级对齐的池侧输入：entranceLink 内嵌账号标识 + 平台族集合
+      // （platform 枚举第一信号，2026-08-28）。
+      const resourceAccountKey = accountKeyFromUrl(resource.entranceLink);
+      const families = resourcePlatformFamilies({
+        name: resource.name,
+        entranceLink: resource.entranceLink,
+        platform: resource.platform,
+      });
+      const stats = passiveStatsOf(resource);
       for (const source of input.questionSources) {
         const sourceDomain = registeredDomain(source.url);
         // 多租户平台（头条/抖音/公众号等）上文章引用与账号共享注册域名，
-        // 域名相等不构成被动对齐证据，只保留名称对齐。
+        // 域名相等不构成被动对齐证据，只保留名称对齐与账户级对齐。
+        const multiTenantSource = isMultiTenantPlatformUrl(source.url);
+        // 域名歧义防护（2026-08-28 用户裁决）：唯一域（域名下核心名经包含
+        // 关系全连通）直接放行；歧义域（ppwll.cn 式跨机构聚合域/同机构多
+        // 产品域）要求名称佐证——引用标题含资源核心名且过平台门。
         const domainAligned =
-          resourceDomain !== null &&
-          sourceDomain === resourceDomain &&
-          !isMultiTenantPlatformUrl(source.url) &&
-          !isMultiTenantPlatformUrl(resource.entranceLink);
-        if (domainAligned || nameMatches(source.title, resource.name)) {
+          !multiTenantSource &&
+          sourceDomain !== null &&
+          resourceDomains.has(sourceDomain) &&
+          (unambiguousDomains.has(sourceDomain) ||
+            (nameMatches(source.title, resource.name) &&
+              (!multiTenantSource ||
+                (citationPlatformFamily(source.url) !== null &&
+                  families.has(citationPlatformFamily(source.url)!)))));
+        // 账户级对齐（2026-08-27 用户裁决，三层解析）：L1 URL 账号标识相等
+        // > L2 标题尾缀/L3 注入账号名 × 渠道核心名 + 平台一致性门。
+        let accountAligned = false;
+        let accountLabel: string | null = null;
+        if (multiTenantSource) {
+          const sourceKey = accountKeyFromUrl(source.url);
+          if (
+            sourceKey &&
+            resourceAccountKey &&
+            sourceKey.platform === resourceAccountKey.platform &&
+            sourceKey.accountId === resourceAccountKey.accountId
+          ) {
+            accountAligned = true;
+            accountLabel = `${sourceKey.platform}号#${sourceKey.accountId}`;
+          } else {
+            const accountName =
+              source.resolvedAccountName?.trim() ||
+              accountNameFromTitle(source.title) ||
+              "";
+            if (
+              accountName &&
+              accountNameMatchesChannel({
+                accountName,
+                citationPlatform: citationPlatformFamily(source.url),
+                resourceName: resource.name,
+                resourceFamilies: families,
+              })
+            ) {
+              accountAligned = true;
+              accountLabel = accountName;
+            }
+          }
+        }
+        if (domainAligned || accountAligned) {
+          const label =
+            accountAligned && accountLabel
+              ? `真实问题来源「${source.title}」与资源池渠道对齐（账号：${accountLabel}）`
+              : `真实问题来源「${source.title}」与资源池渠道对齐`;
+          evidence.push(
+            pathEvidence(
+              "passive",
+              label,
+              source.questionId,
+              source.url,
+              source.articleIds,
+            ),
+          );
+          stats.citations += 1;
+          stats.questions.add(source.questionId);
+          if (accountLabel) stats.accounts.add(accountLabel);
+        } else if (
+          // Q6（2026-08-28 用户裁决）：标题含核心名的兜底匹配对多租户引用加
+          // 平台一致性门（引用平台族 ∈ 资源平台族）——跨平台同名（全池 523 组）
+          // 与蹭名账号不构成被动证据；非多租户引用（如 b2b168→八方资源网）
+          // 保持无门。
+          nameMatches(source.title, resource.name) &&
+          (!multiTenantSource ||
+            (citationPlatformFamily(source.url) !== null &&
+              families.has(citationPlatformFamily(source.url)!)))
+        ) {
           evidence.push(
             pathEvidence(
               "passive",
@@ -812,34 +1236,62 @@ export function buildDistributionCandidates(input: {
               source.articleIds,
             ),
           );
+          stats.citations += 1;
+          stats.questions.add(source.questionId);
         }
       }
-      const industryMatch =
-        resource.kind === "media"
-          ? mediaCode !== null && resource.channelType === mediaCode
-          : weMediaCode !== null && resource.industryCategory === weMediaCode;
+      const industryMatch = industryCategoryMatch(
+        resource,
+        mediaCodes,
+        weMediaCodes,
+      );
       const audienceMatch = audienceOverlap(input.targetAudience, resource);
-      // 主动路（ADR-0031 全局召回）：LLM 联网推荐的渠道，域名优先、名称模糊回落；
-      // 多租户平台域名（toutiao.com 等）不构成渠道身份，同样只认名称对齐，
-      // 且平台品牌家族（今日头条等）不再兜底——品牌分支按核心名判定。
+      // 官方 GEO 标记（geo_platforms 非空）是结构化触发条件；备注关键词命中
+      // （geoIncluded）只作为信号文本兜底，不独立触发——与旧行为一致。
+      const geoMarked = resource.geoPlatforms.length > 0;
+      // 主动路（ADR-0031 全局召回）：LLM 联网推荐的渠道，域名优先、名称回落；
+      // 多租户平台域名（toutiao.com 等）不构成渠道身份，名称对齐只认核心名
+      // （fuzzyMatchScore 全分支限定，2026-08-28）；平台级来源另经「平台官方型」
+      // 通道命中根路径官方资源（搜狐网三农（GEO）等，Q3a 用户裁决）。
+      // 名称回落用 activeNameMatchScore（≥0.8：包含/共享前缀/品牌强重叠，
+      // Jaccard 字符交集档不参与）——同日用户裁决：主动路只要真正正确的
+      // 渠道，Jaccard 档的残留误配（中国团餐网→中国妈妈网 0.5、
+      // 今日头条美食频道→美妆头条 0.4）全部清除。
       for (const source of input.activeSources) {
         const sourceDomain = registeredDomain(source.url);
         const multiTenantSource = isMultiTenantPlatformUrl(source.url);
+        const sourceFamily = multiTenantSource
+          ? citationPlatformFamily(source.url)
+          : null;
+        // 域名歧义防护（同被动路口径）：唯一域直接放行；歧义域要求名称
+        // 佐证（activeNameMatchScore≥0.8：包含/前缀/品牌强重叠）。
         const domainHit =
-          resourceDomain !== null &&
-          sourceDomain === resourceDomain &&
           !multiTenantSource &&
-          !isMultiTenantPlatformUrl(resource.entranceLink);
+          sourceDomain !== null &&
+          resourceDomains.has(sourceDomain) &&
+          (unambiguousDomains.has(sourceDomain) ||
+            activeNameMatchScore(source, resource.name, {
+              multiTenantPlatform: multiTenantSource,
+            }) >= 0.8);
+        const officialHit =
+          sourceFamily !== null &&
+          platformOfficialFamily({
+            name: resource.name,
+            entranceLink: resource.entranceLink,
+          }) === sourceFamily;
         if (
           domainHit ||
-          fuzzyMatchScore(source, resource.name, {
+          officialHit ||
+          activeNameMatchScore(source, resource.name, {
             multiTenantPlatform: multiTenantSource,
-          }) >= 0.4
+          }) >= 0.8
         ) {
           evidence.push(
             pathEvidence(
               "active",
-              `全局召回推荐渠道「${source.title}」与本资源对齐`,
+              officialHit && !domainHit
+                ? `全局召回推荐渠道「${source.title}」命中平台官方型资源`
+                : `全局召回推荐渠道「${source.title}」与本资源对齐`,
               `recall:${source.title}`,
               source.url ?? resource.entranceLink,
               source.articleIds ?? [],
@@ -847,17 +1299,33 @@ export function buildDistributionCandidates(input: {
           );
         }
       }
-      // 保底路（js_ai path 3 语义）：结构化类目/人群是规则匹配，合并为一路；
-      // GEO 收录信号是同一规则路的加强说明，不再单列一路。
-      if (industryMatch || audienceMatch) {
+      // 保底路（js_ai path 3 语义）：结构化类目/人群/官方 GEO 标记是规则匹配，
+      // 合并为一路；GEO 收录信号是同一规则路的加强说明，不再单列一路。
+      if (industryMatch || audienceMatch || geoMarked) {
         const signals = [
           industryMatch
-            ? `超级媒介结构化类目匹配行业「${input.industry}」`
+            ? `超级媒介结构化类目匹配「${
+                [
+                  ...industryCategoryLabels(
+                    mediaCodes,
+                    MEDIA_CHANNEL_TYPE_NAMES,
+                  ),
+                  ...industryCategoryLabels(
+                    weMediaCodes,
+                    WE_MEDIA_INDUSTRY_NAMES,
+                  ),
+                ]
+                  .join("/")
+                  .trim() || input.industry}」`
             : null,
           audienceMatch
             ? `渠道名称或备注匹配目标人群「${input.targetAudience}」`
             : null,
-          geoIncluded(resource) ? "资源名称/备注含真实 GEO 收录信号" : null,
+          geoMarked
+            ? `官方 GEO 标记：${resource.geoPlatforms.join("/")}已收录`
+            : geoIncluded(resource)
+              ? "资源名称/备注含真实 GEO 收录信号"
+              : null,
         ].filter((signal): signal is string => signal !== null);
         evidence.push(
           pathEvidence(
@@ -865,7 +1333,9 @@ export function buildDistributionCandidates(input: {
             signals.join("；"),
             industryMatch
               ? `industry:${input.industry}`
-              : `audience:${input.targetAudience}`,
+              : audienceMatch
+                ? `audience:${input.targetAudience}`
+                : `geo:${resource.geoPlatforms.join("/")}`,
             resource.entranceLink,
             [],
           ),
@@ -910,7 +1380,7 @@ export function buildDistributionCandidates(input: {
           }
           // reference 逗号合并（Rust 确认门按前缀+逗号解析）：面板四路召回
           // 展示靠它把每个召回来源关联回命中的渠道；fallback 是单条规则路，
-          // reference 必须保持 `industry:`/`audience:` 原样，不合并。
+          // reference 必须保持 `industry:`/`audience:`/`geo:` 原样，不合并。
           if (item.path !== "fallback") {
             existing.reference = `${existing.reference},${item.reference}`;
           }
@@ -943,6 +1413,11 @@ export function buildDistributionCandidates(input: {
           ? `渠道信息命中目标人群「${input.targetAudience}」`
           : `目标人群匹配仅有间接证据`,
         `文章类型 ${contentTypes.join("/")} 对该渠道形态的最高适配度 ${(contentFit * 100).toFixed(0)}%`,
+        ...(industryMatch && geoMarked
+          ? [
+              `行业垂类且 AI 平台已收录（${resource.geoPlatforms.join("/")}）`,
+            ]
+          : []),
       ];
       const uncertainties: string[] = [];
       const risks: string[] = [];
@@ -972,32 +1447,103 @@ export function buildDistributionCandidates(input: {
           risks,
           uncertainties,
           resourceSnapshot: resource,
+          variantFamily: variantFamilyKey({
+            name: resource.name,
+            entranceLink: resource.entranceLink,
+            platform: resource.platform,
+          }),
         },
       ];
     })
-    .sort(
-      (left, right) =>
-        right.recommendationWeight - left.recommendationWeight ||
-        right.hitCount - left.hitCount ||
-        left.name.localeCompare(right.name, "zh-CN") ||
-        left.resourceId - right.resourceId,
-    );
+    .sort(compareByGlobalRank);
+
+  // Q15 主干族指派：包含连通聚类改写 variantFamily（列举网系/跨平台同名并族）。
+  assignTrunkFamilies(candidates);
 
   const mediaQuota = GEO_PORT_CONTRACT.channelRecall.recommendation.mediaQuota;
   const weMediaQuota =
     GEO_PORT_CONTRACT.channelRecall.recommendation.weMediaQuota;
-  const mediaCount = candidates.filter(
+  const familyQuota = GEO_PORT_CONTRACT.channelRecall.variantFamily.familyQuota;
+  // ── 变体两级塌缩（Q13，2026-08-28 用户裁决）：同（家族,包）只出 1 个代表
+  //（比较器 compareWithinFamily：非junk → 证据权重 → geo 多 → 价低 → id 小）；
+  // 代表按全局排序进 quota 走查，家族 ≤2 席。被塌缩/限席挤出的同胞留在对齐
+  // 池（面板折叠展示，不算对齐失败）。
+  const packKeyOfCandidate = (candidate: DistributionChannelCandidate): string =>
+    `${candidate.variantFamily}#${packKeyOf(candidate.resourceSnapshot.name, qualifierSuffixes)}`;
+  const packBestByPack = new Map<string, DistributionChannelCandidate>();
+  for (const candidate of candidates) {
+    const packKey = packKeyOfCandidate(candidate);
+    const current = packBestByPack.get(packKey);
+    if (!current || compareWithinFamily(candidate, current) < 0) {
+      packBestByPack.set(packKey, candidate);
+    }
+  }
+  const admissible = [...packBestByPack.values()].sort(compareByGlobalRank);
+  // 本函数构造的候选恒带 variantFamily；?? 兜底只为满足可选类型（旧投影复用）。
+  const familyOf = (candidate: DistributionChannelCandidate): string =>
+    candidate.variantFamily ?? `${candidate.kind}:${candidate.resourceId}`;
+  const familyUsed = new Map<string, number>();
+  const familyAdmitted = admissible.filter((candidate) => {
+    const family = familyOf(candidate);
+    const used = familyUsed.get(family) ?? 0;
+    if (used >= familyQuota) return false;
+    familyUsed.set(family, used + 1);
+    return true;
+  });
+  // 保底优先席位（2026-08-28 用户裁决改随机采样）：垂类池（t0∪t1）随机取满
+  // fallbackVerticalQuota 席，单 GEO 池（t2）随机补足 max 内剩余席位；池尽
+  // 回流整体排序，t3+ 不占保留席。随机采样避免固定渠道长期霸榜。
+  const random = input.random ?? Math.random;
+  const fallbackTierOf = (candidate: DistributionChannelCandidate) =>
+    fallbackPreferenceTier(candidate.resourceSnapshot, tierInput);
+  const shuffled = <T>(list: T[]): T[] => {
+    const out = [...list];
+    for (let i = out.length - 1; i > 0; i -= 1) {
+      const j = Math.floor(random() * (i + 1));
+      [out[i], out[j]] = [out[j], out[i]];
+    }
+    return out;
+  };
+  const verticalPool = shuffled(
+    familyAdmitted.filter((candidate) => fallbackTierOf(candidate) <= 1),
+  );
+  const geoPool = shuffled(
+    familyAdmitted.filter((candidate) => fallbackTierOf(candidate) === 2),
+  );
+  const verticalSeats = Math.min(
+    verticalPool.length,
+    GEO_PORT_CONTRACT.channelRecall.recommendation.fallbackVerticalQuota,
+  );
+  const geoSeats = Math.min(
+    geoPool.length,
+    GEO_PORT_CONTRACT.channelRecall.recommendation.max - verticalSeats,
+  );
+  const fallbackPriorityPicks = [
+    ...verticalPool.slice(0, verticalSeats),
+    ...geoPool.slice(0, geoSeats),
+  ];
+  const reservedKeys = new Set(
+    fallbackPriorityPicks.map(
+      (candidate) => `${candidate.kind}:${candidate.resourceId}`,
+    ),
+  );
+  const quotaOrdered = [
+    ...fallbackPriorityPicks,
+    ...familyAdmitted.filter(
+      (candidate) => !reservedKeys.has(`${candidate.kind}:${candidate.resourceId}`),
+    ),
+  ];
+  const mediaCount = quotaOrdered.filter(
     (candidate) => candidate.kind === "media",
   ).length;
-  const weMediaCount = candidates.length - mediaCount;
+  const weMediaCount = quotaOrdered.length - mediaCount;
   let mediaTake = mediaQuota;
   let weMediaTake = weMediaQuota;
   if (mediaCount < mediaQuota) weMediaTake += mediaQuota - mediaCount;
-  else if (weMediaCount < weMediaQuota)
-    mediaTake += weMediaQuota - weMediaCount;
+  else if (weMediaCount < weMediaQuota) mediaTake += weMediaQuota - weMediaCount;
   let usedMedia = 0;
   let usedWeMedia = 0;
-  const recommended = candidates
+  const recommended = quotaOrdered
     .filter((candidate) => {
       if (candidate.kind === "media") {
         if (usedMedia >= mediaTake) return false;
@@ -1009,11 +1555,115 @@ export function buildDistributionCandidates(input: {
       return true;
     })
     .slice(0, DISTRIBUTION_MAX_CANDIDATES);
+  const recommendedKeys = new Set(
+    recommended.map((candidate) => `${candidate.kind}:${candidate.resourceId}`),
+  );
+  // ── 被动对齐渠道：按变体家族折叠（Q13/S1，2026-08-28）。代表 =
+  // compareWithinFamily 最优成员；引用/问题/账号为家族并集；recommended =
+  // 家族任一成员进入推荐。cap 按家族数计（防止 7 个同名变体吃满 50 个名额）。
+  const passiveFamilyGroups = new Map<
+    string,
+    DistributionChannelCandidate[]
+  >();
+  for (const candidate of candidates) {
+    if (!candidate.evidence.some((item) => item.path === "passive")) continue;
+    const family = familyOf(candidate);
+    const group = passiveFamilyGroups.get(family) ?? [];
+    group.push(candidate);
+    passiveFamilyGroups.set(family, group);
+  }
+  const passiveAlignedChannels: DistributionPassiveAlignedChannel[] = [
+    ...passiveFamilyGroups.values(),
+  ]
+    .map((members) => {
+      const rep = [...members].sort(compareWithinFamily)[0]!;
+      const questions = new Set<string>();
+      const accounts = new Set<string>();
+      let citations = 0;
+      for (const member of members) {
+        const stat = passiveStats.get(
+          `${member.kind}:${member.resourceId}`,
+        );
+        citations += stat?.citations ?? 0;
+        for (const question of stat?.questions ?? []) questions.add(question);
+        for (const account of stat?.accounts ?? []) accounts.add(account);
+      }
+      const prices = members
+        .map((member) => member.estimatedPriceCny)
+        .filter((price): price is number => price !== null);
+      return {
+        resourceId: rep.resourceId,
+        kind: rep.kind,
+        name: rep.name,
+        estimatedPriceCny: rep.estimatedPriceCny,
+        citations,
+        questions: questions.size,
+        accounts: [...accounts],
+        recommended: members.some((member) =>
+          recommendedKeys.has(`${member.kind}:${member.resourceId}`),
+        ),
+        variantCount: members.length,
+        priceMinCny: prices.length > 0 ? Math.min(...prices) : null,
+        priceMaxCny: prices.length > 0 ? Math.max(...prices) : null,
+      };
+    })
+    .sort(
+      (left, right) =>
+        right.questions - left.questions ||
+        right.citations - left.citations ||
+        left.name.localeCompare(right.name, "zh-CN"),
+    )
+    .slice(0, PASSIVE_ALIGNED_CHANNEL_CAP);
+  // ── 偏好命中清单（Q12，2026-08-28）：配额前逐名单项计算，每项一行代表
+  //（全名逐字命中者优先，否则包代表规则）；matched=false = 核心名在价内池
+  // 不存在，如实展示（安庆新闻网型）。
+  const preferenceMatchedChannels: DistributionPreferenceMatchedChannel[] =
+    input.preferenceChannels.map((entry) => {
+      const members = candidates.filter((candidate) =>
+        preferenceEntryMatches(entry, {
+          name: candidate.resourceSnapshot.name,
+          entranceLink: candidate.resourceSnapshot.entranceLink,
+        }),
+      );
+      if (members.length === 0) {
+        return {
+          entryName: entry.name,
+          matched: false,
+          representativeName: null,
+          representativePriceCny: null,
+          variantCount: 0,
+          recommended: false,
+        };
+      }
+      const exactMember = members.find(
+        (member) =>
+          normalizeChannelName(entry.name) ===
+          normalizeChannelName(member.resourceSnapshot.name),
+      );
+      const rep = exactMember ?? [...members].sort(compareWithinFamily)[0]!;
+      return {
+        entryName: entry.name,
+        matched: true,
+        representativeName: rep.name,
+        representativePriceCny: rep.estimatedPriceCny,
+        variantCount: members.length,
+        recommended: members.some((member) =>
+          recommendedKeys.has(`${member.kind}:${member.resourceId}`),
+        ),
+      };
+    });
+  const alignedByPath = { passive: 0, active: 0, fallback: 0, preference: 0 };
+  for (const candidate of candidates) {
+    for (const item of candidate.evidence) alignedByPath[item.path] += 1;
+  }
   return {
     candidates: recommended,
     resourceSnapshot: recommended.map(
       (candidate) => candidate.resourceSnapshot,
     ),
+    passiveAlignedChannels,
+    citationSiteNames,
+    preferenceMatchedChannels,
     summary: {
       inputResources: resources.length,
       approvedResources: approved.length,
@@ -1022,6 +1672,10 @@ export function buildDistributionCandidates(input: {
       filteredOverPerArticleLimit,
       alignedResources: candidates.length,
       recommendedResources: recommended.length,
+      alignedFamilies: new Set(candidates.map(familyOf)).size,
+      alignedByPath,
+      citationDomains: citationDomains.size,
+      citationDomainPoolHits: citationPoolHits.size,
     },
   };
 }
@@ -1029,6 +1683,11 @@ export function buildDistributionCandidates(input: {
 function candidateForArticle(
   article: DistributionArticleSnapshot,
   candidates: DistributionChannelCandidate[],
+  tierInput?: {
+    mediaCodes: ReadonlySet<number>;
+    weMediaCodes: ReadonlySet<number>;
+    targetAudience: string;
+  },
 ): DistributionChannelCandidate[] {
   return [...candidates].sort((left, right) => {
     const leftPassive = left.evidence.some(
@@ -1040,9 +1699,14 @@ function candidateForArticle(
     if (leftPassive !== rightPassive) return leftPassive ? -1 : 1;
     const leftFit = CONTENT_KIND_FIT[article.contentType][left.kind];
     const rightFit = CONTENT_KIND_FIT[article.contentType][right.kind];
+    const tier = tierInput
+      ? fallbackPreferenceTier(left.resourceSnapshot, tierInput) -
+        fallbackPreferenceTier(right.resourceSnapshot, tierInput)
+      : 0;
     return (
       rightFit - leftFit ||
       right.recommendationWeight - left.recommendationWeight ||
+      tier ||
       left.resourceId - right.resourceId
     );
   });
@@ -1055,7 +1719,27 @@ export function assignDistributionChannels(input: {
   ratio: DistributionPlanStartInput["ratio"];
   totalMaxPoints: number;
   publishStartAt: string;
+  /**
+   * 保底路分档 tie-break 输入（垂类∩GEO > 纯垂类 > 纯GEO > 仅人群词）；
+   * 缺省时不分档（保持旧排序），确认门校验不感知该字段。
+   */
+  industry?: string;
+  targetAudience?: string;
 }): DistributionAssignment[] {
+  const tierInput =
+    input.industry !== undefined && input.targetAudience !== undefined
+      ? {
+          mediaCodes: industryCodesFor(
+            input.industry,
+            MEDIA_CHANNEL_TYPE_NAMES,
+          ),
+          weMediaCodes: industryCodesFor(
+            input.industry,
+            WE_MEDIA_INDUSTRY_NAMES,
+          ),
+          targetAudience: input.targetAudience,
+        }
+      : undefined;
   const scheduledAt = validIsoTimestamp(input.publishStartAt);
   const used = new Set<number>();
   const totalRatio = input.ratio.media + input.ratio.weMedia;
@@ -1066,9 +1750,11 @@ export function assignDistributionChannels(input: {
   let mediaUsed = 0;
   let allocatedPoints = 0;
   return input.articles.map((article) => {
-    let ranked = candidateForArticle(article, input.candidates).filter(
-      (candidate) => !used.has(candidate.resourceId),
-    );
+    let ranked = candidateForArticle(
+      article,
+      input.candidates,
+      tierInput,
+    ).filter((candidate) => !used.has(candidate.resourceId));
     if (input.mappingMode === "ratio") {
       const preferredKind: DistributionChannelKind =
         mediaUsed < mediaTarget ? "media" : "we-media";

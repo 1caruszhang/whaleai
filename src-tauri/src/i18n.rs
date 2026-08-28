@@ -161,9 +161,7 @@ pub fn t(key: &str, locale: SupportedLocale) -> &str {
         (SupportedLocale::ZhCn, "notification.geoAwaitingConfirmationBody") => {
             "一个 GEO 操作正在等待您的结构化确认。"
         }
-        (SupportedLocale::ZhCn, "notification.geoOperationFailedTitle") => {
-            "鲸杉geo - GEO 操作失败"
-        }
+        (SupportedLocale::ZhCn, "notification.geoOperationFailedTitle") => "鲸杉geo - GEO 操作失败",
         (SupportedLocale::ZhCn, "notification.geoOperationFailedBody") => {
             "一个 GEO 操作需要您查看失败状态。"
         }
@@ -175,15 +173,17 @@ pub fn t(key: &str, locale: SupportedLocale) -> &str {
         (SupportedLocale::ZhCn, "notification.geoPublishFailedBody") => {
             "一个确定性发布执行需要人工查看。"
         }
-        (SupportedLocale::ZhCn, "notification.geoMonitoringCompletedTitle") => {
-            "鲸杉geo - 监测完成"
-        }
+        (SupportedLocale::ZhCn, "notification.geoMonitoringCompletedTitle") => "鲸杉geo - 监测完成",
         (SupportedLocale::ZhCn, "notification.geoMonitoringCompletedBody") => {
             "一项发布后监测已完成，可打开工作台查看证据。"
         }
-        (SupportedLocale::EnUs, "notification.sessionCompleteTitle") => "Jingshan GEO - Task complete",
+        (SupportedLocale::EnUs, "notification.sessionCompleteTitle") => {
+            "Jingshan GEO - Task complete"
+        }
         (SupportedLocale::EnUs, "notification.sessionCompleteBody") => "Please review the result",
-        (SupportedLocale::EnUs, "notification.sessionStoppedTitle") => "Jingshan GEO - Task stopped",
+        (SupportedLocale::EnUs, "notification.sessionStoppedTitle") => {
+            "Jingshan GEO - Task stopped"
+        }
         (SupportedLocale::EnUs, "notification.sessionStoppedBody") => {
             "Please review the current result"
         }

@@ -205,7 +205,8 @@ impl PostPublishMonitorPassHook for NoopPostPublishMonitorPassHook {
     }
 }
 
-type MonitorBalanceProbeFuture<'a> = Pin<Box<dyn Future<Output = Result<bool, String>> + Send + 'a>>;
+type MonitorBalanceProbeFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<bool, String>> + Send + 'a>>;
 
 /// paused 计划的只读余额探测（票 14）：可用余额 ≥ 单问巡检价时返回
 /// true（恢复巡检）；不可判定（余额不足、直连模式未配置、Sidecar 不可
@@ -901,11 +902,8 @@ fn widen_monitor_plan_status_check(connection: &Connection) -> Result<(), String
         }
     }
     let rebuilt_sql = existing_sql.replace(LEGACY_STATUS_CHECK, WIDENED_STATUS_CHECK);
-    let renamed_sql = super::rename_table_in_ddl(
-        &rebuilt_sql,
-        table,
-        &format!("{table}__status_widened"),
-    )?;
+    let renamed_sql =
+        super::rename_table_in_ddl(&rebuilt_sql, table, &format!("{table}__status_widened"))?;
     connection
         .execute_batch("PRAGMA foreign_keys = OFF;")
         .map_err(|error| format!("unlock {table} status check rebuild: {error}"))?;
@@ -2526,8 +2524,9 @@ fn resume_or_defer_paused_monitor_plan(
             )
             .map_err(|error| format!("resume monitoring operation: {error}"))?;
     } else {
-        let mut next_anchor =
-            next_run_at_ms.unwrap_or(now_ms).saturating_add(interval_minutes * 60_000);
+        let mut next_anchor = next_run_at_ms
+            .unwrap_or(now_ms)
+            .saturating_add(interval_minutes * 60_000);
         while next_anchor <= now_ms {
             next_anchor = next_anchor.saturating_add(interval_minutes * 60_000);
         }
@@ -2641,7 +2640,8 @@ impl PostPublishMonitorExecutor {
         let workspace = self.store.workspace(&context.workspace_id)?;
         let now_ms = (self.now)();
         recover_expired_units(&workspace, &context.plan_id, now_ms)?;
-        self.resolve_paused_plan(&workspace, context, now_ms).await?;
+        self.resolve_paused_plan(&workspace, context, now_ms)
+            .await?;
         let _ = create_due_run(&workspace, context, now_ms)?;
         loop {
             let current = (self.now)();
@@ -3511,8 +3511,8 @@ mod tests {
         let missing = parse_gateway_order_observation(&json!({"record": null})).unwrap_err();
         assert_eq!(missing.code, "distribution-order-unavailable");
         assert!(missing.retryable);
-        let unknown = parse_gateway_order_observation(&json!({"record": {"status": 99}}))
-            .unwrap_err();
+        let unknown =
+            parse_gateway_order_observation(&json!({"record": {"status": 99}})).unwrap_err();
         assert_eq!(unknown.code, "distribution-order-status-unknown");
     }
 
@@ -3614,7 +3614,9 @@ mod tests {
             .get_post_publish_monitor_plan(
                 &fixture.workspace.id,
                 "session-14",
-                PostPublishMonitorGetRequest { plan_id: plan.id.clone() },
+                PostPublishMonitorGetRequest {
+                    plan_id: plan.id.clone(),
+                },
                 first_due,
             )
             .unwrap();
@@ -3638,7 +3640,9 @@ mod tests {
             .get_post_publish_monitor_plan(
                 &fixture.workspace.id,
                 "session-14",
-                PostPublishMonitorGetRequest { plan_id: plan.id.clone() },
+                PostPublishMonitorGetRequest {
+                    plan_id: plan.id.clone(),
+                },
                 clock.load(Ordering::SeqCst),
             )
             .unwrap();
@@ -3693,7 +3697,9 @@ mod tests {
             .get_post_publish_monitor_plan(
                 &fixture.workspace.id,
                 "session-14",
-                PostPublishMonitorGetRequest { plan_id: plan.id.clone() },
+                PostPublishMonitorGetRequest {
+                    plan_id: plan.id.clone(),
+                },
                 clock.load(Ordering::SeqCst),
             )
             .unwrap();

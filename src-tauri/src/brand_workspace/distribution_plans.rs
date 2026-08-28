@@ -32,6 +32,9 @@ pub struct DistributionQuestionSource {
     /// 引用的站点名（豆包 site_name）；面板渠道显示名优先用它。
     #[serde(default)]
     pub site_name: Option<String>,
+    /// L3 页面作者解析注入的账号名（多租户引用；仅展示与被动对齐兜底）。
+    #[serde(default)]
+    pub resolved_account_name: Option<String>,
     #[serde(default)]
     pub article_ids: Vec<String>,
 }
@@ -122,6 +125,16 @@ pub struct DistributionPlanDiscoveryFinishRequest {
     /// 偏好路生效名单名字快照（内置名单+用户 overlay 合成）。
     #[serde(default)]
     pub preference_channel_names: Option<Value>,
+    /// 被动路对齐渠道列表（≤50，2026-08-27 用户裁决二轮；面板对齐渠道区）。
+    #[serde(default)]
+    pub passive_aligned_channels: Option<Value>,
+    /// 引用站点显示名映射（注册域名 → 池反查/标题尾缀解析的展示名）。
+    #[serde(default)]
+    pub citation_site_names: Option<Value>,
+    /// 偏好路命中清单（配额前逐名单项一行代表，2026-08-28 用户裁决 Q12；
+    /// 面板偏好召回区数据源）。旧 Sidecar 不发送时投影保持缺省。
+    #[serde(default)]
+    pub preference_matched_channels: Option<Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -348,6 +361,11 @@ impl BrandWorkspaceStore {
             if let Some(site_name) = source.site_name.as_deref() {
                 if site_name.trim().is_empty() || site_name.chars().count() > 120 {
                     source.site_name = None;
+                }
+            }
+            if let Some(account) = source.resolved_account_name.as_deref() {
+                if account.trim().is_empty() || account.chars().count() > 60 {
+                    source.resolved_account_name = None;
                 }
             }
         }
@@ -654,6 +672,31 @@ impl BrandWorkspaceStore {
                 &mut projection,
                 "preferenceChannelNames",
                 preference_channel_names.clone(),
+            )?;
+        }
+        // 被动路对齐渠道列表与引用站点显示名映射（2026-08-27 用户裁决二轮）：
+        // 新 Sidecar 携带则落进投影；旧 Sidecar 缺省时保持原状（字段可缺省）。
+        if let Some(passive_aligned_channels) = &request.passive_aligned_channels {
+            set_projection_field(
+                &mut projection,
+                "passiveAlignedChannels",
+                passive_aligned_channels.clone(),
+            )?;
+        }
+        if let Some(citation_site_names) = &request.citation_site_names {
+            set_projection_field(
+                &mut projection,
+                "citationSiteNames",
+                citation_site_names.clone(),
+            )?;
+        }
+        // 偏好路命中清单（2026-08-28 用户裁决 Q12）：新 Sidecar 携带则落进投影；
+        // 旧 Sidecar 缺省时保持原状（字段可缺省）。
+        if let Some(preference_matched_channels) = &request.preference_matched_channels {
+            set_projection_field(
+                &mut projection,
+                "preferenceMatchedChannels",
+                preference_matched_channels.clone(),
             )?;
         }
         set_projection_field(&mut projection, "updatedAt", json!(now))?;
@@ -1270,7 +1313,9 @@ fn validate_prepare_request(request: &DistributionPlanPrepareRequest) -> Result<
     if request.article_ids.is_empty() || request.article_ids.len() > 50 {
         return Err("distribution_plan_articles_invalid".to_string());
     }
-    if request.question_sources.len() > 100 {
+    // 全量引用上限（2026-08-27 用户裁决二轮）：20 问 × 每问 10 条 = 200 上界，
+    // 250 为纯防脏数据护栏（原 100 会拦下全量返回的引用）。
+    if request.question_sources.len() > 250 {
         return Err("distribution_plan_question_sources_invalid".to_string());
     }
     if !matches!(request.mapping_mode.as_str(), "one-to-one" | "ratio") {
@@ -1514,10 +1559,24 @@ fn validate_discovery_against_plan(
                         return Err("distribution_plan_active_evidence_mismatch".to_string());
                     }
                 }
-                // 保底路：结构化类目/人群规则匹配（合并后单路）。
+                // 保底路：结构化类目/人群/官方 GEO 标记规则匹配（合并后单路）。
+                // geo: 载荷必须与候选自带资源快照的 geoPlatforms 逐字一致
+                // （官方 geo_platforms 非空是保底路第三个触发条件，2026-08-27）。
                 "fallback" => {
+                    let geo_labels = candidate
+                        .pointer("/resourceSnapshot/geoPlatforms")
+                        .and_then(Value::as_array)
+                        .map(|labels| {
+                            labels
+                                .iter()
+                                .filter_map(Value::as_str)
+                                .collect::<Vec<_>>()
+                                .join("/")
+                        })
+                        .unwrap_or_default();
                     if reference != format!("industry:{industry}")
                         && reference != format!("audience:{audience}")
+                        && reference != format!("geo:{geo_labels}")
                     {
                         return Err("distribution_plan_fallback_evidence_mismatch".to_string());
                     }
@@ -1584,8 +1643,8 @@ fn validate_candidate(candidate: &Value, resource: &Value) -> Result<(), String>
     let weights = HashMap::from([
         ("passive", 0.4_f64),
         ("active", 0.2_f64),
-        ("fallback", 0.1_f64),
-        ("preference", 0.3_f64),
+        ("fallback", 0.3_f64),
+        ("preference", 0.1_f64),
     ]);
     let mut score = 0.0;
     for item in evidence {
@@ -2057,6 +2116,7 @@ mod tests {
                 title: format!("探测来源{}", index + 1),
                 url: format!("https://probe-{index}.example.com/source"),
                 site_name: (index == 0).then(|| "示例站点".to_string()),
+                resolved_account_name: None,
                 article_ids: Vec::new(),
             })
             .collect()
@@ -2115,13 +2175,13 @@ mod tests {
                 "providerStatus": 2,
                 "basis": "supermedia-approved-resource"
             },
-            "recommendationWeight": 0.7,
+            "recommendationWeight": 0.9,
             "hitCount": 3,
             "pathHits": ["passive", "active", "fallback"],
             "evidence": [
                 {"path":"passive","weight":0.4,"label":"真实来源","reference":"q1","url":"https://probe-0.example.com/source","articleIds":["article-1"]},
                 {"path":"active","weight":0.2,"label":"全局召回","reference":"recall:汽车 GEO 产业观察","url":"https://probe-0.example.com","articleIds":[]},
-                {"path":"fallback","weight":0.1,"label":"类目","reference":"industry:汽车","url":"https://source-one.example.com","articleIds":[]}
+                {"path":"fallback","weight":0.3,"label":"类目","reference":"industry:汽车","url":"https://source-one.example.com","articleIds":[]}
             ],
             "fitReasons": ["行业匹配", "内容可发"],
             "risks": [],
@@ -2161,6 +2221,16 @@ mod tests {
                 {"title":"汽车 GEO 产业观察","url":"https://probe-0.example.com","articleIds":["article-1"]}
             ])),
             preference_channel_names: Some(json!(["汽车产业观察（官方头条号）"])),
+            passive_aligned_channels: Some(json!([
+                {"resourceId":8,"kind":"media","name":"汽车产业观察","estimatedPriceCny":88,
+                 "citations":1,"questions":1,"accounts":["汽车产业观察"],"recommended":true}
+            ])),
+            citation_site_names: Some(json!({"example.com":"示例站"})),
+            preference_matched_channels: Some(json!([
+                {"entryName":"汽车产业观察（官方头条号）","matched":true,
+                 "representativeName":"汽车产业观察（官方头条号）","representativePriceCny":88,
+                 "variantCount":1,"recommended":true}
+            ])),
         }
     }
 
@@ -2330,6 +2400,53 @@ mod tests {
         assert_eq!(
             finished["preferenceChannelNames"][0],
             "汽车产业观察（官方头条号）"
+        );
+    }
+
+    #[test]
+    fn geo_fallback_reference_must_match_snapshot_platforms() {
+        let (store, workspace) = setup();
+        let context = store
+            .distribution_planning_context(
+                &workspace.id,
+                "session-12",
+                DistributionPlanningContextRequest {
+                    article_operation_id: Some("operation-articles".to_string()),
+                },
+            )
+            .unwrap();
+        let mut source = prepare_request(&context);
+        source.article_ids = vec!["article-1".to_string()];
+        source.question_sources = probed_sources(&context);
+        let preparation = store
+            .prepare_distribution_plan(&workspace.id, "session-12", source)
+            .unwrap();
+
+        // geo: 载荷与快照 geoPlatforms 不一致：确认门拒绝。
+        let mut tampered_geo = finish_request(&preparation, json!("80"), 90);
+        tampered_geo.candidates[0]["evidence"][2]["reference"] = json!("geo:豆包");
+        tampered_geo.candidates[0]["resourceSnapshot"]["geoPlatforms"] =
+            json!(["豆包", "DeepSeek"]);
+        tampered_geo.resource_snapshot[0]["geoPlatforms"] = json!(["豆包", "DeepSeek"]);
+        assert_eq!(
+            store
+                .finish_distribution_plan_discovery(&workspace.id, "session-12", tampered_geo)
+                .unwrap_err(),
+            "distribution_plan_fallback_evidence_mismatch"
+        );
+
+        // 官方 GEO 标记触发保底路（geo_platforms 非空）：载荷一致即通过。
+        let mut geo_reference = finish_request(&preparation, json!("80"), 90);
+        geo_reference.candidates[0]["evidence"][2]["reference"] = json!("geo:豆包/DeepSeek");
+        geo_reference.candidates[0]["resourceSnapshot"]["geoPlatforms"] =
+            json!(["豆包", "DeepSeek"]);
+        geo_reference.resource_snapshot[0]["geoPlatforms"] = json!(["豆包", "DeepSeek"]);
+        let finished = store
+            .finish_distribution_plan_discovery(&workspace.id, "session-12", geo_reference)
+            .unwrap();
+        assert_eq!(
+            finished["candidates"][0]["evidence"][2]["reference"],
+            "geo:豆包/DeepSeek"
         );
     }
 

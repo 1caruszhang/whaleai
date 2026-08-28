@@ -169,8 +169,8 @@ describe("GEO port contract", () => {
       paths: {
         passive: { number: 1, weight: 0.4 },
         active: { number: 2, weight: 0.2 },
-        fallback: { number: 3, weight: 0.1 },
-        preference: { number: 4, weight: 0.3 },
+        fallback: { number: 3, weight: 0.3 },
+        preference: { number: 4, weight: 0.1 },
       },
       alignment: {
         nameFallbackThreshold: 0.55,
@@ -181,9 +181,28 @@ describe("GEO port contract", () => {
       },
       passiveRecall: {
         perQuestionCap: 10,
-        totalCap: 50,
+        alignedChannelCap: 50,
         rankBy: "cross-question-registered-domain-frequency-desc",
       },
+      accountResolution: {
+        layer1: "url-embedded-account-id",
+        layer2: "title-suffix-account-name-platform-gated",
+        layer3: {
+          pageAuthorFetch: {
+            limit: 20,
+            timeoutMs: 8_000,
+            dedupeBy: "url",
+            failure: "silent-degrade-to-platform-name",
+          },
+        },
+      },
+      citationDisplayNameChain: [
+        "doubao-site-name",
+        "pool-domain-lookup",
+        "brand-table",
+        "title-suffix-site-name",
+        "registered-domain",
+      ],
       fallbackTopN: 50,
       recommendation: {
         max: 30,

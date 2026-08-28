@@ -389,13 +389,11 @@ impl BrandWorkspaceStore {
             spec,
             seeds,
         ) = match request.source_kind.as_str() {
-            "confirmed-topic-plan" => {
-                prepare_plan_article_seeds(
-                    &transaction,
-                    &workspace,
-                    request.topic_plan_id.as_deref(),
-                )?
-            }
+            "confirmed-topic-plan" => prepare_plan_article_seeds(
+                &transaction,
+                &workspace,
+                request.topic_plan_id.as_deref(),
+            )?,
             "direct" => prepare_direct_article_seeds(
                 &transaction,
                 &workspace,

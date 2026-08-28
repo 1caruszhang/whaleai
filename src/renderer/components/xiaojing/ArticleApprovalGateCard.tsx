@@ -23,6 +23,7 @@ import {
   type ArticleProjection,
 } from "../../../shared/geo/articleGeneration";
 import { unwrapToolResultText } from "../../../shared/toolResult";
+import GateCardFooter, { GateCardSuccess } from "./GateCardFooter";
 import { useGateCardRefresh } from "./useGateCardRefresh";
 
 /**
@@ -464,7 +465,7 @@ export default function ArticleApprovalGateCard({
         </span>
         <span className="ml-auto">已批准 {approvedCount}/{operation.articles.length}</span>
       </div>
-      <div className="mt-2 space-y-2">
+      <div className="mt-2 max-h-[60vh] space-y-2 overflow-y-auto pr-1">
         {articles.map((article) => (
           <ArticleRow
             key={article.id}
@@ -474,31 +475,17 @@ export default function ArticleApprovalGateCard({
           />
         ))}
       </div>
-      {allApproved ? (
-        <p className="mt-2 flex items-center gap-2 rounded-lg bg-[var(--success-bg)] p-2 text-sm text-[var(--success)]">
-          <CheckCircle2 className="h-4 w-4" />
-          本轮文章已全部批准（{approvedCount} 篇）；小鲸会继续制定分发计划。
-        </p>
-      ) : pending.length > 0 ? (
-        <button
-          type="button"
-          onClick={() => {
-            void approvePending();
-          }}
-          disabled={approving || !hasRealSession}
-          className="mt-2 flex w-full items-center justify-center gap-1.5 rounded-md bg-[var(--button-primary-bg)] px-3 py-2 text-sm font-medium text-[var(--button-primary-text)] disabled:opacity-50"
-        >
-          {approving && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
-          批准并继续（{pending.length} 篇）
-        </button>
-      ) : hasTerminalFailure ? (
-        <p className="mt-2 rounded-lg bg-[var(--paper-inset)] p-2 text-xs leading-4 text-[var(--ink-muted)]">
-          仍有文章被风险阻断或生成失败；生成失败的篇目可在上方逐篇重试，风险阻断的稿件可在对话中让小鲸修改后重新生成。
-        </p>
-      ) : (
-        <p className="mt-2 rounded-lg bg-[var(--paper-inset)] p-2 text-xs leading-4 text-[var(--ink-muted)]">
-          等待文章生成完成…
-        </p>
+      {/* 无待批稿时的等待/终态说明留在正文区；页脚只在可操作时给按钮。 */}
+      {!allApproved && pending.length === 0 && (
+        hasTerminalFailure ? (
+          <p className="mt-2 rounded-lg bg-[var(--paper-inset)] p-2 text-xs leading-4 text-[var(--ink-muted)]">
+            仍有文章被风险阻断或生成失败；生成失败的篇目可在上方逐篇重试，风险阻断的稿件可在对话中让小鲸修改后重新生成。
+          </p>
+        ) : (
+          <p className="mt-2 rounded-lg bg-[var(--paper-inset)] p-2 text-xs leading-4 text-[var(--ink-muted)]">
+            等待文章生成完成…
+          </p>
+        )
       )}
       {approveFailures.length > 0 && (
         <div
@@ -513,9 +500,23 @@ export default function ArticleApprovalGateCard({
           </ul>
         </div>
       )}
-      <p className="mt-1 text-xs leading-4 text-[var(--ink-subtle)]">
-        这是系统维护的确认卡片，不是用户发送的消息；展开正文可直接编辑，编辑后的稿件经你在此批准才会进入分发计划。
-      </p>
+      <GateCardFooter note="批准后进入分发计划">
+        {allApproved ? (
+          <GateCardSuccess>已全部批准（{approvedCount} 篇）</GateCardSuccess>
+        ) : pending.length > 0 ? (
+          <button
+            type="button"
+            onClick={() => {
+              void approvePending();
+            }}
+            disabled={approving || !hasRealSession}
+            className="flex items-center gap-1.5 rounded-md bg-[var(--button-primary-bg)] px-3 py-1.5 text-sm font-medium text-[var(--button-primary-text)] disabled:opacity-50"
+          >
+            {approving && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+            批准并继续（{pending.length} 篇）
+          </button>
+        ) : null}
+      </GateCardFooter>
     </section>
   );
 }

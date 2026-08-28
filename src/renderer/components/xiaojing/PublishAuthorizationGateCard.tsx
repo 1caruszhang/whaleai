@@ -34,6 +34,7 @@ import type {
   PublishOrderStatusEntry,
 } from "../../../shared/geo/publishScheduler";
 import { cnyToPoints, pointsToCny } from "../../../shared/geo/points";
+import GateCardFooter from "./GateCardFooter";
 import {
   PUBLISH_SCHEDULER_POLICY_VERSION,
   publishOrderRefundsPoints,
@@ -672,31 +673,7 @@ export default function PublishAuthorizationGateCard({
             />
             我已核对上述最终批准文章、渠道、价格、预算和排期，并明确授权创建此发布执行。
           </label>
-          <button
-            type="button"
-            onClick={() => {
-              void confirm();
-            }}
-            disabled={!confirmedImpact || busy || disabled}
-            className="mt-3 w-full rounded-lg bg-[var(--danger)] px-3 py-2 text-sm font-medium text-white disabled:opacity-50"
-          >
-            {busy ? "确认中…" : "独立确认发布执行"}
-          </button>
         </div>
-      )}
-
-      {status === "confirmed" && (
-        <button
-          type="button"
-          onClick={() => {
-            void start();
-          }}
-          disabled={busy || disabled}
-          className="mt-2 flex w-full items-center justify-center gap-1.5 rounded-lg bg-[var(--button-primary-bg)] px-3 py-2 text-sm font-medium text-[var(--button-primary-text)] disabled:opacity-50"
-        >
-          {busy && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
-          开始确定性发布
-        </button>
       )}
 
       {POST_START_ACTIVE.has(status) && (
@@ -834,9 +811,37 @@ export default function PublishAuthorizationGateCard({
           {error}
         </p>
       )}
-      <p className="mt-1 text-xs leading-4 text-[var(--ink-subtle)]">
-        这是系统维护的确认卡片，不是用户发送的消息；付费、上传与外部发布的不可逆授权只能由你在此完成。
-      </p>
+      {/* 不可逆授权是全卡唯一主操作：红色按钮固定页脚右下，勾选框仍在
+          上方警告框内（先读警告再勾选，勾选前按钮禁用）；确认后的
+          「开始确定性发布」在原位接力。 */}
+      {(status === "awaiting-confirmation" || status === "confirmed") && (
+        <GateCardFooter>
+          {status === "awaiting-confirmation" ? (
+            <button
+              type="button"
+              onClick={() => {
+                void confirm();
+              }}
+              disabled={!confirmedImpact || busy || disabled}
+              className="rounded-lg bg-[var(--danger)] px-3 py-1.5 text-sm font-medium text-white disabled:opacity-50"
+            >
+              {busy ? "确认中…" : "独立确认发布执行"}
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={() => {
+                void start();
+              }}
+              disabled={busy || disabled}
+              className="flex items-center gap-1.5 rounded-lg bg-[var(--button-primary-bg)] px-3 py-1.5 text-sm font-medium text-[var(--button-primary-text)] disabled:opacity-50"
+            >
+              {busy && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+              开始确定性发布
+            </button>
+          )}
+        </GateCardFooter>
+      )}
     </section>
   );
 }

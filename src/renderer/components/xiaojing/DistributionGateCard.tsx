@@ -1,4 +1,4 @@
-import { AlertTriangle, CheckCircle2, Loader2 } from "lucide-react";
+import { AlertTriangle, Loader2 } from "lucide-react";
 import { useCallback, useRef, useState } from "react";
 
 import {
@@ -15,6 +15,7 @@ import type {
 } from "../../../shared/geo/distributionPlan";
 import { cnyToPoints, pointsToCny } from "../../../shared/geo/points";
 import { unwrapToolResultText } from "../../../shared/toolResult";
+import GateCardFooter, { GateCardSuccess } from "./GateCardFooter";
 import { useGateCardRefresh } from "./useGateCardRefresh";
 
 /**
@@ -302,7 +303,7 @@ export default function DistributionGateCard({
         </p>
       )}
 
-      <div className="mt-2 space-y-2">
+      <div className="mt-2 max-h-[60vh] space-y-2 overflow-y-auto pr-1">
         {plan.candidates.map((candidate) => {
           const checked = selectedIds.includes(candidate.resourceId);
           const pricePoints = candidatePricePoints(candidate);
@@ -367,37 +368,34 @@ export default function DistributionGateCard({
         </div>
       )}
 
-      {confirmed ? (
-        <p className="mt-2 flex items-center gap-2 rounded-lg bg-[var(--success-bg)] p-2 text-sm text-[var(--success)]">
-          <CheckCircle2 className="h-4 w-4" />
-          分发计划已确认；尚未扣费、下单或发布。
-        </p>
-      ) : (
-        <button
-          type="button"
-          onClick={() => {
-            void confirm();
-          }}
-          disabled={
-            busy ||
-            selectedIds.length === 0 ||
-            plan.blockingIssues.length > 0 ||
-            !hasRealSession
-          }
-          className="mt-2 flex w-full items-center justify-center gap-1.5 rounded-md bg-[var(--button-primary-bg)] px-3 py-2 text-sm font-medium text-[var(--button-primary-text)] disabled:opacity-50"
-        >
-          {busy && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
-          确认分发计划（{selectedIds.length} 个渠道）
-        </button>
-      )}
       {error && (
         <p role="alert" className="mt-2 break-words rounded-lg bg-[var(--error-bg)] p-2 text-xs text-[var(--error)]">
           {error}
         </p>
       )}
-      <p className="mt-1 text-xs leading-4 text-[var(--ink-subtle)]">
-        这是系统维护的确认卡片，不是用户发送的消息；本步骤只确认推荐与分配计划，任何付费、下单或发布仍需后续独立授权。
-      </p>
+      {/* 消费安全边界按风险分级保留（极短）：本确认不花钱，付费另有独立授权卡。 */}
+      <GateCardFooter note="本确认不扣费、不发布">
+        {confirmed ? (
+          <GateCardSuccess>已确认 · 尚未扣费、下单或发布</GateCardSuccess>
+        ) : (
+          <button
+            type="button"
+            onClick={() => {
+              void confirm();
+            }}
+            disabled={
+              busy ||
+              selectedIds.length === 0 ||
+              plan.blockingIssues.length > 0 ||
+              !hasRealSession
+            }
+            className="flex items-center gap-1.5 rounded-md bg-[var(--button-primary-bg)] px-3 py-1.5 text-sm font-medium text-[var(--button-primary-text)] disabled:opacity-50"
+          >
+            {busy && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+            确认分发计划（{selectedIds.length} 个渠道）
+          </button>
+        )}
+      </GateCardFooter>
     </section>
   );
 }

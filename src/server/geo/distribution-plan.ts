@@ -24,8 +24,10 @@ import {
   type DistributionResourceSnapshot,
 } from "../../shared/geo/distributionPlan";
 import {
+  accountNameFromTitle,
   buildGlobalRecallPrompt,
   clampTopicNumbers,
+  isMultiTenantPlatformUrl,
   parseGlobalRecallResult,
   resolvePreferenceChannels,
   type PreferenceChannelEntry,
@@ -34,8 +36,12 @@ import {
 } from "../../shared/geo/channelRecall";
 import { parseGeoProbeProviderResponse } from "../../shared/geo/baseline";
 import { cnyToPoints } from "../../shared/geo/points";
+import { GEO_PORT_CONTRACT } from "../../shared/geo/portContract";
 import { XIAOJING_GEO_PROVIDER_DEFAULTS } from "../../shared/geo/providerCapabilities";
+import { fetch as undiciFetch } from "undici";
 import { managementApi } from "../utils/management-api-client";
+import { withAbortSignal } from "../utils/cancellation";
+import { buildSsrfGuardedDispatcher, isUrlSchemeSafe } from "../utils/ssrf";
 import type { GeoBillingPermitPort } from "./billing-permit";
 import type {
   GeoDistributionCapability,
@@ -48,6 +54,107 @@ export type DistributionKeywordSearchPort = Pick<
   GeoKeywordSearchCapability,
   "probeQuestion" | "search"
 >;
+
+// L3 账号解析（契约 accountResolution）：引用页作者抓取的限量与超时。
+const CITATION_PAGE_FETCH_LIMIT =
+  GEO_PORT_CONTRACT.channelRecall.accountResolution.layer3.pageAuthorFetch
+    .limit;
+const CITATION_PAGE_FETCH_TIMEOUT_MS =
+  GEO_PORT_CONTRACT.channelRecall.accountResolution.layer3.pageAuthorFetch
+    .timeoutMs;
+
+/**
+ * 抓引用页 HTML（SSRF 守卫 + 8s 超时；任何失败返回 null 静默降级）。
+ * 仅 HTTPS、仅公网地址、域名解析钉扎——与材料导入同一套守卫口径。
+ */
+async function fetchCitationPageHtml(url: string): Promise<string | null> {
+  try {
+    const parsed = new URL(url);
+    if (!isUrlSchemeSafe(parsed).ok) return null;
+    const dispatcher = await buildSsrfGuardedDispatcher(parsed);
+    return await withAbortSignal(
+      undefined,
+      async (signal) => {
+        const response = await undiciFetch(parsed, {
+          signal,
+          ...(dispatcher ? { dispatcher } : {}),
+          redirect: "follow",
+          headers: {
+            accept: "text/html,application/xhtml+xml",
+            "user-agent":
+              "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36",
+          },
+        });
+        if (!response.ok) return null;
+        const html = await response.text();
+        return html.length > 0 ? html.slice(0, 400_000) : null;
+      },
+      { timeoutMs: CITATION_PAGE_FETCH_TIMEOUT_MS },
+    );
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 从页面 HTML 提取作者/账号名：meta（article:author / og:article:author /
+ * author / twitter:creator）优先，JSON-LD 的 author 字段兜底。纯启发式，
+ * 提不到返回 null——L3 失败只损失账号标注，不影响对齐本身。
+ */
+export function authorNameFromPageHtml(html: string): string | null {
+  const metaPatterns = [
+    /<meta[^>]+(?:property|name)=["'](?:article:author|og:article:author|twitter:creator)["'][^>]*?content=["']([^"']{2,60})["']/i,
+    /<meta[^>]+content=["']([^"']{2,60})["'][^>]*?(?:property|name)=["'](?:article:author|og:article:author|twitter:creator)["']/i,
+    /<meta[^>]+name=["']author["'][^>]*?content=["']([^"']{2,60})["']/i,
+    /<meta[^>]+content=["']([^"']{2,60})["'][^>]*?name=["']author["']/i,
+  ];
+  for (const pattern of metaPatterns) {
+    const value = html.match(pattern)?.[1]?.trim();
+    if (value) return value;
+  }
+  const ldBlocks =
+    html.match(
+      /<script[^>]+application\/ld\+json[^>]*>([\s\S]*?)<\/script>/gi,
+    ) ?? [];
+  for (const block of ldBlocks) {
+    const payload = block
+      .replace(/^<script[^>]*>/i, "")
+      .replace(/<\/script>\s*$/i, "")
+      .trim();
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(payload);
+    } catch {
+      continue;
+    }
+    const stack: unknown[] = [parsed];
+    while (stack.length > 0) {
+      const node = stack.pop();
+      if (Array.isArray(node)) {
+        stack.push(...node);
+        continue;
+      }
+      if (!node || typeof node !== "object") continue;
+      const record = node as Record<string, unknown>;
+      const author = record.author;
+      const name =
+        typeof author === "string"
+          ? author
+          : author &&
+              typeof author === "object" &&
+              !Array.isArray(author) &&
+              typeof (author as Record<string, unknown>).name === "string"
+            ? ((author as Record<string, unknown>).name as string)
+            : null;
+      if (name) {
+        const trimmed = name.trim();
+        if (trimmed.length >= 2 && trimmed.length <= 60) return trimmed;
+      }
+      stack.push(...Object.values(record));
+    }
+  }
+  return null;
+}
 
 export interface DistributionPlanPreparation {
   plan: DistributionPlanProjection;
@@ -79,6 +186,12 @@ export interface DistributionPlanPersistencePort {
     /** 召回输入快照（右侧面板四路召回展示）：主动路原始渠道 + 偏好生效名单。 */
     activeRecallSources: DistributionActiveRecallSource[];
     preferenceChannelNames: string[];
+    /** 被动路对齐渠道列表（≤50；面板「对齐渠道」区数据源）。 */
+    passiveAlignedChannels: DistributionPlanProjection["passiveAlignedChannels"];
+    /** 引用站点显示名映射（注册域名 → 池反查/标题尾缀解析的展示名）。 */
+    citationSiteNames: DistributionPlanProjection["citationSiteNames"];
+    /** 偏好路命中清单（配额前逐名单项一行代表；面板「偏好召回」区数据源）。 */
+    preferenceMatchedChannels: DistributionPlanProjection["preferenceMatchedChannels"];
   }): Promise<DistributionPlanProjection>;
   edit(input: {
     planId: string;
@@ -270,6 +383,13 @@ export class DistributionPlanningService {
     private readonly now: () => Date = () => new Date(),
     /** 网关计费（票 07）：基础 30 + 被动路 5/问；缺省时跳过 permit。 */
     private readonly permits?: GeoBillingPermitPort,
+    /**
+     * L3 账户解析的页面抓取（2026-08-27 用户裁决）：抓引用页 HTML（≤8s、
+     * SSRF 守卫），失败返回 null 静默降级。测试注入假实现；生产缺省用 undici。
+     */
+    private readonly accountPageFetch: (
+      url: string,
+    ) => Promise<string | null> = fetchCitationPageHtml,
   ) {}
 
   private assertIdentity(input: {
@@ -357,8 +477,48 @@ export class DistributionPlanningService {
       Array.from({ length: Math.min(2, questions.length) }, worker),
     );
     // 被动来源选样（契约 passiveRecall）：每问 10 条、跨问渠道频次降序、
-    // 总量前 50——所有问题都能进入证据，多问交集渠道排前。
+    // 全量返回（2026-08-27 用户裁决二轮，旧总量帽 50 废除）。
     return { sources: selectPassiveSources(collected), outcomes };
+  }
+
+  /**
+   * L3 账户解析（契约 accountResolution）：多租户引用且 L1（URL 内嵌标识）
+   * 与 L2（标题尾缀账号名）都拿不到账号的，抓引用页提取作者；≤20 条并发、
+   * 单条 8s 超时、任何失败静默降级（不动来源）。结果以 resolvedAccountName
+   * 回填——随 prepare 落库，供被动对齐兜底与面板账号标注。
+   */
+  private async resolveCitationAccounts(
+    sources: DistributionQuestionSource[],
+  ): Promise<DistributionQuestionSource[]> {
+    const targets: DistributionQuestionSource[] = [];
+    const seen = new Set<string>();
+    for (const source of sources) {
+      if (source.resolvedAccountName) continue;
+      if (!isMultiTenantPlatformUrl(source.url)) continue;
+      if (accountNameFromTitle(source.title)) continue;
+      const url = source.url.trim();
+      if (seen.has(url)) continue;
+      seen.add(url);
+      targets.push(source);
+      if (targets.length >= CITATION_PAGE_FETCH_LIMIT) break;
+    }
+    if (targets.length === 0) return sources;
+    const resolved = await Promise.all(
+      targets.map(async (source) => {
+        const html = await this.accountPageFetch(source.url);
+        const author = html === null ? null : authorNameFromPageHtml(html);
+        return author ? { source, author } : null;
+      }),
+    );
+    const bySource = new Map<DistributionQuestionSource, string>();
+    for (const entry of resolved) {
+      if (entry) bySource.set(entry.source, entry.author);
+    }
+    if (bySource.size === 0) return sources;
+    return sources.map((source) => {
+      const author = bySource.get(source);
+      return author ? { ...source, resolvedAccountName: author } : source;
+    });
   }
 
   /**
@@ -497,7 +657,9 @@ export class DistributionPlanningService {
           this.recallActiveSources(context),
           this.persistence.channelPreferences().catch(() => undefined),
         ]);
-      const questionSources = probeOutcome.sources;
+      const questionSources = await this.resolveCitationAccounts(
+        probeOutcome.sources,
+      ).catch(() => probeOutcome.sources);
       const preferenceChannels: PreferenceChannelEntry[] =
         resolvePreferenceChannels(preferenceSettings);
       // 召回输入快照（右侧面板四路召回展示）：主动路原始渠道与偏好生效名单
@@ -548,6 +710,14 @@ export class DistributionPlanningService {
             filteredOverPerArticleLimit: 0,
             alignedResources: 0,
             recommendedResources: 0,
+            alignedByPath: {
+              passive: 0,
+              active: 0,
+              fallback: 0,
+              preference: 0,
+            },
+            citationDomains: 0,
+            citationDomainPoolHits: 0,
           },
           blockingIssues: [
             "distribution-provider-unavailable",
@@ -556,6 +726,9 @@ export class DistributionPlanningService {
           ],
           activeRecallSources,
           preferenceChannelNames,
+          passiveAlignedChannels: [],
+          citationSiteNames: {},
+          preferenceMatchedChannels: [],
         });
         await settleDiscovery(probeOutcome.outcomes, false);
         return this.persistence.get(base.id);
@@ -597,6 +770,8 @@ export class DistributionPlanningService {
           cnyToPoints(base.budgetCny),
         ),
         publishStartAt: base.publishStartAt,
+        industry: base.industry,
+        targetAudience: base.targetAudience,
       });
       const selectedResourceIds = assignments.flatMap((assignment) =>
         assignment.resourceId === null ? [] : [assignment.resourceId],
@@ -628,6 +803,9 @@ export class DistributionPlanningService {
         blockingIssues,
         activeRecallSources,
         preferenceChannelNames,
+        passiveAlignedChannels: discovery.passiveAlignedChannels,
+        citationSiteNames: discovery.citationSiteNames,
+        preferenceMatchedChannels: discovery.preferenceMatchedChannels,
       });
       await settleDiscovery(probeOutcome.outcomes, true);
       // Exact identity read: a concurrent Session may have created a newer plan.

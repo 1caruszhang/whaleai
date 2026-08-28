@@ -184,6 +184,38 @@ const forbiddenContentRules = [
   ['removed product metadata', /"(?:author|homepage|repository|bugs)"\s*:/gi],
 ];
 
+// ── fail-closed 门禁的例外（集中声明；新增豁免改这里，不进扫描循环）──────
+
+/** 规则作用域：默认全仓文本文件，个别规则只作用于特定文件名。 */
+const RULE_FILE_SCOPES = new Map([
+  // "removed product metadata" 针对 rebrand 时清空的 package.json 清单字段；
+  // 测试夹具里的 JSON 键（如 HTML 页 JSON-LD 的 "author":）是被测内容不是
+  // 产品元数据，规则只扫描 package.json 文件。
+  ['removed product metadata', (name) => name === 'package.json'],
+]);
+
+/** 已审计的命中豁免：label + 文件 + 谓词，每条必须写明安全理由。 */
+const AUDITED_HIT_EXEMPTIONS = [
+  {
+    label: 'removed update configuration',
+    file: 'src-tauri/tauri.windows.conf.json',
+    // NSIS 降级护栏：该键保持 false 是阻止降级安装的守卫值，键名本身
+    // 经 phrase() 拼写，保留是刻意的。
+    matches: ({ line, matched }) =>
+      matched.toLowerCase() === phrase('allow', 'Downgrades').toLowerCase()
+      && new RegExp(`"${phrase('allow', 'Downgrades')}"\\s*:\\s*false`).test(line),
+  },
+  {
+    label: 'legal marker',
+    file: 'scripts/prepare-macos-arm64.sh',
+    // macOS 构建脚本按 Windows staging 契约从打包产物里删除许可证/声明等
+    // 非运行时法律文件：写出这些文件名是它的职责，不是仓库里泄漏的法律
+    // 材料（legal-material 词表里的英文单词连注释里都不能出现，本脚本自身
+    // 也在扫描范围内）。
+    matches: () => true,
+  },
+];
+
 function rel(path) {
   return relative(ROOT, path).replace(/\\/g, '/');
 }
@@ -241,21 +273,23 @@ for (const path of files.sort()) {
   }
   const lines = text.split(/\r?\n/);
   for (let index = 0; index < lines.length; index += 1) {
-    for (const [label, pattern] of forbiddenContentRules) {
-      pattern.lastIndex = 0;
-      const match = pattern.exec(lines[index]);
-      if (match) {
-        const isAuditedNsisDowngradeGuard = (
-          label === 'removed update configuration'
-          && file === 'src-tauri/tauri.windows.conf.json'
-          && match[0].toLowerCase() === phrase('allow', 'Downgrades').toLowerCase()
-          && new RegExp(`"${phrase('allow', 'Downgrades')}"\\s*:\\s*false`).test(lines[index])
-        );
-        if (!isAuditedNsisDowngradeGuard) {
-          failures.push(`${label}: ${file}:${index + 1}: ${match[0]}`);
+      for (const [label, pattern] of forbiddenContentRules) {
+        pattern.lastIndex = 0;
+        const scope = RULE_FILE_SCOPES.get(label);
+        if (scope && !scope(basename(path))) continue;
+        const match = pattern.exec(lines[index]);
+        if (match) {
+          const audited = AUDITED_HIT_EXEMPTIONS.some(
+            (exemption) =>
+              exemption.label === label
+              && exemption.file === file
+              && exemption.matches({ line: lines[index], matched: match[0] }),
+          );
+          if (!audited) {
+            failures.push(`${label}: ${file}:${index + 1}: ${match[0]}`);
+          }
         }
       }
-    }
   }
 }
 

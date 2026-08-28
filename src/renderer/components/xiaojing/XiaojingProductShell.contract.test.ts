@@ -82,6 +82,69 @@ describe("Xiaojing product shell contract", () => {
     expect(workbench).not.toContain('role="tablist"');
   });
 
+  // GD 反馈（2026-08）：三栏可拖宽（宽度全局持久化、双击复位、<900px 右栏
+  // 浮层禁拖、左栏可折叠成图标窄条）；8 张确认卡统一「底部常驻页脚右下」
+  // 确认键、长列表卡内滚动，样板免责句按风险分级裁剪为极短说明。
+  it("pins the resizable three-column shell and the unified gate-card footer", () => {
+    const sidebar = source(
+      "src/renderer/components/xiaojing/XiaojingSidebar.tsx",
+    );
+    const workbench = source(
+      "src/renderer/components/xiaojing/XiaojingGeoWorkbench.tsx",
+    );
+    const columnLayout = source("src/renderer/utils/columnLayout.ts");
+    expect(columnLayout).toContain('"xiaojing:column-widths"');
+    // 折叠标记键名集中归属 columnLayout；组件经导出常量消费（不再内联字面量）。
+    expect(columnLayout).toContain('"xiaojing:sidebar-collapsed"');
+    expect(columnLayout).toContain('"xiaojing:geo-workbench-collapsed"');
+    expect(sidebar).toContain("<ColumnResizer");
+    expect(sidebar).toContain("SIDEBAR_COLLAPSED_STORAGE_KEY");
+    expect(sidebar).toContain('data-xiaojing-sidebar="collapsed"');
+    expect(workbench).toContain("<ColumnResizer");
+    // <900px 工作台转浮层：分隔线隐藏，浮层宽度回退 min(默认宽, 88vw)。
+    expect(workbench).toContain("max-[900px]:hidden");
+    expect(workbench).toContain("max-[900px]:absolute");
+    expect(workbench).toContain("max-[900px]:w-[min(360px,88vw)]");
+
+    const footerCards = [
+      "QuestionPoolGateCard",
+      "TopicPlanGateCard",
+      "ArticleApprovalGateCard",
+      "DistributionGateCard",
+      "PublishAuthorizationGateCard",
+      "GeoPlanAckPanel",
+      "KnowledgeBatchCard",
+    ];
+    for (const card of footerCards) {
+      const cardSource = source(
+        `src/renderer/components/xiaojing/${card}.tsx`,
+      );
+      expect(cardSource).toContain("<GateCardFooter");
+      expect(cardSource).not.toContain("这是系统维护的确认卡片");
+    }
+    // 长列表卡内滚动：确认键不被长列表推出视野。
+    for (const card of [
+      "QuestionPoolGateCard",
+      "TopicPlanGateCard",
+      "ArticleApprovalGateCard",
+      "DistributionGateCard",
+    ]) {
+      expect(
+        source(`src/renderer/components/xiaojing/${card}.tsx`),
+      ).toContain("max-h-[60vh]");
+    }
+    // 行级裁决（KnowledgeConflictCard）与材料卡（MaterialRequestCard）不套
+    // 整卡页脚规范：它们不是整卡一次确认。
+    const conflict = source(
+      "src/renderer/components/xiaojing/KnowledgeConflictCard.tsx",
+    );
+    const material = source(
+      "src/renderer/components/xiaojing/MaterialRequestCard.tsx",
+    );
+    expect(conflict).not.toContain("<GateCardFooter");
+    expect(material).not.toContain("<GateCardFooter");
+  });
+
   it("registers only focused Session and GEO route families in the Sidecar", () => {
     const composition = source("src/server/sidecar-composition.ts");
     expect(composition).toContain("pathname.startsWith('/api/xiaojing/')");
@@ -129,7 +192,7 @@ describe("Xiaojing product shell contract", () => {
     expect(workbench).toContain(
       "在聊天中发起 GEO 目标后，小鲸会先确认事实与目标",
     );
-    expect(workbench).toContain("xiaojing:geo-workbench-collapsed");
+    expect(workbench).toContain("WORKBENCH_COLLAPSED_STORAGE_KEY");
     expect(workbench).toContain("<XiaojingGeoOperationPanel");
     expect(workbench).toContain("<XiaojingBrandKnowledgePanel");
     // 票 30：历史面板移出工作台，知识版本史与产物血缘整页迁往「品牌档案」。

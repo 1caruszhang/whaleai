@@ -1,7 +1,12 @@
-import { render, screen } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { fireEvent, render, screen } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { BrandWorkspace } from "@/api/brandWorkspaceClient";
+import {
+  __resetColumnWidthsForTest,
+  getColumnWidths,
+  saveColumnWidths,
+} from "@/utils/columnLayout";
 import XiaojingGeoWorkbench from "./XiaojingGeoWorkbench";
 
 vi.mock("./XiaojingGeoOperationPanel", () => ({
@@ -32,6 +37,16 @@ const LAUNCH_CARD_TITLES = [
 describe("XiaojingGeoWorkbench", () => {
   beforeEach(() => {
     localStorage.removeItem("xiaojing:geo-workbench-collapsed");
+    localStorage.removeItem("xiaojing:column-widths");
+    __resetColumnWidthsForTest();
+  });
+
+  afterEach(() => {
+    Object.defineProperty(window, "innerWidth", {
+      configurable: true,
+      writable: true,
+      value: 1024,
+    });
   });
 
   // 票 31：工作台「操作/效果」双页签移除，收为单一操作视图；效果三面板
@@ -127,5 +142,90 @@ describe("XiaojingGeoWorkbench", () => {
     expect(localStorage.getItem("xiaojing:geo-workbench-collapsed")).toBe(
       "false",
     );
+  });
+
+  it("resizes through the divider (pointer left widens) and persists the width", () => {
+    Object.defineProperty(window, "innerWidth", {
+      configurable: true,
+      writable: true,
+      value: 1600,
+    });
+    render(<XiaojingGeoWorkbench currentWorkspace={workspace} />);
+    const handle = screen.getByRole("separator", {
+      name: "调整 GEO 工作台宽度",
+    });
+
+    fireEvent.pointerDown(handle, { button: 0, pointerId: 1, clientX: 1200 });
+    fireEvent.pointerMove(handle, { pointerId: 1, clientX: 1140 });
+    fireEvent.pointerUp(handle, { pointerId: 1 });
+    // 工作台贴右缘：指针左移 60px = 加宽 60px。
+    expect(getColumnWidths().workbench).toBe(420);
+    expect(
+      JSON.parse(localStorage.getItem("xiaojing:column-widths") ?? "{}")
+        .workbench,
+    ).toBe(420);
+  });
+
+  it("clamps the workbench to its 280-560 bounds", () => {
+    Object.defineProperty(window, "innerWidth", {
+      configurable: true,
+      writable: true,
+      value: 1600,
+    });
+    render(<XiaojingGeoWorkbench currentWorkspace={workspace} />);
+    const handle = screen.getByRole("separator", {
+      name: "调整 GEO 工作台宽度",
+    });
+
+    fireEvent.pointerDown(handle, { button: 0, pointerId: 1, clientX: 1200 });
+    fireEvent.pointerMove(handle, { pointerId: 1, clientX: 2000 });
+    fireEvent.pointerUp(handle, { pointerId: 1 });
+    expect(getColumnWidths().workbench).toBe(280);
+
+    fireEvent.pointerDown(handle, { button: 0, pointerId: 1, clientX: 200 });
+    fireEvent.pointerMove(handle, { pointerId: 1, clientX: -240 });
+    fireEvent.pointerUp(handle, { pointerId: 1 });
+    expect(getColumnWidths().workbench).toBe(720);
+  });
+
+  it("double-click on the divider restores the default width", () => {
+    saveColumnWidths({ workbench: 520 });
+    render(<XiaojingGeoWorkbench currentWorkspace={workspace} />);
+    fireEvent.dblClick(
+      screen.getByRole("separator", { name: "调整 GEO 工作台宽度" }),
+    );
+    expect(getColumnWidths().workbench).toBe(360);
+  });
+
+  it("restores the last dragged width after collapse and expand", () => {
+    saveColumnWidths({ workbench: 420 });
+    const { rerender } = render(
+      <XiaojingGeoWorkbench currentWorkspace={workspace} />,
+    );
+    const expanded = () =>
+      document.querySelector<HTMLElement>(
+        '[data-xiaojing-workbench="expanded"]',
+      );
+
+    expect(expanded()?.style.getPropertyValue("--xiaojing-workbench-width")).toBe(
+      "420px",
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "折叠 GEO 工作台" }));
+    expect(
+      document.querySelector('[data-xiaojing-workbench="collapsed"]'),
+    ).not.toBeNull();
+
+    rerender(<XiaojingGeoWorkbench currentWorkspace={workspace} />);
+    fireEvent.click(screen.getByRole("button", { name: "展开 GEO 工作台" }));
+    expect(expanded()?.style.getPropertyValue("--xiaojing-workbench-width")).toBe(
+      "420px",
+    );
+  });
+
+  it("hides the drag divider while collapsed", () => {
+    localStorage.setItem("xiaojing:geo-workbench-collapsed", "true");
+    render(<XiaojingGeoWorkbench currentWorkspace={workspace} />);
+    expect(screen.queryByRole("separator")).not.toBeInTheDocument();
   });
 });

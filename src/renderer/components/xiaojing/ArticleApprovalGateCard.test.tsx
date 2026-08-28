@@ -244,7 +244,7 @@ describe("ArticleApprovalGateCard", () => {
     );
     await waitFor(() =>
       expect(
-        within(card).getByText(/本轮文章已全部批准（1 篇）/),
+        within(card).getByText(/已全部批准（1 篇）/),
       ).toBeInTheDocument(),
     );
   });
@@ -320,7 +320,7 @@ describe("ArticleApprovalGateCard", () => {
     );
     await waitFor(() =>
       expect(
-        within(card).getByText(/本轮文章已全部批准（2 篇）/),
+        within(card).getByText(/已全部批准（2 篇）/),
       ).toBeInTheDocument(),
     );
     expect(mocks.approve).toHaveBeenCalledTimes(2);
@@ -385,7 +385,7 @@ describe("ArticleApprovalGateCard", () => {
       within(card).getByRole("button", { name: "批准并继续（1 篇）" }),
     ).toBeInTheDocument();
     expect(
-      within(card).queryByText(/本轮文章已全部批准/),
+      within(card).queryByText(/已全部批准/),
     ).not.toBeInTheDocument();
   });
 
@@ -411,7 +411,7 @@ describe("ArticleApprovalGateCard", () => {
       expect(within(card).getByText(/指南 · 风险阻断/)).toBeInTheDocument(),
     );
     expect(
-      within(card).queryByText(/本轮文章已全部批准/),
+      within(card).queryByText(/已全部批准/),
     ).not.toBeInTheDocument();
     expect(
       within(card).getByText(/仍有文章被风险阻断或生成失败/),
@@ -434,7 +434,7 @@ describe("ArticleApprovalGateCard", () => {
     );
     const card = screen.getByRole("region", { name: "文章审核批准" });
     expect(
-      within(card).getByText(/本轮文章已全部批准（1 篇）/),
+      within(card).getByText(/已全部批准（1 篇）/),
     ).toBeInTheDocument();
     expect(
       within(card).queryByRole("button", { name: /批准并继续/ }),

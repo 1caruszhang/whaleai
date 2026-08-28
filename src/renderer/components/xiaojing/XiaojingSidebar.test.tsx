@@ -1,6 +1,6 @@
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import type { ComponentProps } from 'react';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type {
   BrandSession,
@@ -12,6 +12,11 @@ import type { AccountState } from '@/api/accountClient';
 import { AccountApiContext, AccountStateContext, type AccountApiContextValue } from '@/context/AccountContext';
 import type { BrandWorkspaceState } from '@/hooks/useBrandWorkspaces';
 import { XiaojingThemeRuntime } from '@/theme';
+import {
+  __resetColumnWidthsForTest,
+  getColumnWidths,
+  saveColumnWidths,
+} from '@/utils/columnLayout';
 import { createNewTab } from '@/types/tab';
 import ProductSidebar from './XiaojingSidebar';
 
@@ -482,5 +487,89 @@ describe('XiaojingSidebar brand session lifecycle', () => {
     expect(within(panel).getByText('13800001234')).toBeTruthy();
     expect(within(panel).getByText('充值引导')).toBeTruthy();
     expect(within(panel).getByRole('button', { name: '退出登录' })).toBeTruthy();
+  });
+});
+
+describe('XiaojingSidebar column resize and collapse', () => {
+  function sidebarProps(): ComponentProps<typeof ProductSidebar> {
+    return {
+      brandState: state(),
+      activeTab: undefined,
+      onOpenWorkspace: vi.fn(async () => true),
+      onOpenSession: vi.fn(async () => true),
+      onRenameSession: vi.fn(async () => undefined),
+      onDeleteSession: vi.fn(async () => ({ deleted: true }) as const),
+      onDeleteBrand: vi.fn(async () => ({ deleted: true }) as const),
+      onOpenBrandArchive: vi.fn(),
+      onOpenBrandEffect: vi.fn(),
+    };
+  }
+
+  beforeEach(() => {
+    localStorage.removeItem('xiaojing:sidebar-collapsed');
+    localStorage.removeItem('xiaojing:column-widths');
+    __resetColumnWidthsForTest();
+    // 宽视口让两栏硬上限生效，拖拽数值不被聊天保底压缩。
+    Object.defineProperty(window, 'innerWidth', { configurable: true, writable: true, value: 1600 });
+  });
+
+  afterEach(() => {
+    Object.defineProperty(window, 'innerWidth', { configurable: true, writable: true, value: 1024 });
+  });
+
+  it('collapses to the icon rail and keeps brand nav plus account reachable', () => {
+    render(<XiaojingSidebar {...sidebarProps()} />);
+    fireEvent.click(screen.getByRole('button', { name: '折叠侧栏' }));
+
+    expect(document.querySelector('[data-xiaojing-sidebar="collapsed"]')).not.toBeNull();
+    expect(localStorage.getItem('xiaojing:sidebar-collapsed')).toBe('true');
+    expect(screen.getByRole('button', { name: '品牌档案' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '效果' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '个人信息' })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: '展开侧栏' }));
+    expect(document.querySelector('[data-xiaojing-sidebar="expanded"]')).not.toBeNull();
+    expect(localStorage.getItem('xiaojing:sidebar-collapsed')).toBe('false');
+  });
+
+  it('commits dragged widths to the shared column store and clamps at 400px', () => {
+    render(<XiaojingSidebar {...sidebarProps()} />);
+    const handle = screen.getByRole('separator', { name: '调整侧栏宽度' });
+
+    fireEvent.pointerDown(handle, { button: 0, pointerId: 1, clientX: 240 });
+    fireEvent.pointerMove(handle, { pointerId: 1, clientX: 300 });
+    fireEvent.pointerUp(handle, { pointerId: 1 });
+    expect(getColumnWidths().sidebar).toBe(308); // 248 + 60
+    expect(
+      JSON.parse(localStorage.getItem('xiaojing:column-widths') ?? '{}').sidebar,
+    ).toBe(308);
+
+    fireEvent.pointerDown(handle, { button: 0, pointerId: 1, clientX: 300 });
+    fireEvent.pointerMove(handle, { pointerId: 1, clientX: 1200 });
+    fireEvent.pointerUp(handle, { pointerId: 1 });
+    expect(getColumnWidths().sidebar).toBe(400);
+  });
+
+  it('expands from the collapsed rail when the divider is dragged', () => {
+    localStorage.setItem('xiaojing:sidebar-collapsed', 'true');
+    render(<XiaojingSidebar {...sidebarProps()} />);
+    expect(document.querySelector('[data-xiaojing-sidebar="collapsed"]')).not.toBeNull();
+
+    const handle = screen.getByRole('separator', { name: '调整侧栏宽度' });
+    fireEvent.pointerDown(handle, { button: 0, pointerId: 1, clientX: 40 });
+    // 拖动开始即展开到默认宽，随后位移继续参与拖宽。
+    expect(document.querySelector('[data-xiaojing-sidebar="expanded"]')).not.toBeNull();
+    expect(localStorage.getItem('xiaojing:sidebar-collapsed')).toBe('false');
+
+    fireEvent.pointerMove(handle, { pointerId: 1, clientX: 60 });
+    fireEvent.pointerUp(handle, { pointerId: 1 });
+    expect(getColumnWidths().sidebar).toBe(268); // 248 + 20
+  });
+
+  it('double-click on the divider restores the default width', () => {
+    saveColumnWidths({ sidebar: 380 });
+    render(<XiaojingSidebar {...sidebarProps()} />);
+    fireEvent.dblClick(screen.getByRole('separator', { name: '调整侧栏宽度' }));
+    expect(getColumnWidths().sidebar).toBe(248);
   });
 });

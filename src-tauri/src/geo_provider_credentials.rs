@@ -79,7 +79,10 @@ mod tests {
             normalize_endpoint_override(Some("ftp://gateway.example.test".to_string())),
             None
         );
-        assert_eq!(normalize_endpoint_override(Some("not-a-url".to_string())), None);
+        assert_eq!(
+            normalize_endpoint_override(Some("not-a-url".to_string())),
+            None
+        );
         assert_eq!(normalize_endpoint_override(None), None);
     }
 }

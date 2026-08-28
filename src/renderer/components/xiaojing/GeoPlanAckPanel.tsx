@@ -8,6 +8,7 @@ import type {
   GeoOperationProjection,
   GeoOperationStep,
 } from "../../../shared/geo/operation";
+import GateCardFooter from "./GateCardFooter";
 
 /**
  * 计划放行门：operation 创建后先停在「认可本轮计划」，用户在进度卡上
@@ -75,14 +76,6 @@ export default function GeoPlanAckPanel({
       <p className="mt-1 break-words text-xs leading-5 text-[var(--ink-secondary)]">
         {step.confirmation?.summary}
       </p>
-      <button
-        type="button"
-        disabled={busy || !identity}
-        onClick={() => void submit()}
-        className="mt-2 inline-flex items-center gap-1 rounded-lg bg-[var(--button-primary-bg)] px-2.5 py-1.5 text-sm text-[var(--button-primary-text)] disabled:opacity-50"
-      >
-        <Play className="h-3.5 w-3.5" aria-hidden="true" /> 认可计划并开始
-      </button>
       {error && (
         <p
           role="alert"
@@ -91,6 +84,16 @@ export default function GeoPlanAckPanel({
           {error}
         </p>
       )}
+      <GateCardFooter>
+        <button
+          type="button"
+          disabled={busy || !identity}
+          onClick={() => void submit()}
+          className="inline-flex items-center gap-1 rounded-lg bg-[var(--button-primary-bg)] px-2.5 py-1.5 text-sm text-[var(--button-primary-text)] disabled:opacity-50"
+        >
+          <Play className="h-3.5 w-3.5" aria-hidden="true" /> 认可计划并开始
+        </button>
+      </GateCardFooter>
     </div>
   );
 }
