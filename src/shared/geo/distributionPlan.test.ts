@@ -1099,9 +1099,17 @@ describe("official gate + variant family + junk + preference list (2026-08-28 �
   it("platform-level active source hits official-type resources only (Q3a)", () => {
     const result = candidateResult(
       [
-        // 根路径 + 品牌核心名 → 官方型，承接平台级来源。
+        // 根路径 + 品牌核心名 → 官方型，承接对齐的平台级/同频道来源。
         resource("media", {
           id: 41,
+          name: "今日头条美食（GEO）",
+          status: 2,
+          price: "30",
+          entrance_link: "https://www.toutiao.com/",
+        }),
+        // 同平台不同垂类的官方型资源：频道佐证不齐，不得跨垂类命中。
+        resource("media", {
+          id: 43,
           name: "今日头条体育（GEO）",
           status: 2,
           price: "30",
@@ -1130,10 +1138,119 @@ describe("official gate + variant family + junk + preference list (2026-08-28 �
     const ids = result.candidates.map((c) => c.resourceId);
     expect(ids).toContain(41);
     expect(ids).not.toContain(42);
+    expect(ids).not.toContain(43);
     const official = result.candidates.find((c) => c.resourceId === 41)!;
     expect(
       official.evidence.find((e) => e.path === "active")?.label,
     ).toContain("平台官方型");
+  });
+
+  it("platform-level source without channel word still lands on official-type resources (Q3a 收紧保留面)", () => {
+    // 标题剥品牌后为空（纯平台级来源）→ 官方型承接不设频道佐证。
+    const result = candidateResult(
+      [
+        resource("media", {
+          id: 51,
+          name: "网易房产（GEO）",
+          status: 2,
+          price: "30",
+          entrance_link: "https://www.163.com/",
+        }),
+      ],
+      {
+        activeSources: [
+          {
+            title: "网易",
+            url: "https://www.163.com/",
+            articleIds: ["article-news"],
+          },
+        ],
+        preferenceChannels: [],
+      },
+    );
+    expect(result.candidates.map((c) => c.resourceId)).toContain(51);
+  });
+
+  it("cross-vertical official-type hit is blocked by channel corroboration (2026-08-28 收紧)", () => {
+    // 实测复现：炊班主（团餐）场景，LLM 返回餐饮/医美频道，误挂网易房产。
+    const result = candidateResult(
+      [
+        resource("media", {
+          id: 61,
+          name: "网易房产（GEO）",
+          status: 2,
+          price: "30",
+          entrance_link: "https://www.163.com/",
+          channel_type: 10,
+        }),
+        resource("media", {
+          id: 62,
+          name: "网易餐饮（GEO）",
+          status: 2,
+          price: "30",
+          entrance_link: "https://www.163.com/",
+          channel_type: 18,
+        }),
+      ],
+      {
+        activeSources: [
+          {
+            title: "网易新闻健康医美频道",
+            url: "https://www.163.com/",
+            articleIds: ["article-news"],
+          },
+          {
+            title: "网易餐饮频道",
+            url: "https://www.163.com/",
+            articleIds: ["article-news"],
+          },
+        ],
+        preferenceChannels: [],
+      },
+    );
+    const ids = result.candidates.map((c) => c.resourceId);
+    expect(ids).not.toContain(61);
+    expect(ids).toContain(62);
+  });
+
+  it("structured category corroboration catches synonym verticals the name heuristic misses (2026-08-28 真实池)", () => {
+    // 真实池形态：网易美食（GEO）是自媒体，industry_category=13（美食）。
+    // 名称佐证接不住「餐饮频道→网易美食」（餐饮/美食零字重叠），结构化
+    // 类目（餐饮→美食/食品 别名）能接住；房产资源两路佐证皆无 → 拦截。
+    const result = candidateResult(
+      [
+        resource("we-media", {
+          id: 71,
+          name: "网易美食（GEO）",
+          status: 2,
+          price: "30",
+          entrance_link: "http://www.163.com/",
+          industry_category: 13,
+        }),
+        resource("we-media", {
+          id: 72,
+          name: "网易房产（GEO）",
+          status: 2,
+          price: "30",
+          entrance_link: "http://www.163.com/",
+          industry_category: 19,
+        }),
+      ],
+      {
+        industry: "餐饮",
+        activeSources: [
+          {
+            title: "网易餐饮频道",
+            url: "http://www.163.com/",
+            articleIds: ["article-news"],
+          },
+        ],
+        preferenceChannels: [],
+      },
+    );
+    const ids = result.candidates.map((c) => c.resourceId);
+    expect(ids).toContain(71);
+    expect(ids).not.toContain(72);
   });
 
   it("default pack keeps one representative; sub-channel family caps at 2 seats (Q13)", () => {

@@ -14,6 +14,7 @@ import {
   isJunkResaleListing,
   isMultiTenantPlatformUrl,
   normalizeChannelName,
+  officialChannelAligned,
   packKeyOf,
   platformOfficialFamily,
   preferenceEntryMatches,
@@ -1278,12 +1279,21 @@ export function buildDistributionCandidates(input: {
             activeNameMatchScore(source, resource.name, {
               multiTenantPlatform: multiTenantSource,
             }) >= 0.8);
-        const officialHit =
-          sourceFamily !== null &&
-          platformOfficialFamily({
-            name: resource.name,
-            entranceLink: resource.entranceLink,
-          }) === sourceFamily;
+      // 平台官方型通道（Q3a）+ 双重佐证（2026-08-28 真实池核验后收严）：
+      // 同族之外还须 (a) 结构化类目一致（channelType/industryCategory 对码，
+      // 真实池核验：网易美食（GEO）ic=13、搜狐网美食（GEO）ic=13、
+      // 今日头条健康（GEO）ct=9——官方型 GEO 资源类目字段真实可用，且能
+      // 接住名称佐证接不住的同义垂类「餐饮频道→网易美食」）或
+      // (b) officialChannelAligned 品牌后频道残差对齐（字段缺失/宽类目
+      // 「生活消费」「其他」时的名称兜底）。二者皆无则不命中——否则
+      // 「网易餐饮频道」会跨垂类命中「网易房产（GEO）」。
+      const officialHit =
+        sourceFamily !== null &&
+        platformOfficialFamily({
+          name: resource.name,
+          entranceLink: resource.entranceLink,
+        }) === sourceFamily &&
+        (industryMatch || officialChannelAligned(source, resource.name));
         if (
           domainHit ||
           officialHit ||

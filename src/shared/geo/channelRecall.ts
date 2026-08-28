@@ -618,6 +618,45 @@ export function platformOfficialFamily(resource: ResourceIdentity): string | nul
   return entry.aliases.some((alias) => core.includes(alias)) ? family : null;
 }
 
+/**
+ * 平台官方型命中的频道佐证（2026-08-28 收紧：同平台跨垂类误挂）。
+ * 官方型通道原本只比对平台族——「网易餐饮频道」会经 163.com 命中
+ * 「网易房产（GEO）」这类同平台不同垂类的官方资源。现要求来源/资源
+ * 剥离品牌后的频道残差对齐（复用 fuzzyMatchScore 品牌分支口径）：
+ * - 平台级来源（标题剥品牌后为空，如「网易」）：仍承接官方型资源
+ *   （Q3a 原语义：平台级推荐只能落到根路径官方资源上）；
+ * - 资源核心名剥品牌后为空（「网易（GEO）」类泛官方资源）：同上承接；
+ * - 两侧都有频道词：包含关系或去噪字重叠 ≥0.8 才算对齐
+ *   （网易餐饮频道 → 网易餐饮（GEO）✓、→ 网易房产（GEO）✗）。
+ */
+export function officialChannelAligned(
+  source: RecallSource,
+  resourceName: string,
+): boolean {
+  const brand = domainToBrand(source.url);
+  if (!brand) return true;
+  const srcChannel = stripBrand(source.title ?? "", brand);
+  if (!srcChannel) return true;
+  const resChannel = stripBrand(
+    channelNameCore(resourceName).toLowerCase(),
+    brand,
+  );
+  if (!resChannel) return true;
+  if (resChannel.includes(srcChannel) || srcChannel.includes(resChannel))
+    return true;
+  const srcChars = new Set(
+    [...srcChannel].filter((ch) => {
+      const c = ch.codePointAt(0)!;
+      if (c < 0x4e00 || c > 0x9fff) return false;
+      return !NOISE_CHARS.has(ch);
+    }),
+  );
+  if (srcChars.size === 0) return true;
+  let shared = 0;
+  for (const ch of srcChars) if (resChannel.includes(ch)) shared += 1;
+  return shared / srcChars.size >= 0.8;
+}
+
 // ── 名称匹配（js_ai sourceAlignment，策略逐条移植） ────────────────────────
 
 const SUFFIX_STRIP = [
