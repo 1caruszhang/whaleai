@@ -344,6 +344,11 @@ export interface DistributionPlanCardCandidate {
   kind: DistributionChannelKind;
   name: string;
   estimatedPricePoints: number | null;
+  /** 渠道可用性；旧转录可能缺省，消费方需按可选处理。 */
+  availability?: {
+    state: DistributionChannelCandidate["availability"]["state"];
+    providerStatus?: number;
+  };
   pathHits: DistributionRecallPath[];
   fitReasons: string[];
   evidence: Array<{

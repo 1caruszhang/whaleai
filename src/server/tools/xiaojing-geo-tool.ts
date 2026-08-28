@@ -728,6 +728,7 @@ export function distributionPlanCardProjection(
       resourceId: candidate.resourceId,
       kind: candidate.kind,
       name: candidate.name,
+      availability: candidate.availability,
       estimatedPricePoints:
         candidate.estimatedPriceCny === null
           ? null

@@ -10,6 +10,7 @@ import { useTabApi, useTabState } from "@/context/TabContext";
 import { isPendingSessionId } from "../../../shared/constants";
 import type {
   DistributionAssignment,
+  DistributionChannelCandidate,
   DistributionPlanEditInput,
   DistributionPlanProjection,
 } from "../../../shared/geo/distributionPlan";
@@ -44,6 +45,7 @@ type GateCandidate = Omit<
 > & {
   estimatedPriceCny?: number | null;
   estimatedPricePoints?: number | null;
+  availability?: DistributionChannelCandidate["availability"];
 };
 
 type GatePlan = Omit<
@@ -146,7 +148,7 @@ function reconcileAssignments(
       (item) =>
         selected.has(item.resourceId) &&
         !used.has(item.resourceId) &&
-        item.availability.state === "available" &&
+        item.availability?.state === "available" &&
         candidatePricePoints(item) !== null,
     );
     if (!candidate) return null;
