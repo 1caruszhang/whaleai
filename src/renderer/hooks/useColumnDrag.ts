@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState, useSyncExternalStore } from 'react';
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import {
   getColumnWidths,
   resetColumnWidths,
@@ -30,8 +30,12 @@ export function useColumnDrag(options: UseColumnDragOptions) {
   const [dragWidth, setDragWidth] = useState<number | null>(null);
   const dragWidthRef = useRef<number | null>(null);
   // effectiveMax 每次渲染取最新闭包（读视口/对侧宽度），但不 destabilize 回调。
+  // 渲染期直接写 ref 会违反 react-hooks/refs（并发渲染下 render 可能被丢弃），
+  // 提交后在 effect 里刷新；applyDelta 只在指针/键盘事件里调用，时序上足够新。
   const effectiveMaxRef = useRef(options.effectiveMax);
-  effectiveMaxRef.current = options.effectiveMax;
+  useEffect(() => {
+    effectiveMaxRef.current = options.effectiveMax;
+  });
 
   const applyDelta = useCallback(
     (deltaPx: number) => {
