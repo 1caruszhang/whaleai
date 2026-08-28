@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "鲸杉geo",
-  "version": "0.5.2",
+  "version": "0.6.2",
   "identifier": "com.xiaojing.geo",
   "build": {
     "frontendDist": "../dist",
