@@ -290,6 +290,28 @@ export interface KnowledgeFieldRow {
 }
 
 /**
+ * 竞品证据摘录 → 每品牌来源链接（用户裁决 2026-08-31：来源链接要在品牌
+ * 胶囊旁直接可见，不埋在展开后的依据长文里）。摘录是富化管线的固定拼装
+ * 「名（地域）：快照（来源：<url>） … 名（地域）：…」；按 ' … ' 分段、
+ * 段首「名（地域）：」取品牌名（.+? 非贪婪跨过名字自身的括号，如张仔纪
+ * （广州）餐饮管理有限公司）、段内（来源：url） 取链接。解析失败/无链接
+ * 段安静跳过——链接是增强呈现，不构成数据契约。纯函数。
+ */
+export function competitorSourceLinks(excerpt: string | null | undefined): Map<string, string> {
+  const links = new Map<string, string>();
+  if (!excerpt) return links;
+  for (const segment of excerpt.split(' … ')) {
+    const nameMatch = segment.match(/^(.+?)（[^（）]{1,15}）：/);
+    const urlMatch = segment.match(/（来源：(https?:\/\/[^）]+)）/);
+    const name = nameMatch?.[1]?.trim();
+    if (name && urlMatch?.[1] && !links.has(name)) {
+      links.set(name, urlMatch[1]);
+    }
+  }
+  return links;
+}
+
+/**
  * 字段行分组投影（ADR 0003）：候选按企业 Profile 固定字段序分行，同字段多值合并；
  * 未知 predicate 的行按首现顺序排在全部已知字段之后。
  * ADR-0007 两层名单：potentialCompetitors 候选并入 competitors 行（数据

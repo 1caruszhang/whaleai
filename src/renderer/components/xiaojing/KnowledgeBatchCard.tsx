@@ -7,6 +7,7 @@ import { isEnterpriseProfileField } from '../../../shared/geo/enterpriseProfile'
 import {
   buildKnowledgeFieldRows,
   KNOWLEDGE_CARD_MAX_CANDIDATES,
+  competitorSourceLinks,
   knowledgeFieldKeyOfPredicate,
   parseKnowledgeCandidatesCard,
   type KnowledgeBatchDecisionItem,
@@ -857,9 +858,25 @@ function FieldRow({ row, stateOf, busy, onConfirmRow, onChoose, onStageEdits, on
                   {candidate.source.excerpt}
                 </span>
               )}
-              {candidateValueTexts(candidate).map((text, index) => (
+              {candidateValueTexts(candidate).map((text, index) => {
+                const sourceUrl = isCompetitorTierField(row.field)
+                  ? competitorSourceLinks(candidate.source.excerpt).get(text)
+                  : undefined;
+                return (
                 <span key={`${candidate.id}:${index}`} className="inline-flex items-center gap-0.5">
                   <ValuePill text={text} wrap={isCompetitorTierField(row.field)} />
+                  {sourceUrl && (
+                    <a
+                      href={sourceUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                      data-competitor-source-link={text}
+                      className="text-[10px] leading-none text-[var(--ink-subtle)] underline hover:text-[var(--ink)]"
+                      onClick={(event) => event.stopPropagation()}
+                    >
+                      {t('knowledgeCard.sourceLink')}
+                    </a>
+                  )}
                   {isArrayShapedCandidate(candidate) && !isFailed && !editing && (
                     <button
                       type="button"
@@ -873,7 +890,8 @@ function FieldRow({ row, stateOf, busy, onConfirmRow, onChoose, onStageEdits, on
                     </button>
                   )}
                 </span>
-              ))}
+                );
+              })}
               {isFailed && (
                 <button
                   type="button"

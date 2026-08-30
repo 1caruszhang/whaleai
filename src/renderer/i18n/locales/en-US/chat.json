@@ -133,7 +133,8 @@
     "fieldNotes": {
       "potentialCompetitors": "Adjacent scenarios or substitute categories; backfill the ranking roster only when direct competitors fall below 5"
     },
-    "potentialDivider": "Potential: "
+    "potentialDivider": "Potential: ",
+    "sourceLink": "Source"
   },
   "shell": {
     "common": {

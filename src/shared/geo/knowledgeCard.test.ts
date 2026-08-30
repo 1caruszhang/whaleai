@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  competitorSourceLinks,
   buildKnowledgeCandidatesCardData,
   buildKnowledgeFieldRows,
   KNOWLEDGE_CARD_EXCERPT_MAX_CHARS,
@@ -48,6 +49,24 @@ function source(
     key: { ...defaults.key, ...(rest.key ?? {}) },
   };
 }
+
+describe('competitorSourceLinks（竞品证据摘录 → 每品牌来源链接）', () => {
+  it('parses per-brand name and source url from the enrichment excerpt format', () => {
+    const links = competitorSourceLinks(
+      '张仔纪（广州）餐饮管理有限公司（广东）：干蒸菜服务商汇总（来源：http://m.toutiao.com/group/1）'
+      + ' … 街坊蒸神（顺德）：封神探店帖（来源：https://www.sohu.com/a/1_2）',
+    );
+    expect(links.get('张仔纪（广州）餐饮管理有限公司')).toBe('http://m.toutiao.com/group/1');
+    expect(links.get('街坊蒸神')).toBe('https://www.sohu.com/a/1_2');
+  });
+
+  it('skips segments without a url and tolerates empty excerpts', () => {
+    expect(competitorSourceLinks('某品牌（广州）：无链接证据').size).toBe(0);
+    expect(competitorSourceLinks('').size).toBe(0);
+    expect(competitorSourceLinks(null).size).toBe(0);
+    expect(competitorSourceLinks(undefined).size).toBe(0);
+  });
+});
 
 describe('knowledge candidates card contract', () => {
   it('parses only well-formed batch card payloads', () => {

@@ -387,6 +387,30 @@ describe('KnowledgeBatchCard（字段行复核卡）', () => {
     expect(screen.getByText('材料原文')).toBeInTheDocument();
   });
 
+  it('竞品行品牌胶囊旁直接显示来源链接（用户裁决 2026-08-31：链接不埋进展开长文）', () => {
+    render(<KnowledgeBatchCard data={cardData([
+      candidateSource({
+        id: 'c-competitors-link',
+        predicate: 'enterprise-profile.competitors',
+        valueJson: '["张仔纪（广州）餐饮管理有限公司","街坊蒸神"]',
+        normalizedValueJson: '["张仔纪（广州）餐饮管理有限公司","街坊蒸神"]',
+        source: {
+          materialId: 'material-1',
+          excerpt: '张仔纪（广州）餐饮管理有限公司（广东）：干蒸菜服务商汇总（来源：https://mill.example/zhang）'
+            + ' … 街坊蒸神（顺德）：探店帖（来源：https://sohu.example/jiefang）',
+          confidence: 0.5,
+          profileProvenance: 'inferred',
+        },
+      }),
+    ])} />);
+
+    // 不展开行也能看到：每个品牌胶囊旁一个「来源」小链接，指向各自命中源。
+    const links = screen.getAllByRole('link', { name: '来源' });
+    expect(links).toHaveLength(2);
+    expect(links[0]).toHaveAttribute('href', 'https://mill.example/zhang');
+    expect(links[1]).toHaveAttribute('href', 'https://sohu.example/jiefang');
+  });
+
   it('证据摘录里的来源 URL 渲染为可点击外链（竞品证据行留痕可复核）', () => {
     render(<KnowledgeBatchCard data={cardData([
       candidateSource({
