@@ -41,8 +41,9 @@
    - 关系闸：所引快照里名字附近出现供应/合作/前东家等非竞争关系词的丢弃
      （沿用既有 NON_COMPETITOR_RELATION 词表，从「摘录门」迁移为「快照门」）
    - 跨层互斥：与直接层归一名相等或互为子串的潜在名丢弃（张仔纪/张纪仔不留双份）
-④ 幸存者作为 inferred/0.5 候选走既有 propose → 确认卡（两个字段行：
-   competitors + potentialCompetitors，潜在行带补位小注，均逐项 ✕）
+④ 幸存者作为 inferred/0.5 候选走既有 propose → 确认卡（数据两个 fact：
+   competitors + potentialCompetitors；卡面合并为单一「竞品」栏——直接层在前、
+   潜在层带「潜在：」分界标记与补位小注，均逐项 ✕）
 ```
 
 要点：

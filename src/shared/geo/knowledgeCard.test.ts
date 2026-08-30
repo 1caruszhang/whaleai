@@ -254,6 +254,24 @@ describe('knowledge candidates card contract', () => {
       .toEqual(['c-servicearea', 'c-servicearea-camel']);
   });
 
+  // ADR-0007 两层名单：数据两层、卡面一栏——potentialCompetitors 候选并入
+  // competitors 行（行键只剩 competitors），行内直接层在前、潜在层在后。
+  it('merges potential competitors into the single competitors row, direct tier first', () => {
+    const card = buildKnowledgeCandidatesCardData(
+      { id: 'material-1', displayName: '资料.md' },
+      [
+        source({ id: 'c-potential-first-payload', predicate: 'enterprise-profile.potentialCompetitors' }),
+        source({ id: 'c-fullname', predicate: 'enterprise-profile.fullName' }),
+        source({ id: 'c-competitors', predicate: 'enterprise-profile.competitors' }),
+        source({ id: 'c-potential', predicate: 'enterprise-profile.potentialCompetitors' }),
+      ].map(toKnowledgeCardCandidate),
+    );
+    const rows = buildKnowledgeFieldRows(card!);
+    expect(rows.map((row) => row.field)).toEqual(['fullName', 'competitors']);
+    expect(rows[1].candidates.map((candidate) => candidate.id))
+      .toEqual(['c-competitors', 'c-potential-first-payload', 'c-potential']);
+  });
+
   it('attributes truncated overflow to the specific field rows instead of a card-level count', () => {
     // 2 条 fullName + 55 条 products（超总量 7 条）：products 按自然分布占满
     // 剩余预算，fullName 不受影响；溢出全部归因到 products。

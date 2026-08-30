@@ -292,6 +292,9 @@ export interface KnowledgeFieldRow {
 /**
  * 字段行分组投影（ADR 0003）：候选按企业 Profile 固定字段序分行，同字段多值合并；
  * 未知 predicate 的行按首现顺序排在全部已知字段之后。
+ * ADR-0007 两层名单：potentialCompetitors 候选并入 competitors 行（数据
+ * 两层、卡面一栏），行内直接层在前、潜在层在后——tier 区分靠候选自身
+ * predicate，供排行补位与「潜在」标记消费。
  */
 export function buildKnowledgeFieldRows(
   data: Pick<KnowledgeCandidatesCardData, 'candidates' | 'overflowByField'>,
@@ -301,21 +304,24 @@ export function buildKnowledgeFieldRows(
   let unknownOrder = 0;
   for (const candidate of data.candidates) {
     const field = knowledgeFieldKeyOfPredicate(candidate.key.predicate);
-    if (!fieldIndex.has(field)) {
-      const known = (ENTERPRISE_PROFILE_FIELDS as readonly string[]).indexOf(field);
-      fieldIndex.set(field, known >= 0
+    const rowKey = field === 'potentialCompetitors' ? 'competitors' : field;
+    if (!fieldIndex.has(rowKey)) {
+      const known = (ENTERPRISE_PROFILE_FIELDS as readonly string[]).indexOf(rowKey);
+      fieldIndex.set(rowKey, known >= 0
         ? known
         : ENTERPRISE_PROFILE_FIELDS.length + unknownOrder++);
     }
-    const existing = grouped.get(field);
+    const existing = grouped.get(rowKey);
     if (existing) existing.push(candidate);
-    else grouped.set(field, [candidate]);
+    else grouped.set(rowKey, [candidate]);
   }
+  const tierOrder = (candidate: KnowledgeCardCandidate): number =>
+    knowledgeFieldKeyOfPredicate(candidate.key.predicate) === 'potentialCompetitors' ? 1 : 0;
   return [...grouped.entries()]
     .sort(([left], [right]) => fieldIndex.get(left)! - fieldIndex.get(right)!)
     .map(([field, candidates]) => ({
       field,
-      candidates,
+      candidates: [...candidates].sort((left, right) => tierOrder(left) - tierOrder(right)),
       overflowCount: data.overflowByField?.[field] ?? 0,
     }));
 }

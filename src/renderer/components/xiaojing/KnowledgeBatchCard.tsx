@@ -7,6 +7,7 @@ import { isEnterpriseProfileField } from '../../../shared/geo/enterpriseProfile'
 import {
   buildKnowledgeFieldRows,
   KNOWLEDGE_CARD_MAX_CANDIDATES,
+  knowledgeFieldKeyOfPredicate,
   parseKnowledgeCandidatesCard,
   type KnowledgeBatchDecisionItem,
   type KnowledgeBatchDecisionItemResult,
@@ -566,8 +567,14 @@ function FieldRow({ row, stateOf, busy, onConfirmRow, onChoose, onStageEdits, on
   const fieldText = isEnterpriseProfileField(row.field)
     ? t(`knowledgeCard.fields.${row.field}`)
     : row.field;
-  // 字段级小注（i18n 可扩展）：潜在竞品行说明补位语义，其余字段默认无。
-  const fieldNote = t(`knowledgeCard.fieldNotes.${row.field}`, { defaultValue: '' });
+  // ADR-0007 两层名单：潜在竞品并入竞品栏，仅当行内确有潜在候选时说明
+  // 补位语义（纯直接层的竞品行不打扰）。
+  const rowHasPotential = row.candidates.some(
+    (candidate) => knowledgeFieldKeyOfPredicate(candidate.key.predicate) === 'potentialCompetitors',
+  );
+  const fieldNote = rowHasPotential
+    ? t(`knowledgeCard.fieldNotes.potentialCompetitors`)
+    : '';
   const active = row.candidates.filter(
     (candidate) => stateOf(candidate).outcome !== 'settled',
   );
@@ -715,14 +722,31 @@ function FieldRow({ row, stateOf, busy, onConfirmRow, onChoose, onStageEdits, on
       )}
 
       <div className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1.5">
-        {row.candidates.map((candidate) => {
+        {row.candidates.map((candidate, candidateIndex) => {
           const state = stateOf(candidate);
+          // 两层竞品同栏陈列：首个潜在候选前插一个弱化「潜在」分界标签，
+          // 让补位候选可辨认（行内排序保证直接层在前）。
+          const isPotentialTier = knowledgeFieldKeyOfPredicate(candidate.key.predicate) === 'potentialCompetitors';
+          const showPotentialDivider = isPotentialTier
+            && !row.candidates.slice(0, candidateIndex).some(
+              (earlier) => knowledgeFieldKeyOfPredicate(earlier.key.predicate) === 'potentialCompetitors',
+            );
+          const potentialDivider = showPotentialDivider ? (
+            <span
+              key={`${candidate.id}:potential-divider`}
+              data-potential-divider
+              className="text-xs text-[var(--ink-subtle)]"
+            >
+              {t('knowledgeCard.potentialDivider')}
+            </span>
+          ) : null;
           if (state.outcome === 'settled') {
             const status = state.settledStatus ?? '';
             const resultKey = `knowledgeCard.results.${status}`;
             const resultLabel = t(resultKey);
             return (
               <span key={candidate.id} className="inline-flex items-center gap-1.5">
+                {potentialDivider}
                 {candidateValueTexts(candidate).map((text, index) => (
                   <ValuePill
                     key={`${candidate.id}:${index}`}
@@ -753,6 +777,7 @@ function FieldRow({ row, stateOf, busy, onConfirmRow, onChoose, onStageEdits, on
               className="inline-flex flex-wrap items-center gap-1.5"
               data-candidate-capsule={candidate.id}
             >
+              {potentialDivider}
               {isFailed && (
                 <span className="rounded-full bg-[var(--error-bg)] px-2 py-0.5 text-xs text-[var(--error)]">
                   {t('knowledgeCard.badgeFailed')}

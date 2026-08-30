@@ -262,8 +262,14 @@ describe('KnowledgeBatchCard（字段行复核卡）', () => {
     });
   });
 
-  it('潜在竞品行独立成行：带补位小注，胶囊可逐项 ✕（ADR-0007 两层名单）', async () => {
+  it('两层竞品同栏陈列：合并进「竞品」行，潜在层带分界标记，胶囊均可 ✕（ADR-0007）', async () => {
     render(<KnowledgeBatchCard data={cardData([
+      candidateSource({
+        id: 'c-competitors',
+        predicate: 'enterprise-profile.competitors',
+        valueJson: '["云帆信息","星河智能"]',
+        normalizedValueJson: '["云帆信息","星河智能"]',
+      }),
       candidateSource({
         id: 'c-potential',
         predicate: 'enterprise-profile.potentialCompetitors',
@@ -272,20 +278,28 @@ describe('KnowledgeBatchCard（字段行复核卡）', () => {
       }),
     ])} />);
 
-    // 字段小注说明补位语义，两枚胶囊独立陈列且各带 ✕。
-    expect(screen.getByText('潜在竞品')).toBeInTheDocument();
-    expect(screen.getByText(/直接竞品不足 5 家时按序补位/)).toBeInTheDocument();
+    // 数据两层、卡面一栏：不再出现独立的「潜在竞品」行标签。
+    expect(screen.getByText('竞品')).toBeInTheDocument();
+    expect(screen.queryByText('潜在竞品')).not.toBeInTheDocument();
+    // 同栏陈列：直接层胶囊在前，潜在层前有「潜在：」分界标记。
+    expect(screen.getByText('云帆信息')).toBeInTheDocument();
+    expect(screen.getByText('星河智能')).toBeInTheDocument();
+    expect(screen.getByText('潜在：')).toBeInTheDocument();
     expect(screen.getByText('省外连锁品牌')).toBeInTheDocument();
     expect(screen.getByText('替代业态品牌')).toBeInTheDocument();
+    // 两层胶囊均可逐项删除。
+    expect(screen.getByRole('button', { name: '移除云帆信息' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '移除省外连锁品牌' })).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: '移除省外连锁品牌' }));
     expect(screen.queryByText('省外连锁品牌')).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: '确认（采纳全部 1 条）' }));
+    fireEvent.click(screen.getByRole('button', { name: '确认（采纳全部 2 条）' }));
     await waitFor(() => expect(mocks.apiPost.mock.calls.some(([path]) => path === '/api/xiaojing/knowledge/decide-batch')).toBe(true));
     const submit = mocks.apiPost.mock.calls.find(([path]) => path === '/api/xiaojing/knowledge/decide-batch');
-    expect(submit?.[1]?.decisions?.[0]).toMatchObject({
-      candidateId: 'c-potential',
+    const potentialDecision = submit?.[1]?.decisions?.find(
+      (decision: { candidateId: string }) => decision.candidateId === 'c-potential',
+    );
+    expect(potentialDecision).toMatchObject({
       decision: 'adopt-edited',
       editedValue: ['替代业态品牌'],
     });

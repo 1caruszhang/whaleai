@@ -132,7 +132,8 @@
     },
     "fieldNotes": {
       "potentialCompetitors": "相近场景/替代品类；直接竞品不足 5 家时按序补位进排行榜对比"
-    }
+    },
+    "potentialDivider": "潜在："
   },
   "shell": {
     "common": {
