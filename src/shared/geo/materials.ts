@@ -96,3 +96,29 @@ export interface MaterialStatusEntry<TMaterial = unknown> {
   material: TMaterial;
   card: KnowledgeCandidatesCardData | null;
 }
+
+/**
+ * 单份文档的存量重扫结果（ADR-0008 T7）：只做图片腿——不 begin/finish
+ * attempt、不产出知识候选，材料终态与画像事实原样保留。
+ */
+export interface MaterialRescanDocumentSummary {
+  materialId: string;
+  displayName: string;
+  /** 本次新入池张数。 */
+  pooled: number;
+  /** sha256 已在池中（预扫命中或存储层唯一键去重）的张数。 */
+  deduplicated: number;
+  /** 因格式白名单/尺寸/打标/入库失败未入池的张数（降级，不报错）。 */
+  degraded: number;
+  /** 本份材料的时间预算耗尽，仍有图片未处理；再次触发可继续。 */
+  budgetExhausted: boolean;
+  /** 单份失败（如原始字节读不回）的固定错误码；成功时省略。 */
+  errorCode?: MaterialErrorCode;
+}
+
+/** 存量材料手动重扫（workspace 内全部 docx/pptx）的一次通过结果。 */
+export interface MaterialRescanResult {
+  documents: MaterialRescanDocumentSummary[];
+  /** 总时间预算耗尽，仍有文档未启动；幂等重扫可再次触发继续。 */
+  budgetExhausted: boolean;
+}

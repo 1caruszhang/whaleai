@@ -2,6 +2,7 @@ import { act, fireEvent, render, screen, waitFor, within } from '@testing-librar
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { BrandMaterialProcessResult, TabApiPost } from '@/api/brandMaterialClient';
+import type { MaterialRescanResult } from '../../../shared/geo/materials';
 import MaterialRequestCard from './MaterialRequestCard';
 
 const mocks = vi.hoisted(() => ({
@@ -14,6 +15,7 @@ const mocks = vi.hoisted(() => ({
   importWebsite: vi.fn(),
   retry: vi.fn(),
   deleteMaterial: vi.fn(),
+  rescanImages: vi.fn(),
   fetchStatuses: vi.fn(),
 }));
 
@@ -47,6 +49,7 @@ vi.mock('@/api/brandMaterialClient', async (importOriginal) => {
     importBrandMaterialWebsite: mocks.importWebsite,
     retryBrandMaterial: mocks.retry,
     deleteBrandMaterial: mocks.deleteMaterial,
+    rescanBrandMaterialImages: mocks.rescanImages,
     fetchBrandMaterialStatuses: mocks.fetchStatuses,
   };
 });
@@ -141,6 +144,7 @@ describe('MaterialRequestCard', () => {
       mocks.importWebsite,
       mocks.retry,
       mocks.deleteMaterial,
+      mocks.rescanImages,
       mocks.fetchStatuses,
     ]) mock.mockReset();
     // 默认恢复查询返回空；个别用例按需覆盖。
@@ -470,5 +474,80 @@ describe('MaterialRequestCard', () => {
     ).toBeInTheDocument();
     expect(screen.getByPlaceholderText('https://example.com/about')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '选择文件' })).toBeInTheDocument();
+  });
+
+  it('triggers a legacy image rescan from the card header and reports the pooled summary', async () => {
+    let releaseRescan: ((value: MaterialRescanResult) => void) | undefined;
+    mocks.rescanImages.mockImplementation(
+      () => new Promise<MaterialRescanResult>((resolve) => { releaseRescan = resolve; }),
+    );
+    renderRequestCard();
+
+    fireEvent.click(screen.getByRole('button', { name: '重扫存量材料图片' }));
+    expect(mocks.rescanImages).toHaveBeenCalledWith(
+      mocks.apiPost,
+      { workspaceId: 'brand-07', sessionId: 'session-07' },
+    );
+    // 进行中：按钮禁用防重复触发，结果行提示幂等口径。
+    expect(screen.getByRole('button', { name: '重扫存量材料图片' })).toBeDisabled();
+    expect(screen.getByText(/重复触发不会产生重复图片/)).toBeInTheDocument();
+
+    await act(async () => {
+      releaseRescan?.({
+        documents: [
+          {
+            materialId: 'material-legacy-doc',
+            displayName: '旧品牌介绍.docx',
+            pooled: 2,
+            deduplicated: 1,
+            degraded: 0,
+            budgetExhausted: false,
+          },
+        ],
+        budgetExhausted: false,
+      });
+    });
+
+    // 摘要行：新入池/已入池（幂等去重）计数聚合呈现。
+    expect(screen.getByText(/存量重扫完成：入池 2 张；已入池 1 张；0 张未入池/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '重扫存量材料图片' })).toBeEnabled();
+  });
+
+  it('tells the user to rescan again when the pass hits its time budget', async () => {
+    mocks.rescanImages.mockResolvedValue({
+      documents: [{
+        materialId: 'material-legacy-deck',
+        displayName: '旧路演.pptx',
+        pooled: 3,
+        deduplicated: 0,
+        degraded: 1,
+        budgetExhausted: true,
+      }],
+      budgetExhausted: true,
+    } satisfies MaterialRescanResult);
+    renderRequestCard();
+
+    fireEvent.click(screen.getByRole('button', { name: '重扫存量材料图片' }));
+    await waitFor(() =>
+      expect(screen.getByText(/时间预算用完，再次点击可继续/)).toBeInTheDocument());
+    expect(screen.getByText(/入池 3 张/)).toBeInTheDocument();
+    expect(screen.getByText(/1 张未入池/)).toBeInTheDocument();
+  });
+
+  it('marks rescan transport failures as material_request_failed', async () => {
+    mocks.rescanImages.mockRejectedValue(new Error('proxy timeout'));
+    renderRequestCard();
+
+    fireEvent.click(screen.getByRole('button', { name: '重扫存量材料图片' }));
+    await waitFor(() =>
+      expect(screen.getByText('重扫失败：material_request_failed')).toBeInTheDocument());
+  });
+
+  it('disables the rescan entry when the Tab has no exact-match brand', () => {
+    mocks.hasWorkspace = false;
+    renderRequestCard();
+
+    expect(screen.getByRole('button', { name: '重扫存量材料图片' })).toBeDisabled();
+    expect(mocks.rescanImages).not.toHaveBeenCalled();
   });
 });

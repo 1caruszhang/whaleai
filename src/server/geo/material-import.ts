@@ -19,6 +19,8 @@ import {
   type MaterialProcessFailure,
   type MaterialProcessResult as SharedMaterialProcessResult,
   type MaterialProcessSuccess as SharedMaterialProcessSuccess,
+  type MaterialRescanDocumentSummary,
+  type MaterialRescanResult,
 } from '../../shared/geo/materials';
 import {
   isMaterialImageExtension,
@@ -64,6 +66,12 @@ const WEBSITE_TIMEOUT_MS = 15_000;
  * 材料永远停在 processing。
  */
 const DEFAULT_EXTRACTION_TIMEOUT_MS = 10 * 60_000;
+/**
+ * 存量重扫（ADR-0008 T7）的池预扫上限：与 Rust images/list 的 limit 上界
+ * 一致。预扫只为省打标调用，超出上限的已入池图片由存储层 sha256 唯一键
+ * 兜底去重，幂等不依赖本清单的完整性。
+ */
+const RESCAN_POOL_PRESCAN_LIMIT = 200;
 /**
  * ranking 陈列位 1 为本品牌、2–6 为真实竞品（5 家）。第一阶段
  * 给用户最多 10 家带地域/同类业务的联网候选，留出确认与去重空间。
@@ -227,6 +235,11 @@ export interface BrandMaterialPort {
     errorCode?: string;
   }): Promise<BrandMaterial>;
   list(input: { materialIds?: string[]; limit?: number }): Promise<BrandMaterialListItem[]>;
+  /**
+   * 存量重扫候选清单（ADR-0008 T7）：本 workspace 全部 docx/pptx 材料
+   * （processing 中的除外——其导入腿本就会提取内嵌图），最旧优先，有界。
+   */
+  listDocumentMaterials(input?: { limit?: number }): Promise<BrandMaterial[]>;
   /** 材料图片候选池写入；同 sha256 已在池时返回既有条目并标记 deduplicated。 */
   saveImageAsset(input: SaveMaterialImageInput): Promise<{ id: string; deduplicated: boolean }>;
   /** 候选清单（供生成注入与预览取回消费方）。 */
@@ -265,6 +278,18 @@ type MaterialImagePoolOutcome =
   | 'extract-failed'
   /** 内嵌图提取专用：时间预算耗尽，余量图片不再打标（导入照常收敛）。 */
   | 'budget-exhausted';
+
+/**
+ * 一次内嵌图提取入池的 outcome 计数（ADR-0008 T7）：pooled=新入池，
+ * deduplicated=sha256 已在池（预扫命中或存储层唯一键去重），degraded=
+ * 因闸门/打标/入库失败未入池，budgetExhausted=时间预算截断仍有余量。
+ */
+export interface MaterialImagePoolTally {
+  pooled: number;
+  deduplicated: number;
+  degraded: number;
+  budgetExhausted: boolean;
+}
 
 export interface WebsiteFetchDependencies {
   fetch?: (
@@ -364,6 +389,14 @@ export class RustBrandMaterialPort implements BrandMaterialPort {
     }));
     if (result.ok !== true) throw managementError(result);
     return result.materials as BrandMaterialListItem[];
+  }
+
+  async listDocumentMaterials(input: { limit?: number } = {}): Promise<BrandMaterial[]> {
+    const result = await managementApi('/api/brand-materials/documents/list', 'POST', this.envelope(
+      input.limit !== undefined ? { limit: input.limit } : {},
+    ));
+    if (result.ok !== true) throw managementError(result);
+    return result.materials as BrandMaterial[];
   }
 
   async saveImageAsset(input: SaveMaterialImageInput): Promise<{ id: string; deduplicated: boolean }> {
@@ -1481,7 +1514,7 @@ function failureDiagnostic(error: unknown): Record<string, unknown> {
 }
 
 export function materialLogProjection(input: {
-  operation: 'import-file' | 'import-text' | 'fetch-website' | 'parse' | 'extract' | 'propose-candidates' | 'retry' | 'delete' | 'image-content';
+  operation: 'import-file' | 'import-text' | 'fetch-website' | 'parse' | 'extract' | 'propose-candidates' | 'retry' | 'delete' | 'image-content' | 'rescan-images';
   workspaceId: string;
   sessionId: string;
   materialId?: string;
@@ -2463,10 +2496,25 @@ export class MaterialImportService {
    * 白名单外格式安全跳过并留痕，逐图走独立图片同款打标管线；每张图的
    * 任何失败都只降级该图，不阻塞也不拖慢文档导入主链。整段共享与文本
    * 抽取同款的硬性时间预算（材料不会因配图提取停在 processing）。
+   *
+   * 导入与存量重扫（T7）共用本方法这同一条提取腿：重扫额外传入池预扫
+   * sha 集合，已入池图片跳过打标（幂等重扫不重复花视觉调用；预扫漏网
+   * 由存储层 sha256 全局唯一键兜底去重）。返回 outcome 计数供重扫摘要
+   * 消费，导入路径忽略返回值。
    */
-  private async poolEmbeddedImages(material: BrandMaterial, bytes: Uint8Array): Promise<void> {
+  private async poolEmbeddedImages(
+    material: BrandMaterial,
+    bytes: Uint8Array,
+    options: { alreadyPooled?: ReadonlySet<string> } = {},
+  ): Promise<MaterialImagePoolTally> {
     const logOutcome = (outcome: string, extra: Record<string, unknown> = {}): void => {
       console.log(`[materials] image-extract ${JSON.stringify({ materialId: material.id, outcome, ...extra })}`);
+    };
+    const tally: MaterialImagePoolTally = { pooled: 0, deduplicated: 0, degraded: 0, budgetExhausted: false };
+    const countOutcome = (outcome: MaterialImagePoolOutcome): void => {
+      if (outcome === 'pooled') tally.pooled += 1;
+      else if (outcome === 'deduplicated') tally.deduplicated += 1;
+      else tally.degraded += 1;
     };
     let extraction: ReturnType<typeof extractEmbeddedMaterialImages>;
     try {
@@ -2474,7 +2522,7 @@ export class MaterialImportService {
     } catch {
       // 坏档/解压失败：零入池零报错，导入主链照走（与打标失败同款降级纪律）。
       logOutcome('extract-failed');
-      return;
+      return tally;
     }
     const skipped = Object.keys(extraction.skippedFormats);
     if (skipped.length > 0) logOutcome('skipped-format', { formats: extraction.skippedFormats });
@@ -2485,11 +2533,18 @@ export class MaterialImportService {
     for (let index = 0; index < extraction.images.length; index += 1) {
       if (Date.now() >= deadline) {
         logOutcome('budget-exhausted', { remaining: extraction.images.length - index });
+        tally.budgetExhausted = true;
         break;
       }
       const image = extraction.images[index];
+      if (options.alreadyPooled?.has(image.sha256)) {
+        // 已入池（重扫幂等的预扫命中）：不再打标，按去重收场。
+        logOutcome('deduplicated');
+        tally.deduplicated += 1;
+        continue;
+      }
       try {
-        logOutcome(await this.poolImageAsset(material, image.bytes, {
+        countOutcome(await this.poolImageAsset(material, image.bytes, {
           sha256: image.sha256,
           fileExt: image.fileExt,
           imageBytes: image.bytes,
@@ -2501,8 +2556,85 @@ export class MaterialImportService {
           errorCode: errorCode(error),
         })}`);
         logOutcome('degraded');
+        tally.degraded += 1;
       }
     }
+    return tally;
+  }
+
+  /**
+   * 单份存量材料的图片重扫（ADR-0008 T7）：对已导入（图片曾被丢弃、原始
+   * 字节留存）的 docx/pptx 再跑一遍 T3 同一条内嵌提取腿——不 begin/finish
+   * attempt、不产出知识候选，材料终态与画像事实原样保留。幂等由
+   * sha256 全局唯一键保证：`alreadyPooled` 预扫命中即跳过打标；预扫漏网
+   * 时存储层唯一键兜底去重，重复触发不产生重复候选。
+   */
+  async rescanMaterialImages(
+    material: BrandMaterial,
+    bytes: Uint8Array,
+    alreadyPooled: ReadonlySet<string>,
+  ): Promise<MaterialImagePoolTally> {
+    if (material.fileExt !== 'docx' && material.fileExt !== 'pptx') {
+      throw new Error('material_type_unsupported');
+    }
+    if (material.workspaceId !== this.identity.workspaceId) {
+      throw new Error('material_identity_mismatch');
+    }
+    return this.poolEmbeddedImages(material, bytes, { alreadyPooled });
+  }
+
+  /**
+   * workspace 级存量重扫一次通过（ADR-0008 T7）：枚举全部 docx/pptx 材料，
+   * 逐份读回原始字节跑同一条提取腿；单份失败（字节读不回/类型不符）降级
+   * 计入摘要不拖垮其余文档。总时间预算只约束「启动下一份」——在途材料
+   * 的收敛由每份自身的提取预算保证，预算截断是幂等的：再次触发时已入池
+   * sha 被预扫跳过，续扫只花在余量上。
+   */
+  async rescanWorkspaceDocumentImages(options: {
+    totalBudgetMs: number;
+    poolPrescanLimit?: number;
+  }): Promise<MaterialRescanResult> {
+    const documents = await this.materialPort.listDocumentMaterials();
+    let alreadyPooled = new Set<string>();
+    try {
+      const assets = await this.materialPort.listImageAssets({
+        limit: options.poolPrescanLimit ?? RESCAN_POOL_PRESCAN_LIMIT,
+      });
+      alreadyPooled = new Set(assets.map((asset) => asset.sha256));
+    } catch {
+      // 预扫只是省打标：池清单读不到时照跑全腿，幂等由存储层唯一键兜底。
+    }
+    const startedAt = Date.now();
+    const summaries: MaterialRescanDocumentSummary[] = [];
+    let budgetExhausted = false;
+    for (const material of documents) {
+      if (Date.now() - startedAt >= options.totalBudgetMs) {
+        budgetExhausted = true;
+        break;
+      }
+      try {
+        const bytes = await this.materialPort.content(material.id);
+        const tally = await this.rescanMaterialImages(material, bytes, alreadyPooled);
+        summaries.push({
+          materialId: material.id,
+          displayName: material.displayName,
+          ...tally,
+        });
+      } catch (error) {
+        // 单份失败固定码入摘要（自由文本 management 错误收敛为固定码）。
+        const code = errorCode(error);
+        summaries.push({
+          materialId: material.id,
+          displayName: material.displayName,
+          pooled: 0,
+          deduplicated: 0,
+          degraded: 0,
+          budgetExhausted: false,
+          errorCode: code === 'material_processing_failed' ? 'material_management_failed' : code,
+        });
+      }
+    }
+    return { documents: summaries, budgetExhausted };
   }
 
   async process(materialId: string): Promise<MaterialProcessResult> {

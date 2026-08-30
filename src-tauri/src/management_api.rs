@@ -187,6 +187,10 @@ pub async fn start_management_api() -> Result<u16, String> {
             post(brand_material_image_content_handler),
         )
         .route(
+            "/api/brand-materials/documents/list",
+            post(brand_material_document_list_handler),
+        )
+        .route(
             "/api/brand-question-pools/latest",
             post(brand_question_pool_latest_handler),
         )
@@ -458,6 +462,12 @@ struct MaterialImageListPayload {
 #[serde(rename_all = "camelCase")]
 struct MaterialImageContentPayload {
     image_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MaterialDocumentListPayload {
+    limit: Option<usize>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1292,6 +1302,26 @@ async fn brand_material_image_content_handler(
             Json(serde_json::json!({ "ok": false, "error": error })),
         )
             .into_response(),
+    }
+}
+
+// 存量重扫候选清单（ADR-0008 T7）：workspace 全部 docx/pptx 材料（不限
+// 导入 Session），供 Sidecar 对存量旧材料手动重扫内嵌图片。只读投影。
+async fn brand_material_document_list_handler(
+    headers: HeaderMap,
+    Json(request): Json<BrandKnowledgeEnvelope<MaterialDocumentListPayload>>,
+) -> Json<serde_json::Value> {
+    let store = match validate_brand_knowledge_request(&headers, &request) {
+        Ok(store) => store,
+        Err(error) => return Json(error),
+    };
+    match store.list_workspace_document_materials(
+        &request.workspace_id,
+        &request.session_id,
+        request.payload.limit.unwrap_or(100),
+    ) {
+        Ok(materials) => Json(serde_json::json!({ "ok": true, "materials": materials })),
+        Err(error) => Json(serde_json::json!({ "ok": false, "error": error })),
     }
 }
 

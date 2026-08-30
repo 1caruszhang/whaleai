@@ -33,6 +33,12 @@ Renderer 对处理中行每 3s 轮询 `/api/xiaojing/materials/status`（带 `ma
 
 抽取链路（含竞品富化的联网检索）带 10 分钟硬超时信号；provider 挂起按 `model_failed` 落回 failed 终态，材料不会永远停在 processing。Renderer 传输层失败（代理超时 / IPC / 网络）显示专用 `material_request_failed`，与服务端业务错误码严格区分。
 
+## 存量材料手动重扫（ADR-0008 T7）
+
+配图管线落地前导入的 docx/pptx 旧材料（内嵌图片曾被丢弃、原始字节留存）可经材料请求卡卡头的「重扫存量图片」手动触发一次图片提取（最小 UI 挂点；材料入口不出现在工作台的纪律不变）。链路：Renderer `POST /api/xiaojing/materials/rescan-images`（Session 身份闸）→ Sidecar 经 management `/api/brand-materials/documents/list` 枚举本 workspace 全部 docx/pptx 材料（跨导入 Session，processing 中的除外，最旧优先、limit ≤100）→ 逐份从 `/content` 读回原始字节，复用 T3 同一条内嵌提取腿（`extractEmbeddedMaterialImages` → 打标管线 → `images/save`），不复制管线代码。
+
+重扫只做图片腿：不 begin/finish attempt、不产出知识候选，材料终态与画像事实原样保留。幂等由 `brand_material_images` 的 sha256 全局唯一键保证——重复触发先按池预扫（`images/list`，上限 200，预扫漏网由唯一键兜底）跳过已入池图片的打标，存储层再把漏网的重复写合一；重复触发不产生重复候选。同步一次通过受双时间预算约束（每份材料 25s、启动新材料前的总预算 60s，落在转发控制面 120s 代理上限内）；预算截断是幂等的，再次触发只花在余量上。单份失败（字节读不回等）以固定错误码计入逐份摘要，不拖垮其余文档。
+
 ## 产品入口与 Session 归属
 
 真实用户入口全部在聊天内（ADR 0005，取代票 27 的输入区常驻形态）：上传由 agent 判断需要后经 `request_brand_material` 工具发起的**材料请求卡**承载（`MaterialRequestCard`，渲染在发起那轮助手消息内、随 transcript 持久），卡体提供粘贴文本、官网 URL 与文件选择三条路径，使用当前 Tab 的 `apiPost` 和固化 `sessionId`；聊天输入框上方的常驻导入区域已删除，零消息空态由起始建议中的材料引导语承接，显隐不存在任何 renderer 侧机械条件。会话附件（文件/图片）路线保持——附件由 Agent 经 `read_session_file` 判断后走 `import_pasted_material` 导入并停在知识裁决门；二进制附件由 Agent 调用 `request_brand_material` 转入材料请求卡。唤起标准（系统提示词硬规则）：制定计划时品牌无已确认知识或明显过薄、用户明确要求补材料、不可直读的二进制品牌材料；操作进行中缺材料佐证不唤起，按来源层级以 AI 补全行推进由用户裁决兜底；材料是否够用在制定计划时判断一次，判断结果只决定计划是否包含材料收集步骤——随计划执行的请求卡在放行后按步骤顺序发出，计划停在认可门期间不得提前出现（用户主动要求补充材料不受此限）。右侧工作台不挂任何材料面板，材料入口不出现在工作台，也不作为 GeoOperation 闸门。`BrandWorkspace` 只可由该 Tab 的 `workspacePath` 精确匹配得到，不能用全局 current workspace 补位；没有匹配品牌时材料请求卡禁用上传并说明原因。转录重放重新挂载卡片即恢复在途行与确认卡。

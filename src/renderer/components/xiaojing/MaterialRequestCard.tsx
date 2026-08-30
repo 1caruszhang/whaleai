@@ -3,6 +3,7 @@ import {
   ChevronDown,
   ClipboardPaste,
   FileUp,
+  ImagePlus,
   Link,
   Loader2,
   RotateCcw,
@@ -17,6 +18,7 @@ import {
   importBrandMaterialFiles,
   importBrandMaterialText,
   importBrandMaterialWebsite,
+  rescanBrandMaterialImages,
   retryBrandMaterial,
   type BrandMaterialProcessResult,
   type BrandMaterialStatusEntry,
@@ -26,6 +28,7 @@ import { useTabApi, useTabState } from '@/context/TabContext';
 import { isPendingSessionId } from '../../../shared/constants';
 import type { KnowledgeCandidatesCardData } from '../../../shared/geo/knowledgeCard';
 import { isMaterialImageExtension, MATERIAL_IMAGE_EXTENSIONS } from '../../../shared/geo/materialImages';
+import type { MaterialRescanResult } from '../../../shared/geo/materials';
 import { parseMaterialRequestCard, type MaterialRequestCardData } from '../../../shared/geo/materialRequestCard';
 import KnowledgeBatchCard from './KnowledgeBatchCard';
 
@@ -54,6 +57,13 @@ interface MaterialRow {
 interface MaterialRequestCardProps {
   data: MaterialRequestCardData;
 }
+
+/** 存量重扫（ADR-0008 T7）的卡内投影状态：一次手动触发的进度与摘要。 */
+type MaterialRescanState =
+  | { status: 'idle' }
+  | { status: 'running' }
+  | { status: 'done'; summary: MaterialRescanResult }
+  | { status: 'failed'; errorCode: string };
 
 /** 卡片保留上限：与会话恢复的 Rust 端材料列表上限一致。 */
 const CARD_RETAIN_LIMIT = 10;
@@ -345,6 +355,45 @@ export default memo(function MaterialRequestCard({ data }: MaterialRequestCardPr
     }
   }, [apiPost, identity, replaceRow]);
 
+  // 存量材料手动重扫（ADR-0008 T7）：对本品牌已导入的 docx/pptx 旧材料
+  // 手动触发一次内嵌图提取；幂等（sha256 去重），不动既有材料终态与知识。
+  const [rescan, setRescan] = useState<MaterialRescanState>({ status: 'idle' });
+  const rescanImages = useCallback(async () => {
+    if (!identity || rescan.status === 'running') return;
+    setRescan({ status: 'running' });
+    try {
+      const summary = await rescanBrandMaterialImages(apiPost, identity);
+      setRescan({ status: 'done', summary });
+    } catch (error) {
+      // 与移除/重试同款：服务端固定码原样展示，传输层失败收敛为固定码。
+      const message = error instanceof Error ? error.message : '';
+      setRescan({
+        status: 'failed',
+        errorCode: message.startsWith('material_') ? message : 'material_request_failed',
+      });
+    }
+  }, [apiPost, identity, rescan.status]);
+
+  const rescanSummaryLine = useMemo(() => {
+    if (rescan.status !== 'done') return null;
+    const totals = rescan.summary.documents.reduce(
+      (acc, doc) => ({
+        pooled: acc.pooled + doc.pooled,
+        deduplicated: acc.deduplicated + doc.deduplicated,
+        degraded: acc.degraded + doc.degraded,
+      }),
+      { pooled: 0, deduplicated: 0, degraded: 0 },
+    );
+    if (rescan.summary.documents.length === 0) return '本品牌没有需要重扫的文档材料（重扫面向 docx/pptx）。';
+    const parts = [
+      `入池 ${totals.pooled} 张`,
+      `已入池 ${totals.deduplicated} 张`,
+      `${totals.degraded} 张未入池（格式/尺寸/识别不合格）`,
+    ];
+    const suffix = rescan.summary.budgetExhausted ? '；时间预算用完，再次点击可继续' : '';
+    return `存量重扫完成：${parts.join('；')}。${suffix}`;
+  }, [rescan]);
+
   return (
     <section
       aria-label="品牌材料导入"
@@ -359,6 +408,19 @@ export default memo(function MaterialRequestCard({ data }: MaterialRequestCardPr
         </div>
         <button
           type="button"
+          onClick={() => { void rescanImages(); }}
+          disabled={!identity || rescan.status === 'running'}
+          aria-label="重扫存量材料图片"
+          title="对本品牌已导入的 docx/pptx 材料手动触发一次内嵌图片提取（幂等，不会产生重复图片）"
+          className="flex shrink-0 items-center gap-1 rounded-md px-1.5 py-1 text-xs font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)] disabled:opacity-50"
+        >
+          {rescan.status === 'running'
+            ? <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
+            : <ImagePlus className="h-3.5 w-3.5" aria-hidden="true" />}
+          {rescan.status === 'running' ? '重扫中…' : '重扫存量图片'}
+        </button>
+        <button
+          type="button"
           onClick={() => setFormOpen((open) => !open)}
           aria-expanded={formOpen}
           aria-label={formOpen ? '收起材料上传表单' : '继续添加品牌材料'}
@@ -371,6 +433,17 @@ export default memo(function MaterialRequestCard({ data }: MaterialRequestCardPr
           {formOpen ? '收起' : '继续添加'}
         </button>
       </div>
+
+      {rescan.status !== 'idle' && (
+        <p
+          data-material-rescan-result
+          className="mt-2 rounded-lg bg-[var(--paper-inset)] px-3 py-2 text-xs leading-5 text-[var(--ink-muted)]"
+        >
+          {rescan.status === 'running' && '正在为已导入的文档材料提取配图候选…（重复触发不会产生重复图片）'}
+          {rescan.status === 'done' && rescanSummaryLine}
+          {rescan.status === 'failed' && `重扫失败：${rescan.errorCode}`}
+        </p>
+      )}
 
       {!currentWorkspace && (
         <p className="mt-2 rounded-lg bg-[var(--paper-inset)] px-3 py-2 text-xs leading-5 text-[var(--ink-muted)]">

@@ -31,6 +31,16 @@ import { getRuntimeSessionIdForRequest, type XiaojingRouteContext } from './xiao
 
 type MaterialIdentity = { workspaceId: string; sessionId: string };
 
+/**
+ * 存量重扫（ADR-0008 T7）的同步预算：转发控制面请求有 120s 代理上限，
+ * 每份材料的提取预算（同时约束单次打标调用）25s、启动新材料前的总预算
+ * 60s，最坏情况（60s 边界启动的最后一份 + 其在途打标调用）仍在 ~110s 内
+ * 收敛。预算截断不丢工作：重扫幂等（sha256 预扫跳过已入池图），再次触发
+ * 只花在余量上。
+ */
+const RESCAN_MATERIAL_BUDGET_MS = 25_000;
+const RESCAN_TOTAL_BUDGET_MS = 60_000;
+
 function logMaterial(input: Parameters<typeof materialLogProjection>[0]): void {
   console.log(`[materials] ${JSON.stringify(materialLogProjection(input))}`);
 }
@@ -528,6 +538,54 @@ export async function handleXiaojingKnowledgeRoute(
       const code = MATERIAL_ERROR_CODES.find((candidate) => message.includes(candidate))
         ?? 'material_delete_failed';
       return jsonResponse({ success: false, error: code }, 400);
+    }
+  }
+
+  // 存量材料手动重扫（ADR-0008 T7）：对 workspace 内已导入的 docx/pptx 旧
+  // 材料（图片曾被丢弃、原始字节留存）手动触发一次内嵌图提取，复用 T3 的
+  // 同一条提取/打标/入库管线；sha256 唯一键保证幂等，重复触发不产生重复
+  // 候选。同步一次通过（时间预算有界，预算截断幂等可续）；不动材料 attempt
+  // 与终态、不产出知识候选。
+  if (pathname === '/api/xiaojing/materials/rescan-images' && request.method === 'POST') {
+    try {
+      const payload = await request.json() as { workspaceId: string; sessionId: string };
+      const runtimeSessionId = getRuntimeSessionIdForRequest();
+      const workspaceId = basename(resolve(workspacePath));
+      if (payload.workspaceId !== workspaceId
+        || payload.sessionId !== runtimeSessionId) {
+        return jsonResponse({ success: false, error: 'material_identity_mismatch' }, 403);
+      }
+      const identity = { workspaceId, sessionId: runtimeSessionId };
+      const capabilities = getXiaojingGeoProviderCapabilities();
+      logMaterial({
+        operation: 'rescan-images', workspaceId, sessionId: runtimeSessionId,
+        status: 'started',
+      });
+      // 每份材料的提取预算（也约束单次打标调用）与整次通过的总预算共同
+      // 保证同步请求落在转发控制面 120s 超时内；预算截断由幂等续扫兜底。
+      const service = new MaterialImportService(
+        identity,
+        createBrandMaterialPort(identity),
+        capabilities.extraction,
+        createKnowledgeAuthority(identity),
+        {},
+        capabilities.keywordSearch,
+        RESCAN_MATERIAL_BUDGET_MS,
+      );
+      const result = await service.rescanWorkspaceDocumentImages({
+        totalBudgetMs: RESCAN_TOTAL_BUDGET_MS,
+      });
+      logMaterial({
+        operation: 'rescan-images', workspaceId, sessionId: runtimeSessionId,
+        status: 'completed',
+      });
+      return jsonResponse({ success: true, result });
+    } catch (error) {
+      logMaterial({
+        operation: 'rescan-images', workspaceId: basename(resolve(workspacePath)),
+        sessionId: getRuntimeSessionIdForRequest(), status: 'failed', error,
+      });
+      return jsonResponse({ success: false, error: 'material_rescan_failed' }, 400);
     }
   }
 

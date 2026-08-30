@@ -2,6 +2,7 @@ import type {
   BrandMaterialProjection,
   MaterialImportEntry,
   MaterialImportStarted,
+  MaterialRescanResult,
   MaterialStatusEntry,
 } from '../../shared/geo/materials';
 
@@ -88,6 +89,21 @@ export async function deleteBrandMaterial(
   await apiPost<MaterialResponse<{ materialId: string }>>(
     '/api/xiaojing/materials/delete',
     { ...identity, materialId },
+  ).then(requireResult);
+}
+
+/**
+ * 存量材料手动重扫（ADR-0008 T7）：对品牌内已导入的 docx/pptx 旧材料手动
+ * 触发一次内嵌图提取（同步一次通过，预算截断幂等可续）。传输层失败以异常
+ * 抛出，由调用方映射为 material_request_failed。
+ */
+export function rescanBrandMaterialImages(
+  apiPost: TabApiPost,
+  identity: { workspaceId: string; sessionId: string },
+): Promise<MaterialRescanResult> {
+  return apiPost<MaterialResponse<MaterialRescanResult>>(
+    '/api/xiaojing/materials/rescan-images',
+    { ...identity },
   ).then(requireResult);
 }
 

@@ -775,6 +775,40 @@ impl BrandWorkspaceStore {
             .collect())
     }
 
+    /// 存量重扫候选清单（ADR-0008 T7）：workspace 全部 docx/pptx 材料，
+    /// 不限导入 Session（存量旧材料正是重扫对象）；processing 中的除外
+    /// （其导入腿本就会提取内嵌图）。按 `updated_at` 升序（最旧的存量最先
+    /// 补扫），limit 有界。只读投影，不含材料正文或本机路径。
+    pub fn list_workspace_document_materials(
+        &self,
+        workspace_id: &str,
+        session_id: &str,
+        limit: usize,
+    ) -> Result<Vec<BrandMaterial>, String> {
+        validate_session_id(session_id)?;
+        let workspace = self.workspace(workspace_id)?;
+        let connection = open_database(&workspace)?;
+        require_committed_session(&connection, session_id)?;
+        let limit = limit.clamp(1, 100);
+        let mut statement = connection
+            .prepare(
+                "SELECT id FROM brand_materials
+                 WHERE file_ext IN ('docx', 'pptx') AND status != 'processing'
+                 ORDER BY updated_at ASC, id
+                 LIMIT ?1",
+            )
+            .map_err(|_| "material_read_failed".to_string())?;
+        let ids: Vec<String> = statement
+            .query_map(params![limit as i64], |row| row.get(0))
+            .map_err(|_| "material_read_failed".to_string())?
+            .filter_map(|row| row.ok())
+            .collect();
+        Ok(ids
+            .into_iter()
+            .filter_map(|id| read_material(&connection, &workspace.id, &id).ok())
+            .collect())
+    }
+
     /// 材料图片入池（ADR-0008 T2/T3）：sha256 全局唯一——已在池时幂等返回
     /// 既有条目（跨来源只入池一次）。独立图片材料的字节从来源材料本体读回
     /// 并按存储哈希校验；文档内嵌图的字节经 `embedded_image_b64` 载荷直送
@@ -2061,6 +2095,51 @@ mod tests {
             .expect("finish");
         assert_eq!(finished.status, "processed");
         assert_eq!(finished.last_error_code, None);
+    }
+
+    #[test]
+    fn lists_workspace_documents_for_legacy_rescan_across_sessions() {
+        let (_root, store, workspace, session_id) = fixture();
+        let other_session = "session-07c".to_string();
+        store
+            .commit_session(
+                &workspace.id,
+                SessionCommit {
+                    id: other_session.clone(),
+                    title: "旧会话".to_string(),
+                    title_source: SessionTitleSource::Default,
+                },
+            )
+            .expect("other session");
+        // 旧会话导入的存量 docx/pptx + 不参与重扫的 txt/png 材料。
+        let legacy_doc = import_material_file(&store, &workspace, &other_session, "旧品牌介绍.docx", b"docx");
+        let legacy_deck = import_material_file(&store, &workspace, &other_session, "旧路演.pptx", b"pptx");
+        import_material_file(&store, &workspace, &other_session, "旧资料.txt", b"text");
+        import_material_file(&store, &workspace, &other_session, "旧实拍.png", &png_bytes(800, 600));
+
+        let listed = store
+            .list_workspace_document_materials(&workspace.id, &session_id, 100)
+            .expect("list");
+        let ids: Vec<String> = listed.iter().map(|item| item.id.clone()).collect();
+        assert_eq!(ids, vec![legacy_doc.id.clone(), legacy_deck.id.clone()]);
+        // 跨 Session 可见：新会话也能枚举旧会话导入的存量文档。
+        assert_eq!(listed[0].imported_by_session_id, other_session);
+
+        // processing 中的文档不进清单（其导入腿本就会提取内嵌图）。
+        store
+            .begin_material_processing(&workspace.id, &session_id, &legacy_deck.id)
+            .expect("begin");
+        let filtered = store
+            .list_workspace_document_materials(&workspace.id, &session_id, 100)
+            .expect("filtered");
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].id, legacy_doc.id);
+
+        // 另一品牌的文档不可见（workspace 隔离：本 Session 未提交到该品牌）。
+        let second = store.create_workspace("蓝鲸科技", vec![]).expect("second");
+        assert!(store
+            .list_workspace_document_materials(&second.id, &session_id, 100)
+            .is_err());
     }
 
     #[test]

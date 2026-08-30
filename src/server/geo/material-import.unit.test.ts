@@ -84,6 +84,8 @@ class FakeMaterialPort implements BrandMaterialPort {
   }> = [];
   readonly materials = new Map<string, BrandMaterial>();
   readonly bytes = new Map<string, Uint8Array>();
+  /** 字节读不回开关（Rust content 端点 material_content_unavailable 形态）。 */
+  readonly unreadable = new Set<string>();
   readonly savedImages: SaveMaterialImageInput[] = [];
   readonly imageAssets = new Map<string, {
     id: string;
@@ -146,7 +148,10 @@ class FakeMaterialPort implements BrandMaterialPort {
     return item;
   }
   async get(id: string) { return this.materials.get(id) ?? material({ id }); }
-  async content(id: string) { return this.bytes.get(id) ?? new TextEncoder().encode('公司全称：鲸跃科技'); }
+  async content(id: string) {
+    if (this.unreadable.has(id)) throw new Error('material_content_unavailable');
+    return this.bytes.get(id) ?? new TextEncoder().encode('公司全称：鲸跃科技');
+  }
   async delete(id: string) {
     this.trace.push(`delete:${id}`);
     this.materials.delete(id);
@@ -217,6 +222,12 @@ class FakeMaterialPort implements BrandMaterialPort {
         .filter((finish) => finish.materialId === item.id && finish.status === 'awaiting-confirmation')
         .flatMap((finish) => finish.candidateIds),
     }));
+  }
+  /** 存量重扫候选清单（T7）：workspace 全部 docx/pptx 材料（测试直接投喂）。 */
+  readonly workspaceDocuments: BrandMaterial[] = [];
+  async listDocumentMaterials() {
+    this.trace.push('list-documents');
+    return [...this.workspaceDocuments];
   }
 }
 
@@ -2725,5 +2736,209 @@ describe('MaterialImportService embedded document images (ADR-0008 T3)', () => {
     expect(current.describeImage).not.toHaveBeenCalled();
     expect(port.savedImages).toHaveLength(0);
     expect(port.finishes.at(-1)).toMatchObject({ status: 'awaiting-confirmation' });
+  });
+});
+
+describe('MaterialImportService 存量材料手动重扫（ADR-0008 T7）', () => {
+  const taggingResponse = (
+    category = '产品实拍',
+    description = '存量文档内嵌的门店前台展台实拍',
+  ) => JSON.stringify({ description, category });
+
+  function sha256Of(bytes: Uint8Array): string {
+    return createHash('sha256').update(bytes).digest('hex');
+  }
+
+  function ooxmlZip(extension: 'docx' | 'pptx', media: Record<string, Uint8Array>): Buffer {
+    const zip = new AdmZip();
+    if (extension === 'docx') {
+      zip.addFile(
+        'word/document.xml',
+        Buffer.from('<w:document><w:body><w:p><w:r><w:t>鲸跃科技</w:t></w:r></w:p></w:body></w:document>'),
+      );
+      for (const [name, bytes] of Object.entries(media)) zip.addFile(`word/media/${name}`, Buffer.from(bytes));
+    } else {
+      zip.addFile(
+        'ppt/slides/slide1.xml',
+        Buffer.from('<p:sld><p:cSld><p:spTree><a:p><a:r><a:t>鲸跃科技</a:t></a:r></a:p></p:spTree></p:cSld></p:sld>'),
+      );
+      for (const [name, bytes] of Object.entries(media)) zip.addFile(`ppt/media/${name}`, Buffer.from(bytes));
+    }
+    return zip.toBuffer();
+  }
+
+  async function storedDocument(port: FakeMaterialPort, extension: 'docx' | 'pptx', bytes: Buffer) {
+    const item = await port.importFile(`C:/docs/品牌介绍.${extension}`);
+    port.bytes.set(item.id, new Uint8Array(bytes));
+    return item;
+  }
+
+  /** 已是终态（processed）的存量材料：重扫前的典型形态。 */
+  async function legacyDocument(port: FakeMaterialPort, media: Record<string, Uint8Array>) {
+    const item = await storedDocument(port, 'docx', ooxmlZip('docx', media));
+    item.status = 'processed';
+    port.materials.set(item.id, item);
+    return item;
+  }
+
+  it('rescans a legacy docx through the same T3 extraction leg as import', async () => {
+    const port = new FakeMaterialPort();
+    const image = pngFixtureBytes(640, 480);
+    const document = await legacyDocument(port, { 'image1.png': image });
+    // 对照组：另一份 docx 走导入腿（process），产出基线 saveImageAsset 形状。
+    const imported = await storedDocument(port, 'docx', ooxmlZip('docx', { 'image1.png': pngFixtureBytes(800, 600) }));
+    const current = service(port, { describeImage: async () => taggingResponse() });
+
+    const importResult = await current.value.process(imported.id);
+    const importBaseline = port.savedImages[0];
+    expect(importResult.ok).toBe(true);
+    expect(importBaseline).toBeDefined();
+
+    const tally = await current.value.rescanMaterialImages(document, await port.content(document.id), new Set());
+
+    // 重扫产出与导入腿完全同构：同一提取/打标/持久化路径，不是新副本。
+    expect(tally).toEqual({ pooled: 1, deduplicated: 0, degraded: 0, budgetExhausted: false });
+    expect(port.savedImages).toHaveLength(2);
+    const rescanSave = port.savedImages[1];
+    expect(rescanSave.sourceMaterialId).toBe(document.id);
+    expect(rescanSave.sha256).toBe(sha256Of(image));
+    expect(rescanSave.imageBytes).toEqual(image);
+    expect(rescanSave.mediaType).toBe('image/png');
+    expect(rescanSave.width).toBe(640);
+    expect(rescanSave.height).toBe(480);
+    expect(rescanSave.description).toBe(importBaseline?.description);
+    expect(current.describeImage).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps the material terminal state, attempts and knowledge facts untouched by the rescan', async () => {
+    const port = new FakeMaterialPort();
+    const document = await legacyDocument(port, { 'image1.png': pngFixtureBytes(800, 600) });
+    const current = service(port, { describeImage: async () => taggingResponse() });
+    const attemptsBefore = document.attemptCount;
+    const finishesBefore = port.finishes.length;
+
+    await current.value.rescanMaterialImages(document, await port.content(document.id), new Set());
+
+    // 不 begin/finish、不产知识候选：存量终态与画像事实原样保留。
+    expect(document.attemptCount).toBe(attemptsBefore);
+    expect(document.status).toBe('processed');
+    expect(port.finishes.length).toBe(finishesBefore);
+    expect(port.trace).not.toContain(`begin:${document.id}`);
+    expect(current.propose).not.toHaveBeenCalled();
+    expect(current.complete).not.toHaveBeenCalled();
+  });
+
+  it('is idempotent: a repeated rescan skips already-pooled images without new pool entries', async () => {
+    const port = new FakeMaterialPort();
+    const image = pngFixtureBytes(800, 600);
+    const other = pngFixtureBytes(640, 480);
+    const document = await legacyDocument(port, { 'image1.png': image, 'image2.png': other });
+    port.workspaceDocuments.push(document);
+    const current = service(port, { describeImage: async () => taggingResponse() });
+
+    // 首轮：池预扫为空，两张图打标入池。
+    const first = await current.value.rescanWorkspaceDocumentImages({ totalBudgetMs: 60_000 });
+    expect(first.documents[0]).toMatchObject({ pooled: 2, deduplicated: 0 });
+    expect(port.imageAssets.size).toBe(2);
+    const savedAfterFirst = port.savedImages.length;
+    const describeAfterFirst = current.describeImage!.mock.calls.length;
+
+    // 第二轮（重复触发）：池预扫命中已入池 sha → 零打标、零写库、池不变。
+    const second = await current.value.rescanWorkspaceDocumentImages({ totalBudgetMs: 60_000 });
+    expect(second.documents[0]).toMatchObject({ pooled: 0, deduplicated: 2 });
+    expect(current.describeImage!.mock.calls.length).toBe(describeAfterFirst);
+    expect(port.savedImages.length).toBe(savedAfterFirst);
+    expect(port.imageAssets.size).toBe(2);
+  });
+
+  it('falls back to the sha256 unique-key dedup path when the pool prescan misses', async () => {
+    const port = new FakeMaterialPort();
+    const image = pngFixtureBytes(800, 600);
+    const document = await legacyDocument(port, { 'image1.png': image });
+    const current = service(port, { describeImage: async () => taggingResponse() });
+
+    // 首轮入池。
+    await current.value.rescanMaterialImages(document, await port.content(document.id), new Set());
+    const pooledBefore = port.imageAssets.size;
+    const savedBefore = port.savedImages.length;
+    expect(pooledBefore).toBe(1);
+
+    // 第二轮携带过期的空预扫集合（模拟池清单读失败/超上限）：打标照跑，
+    // 但存储层 sha256 全局唯一键把重复写合一，不产生重复候选。
+    const second = await current.value.rescanMaterialImages(document, await port.content(document.id), new Set());
+
+    expect(second.deduplicated).toBe(1);
+    expect(second.pooled).toBe(0);
+    expect(port.savedImages.length).toBe(savedBefore + 1);
+    expect(port.imageAssets.size).toBe(pooledBefore);
+  });
+
+  it('rejects non-document materials instead of running the embedded leg', async () => {
+    const port = new FakeMaterialPort();
+    const textMaterial = material({ id: 'legacy-text', fileExt: 'txt', status: 'processed' });
+    const current = service(port, { describeImage: async () => taggingResponse() });
+
+    await expect(
+      current.value.rescanMaterialImages(textMaterial, new TextEncoder().encode('文本'), new Set()),
+    ).rejects.toThrow('material_type_unsupported');
+    expect(current.describeImage).not.toHaveBeenCalled();
+  });
+
+  it('rescans every workspace document once and reports a per-document summary', async () => {
+    const port = new FakeMaterialPort();
+    const firstDoc = await legacyDocument(port, { 'image1.png': pngFixtureBytes(800, 600) });
+    const secondDoc = await storedDocument(port, 'pptx', ooxmlZip('pptx', { 'slide1.png': pngFixtureBytes(1024, 768) }));
+    secondDoc.status = 'awaiting-confirmation';
+    port.materials.set(secondDoc.id, secondDoc);
+    port.workspaceDocuments.push(firstDoc, secondDoc);
+    const current = service(port, { describeImage: async () => taggingResponse() });
+
+    const result = await current.value.rescanWorkspaceDocumentImages({ totalBudgetMs: 60_000 });
+
+    expect(result.budgetExhausted).toBe(false);
+    expect(result.documents).toHaveLength(2);
+    expect(result.documents[0]).toMatchObject({
+      materialId: firstDoc.id,
+      displayName: firstDoc.displayName,
+      pooled: 1,
+      deduplicated: 0,
+      degraded: 0,
+    });
+    expect(result.documents[1]).toMatchObject({ materialId: secondDoc.id, pooled: 1 });
+    expect(port.trace).toContain('list-documents');
+  });
+
+  it('degrades a single unreadable document without aborting the workspace pass', async () => {
+    const port = new FakeMaterialPort();
+    const broken = await legacyDocument(port, { 'image1.png': pngFixtureBytes(800, 600) });
+    const healthy = await legacyDocument(port, { 'image1.png': pngFixtureBytes(640, 480) });
+    port.workspaceDocuments.push(broken, healthy);
+    port.unreadable.add(broken.id);
+    const current = service(port, { describeImage: async () => taggingResponse() });
+
+    const result = await current.value.rescanWorkspaceDocumentImages({ totalBudgetMs: 60_000 });
+
+    expect(result.documents).toHaveLength(2);
+    expect(result.documents[0]).toMatchObject({
+      materialId: broken.id,
+      pooled: 0,
+      errorCode: 'material_content_unavailable',
+    });
+    expect(result.documents[1]).toMatchObject({ materialId: healthy.id, pooled: 1 });
+  });
+
+  it('stops launching new documents once the total budget is exhausted', async () => {
+    const port = new FakeMaterialPort();
+    const firstDoc = await legacyDocument(port, { 'image1.png': pngFixtureBytes(800, 600) });
+    const secondDoc = await legacyDocument(port, { 'image1.png': pngFixtureBytes(640, 480) });
+    port.workspaceDocuments.push(firstDoc, secondDoc);
+    const current = service(port, { describeImage: async () => taggingResponse() });
+
+    const result = await current.value.rescanWorkspaceDocumentImages({ totalBudgetMs: 0 });
+
+    // 零预算：一份都不启动；幂等重扫可再次触发继续。
+    expect(result.budgetExhausted).toBe(true);
+    expect(result.documents).toHaveLength(0);
+    expect(current.describeImage).not.toHaveBeenCalled();
   });
 });

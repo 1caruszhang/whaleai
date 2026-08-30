@@ -81,6 +81,10 @@ class SmokeMaterialPort implements BrandMaterialPort {
   async list() {
     return [];
   }
+  async listDocumentMaterials(): Promise<BrandMaterial[]> {
+    // 冒烟路径走单份材料导入，不做存量重扫。
+    return [];
+  }
   async saveImageAsset(input: {
     sourceMaterialId: string;
     sha256: string;
