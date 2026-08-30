@@ -44,9 +44,18 @@ const COMMON_TWO_LEVEL_SUFFIXES = new Set([
   "net.cn",
   "org.cn",
   "gov.cn",
+  "edu.cn",
+  "ac.cn",
   "co.jp",
   "com.hk",
+  "net.hk",
+  "org.hk",
   "com.tw",
+  "com.sg",
+  "co.kr",
+  "co.uk",
+  "org.uk",
+  "gov.uk",
 ]);
 
 /** URL/裸域名 → 注册域名（近似 eTLD+1；解析失败返回 null）。 */

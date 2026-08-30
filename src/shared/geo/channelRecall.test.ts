@@ -38,6 +38,12 @@ describe("channel recall ported from js_ai", () => {
     expect(registeredDomain("https://www.news.example.com.cn/a")).toBe(
       "example.com.cn",
     );
+    // 两段公共后缀全类取倒数三段（竞词语料封顶与渠道召回共用此清单，
+    // edu.cn/co.uk 类不得坍缩成公共后缀本身）。
+    expect(registeredDomain("https://www.pku.edu.cn/admissions")).toBe(
+      "pku.edu.cn",
+    );
+    expect(registeredDomain("https://bbc.co.uk/news")).toBe("bbc.co.uk");
     expect(registeredDomain("not a url")).toBeNull();
   });
 

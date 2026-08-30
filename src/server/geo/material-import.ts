@@ -20,6 +20,7 @@ import {
   type MaterialProcessSuccess as SharedMaterialProcessSuccess,
 } from '../../shared/geo/materials';
 import { toKnowledgeCardCandidate } from '../../shared/geo/knowledgeCard';
+import { registeredDomain } from '../../shared/geo/channelRecall';
 import type { CompetitorDisplayDetail } from '../../shared/geo/competitorDetails';
 import {
   deriveCompetitorScope,
@@ -57,6 +58,14 @@ const COMPETITOR_ENRICHMENT_TARGET = 10;
 /** 潜在竞品层上限（ADR-0007 两层名单）：只做排行 roster 补位与知识备查，
  * 5 家封顶足够，不占直接层的确认空间。 */
 const COMPETITOR_POTENTIAL_TARGET = 5;
+
+/**
+ * 检索语料域名封顶（ADR-0007 语料多样性）：同一可注册域最多保留 3 条。
+ * 张仔纪霸屏事故（2026-08-31）：40 条源里 19/20 来自 4 个软文站，单一
+ * 品牌的 GEO 投放把多品牌并列的列表页/品类文挤出语料，抽取只剩 1 家可认。
+ * 封顶不辨内容，只按域名分组保检索序——是通用机制，无行业词。
+ */
+const COMPETITOR_SOURCE_DOMAIN_CAP = 3;
 
 /**
  * 竞品富化的本地诊断转储（仅显式设置 XIAOJING_DEBUG_COMPETITOR_DUMP 时
@@ -431,6 +440,11 @@ function extractionPrompt(context: BrandMaterialContext, material: BrandMaterial
     '「地域 + 品类/项目 + 加盟/合作/供应商」这类比选项目的口吻；目标客户是终端',
     '消费者 → 用「地域 + 品类 + 排行榜/哪家好/口碑」这类消费比价口吻。客户是谁',
     '由材料决定（targetCustomers 字段的判定同源），不套固定模板。',
+    '两条查询词检索意图必须互补、不得近义重复：第 1 条用需求问句型——客户带着',
+    '具体问题搜（「…哪家好」「…怎么选」「…费用多少」）；第 2 条用品类盘点型——',
+    '客户在找整个品类的品牌名单（「…品牌 有哪些」「…品牌盘点/名单」）。问句型',
+    '常落进单一品牌的软文池，盘点型才命中多品牌并列的列表页/品类分析文章——',
+    '那是竞品名最密集的语料，两条同型会让检索被单一品牌的投放霸屏。',
     '',
     '## provenance、scope 与输出',
     '- extracted=材料逐字证据（必须 sourceExcerpt）；inferred=基于上下文推断（必须待用户确认）；'
@@ -961,6 +975,46 @@ export function parseCompetitorSearchQueries(raw: string): string[] {
     .map((query) => query.trim().slice(0, 60))
     .filter(Boolean)
     .slice(0, 2);
+}
+
+/**
+ * 检索语料域名封顶的分组键：复用共享层 registeredDomain（可注册域近似值，
+ * 子域/前缀不参与分组，com.cn 等两段公共后缀取倒数三段——后缀清单只此一
+ * 份，渠道召回侧同源）。解析失败/非 URL 原样返回，退化为每条独立成组
+ * （不影响封顶正确性，只少合并）。纯函数。
+ */
+export function sourceDomainKey(url: string): string {
+  return registeredDomain(url) ?? url;
+}
+
+/** 检索语料按 URL 去重（保首现检索序）：两条查询词召回同一篇文章只算一份，
+ * 不占语料名额；URL 为空/空白的源无分组意义，一并丢弃。纯函数。 */
+export function dedupeSourcesByUrl<T extends { url: string }>(sources: readonly T[]): T[] {
+  const seen = new Set<string>();
+  const kept: T[] = [];
+  for (const source of sources) {
+    const key = source.url.trim();
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    kept.push(source);
+  }
+  return kept;
+}
+
+/** 同一可注册域最多保留 cap 条（保检索序，先到先得）。cap 非正数时原样
+ * 返回全量副本。纯函数，配合 dedupeSourcesByUrl 使用。 */
+export function capSourcesPerDomain<T extends { url: string }>(sources: readonly T[], cap: number): T[] {
+  if (!Number.isFinite(cap) || cap <= 0) return [...sources];
+  const perDomain = new Map<string, number>();
+  const kept: T[] = [];
+  for (const source of sources) {
+    const key = sourceDomainKey(source.url);
+    const count = perDomain.get(key) ?? 0;
+    if (count >= cap) continue;
+    perDomain.set(key, count + 1);
+    kept.push(source);
+  }
+  return kept;
 }
 
 /**
@@ -1577,10 +1631,17 @@ export class MaterialImportService {
           }
         }))
       : [];
-    const sources = sourceGroups.flat();
+    // 语料多样性两步裁剪：先按 URL 去重（两条查询召回同一篇只算一份），再按
+    // 可注册域封顶——防单一品牌的 GEO 投放霸屏软文站挤出列表页/品类文（张仔纪
+    // 事故：19/20 同四站）。裁剪后的列表同源供给模型快照与存在闸语料。
+    const sources = capSourcesPerDomain(
+      dedupeSourcesByUrl(sourceGroups.flat()),
+      COMPETITOR_SOURCE_DOMAIN_CAP,
+    );
     debugDumpCompetitorSearch({
       event: 'sources',
       counts: sourceGroups.map((group) => group.length),
+      kept: sources.length,
       sample: sources.slice(0, 20).map((source) => ({
         title: source.title,
         summary: (source.summary ?? '').slice(0, 200),

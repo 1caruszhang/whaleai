@@ -6,12 +6,15 @@ import type { KnowledgeCandidate, KnowledgeCurrentFact, KnowledgeProposalInput }
 import { GatewayBillingError } from './billing-permit';
 import {
   MaterialImportService,
+  capSourcesPerDomain,
+  dedupeSourcesByUrl,
   fetchWebsiteMaterial,
   isSimilarSelfName,
   materialLogProjection,
   parseBrandMaterial,
   parseCompetitorSearchQueries,
   parseProfileFacts,
+  sourceDomainKey,
   type BrandMaterial,
   type BrandMaterialContext,
   type BrandMaterialPort,
@@ -694,6 +697,47 @@ describe("competitor enrichment (ADR-0007 source-grounded extraction)", () => {
     expect(queries[0]).not.toContain('排行榜');
   });
 
+  it('caps sources per registrable domain so one advertorial mill cannot crowd out the corpus', async () => {
+    // 张仔纪霸屏回归（2026-08-31 真实运行：40 条源里 19/20 来自 4 个软文站，
+    // 9 条点名张仔纪、5 条是品牌自己投放）：同一可注册域最多 3 条，先按 URL
+    // 去重再保序封顶；被挤出语料的名字过不了存在闸——存在闸语料与模型可见
+    // 语料同源，两条腿看到的是同一份裁剪结果。
+    const millCorpus = [1, 2, 3, 4].map((n) => ({
+      title: `干蒸菜加盟测评${n}`,
+      url: `https://m-mill.com/article-${n}`,
+      summary: `干蒸菜加盟对比第${n}篇：品牌${
+        ['云帆信息', '星河智能', '江澜数据', '泓川软件'][n - 1]
+      }口碑居前`,
+    }));
+    const listCorpus = [{
+      title: '干蒸菜品牌有哪些',
+      url: 'https://example.org/list',
+      summary: '干蒸菜品牌盘点：泽言网络与恒启智联均在列',
+    }];
+    const port = new FakeMaterialPort();
+    const current = service(port, {
+      completeResponses: [withAreaResponse, JSON.stringify({ direct: [
+        { name: '云帆信息', region: '成都新都' },
+        { name: '星河智能', region: '成都' },
+        { name: '江澜数据', region: '成都' },
+        { name: '泓川软件', region: '成都' },
+        { name: '泽言网络', region: '成都新都' },
+      ], potential: [] })],
+      searchSources: async () => [...millCorpus, ...listCorpus],
+    });
+    const result = await current.value.importPastedText('公司资料');
+
+    expect(result.ok).toBe(true);
+    // 第 4 条同域软文被挤出语料：只出现在其中的泓川软件过不了存在闸；
+    // 其他域的列表页品牌（泽言网络）保留。
+    expect(competitorsCallOf(current)?.[0].value).toEqual(['云帆信息', '星河智能', '江澜数据', '泽言网络']);
+    const snapshotPrompt = (current.complete.mock.calls[1] as unknown as [
+      readonly { role: string; content: string }[],
+    ])[0][1].content;
+    expect(snapshotPrompt).not.toContain('泓川软件');
+    expect(snapshotPrompt).toContain('泽言网络');
+  });
+
   it('injects the customer-profile fields into the snapshot prompt and gates by customer voice', async () => {
     const port = new FakeMaterialPort();
     const current = service(port, {
@@ -1244,9 +1288,15 @@ describe("competitor enrichment (ADR-0007 source-grounded extraction)", () => {
     expect(snapshotPrompt).toContain('服务区域：成都新都');
     // 快照语料随提示词下发，名字只能从中识别。
     expect(snapshotPrompt).toContain('云帆信息口碑靠前');
-    // 材料腿抽取提示词顺手产出目标客户视角的检索词（输出契约含该字段）。
+    // 材料腿抽取提示词顺手产出目标客户视角的检索词（输出契约含该字段），
+    // 且两条检索意图必须互补（问句型+盘点型）——只发同型问句会落进单一品牌
+    // 软文池（张仔纪霸屏回归 2026-08-31）。
     expect(profilePrompt).toContain('竞品检索词（顺手产出，管线瞬时值，不是事实）');
     expect(profilePrompt).toContain('competitorSearchQueries');
+    expect(profilePrompt).toContain('两条查询词检索意图必须互补');
+    expect(profilePrompt).toContain('不得近义重复');
+    expect(profilePrompt).toContain('需求问句型');
+    expect(profilePrompt).toContain('品类盘点型');
   });
 });
 
@@ -1261,6 +1311,40 @@ describe('parseCompetitorSearchQueries（材料腿顺手产出的检索词）', 
     expect(parseCompetitorSearchQueries(JSON.stringify({ facts: [] }))).toEqual([]);
     expect(parseCompetitorSearchQueries('not json')).toEqual([]);
     expect(parseCompetitorSearchQueries(JSON.stringify({ competitorSearchQueries: '非数组' }))).toEqual([]);
+  });
+});
+
+describe('检索语料域名封顶（语料多样性）', () => {
+  it('derives registrable-domain keys, ignoring mobile/www prefixes and multi-label suffixes', () => {
+    expect(sourceDomainKey('https://m.toutiao.com/group/1')).toBe('toutiao.com');
+    expect(sourceDomainKey('http://www.chinabidding.com.cn/shangxun/x')).toBe('chinabidding.com.cn');
+    expect(sourceDomainKey('https://m.chinabidding.com.cn/cyzx/y')).toBe('chinabidding.com.cn');
+    expect(sourceDomainKey('https://example.org/rank')).toBe('example.org');
+    expect(sourceDomainKey('https://a.b.example.com/p')).toBe('example.com');
+    // 两段公共后缀全类（共享 registeredDomain 清单）：edu.cn/co.uk 取倒数
+    // 三段，不坍缩成公共后缀本身共享同一个封顶名额。
+    expect(sourceDomainKey('https://www.pku.edu.cn/admissions')).toBe('pku.edu.cn');
+    expect(sourceDomainKey('https://bbc.co.uk/news')).toBe('bbc.co.uk');
+    // 非 URL 输入不炸：原样作为分组键（退化为每条独立成组）。
+    expect(sourceDomainKey('not a url')).toBe('not a url');
+  });
+
+  it('dedupes by URL first, then caps per domain preserving rank order', () => {
+    const mill = (n: number) => ({ url: `https://m-mill.com/a${n}` });
+    const org = { url: 'https://example.org/one' };
+    const net = { url: 'https://example.net/two' };
+    const input = [mill(1), org, mill(2), mill(1), mill(3), mill(4), net];
+    expect(dedupeSourcesByUrl(input)).toEqual([mill(1), org, mill(2), mill(3), mill(4), net]);
+    // 封顶保序：m-mill.com 只留检索序前 3 条，其他域各留 1 条。
+    expect(capSourcesPerDomain(dedupeSourcesByUrl(input), 3)).toEqual([
+      mill(1), org, mill(2), mill(3), net,
+    ]);
+  });
+
+  it('keeps everything when the cap is not a positive number', () => {
+    const input = [{ url: 'https://a.example/1' }, { url: 'https://a.example/2' }];
+    expect(capSourcesPerDomain(input, 0)).toEqual(input);
+    expect(capSourcesPerDomain(input, Number.NaN)).toEqual(input);
   });
 });
 
