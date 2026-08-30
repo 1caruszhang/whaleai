@@ -668,12 +668,12 @@ describe("competitor enrichment (ADR-0007 source-grounded extraction)", () => {
   });
 
   it('prefers the model-authored customer-voice queries from the material extraction (一劳永逸版)', async () => {
-    // 材料抽取顺手产出 competitorSearchQueries：富化直接使用（经营者→项目/
-    // 加盟语料池），代码零行业词；不再拼「品类+排行榜」默认形态。
+    // 材料抽取顺手产出 competitorSearchQueries：富化直接使用（双池：第 1 条
+    // 客户口吻、第 2 条中立盘点口吻），代码零行业词；不再拼默认形态。
     const port = new FakeMaterialPort();
     const current = service(port, {
       completeResponses: [JSON.stringify({
-        competitorSearchQueries: ['广东 干蒸菜 食堂档口项目 加盟', '广东 干蒸菜档口 技术输出 哪家好'],
+        competitorSearchQueries: ['广东 干蒸菜 食堂档口项目 加盟', '广东 干蒸菜 品牌 有哪些'],
         facts: [
           { field: 'industry', value: '餐饮管理', provenance: 'extracted', sourceExcerpt: '行业' },
           { field: 'serviceArea', value: '广东省', provenance: 'extracted', sourceExcerpt: '业务区域范围：广东省' },
@@ -693,7 +693,7 @@ describe("competitor enrichment (ADR-0007 source-grounded extraction)", () => {
     const queries = current.searchSources!.mock.calls.map(([query]) => query);
     expect(queries).toEqual([
       '广东 干蒸菜 食堂档口项目 加盟',
-      '广东 干蒸菜档口 技术输出 哪家好',
+      '广东 干蒸菜 品牌 有哪些',
     ]);
     expect(queries[0]).not.toContain('排行榜');
   });
@@ -1335,15 +1335,15 @@ describe("competitor enrichment (ADR-0007 source-grounded extraction)", () => {
     expect(snapshotPrompt).toContain('服务区域：成都新都');
     // 快照语料随提示词下发，名字只能从中识别。
     expect(snapshotPrompt).toContain('云帆信息口碑靠前');
-    // 材料腿抽取提示词顺手产出目标客户视角的检索词（输出契约含该字段），
-    // 且两条检索意图必须互补（问句型+盘点型）——只发同型问句会落进单一品牌
-    // 软文池（张仔纪霸屏回归 2026-08-31）。
+    // 材料腿抽取提示词顺手产出检索词（输出契约含该字段），且两条必须分池：
+    // 第 1 条客户口吻问句型、第 2 条中立观察者品类盘点型（禁带招商词）——
+    // 两条同池会困在单一投放软文池（张仔纪霸屏 + 余美娟缺席回归）。
     expect(profilePrompt).toContain('竞品检索词（顺手产出，管线瞬时值，不是事实）');
     expect(profilePrompt).toContain('competitorSearchQueries');
-    expect(profilePrompt).toContain('两条查询词检索意图必须互补');
-    expect(profilePrompt).toContain('不得近义重复');
-    expect(profilePrompt).toContain('需求问句型');
-    expect(profilePrompt).toContain('品类盘点型');
+    expect(profilePrompt).toContain('两个不同的语料池');
+    expect(profilePrompt).toContain('需求问句');
+    expect(profilePrompt).toContain('品类盘点');
+    expect(profilePrompt).toContain('不得出现加盟、招商、合作、供应商');
   });
 });
 
