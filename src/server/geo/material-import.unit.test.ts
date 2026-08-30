@@ -14,6 +14,7 @@ import {
   materialLogProjection,
   parseBrandMaterial,
   parseCompetitorSearchQueries,
+  parseRetryQuery,
   parseProfileFacts,
   sourceDomainKey,
   type BrandMaterial,
@@ -869,6 +870,69 @@ describe("competitor enrichment (ADR-0007 source-grounded extraction)", () => {
     expect(potential?.[0].source.excerpt).toContain('（来源：https://mill.example/jm-list）');
   });
 
+  it('fires a pool-swap retry when survivors are thin and merges the richer corpus (两段式自适应)', async () => {
+    // 第五写实跑裁决：盘点词的非确定性不可靠——场景词漏进盘点词，整池塌回
+    // 自身投放软文、名单只剩 1 家。结果驱动补枪：幸存 <2 时让模型看着召回
+    // 标题重写去场景/去招商的盘点词，换池补一枪；合并语料重新抽取重新过闸，
+    // 两轮幸存按同品牌身份并集。
+    const provinceResponse = JSON.stringify({
+      competitorSearchQueries: ['广东大学食堂干蒸菜档口加盟哪家好', '广东食堂干蒸菜品牌有哪些'],
+      facts: [
+        { field: 'industry', value: '餐饮/高校食堂干蒸菜档口', provenance: 'extracted', sourceExcerpt: '行业' },
+        { field: 'serviceArea', value: '广东省', provenance: 'extracted', sourceExcerpt: '区域' },
+      ],
+    });
+    const thinCorpus = [{
+      title: '炊班主档口方案',
+      url: 'https://mill.example/thin',
+      summary: '炊班主面向创业者输出干蒸菜档口方案，张仔纪亦在同赛道布局',
+    }];
+    const richCorpus = [
+      {
+        title: '干蒸菜品类观察',
+        url: 'https://zhihu.example/category',
+        summary: '顺德干蒸菜品类一年扩张上百家：渔文乐、蒸简单原盅蒸饭均在扩张名单',
+      },
+      {
+        title: '干蒸菜品牌有哪些',
+        url: 'https://list.example/brands',
+        summary: '广东干蒸菜品牌盘点：张仔纪、渔文乐、蒸简单原盅蒸饭、容边排骨饭',
+      },
+    ];
+    const port = new FakeMaterialPort();
+    let searchCall = 0;
+    const current = service(port, {
+      completeResponses: [
+        provinceResponse,
+        JSON.stringify({ direct: [{ name: '张仔纪', region: '广州' }], potential: [] }),
+        JSON.stringify({ query: '广东 干蒸菜 品牌 有哪些' }),
+        JSON.stringify({
+          direct: [{ name: '张仔纪', region: '广州' }],
+          potential: [
+            { name: '渔文乐', region: '顺德' },
+            { name: '蒸简单原盅蒸饭', region: '广东' },
+          ],
+        }),
+      ],
+      searchSources: async () => {
+        searchCall += 1;
+        return searchCall <= 2 ? thinCorpus : richCorpus;
+      },
+    });
+    const result = await current.value.importPastedText('公司资料');
+
+    expect(result.ok).toBe(true);
+    // 第三枪换池：重写词生效且确实检索。
+    expect(current.searchSources).toHaveBeenCalledTimes(3);
+    expect(current.searchSources!.mock.calls[2][0]).toBe('广东 干蒸菜 品牌 有哪些');
+    // 合并语料后的第二轮结果与第一轮并集：张仔纪（同身份只一份）+ 两个品类品牌。
+    expect(competitorsCallOf(current)?.[0].value).toEqual(['张仔纪']);
+    const potential = current.propose.mock.calls.find(
+      ([input]) => input.key.predicate.toLowerCase() === 'enterprise-profile.potentialcompetitors',
+    );
+    expect(potential?.[0].value).toEqual(['渔文乐', '蒸简单原盅蒸饭']);
+  });
+
   it('collapses parenthesized-region disguises of the same brand (括号马甲回归 2026-08-31)', async () => {
     // 第三写实跑回归：直接层同时收了「张仔纪（广州）餐饮管理有限公司」与
     // 「张仔纪餐饮管理有限公司」——括号中缀（广州）让两个名字互不为子串，
@@ -1439,10 +1503,20 @@ describe("competitor enrichment (ADR-0007 source-grounded extraction)", () => {
       searchSources: async () => corpus,
       inspect: async (key) => key.predicate.toLowerCase() === 'enterprise-profile.industry'
         ? {
-          factKey: 'k1', subject: '鲸跃科技', predicate: key.predicate,
-          scopeJson: '{"entityScope":"brand"}', effectiveFrom: null, effectiveTo: null,
-          normalizedValueJson: '"餐饮/高校食堂干蒸菜档口"', unit: null,
-          version: 3, confirmedBy: 'user-1',
+          key: {
+            subject: key.subject,
+            predicate: key.predicate,
+            scopeJson: '{"entityScope":"brand"}',
+            effectiveFrom: null,
+            effectiveTo: null,
+            identity: 'industry-anchor-1',
+          },
+          normalizedValueJson: '"餐饮/高校食堂干蒸菜档口"',
+          unit: null,
+          version: 3,
+          confirmedBy: 'user-1',
+          confirmedAt: '2026-08-30T00:00:00Z',
+          sources: [],
         }
         : null,
     });
@@ -1574,6 +1648,22 @@ describe('sameBrandIdentity（同品牌身份判定：归一键嵌套 + ·分段
     expect(sameBrandIdentity('顺德·渔文乐', '渔文乐', ['顺德'])).toBe(true);
     // 服务区锚（广东省）同样剔除：段「广东」不参与身份比对。
     expect(sameBrandIdentity('广东·干蒸汇', '广东干蒸坊', ['广东省'])).toBe(false);
+  });
+});
+
+describe('parseRetryQuery（两段式补枪的重写词解析）', () => {
+  it('takes a valid query, trims and caps length', () => {
+    expect(parseRetryQuery(JSON.stringify({ query: '  广东 干蒸菜 品牌 有哪些  ' }), ['a']))
+      .toBe('广东 干蒸菜 品牌 有哪些');
+  });
+
+  it('rejects empty, duplicate, commerce-word, and malformed payloads', () => {
+    expect(parseRetryQuery(JSON.stringify({ query: '' }), [])).toBeNull();
+    expect(parseRetryQuery(JSON.stringify({ query: '广' }), [])).toBeNull();
+    expect(parseRetryQuery(JSON.stringify({ query: '广东 干蒸菜 加盟 品牌' }), [])).toBeNull();
+    expect(parseRetryQuery(JSON.stringify({ query: '广东 干蒸菜 品牌 有哪些' }), ['广东 干蒸菜 品牌 有哪些'])).toBeNull();
+    expect(parseRetryQuery('not json', [])).toBeNull();
+    expect(parseRetryQuery(JSON.stringify({ facts: [] }), [])).toBeNull();
   });
 });
 

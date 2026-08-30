@@ -82,6 +82,14 @@ const COMPETITOR_POTENTIAL_TARGET = 5;
 const COMPETITOR_SOURCE_DOMAIN_CAP = 3;
 
 /**
+ * 两段式自适应触发线（ADR-0007 D7，第五写实跑裁决）：主路径两层幸存合计
+ * 不足 2 家即视为语料池太薄（大概率困在自身投放软文池），触发盘点词重写
+ * 换池补枪。阈值取 2 而非 5：补枪目标是「换个池子再试一次」，不是硬凑满
+ * 名额——凑数仍由 fail-closed 门槛把关。
+ */
+const COMPETITOR_RETRY_MIN_SURVIVORS = 2;
+
+/**
  * 竞品富化的本地诊断转储（仅显式设置 XIAOJING_DEBUG_COMPETITOR_DUMP 时
  * 生效）：把查询词、检索快照标题/摘要、抽取原始响应、闸后幸存数落到
  * 指定文件，并同步打进统一日志（`[materials-competitor-debug]` 前缀，
@@ -1079,6 +1087,57 @@ export function parseCompetitorSearchQueries(raw: string): string[] {
 }
 
 /**
+ * 盘点词重写提示（两段式自适应第二轮）：把「第一轮召回全是自身投放」的
+ * 事实喂给模型，让它重写一条去场景、去招商的纯品类盘点查询词。反馈式
+ * 重写远比首写时的抽象规则可靠（第五写实跑：首写规则约束下模型仍把
+ * 「食堂」带进盘点词，整池塌回软文）。
+ */
+function inventoryRetryPrompt(input: {
+  brandName: string;
+  industry: string;
+  products: string[];
+  anchor: string;
+  queries: readonly string[];
+  corpusTitles: readonly string[];
+}): string {
+  return [
+    '你是搜索查询词优化器。任务：为品牌竞品检索重写一条「品类盘点」查询词。',
+    `品牌：${input.brandName}`,
+    `行业：${input.industry || '未知'}；产品/项目：${input.products.join('、') || '未知'}；地域锚：${input.anchor}`,
+    '此前查询词召回的语料标题（几乎全是目标品牌自己的投放内容，几乎没有其他品牌名）：',
+    ...input.corpusTitles.map((title, index) => `${index + 1}. ${title.slice(0, 60)}`),
+    `此前查询词：${input.queries.join('；')}`,
+    '',
+    '请写一条全新的查询词，规则：',
+    '- 形态固定：「地域 + 品类 + 品牌有哪些」（或 品牌 盘点/名单）',
+    '- 品类只留最核心的大众品类词：去掉经营场景词（业务发生在哪不等于品类叫什么——'
+    + '食堂/档口/团餐这类场景词会把检索拉回招商软文池）、去掉招商词（加盟/招商/合作/供应商）',
+    '- 与此前查询词不得相同或近义；≤25 字；地域用上面的地域锚',
+    '只返回 JSON：{"query":"查询词"}',
+  ].join('\n');
+}
+
+/**
+ * 重写查询词解析：{"query":"…"} 取非空字符串（trim、截 60 字）；与第一轮
+ * 查询相同/为空/仍带招商词（加盟/招商/合作/供应商——商务通用词，非行业
+ * 词）的一律判无效返回 null，避免浪费一次补枪。纯函数。
+ */
+export function parseRetryQuery(raw: string, existingQueries: readonly string[]): string | null {
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = extractJsonObject(raw) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+  if (typeof parsed.query !== 'string') return null;
+  const query = parsed.query.trim().slice(0, 60);
+  if (!query || query.length < 4) return null;
+  if (existingQueries.some((existing) => existing === query)) return null;
+  if (/加盟|招商|合作|供应商/.test(query)) return null;
+  return query;
+}
+
+/**
  * 检索语料域名封顶的分组键：复用共享层 registeredDomain（可注册域近似值，
  * 子域/前缀不参与分组，com.cn 等两段公共后缀取倒数三段——后缀清单只此一
  * 份，渠道召回侧同源）。解析失败/非 URL 原样返回，退化为每条独立成组
@@ -1789,93 +1848,179 @@ export class MaterialImportService {
       })),
     });
     if (sources.length > 0) {
-      const sourceTexts = sources.map((source) =>
-        `${source.title} ${source.summary ?? ''}`.replace(/\s+/g, ' ').trim(),
-      );
-      const sourceNorms = sourceTexts.map(normalizeEvidenceText);
-      const corpusNorm = sourceNorms.join('\n');
-      const corpusLines = sources.slice(0, 30).map((source, index) =>
-        `[${index + 1}] ${(source.summary ? `${source.title} — ${source.summary}` : source.title)
-          .replace(/\s+/g, ' ').trim().slice(0, 400)}`,
-      );
-      let parsedNames: ReturnType<typeof parseCompetitorNames> | null = null;
-      for (let attempt = 0; attempt < 2 && parsedNames === null; attempt += 1) {
-        let response: string;
-        try {
-          response = await this.extraction.complete([
-            { role: 'system', content: '只执行快照内的竞品名识别；不要调用工具，不要输出快照之外的品牌。' },
-            { role: 'user', content: competitorExtractionPrompt({
-              brandName,
-              industry,
-              products: [...products],
-              targetCustomers: audienceProfile.targetCustomers,
-              customerCases: audienceProfile.customerCases,
-              coreAdvantages: audienceProfile.coreAdvantages,
-              anchor: scope.primary,
-              knownCompetitors: [...knownDisplay.values()],
-              excludedNames: [...excludedDisplay.values()],
-              deficit,
-              corpus: corpusLines.join('\n'),
-            }) },
-          ], { signal, maxTokens: 2048 });
-          debugDumpCompetitorSearch({ event: 'extraction-response', attempt, response: response.slice(0, 4_000) });
-        } catch {
-          break;
+      // 语料上下文与抽取/闸门闭包化：两段式自适应的第二轮换池补枪时复用
+      // 同一套构造与闸门，保证两轮都满足「模型可见语料 = 存在闸语料」。
+      const corpusOf = (corpusSources: typeof sources) => {
+        const sourceTexts = corpusSources.map((source) =>
+          `${source.title} ${source.summary ?? ''}`.replace(/\s+/g, ' ').trim(),
+        );
+        const sourceNorms = sourceTexts.map(normalizeEvidenceText);
+        return {
+          sourceTexts,
+          sourceNorms,
+          corpusNorm: sourceNorms.join('\n'),
+          corpusLines: corpusSources.slice(0, 30).map((source, index) =>
+            `[${index + 1}] ${(source.summary ? `${source.title} — ${source.summary}` : source.title)
+              .replace(/\s+/g, ' ').trim().slice(0, 400)}`,
+          ),
+        };
+      };
+      const extractNames = async (
+        corpusLines: readonly string[],
+      ): Promise<ReturnType<typeof parseCompetitorNames> | null> => {
+        let parsedNames: ReturnType<typeof parseCompetitorNames> | null = null;
+        for (let attempt = 0; attempt < 2 && parsedNames === null; attempt += 1) {
+          let response: string;
+          try {
+            response = await this.extraction.complete([
+              { role: 'system', content: '只执行快照内的竞品名识别；不要调用工具，不要输出快照之外的品牌。' },
+              { role: 'user', content: competitorExtractionPrompt({
+                brandName,
+                industry,
+                products: [...products],
+                targetCustomers: audienceProfile.targetCustomers,
+                customerCases: audienceProfile.customerCases,
+                coreAdvantages: audienceProfile.coreAdvantages,
+                anchor: scope.primary,
+                knownCompetitors: [...knownDisplay.values()],
+                excludedNames: [...excludedDisplay.values()],
+                deficit,
+                corpus: corpusLines.join('\n'),
+              }) },
+            ], { signal, maxTokens: 2048 });
+            debugDumpCompetitorSearch({ event: 'extraction-response', attempt, response: response.slice(0, 4_000) });
+          } catch {
+            break;
+          }
+          try {
+            parsedNames = parseCompetitorNames(response, limits);
+          } catch {
+            // 坏 JSON 重抽一次（同 extractFacts 契约），两次都坏落 invalid。
+          }
         }
-        try {
-          parsedNames = parseCompetitorNames(response, limits);
-        } catch {
-          // 坏 JSON 重抽一次（同 extractFacts 契约），两次都坏落 invalid。
-        }
-      }
-      if (parsedNames === null) {
-        logOutcome({ status: 'skipped', errorCode: 'model_response_invalid' });
-        return [];
-      }
+        return parsedNames;
+      };
       // 两层名单走同一组本地闸（存在/关系恒开，地域闸仅城市锚）——分层是
       // 模型的语义判断（用户裁决 2026-08-30），闸门只保「名字真实出自快照」。
-      const gateTier = (
-        rows: Array<{ name: string; region: string }>,
-        cap: number,
-      ): Array<{ name: string; region: string; evidence: string; evidenceUrl: string }> => {
+      const gateWith = (
+        corpus: ReturnType<typeof corpusOf>,
+        corpusSources: typeof sources,
+      ) => (rows: Array<{ name: string; region: string }>, cap: number) => {
         const survivors: Array<{ name: string; region: string; evidence: string; evidenceUrl: string }> = [];
         for (const { name, region } of rows) {
           if (survivors.length >= cap) break;
           const nameNorm = normalizeEvidenceText(name);
-          if (!nameNorm || !corpusNorm.includes(nameNorm)) continue; // 存在闸
+          if (!nameNorm || !corpus.corpusNorm.includes(nameNorm)) continue; // 存在闸
           // 地域闸（仅城市/区县锚）：省级锚无 allowed 白名单，模型自证。
           if (scope.granularity === 'city' && !regionInServiceScope(region, scope.allowed)) continue;
-          const matchedIndex = sourceNorms.findIndex((text) => text.includes(nameNorm));
+          const matchedIndex = corpus.sourceNorms.findIndex((text) => text.includes(nameNorm));
           if (matchedIndex >= 0) {
             // 关系闸：快照里名字附近出现供应/合作/前东家等关系词的剔除。
-            if (namedRelation(sourceTexts[matchedIndex], name, NON_COMPETITOR_RELATION)) continue;
+            if (namedRelation(corpus.sourceTexts[matchedIndex], name, NON_COMPETITOR_RELATION)) continue;
           }
           survivors.push({
             name,
             region,
-            evidence: matchedIndex >= 0 ? sourceTexts[matchedIndex].slice(0, 200) : '',
-            evidenceUrl: matchedIndex >= 0 ? sources[matchedIndex].url : '',
+            evidence: matchedIndex >= 0 ? corpus.sourceTexts[matchedIndex].slice(0, 200) : '',
+            evidenceUrl: matchedIndex >= 0 ? corpusSources[matchedIndex].url : '',
           });
         }
         return survivors;
       };
-      const directSuggestions = gateTier(parsedNames.direct, deficit);
-      const potentialSuggestions = gateTier(parsedNames.potential, COMPETITOR_POTENTIAL_TARGET);
+
+      const corpus = corpusOf(sources);
+      const parsedNames = await extractNames(corpus.corpusLines);
+      if (parsedNames === null) {
+        logOutcome({ status: 'skipped', errorCode: 'model_response_invalid' });
+        return [];
+      }
+      const gateTier = gateWith(corpus, sources);
+      let directSuggestions = gateTier(parsedNames.direct, deficit);
+      let potentialSuggestions = gateTier(parsedNames.potential, COMPETITOR_POTENTIAL_TARGET);
+
+      // 两段式自适应（ADR-0007 D7，第五写实跑裁决）：模型写盘点词是非确定
+      // 性的——第四写实跑「广东 干蒸菜 品牌 有哪些」换来了品类池（渔文乐/
+      // 蒸简单），第五写实跑「广东食堂干蒸菜品牌有哪些」多带一个场景词整池
+      // 就塌回自身投放软文、名单只剩 1 家。提示词约束不可靠，改为结果驱动：
+      // 幸存不足时让模型看着「召回全是自身投放」的事实重写一条去场景/去招商
+      // 的盘点词，换池补一枪；合并语料重新抽取、重新过闸，重试链路任何一步
+      // 失败都保住第一轮结果。
+      let usedRetry = false;
+      if (
+        searchSourcesFn
+        && directSuggestions.length + potentialSuggestions.length < COMPETITOR_RETRY_MIN_SURVIVORS
+      ) {
+        try {
+          const rewrite = await this.extraction.complete([
+            { role: 'system', content: '只重写一条搜索查询词；只返回 JSON。' },
+            { role: 'user', content: inventoryRetryPrompt({
+              brandName,
+              industry,
+              products: [...products],
+              anchor: scope.primary,
+              queries,
+              corpusTitles: sources.slice(0, 10).map((source) => source.title),
+            }) },
+          ], { signal, maxTokens: 512 });
+          debugDumpCompetitorSearch({ event: 'retry-rewrite', response: rewrite.slice(0, 1_000) });
+          const retryQuery = parseRetryQuery(rewrite, queries);
+          if (retryQuery) {
+            const retryGroup = await searchSourcesFn(retryQuery, { signal, count: 20 })
+              .catch((error: unknown) => {
+                debugDumpCompetitorSearch({ event: 'search-source-failed', query: retryQuery, error: String(error) });
+                return [] as Array<{ title: string; url: string; summary?: string }>;
+              });
+            const merged = capSourcesPerDomain(
+              dedupeSourcesByUrl([...sources, ...retryGroup]),
+              COMPETITOR_SOURCE_DOMAIN_CAP,
+            );
+            if (merged.length > sources.length) {
+              debugDumpCompetitorSearch({ event: 'retry-corpus', query: retryQuery, kept: merged.length });
+              const retryCorpus = corpusOf(merged);
+              const retryParsed = await extractNames(retryCorpus.corpusLines);
+              if (retryParsed) {
+                usedRetry = true;
+                const retryGate = gateWith(retryCorpus, merged);
+                const retryDirect = retryGate(retryParsed.direct, deficit);
+                const retryPotential = retryGate(retryParsed.potential, COMPETITOR_POTENTIAL_TARGET);
+                const regionHints = [scope.primary, ...scope.allowed];
+                const notSeen = (
+                  row: { name: string; region: string },
+                  existing: ReadonlyArray<{ name: string; region: string }>,
+                ) => !existing.some(
+                  (keptRow) => sameBrandIdentity(keptRow.name, row.name,
+                    [keptRow.region, row.region, ...regionHints]),
+                );
+                directSuggestions = [
+                  ...retryDirect,
+                  ...directSuggestions.filter((row) => notSeen(row, retryDirect)),
+                ].slice(0, deficit);
+                potentialSuggestions = [
+                  ...retryPotential,
+                  ...potentialSuggestions.filter((row) => notSeen(row, retryPotential)),
+                ].slice(0, COMPETITOR_POTENTIAL_TARGET);
+              }
+            }
+          }
+        } catch {
+          // 重试链路任何失败（重写坏 JSON/检索异常/抽取失败）保第一轮结果。
+        }
+      }
       debugDumpCompetitorSearch({
         event: 'survivors',
-        path: 'main',
+        path: usedRetry ? 'retry' : 'main',
         parsedDirect: parsedNames.direct.length,
         parsedPotential: parsedNames.potential.length,
         directSurvivors: directSuggestions.map((row) => row.name),
         potentialSurvivors: potentialSuggestions.map((row) => row.name),
       });
       if (directSuggestions.length === 0 && potentialSuggestions.length === 0) {
-        logOutcome({ status: 'skipped', errorCode: 'no_qualified_suggestions', path: 'main' });
+        logOutcome({ status: 'skipped', errorCode: 'no_qualified_suggestions', path: usedRetry ? 'retry' : 'main' });
         return [];
       }
       logOutcome({
         status: 'ok',
-        path: 'main',
+        path: usedRetry ? 'retry' : 'main',
         count: directSuggestions.length,
         potentialCount: potentialSuggestions.length,
       });
