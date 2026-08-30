@@ -941,6 +941,40 @@ describe("competitor enrichment (ADR-0007 source-grounded extraction)", () => {
     expect(potential?.[0].value).toEqual(['渔文乐', '蒸简单原盅蒸饭']);
   });
 
+  it('upgrades http source urls to https before page fetching (scheme whitelist preserved)', async () => {
+    // 搜索结果常含 http:// 明文链（toutiao m. 站），scheme 白名单只收 https
+    // ——抓取前升级协议，来源身份（证据链接）保持引擎给的原 URL。
+    const provinceResponse = JSON.stringify({ facts: [
+      { field: 'industry', value: '餐饮/干蒸菜', provenance: 'extracted', sourceExcerpt: '行业' },
+      { field: 'serviceArea', value: '广东省', provenance: 'extracted', sourceExcerpt: '区域' },
+    ] });
+    const fetch = vi.fn(async () => new Response('<html><body>干蒸菜品牌名录：蒸简单原盅蒸饭在列，内容足够长以通过最短正文校验，补充文字补充文字补充文字</body></html>', {
+      status: 200,
+      headers: { 'content-type': 'text/html' },
+    }));
+    const port = new FakeMaterialPort();
+    const current = service(port, {
+      completeResponses: [provinceResponse, JSON.stringify({
+        direct: [{ name: '蒸简单原盅蒸饭', region: '广东' }],
+        potential: [],
+      })],
+      searchSources: async () => [{
+        title: '干蒸菜品牌名录',
+        url: 'http://wap.example.com/list',
+        summary: '干蒸菜品牌名录汇总',
+      }],
+      fetch: fetch as unknown as typeof globalThis.fetch,
+    });
+    await current.value.importPastedText('公司资料');
+
+    // 抓取收到的是升级后的 https URL。
+    const requested = fetch.mock.calls.map(([url]) => String(url));
+    expect(requested).toContain('https://wap.example.com/list');
+    expect(requested).not.toContain('http://wap.example.com/list');
+    // 来源链接保持引擎原 URL（http）。
+    expect(competitorsCallOf(current)?.[0].source.excerpt).toContain('（来源：http://wap.example.com/list）');
+  });
+
   it('collapses parenthesized-region disguises of the same brand (括号马甲回归 2026-08-31)', async () => {
     // 第三写实跑回归：直接层同时收了「张仔纪（广州）餐饮管理有限公司」与
     // 「张仔纪餐饮管理有限公司」——括号中缀（广州）让两个名字互不为子串，

@@ -1469,7 +1469,14 @@ export async function fetchWebsiteMaterial(
           method: 'GET',
           redirect: 'manual',
           signal,
-          headers: { Accept: 'text/html,application/xhtml+xml,text/plain' },
+          headers: {
+            Accept: 'text/html,application/xhtml+xml,text/plain',
+            // 无 UA/桌面 UA 会被部分站点回 JS 空壳或 301 到桌面壳（toutiao：
+            // m. 站仅对移动 UA 下发服务端渲染正文，桌面壳正文 0 字）；移动
+            // UA 对其余站点无碍——正文抓取与网址导入共用此头。
+            'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) '
+              + 'AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1',
+          },
           ...(dispatcher ? { dispatcher } : {}),
         }),
         { timeoutMs: WEBSITE_TIMEOUT_MS },
@@ -1911,7 +1918,11 @@ export class MaterialImportService {
           const pageSignal = signal
             ? AbortSignal.any([signal, AbortSignal.timeout(COMPETITOR_PAGE_TIMEOUT_MS)])
             : AbortSignal.timeout(COMPETITOR_PAGE_TIMEOUT_MS);
-          const page = await fetchWebsiteMaterial(target.url, this.websiteDeps, pageSignal);
+          // 搜索结果常含 http:// 明文链（toutiao m. 站等），scheme 白名单只收
+          // https——抓取前升级协议（绝大多数站点 https 可达或本就 301 到
+          // https）；来源身份仍是引擎给的原 URL（证据链接不变）。
+          const fetchUrl = target.url.replace(/^http:\/\//i, 'https://');
+          const page = await fetchWebsiteMaterial(fetchUrl, this.websiteDeps, pageSignal);
           const text = textFromHtml(page.html).slice(0, COMPETITOR_PAGE_TEXT_CHARS);
           return text.length >= 40 ? ([target.url, text] as const) : null;
         }));
