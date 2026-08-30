@@ -176,7 +176,7 @@ describe('MaterialRequestCard', () => {
       expect(extensions).toContain(extension);
     }
     expect(
-      screen.getByText(/直接上传的图片会自动进入配图候选池/),
+      screen.getByText(/直接上传的图片与文档里的内嵌图片会自动进入配图候选池/),
     ).toBeInTheDocument();
   });
 

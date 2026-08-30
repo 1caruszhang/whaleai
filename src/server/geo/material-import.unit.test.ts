@@ -1,4 +1,5 @@
 import AdmZip from 'adm-zip';
+import { createHash } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
 import * as XLSX from 'xlsx';
 
@@ -109,6 +110,21 @@ class FakeMaterialPort implements BrandMaterialPort {
       });
       this.materials.set(item.id, item);
       this.bytes.set(item.id, pngFixtureBytes(800, 600));
+      return item;
+    }
+    if (sourcePath.endsWith('.docx') || sourcePath.endsWith('.pptx')) {
+      const ext = sourcePath.split('.').at(-1) as 'docx' | 'pptx';
+      const item = material({
+        id: `file-${++this.next}`,
+        inputKind: 'file',
+        displayName: `品牌介绍.${ext}`,
+        fileExt: ext,
+        mediaType: 'application/vnd.openxmlformats-officedocument.presentationml.slideshow',
+        sha256: 'c'.repeat(64),
+      });
+      this.materials.set(item.id, item);
+      // 字节由测试用构造的 zip 覆写（storedDocument helper）。
+      this.bytes.set(item.id, new TextEncoder().encode('公司全称：鲸跃科技'));
       return item;
     }
     const item = material({ id: `file-${++this.next}`, inputKind: 'file', displayName: 'profile.md' });
@@ -2444,5 +2460,267 @@ describe('MaterialImportService standalone image materials (ADR-0008 T2)', () =>
     expect(port.savedImages).toHaveLength(2);
     expect(port.imageAssets.size).toBe(1);
     expect(port.finishes.at(-1)?.status).toBe('processed');
+  });
+});
+
+describe('MaterialImportService embedded document images (ADR-0008 T3)', () => {
+  const taggingResponse = (
+    category = '产品实拍',
+    description = '文档内嵌的门店前台展台实拍',
+  ) => JSON.stringify({ description, category });
+
+  function sha256Of(bytes: Uint8Array): string {
+    return createHash('sha256').update(bytes).digest('hex');
+  }
+
+  /** 构造 docx/pptx：正文 xml + 媒体目录条目（media 名 → 字节）。 */
+  function ooxmlZip(extension: 'docx' | 'pptx', media: Record<string, Uint8Array>): Buffer {
+    const zip = new AdmZip();
+    if (extension === 'docx') {
+      zip.addFile(
+        'word/document.xml',
+        Buffer.from('<w:document><w:body><w:p><w:r><w:t>鲸跃科技</w:t></w:r></w:p></w:body></w:document>'),
+      );
+      for (const [name, bytes] of Object.entries(media)) zip.addFile(`word/media/${name}`, Buffer.from(bytes));
+    } else {
+      zip.addFile(
+        'ppt/slides/slide1.xml',
+        Buffer.from('<p:sld><p:cSld><p:spTree><a:p><a:r><a:t>鲸跃科技</a:t></a:r></a:p></p:spTree></p:cSld></p:sld>'),
+      );
+      for (const [name, bytes] of Object.entries(media)) zip.addFile(`ppt/media/${name}`, Buffer.from(bytes));
+    }
+    return zip.toBuffer();
+  }
+
+  async function storedDocument(port: FakeMaterialPort, extension: 'docx' | 'pptx', bytes: Buffer) {
+    const item = await port.importFile(`C:/docs/品牌介绍.${extension}`);
+    port.bytes.set(item.id, new Uint8Array(bytes));
+    return item;
+  }
+
+  async function storedStandalone(port: FakeMaterialPort, bytes: Uint8Array) {
+    const item = await port.importFile('C:/pics/展拍.png');
+    port.bytes.set(item.id, bytes);
+    return item;
+  }
+
+  it('extracts docx embedded media into the pool through the same tagging pipeline', async () => {
+    const port = new FakeMaterialPort();
+    const imageOne = pngFixtureBytes(800, 600);
+    const imageTwo = pngFixtureBytes(640, 480);
+    const document = await storedDocument(port, 'docx', ooxmlZip('docx', {
+      'image1.png': imageOne,
+      'image2.png': imageTwo,
+    }));
+    const current = service(port, { describeImage: async () => taggingResponse() });
+
+    const result = await current.value.process(document.id);
+
+    expect(result.ok).toBe(true);
+    expect(current.describeImage).toHaveBeenCalledTimes(2);
+    // 每张内嵌图按自身字节哈希入池（不是文档材料的哈希），字节随载荷直送存储。
+    expect(port.savedImages.map((saved) => saved.sha256).sort())
+      .toEqual([sha256Of(imageOne), sha256Of(imageTwo)].sort());
+    expect(port.savedImages[0]).toMatchObject({
+      sourceMaterialId: document.id,
+      fileExt: 'png',
+      mediaType: 'image/png',
+      byteSize: imageOne.byteLength,
+      width: 800,
+      height: 600,
+      description: '文档内嵌的门店前台展台实拍',
+      category: 'product-photo',
+    });
+    expect(port.savedImages[0]?.imageBytes).toEqual(imageOne);
+    // 文档正文照常走文本抽取与知识裁决，配图提取不改变导入终态。
+    expect(current.complete).toHaveBeenCalled();
+    expect(port.finishes.at(-1)).toMatchObject({ status: 'awaiting-confirmation' });
+  });
+
+  it('extracts pptx embedded media into the pool', async () => {
+    const port = new FakeMaterialPort();
+    const slide = pngFixtureBytes(1024, 768);
+    const deck = await storedDocument(port, 'pptx', ooxmlZip('pptx', { 'image1.png': slide }));
+    const current = service(port, { describeImage: async () => taggingResponse() });
+
+    const result = await current.value.process(deck.id);
+
+    expect(result.ok).toBe(true);
+    expect(current.describeImage).toHaveBeenCalledTimes(1);
+    expect(port.savedImages).toHaveLength(1);
+    expect(port.savedImages[0]).toMatchObject({ sha256: sha256Of(slide), width: 1024, height: 768 });
+  });
+
+  it('merges document-embedded and standalone uploads of the same image into one pool entry', async () => {
+    const port = new FakeMaterialPort();
+    const bytes = pngFixtureBytes(800, 600);
+    const document = await storedDocument(port, 'docx', ooxmlZip('docx', { 'image1.png': bytes }));
+    const standalone = await storedStandalone(port, bytes);
+    // 独立上传的材料存储哈希 = 图像内容哈希（两侧 sha256 键一致才可去重）。
+    standalone.sha256 = sha256Of(bytes);
+    const current = service(port, { describeImage: async () => taggingResponse() });
+
+    await current.value.process(document.id);
+    await current.value.process(standalone.id);
+
+    // 两个来源各保存一次，但同一 sha256 在端口层合一为一个候选。
+    expect(port.savedImages.map((saved) => saved.sha256)).toEqual([sha256Of(bytes), sha256Of(bytes)]);
+    expect(port.imageAssets.size).toBe(1);
+  });
+
+  it('skips non-whitelisted embedded formats without failing the import', async () => {
+    const spy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    try {
+      const port = new FakeMaterialPort();
+      const document = await storedDocument(port, 'docx', ooxmlZip('docx', {
+        'logo.emf': new Uint8Array([1, 2, 3]),
+        'chart.wmf': new Uint8Array([4, 5, 6]),
+        'scan.tiff': new Uint8Array([7, 8, 9]),
+        'photo.png': pngFixtureBytes(800, 600),
+      }));
+      const current = service(port, { describeImage: async () => taggingResponse() });
+
+      const result = await current.value.process(document.id);
+
+      // 白名单外格式零打标零入库，导入照常成功。
+      expect(result.ok).toBe(true);
+      expect(current.describeImage).toHaveBeenCalledTimes(1);
+      expect(port.savedImages).toHaveLength(1);
+      expect(port.savedImages[0]?.fileExt).toBe('png');
+      // 留痕：脱敏 outcome 投影记录跳过的格式与数量。
+      const line = spy.mock.calls
+        .map((call) => String(call[0]))
+        .find((entry) => entry.includes('image-extract') && entry.includes('skipped-format'));
+      expect(line).toBeDefined();
+      expect(line).toContain('emf');
+      expect(line).toContain('wmf');
+      expect(line).toContain('tiff');
+      expect(port.finishes.at(-1)?.status).toBe('awaiting-confirmation');
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('tags each unique image once when the document embeds duplicates', async () => {
+    const port = new FakeMaterialPort();
+    const bytes = pngFixtureBytes(800, 600);
+    const document = await storedDocument(port, 'docx', ooxmlZip('docx', {
+      'image1.png': bytes,
+      'image2.png': bytes,
+    }));
+    const current = service(port, { describeImage: async () => taggingResponse() });
+
+    const result = await current.value.process(document.id);
+
+    expect(result.ok).toBe(true);
+    // 文档内同图多次引用（logo 页眉页脚重复）只打标一次。
+    expect(current.describeImage).toHaveBeenCalledTimes(1);
+    expect(port.savedImages).toHaveLength(1);
+  });
+
+  it('normalizes uppercase media extensions against the whitelist', async () => {
+    const port = new FakeMaterialPort();
+    const bytes = pngFixtureBytes(800, 600);
+    const document = await storedDocument(port, 'pptx', ooxmlZip('pptx', { 'IMG1.PNG': bytes }));
+    const current = service(port, { describeImage: async () => taggingResponse() });
+
+    const result = await current.value.process(document.id);
+
+    expect(result.ok).toBe(true);
+    expect(current.describeImage).toHaveBeenCalledTimes(1);
+    expect(port.savedImages[0]).toMatchObject({ fileExt: 'png', sha256: sha256Of(bytes) });
+  });
+
+  it('degrades embedded images without blocking the document when tagging throws', async () => {
+    const port = new FakeMaterialPort();
+    const document = await storedDocument(port, 'docx', ooxmlZip('docx', {
+      'image1.png': pngFixtureBytes(800, 600),
+    }));
+    const current = service(port, {
+      describeImage: async () => { throw new Error('keyword-search upstream failed'); },
+    });
+
+    const result = await current.value.process(document.id);
+
+    // 打标失败只降级该图：正文抽取照走、材料不落 failed。
+    expect(result.ok).toBe(true);
+    expect(port.savedImages).toHaveLength(0);
+    expect(current.complete).toHaveBeenCalled();
+    expect(port.finishes.at(-1)).toMatchObject({ status: 'awaiting-confirmation' });
+  });
+
+  it('keeps the document import healthy when the capability has no describeImage', async () => {
+    const port = new FakeMaterialPort();
+    const document = await storedDocument(port, 'docx', ooxmlZip('docx', {
+      'image1.png': pngFixtureBytes(800, 600),
+    }));
+    const current = service(port, { search: async () => '搜索结果' });
+
+    const result = await current.value.process(document.id);
+
+    expect(result.ok).toBe(true);
+    expect(port.savedImages).toHaveLength(0);
+    expect(current.complete).toHaveBeenCalled();
+  });
+
+  it('applies the dimension gate to embedded images before tagging', async () => {
+    const port = new FakeMaterialPort();
+    const document = await storedDocument(port, 'docx', ooxmlZip('docx', {
+      'icon.png': pngFixtureBytes(120, 80),
+      'photo.png': pngFixtureBytes(800, 600),
+    }));
+    const current = service(port, { describeImage: async () => taggingResponse() });
+
+    const result = await current.value.process(document.id);
+
+    expect(result.ok).toBe(true);
+    // 小图在打标之前被拦下，不花打标调用。
+    expect(current.describeImage).toHaveBeenCalledTimes(1);
+    expect(port.savedImages).toHaveLength(1);
+    expect(port.savedImages[0]?.width).toBe(800);
+  });
+
+  it('sanitizes non-ascii media tails in the skip trace', async () => {
+    const spy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    try {
+      const port = new FakeMaterialPort();
+      const document = await storedDocument(port, 'docx', ooxmlZip('docx', {
+        'logo.公司徽标': new Uint8Array([1, 2, 3]),
+        'photo.png': pngFixtureBytes(800, 600),
+      }));
+      const current = service(port, { describeImage: async () => taggingResponse() });
+
+      const result = await current.value.process(document.id);
+
+      // 条目尾段是文档作者可控文本：留痕键并入 other 桶，原文不进日志。
+      expect(result.ok).toBe(true);
+      const line = spy.mock.calls
+        .map((call) => String(call[0]))
+        .find((entry) => entry.includes('image-extract') && entry.includes('skipped-format'));
+      expect(line).toContain('other');
+      expect(line).not.toContain('公司徽标');
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('stops tagging when the extraction time budget is exhausted', async () => {
+    const port = new FakeMaterialPort();
+    const document = await storedDocument(port, 'docx', ooxmlZip('docx', {
+      'image1.png': pngFixtureBytes(800, 600),
+      'image2.png': pngFixtureBytes(640, 480),
+    }));
+    const current = service(port, {
+      describeImage: async () => taggingResponse(),
+      extractionTimeoutMs: 0,
+    });
+
+    const result = await current.value.process(document.id);
+
+    // 预算耗尽：零打标零入池，文档导入照常收敛（不停在 processing）。
+    expect(result.ok).toBe(true);
+    expect(current.describeImage).not.toHaveBeenCalled();
+    expect(port.savedImages).toHaveLength(0);
+    expect(port.finishes.at(-1)).toMatchObject({ status: 'awaiting-confirmation' });
   });
 });

@@ -1,4 +1,5 @@
 import AdmZip from 'adm-zip';
+import { createHash } from 'node:crypto';
 import { appendFileSync } from 'node:fs';
 import { basename } from 'node:path';
 import { fetch as undiciFetch, type Dispatcher } from 'undici';
@@ -197,6 +198,12 @@ export interface SaveMaterialImageInput {
   height: number;
   description: string;
   category: MaterialImageCategoryCode;
+  /**
+   * 内嵌图原始字节（ADR-0008 T3）：docx/pptx zip 媒体条目直取的字节，
+   * Rust 侧按内容寻址落盘并校验哈希。独立图片材料省略——字节本就是材料
+   * 本体，由 Rust 从材料存储读回。
+   */
+  imageBytes?: Uint8Array;
 }
 
 export interface BrandMaterialPort {
@@ -251,7 +258,13 @@ type MaterialImagePoolOutcome =
   | 'below-min-dimension'
   | 'tagging-unparsed'
   | 'icon-decoration'
-  | 'degraded';
+  | 'degraded'
+  /** 内嵌图提取专用：白名单外格式（emf/wmf/tiff 等）安全跳过。 */
+  | 'skipped-format'
+  /** 内嵌图提取专用：zip 坏档/解压失败，零入池不报错。 */
+  | 'extract-failed'
+  /** 内嵌图提取专用：时间预算耗尽，余量图片不再打标（导入照常收敛）。 */
+  | 'budget-exhausted';
 
 export interface WebsiteFetchDependencies {
   fetch?: (
@@ -354,7 +367,14 @@ export class RustBrandMaterialPort implements BrandMaterialPort {
   }
 
   async saveImageAsset(input: SaveMaterialImageInput): Promise<{ id: string; deduplicated: boolean }> {
-    const result = await managementApi('/api/brand-materials/images/save', 'POST', this.envelope({ ...input }));
+    // 内嵌图字节经 management hop 以 base64 载荷直送（Rust 侧按内容哈希校验）；
+    // 独立图片材料不传字节，保持 T2 的「从材料本体读回」路径。字节载荷放大
+    // 请求体，超时放宽到与材料内容读取同款 30s。
+    const { imageBytes, ...rest } = input;
+    const result = await managementApi('/api/brand-materials/images/save', 'POST', this.envelope({
+      ...rest,
+      ...(imageBytes ? { embeddedImageB64: Buffer.from(imageBytes).toString('base64') } : {}),
+    }), { timeoutMs: imageBytes ? 30_000 : undefined });
     if (result.ok !== true) throw managementError(result);
     return result.image as { id: string; deduplicated: boolean };
   }
@@ -410,6 +430,61 @@ function parseOoxml(bytes: Uint8Array, extension: 'docx' | 'pptx'): string {
       : /^ppt\/slides\/slide\d+\.xml$/i.test(entry.entryName))
     .sort((left, right) => left.entryName.localeCompare(right.entryName, undefined, { numeric: true }));
   return wanted.map((entry) => decodeXmlText(entry.getData().toString('utf8'))).filter(Boolean).join('\n\n');
+}
+
+/** 文档媒体目录前缀（ADR-0008：docx word/media/*、pptx ppt/media/* 直取）。 */
+const EMBEDDED_IMAGE_MEDIA_PREFIX: Record<'docx' | 'pptx', RegExp> = {
+  docx: /^word\/media\//i,
+  pptx: /^ppt\/media\//i,
+};
+
+/** 从文档 zip 媒体目录直取的白名单图片（sha256 已按内容计算并批内去重）。 */
+export interface EmbeddedMaterialImage {
+  sha256: string;
+  fileExt: string;
+  bytes: Uint8Array;
+}
+
+/**
+ * docx/pptx 内嵌图提取（ADR-0008 T3）：zip 媒体目录直取，白名单外格式
+ * （emf/wmf/tiff 等，浏览器渲染不了且转换显式延后）安全跳过并计数留痕；
+ * 同一内容（sha256）在文档内多次引用只取一次。纯函数——坏档抛错由调用
+ * 方按「零入池不阻塞导入」降级。
+ */
+export function extractEmbeddedMaterialImages(
+  bytes: Uint8Array,
+  extension: 'docx' | 'pptx',
+): { images: EmbeddedMaterialImage[]; skippedFormats: Record<string, number> } {
+  const zip = new AdmZip(Buffer.from(bytes));
+  const prefix = EMBEDDED_IMAGE_MEDIA_PREFIX[extension];
+  const images: EmbeddedMaterialImage[] = [];
+  const seen = new Set<string>();
+  const skippedFormats: Record<string, number> = {};
+  // 留痕键只收短 ascii 扩展名：zip 条目名是文档作者可控文本，长/非 ascii
+  // 尾段进日志会破坏「材料内容不进日志」纪律，统一并入 other 桶。
+  const traceableExtension = (entryName: string): { fileExt: string; traceKey: string } => {
+    const base = entryName.split('/').pop() ?? '';
+    const dot = base.lastIndexOf('.');
+    const raw = dot > 0 ? base.slice(dot + 1).toLowerCase() : '';
+    return {
+      fileExt: raw,
+      traceKey: /^[a-z0-9]{1,8}$/.test(raw) ? raw : 'other',
+    };
+  };
+  for (const entry of zip.getEntries()) {
+    if (entry.isDirectory || !prefix.test(entry.entryName)) continue;
+    const { fileExt, traceKey } = traceableExtension(entry.entryName);
+    if (!isMaterialImageExtension(fileExt)) {
+      skippedFormats[traceKey] = (skippedFormats[traceKey] ?? 0) + 1;
+      continue;
+    }
+    const data = entry.getData();
+    const sha256 = createHash('sha256').update(data).digest('hex');
+    if (seen.has(sha256)) continue;
+    seen.add(sha256);
+    images.push({ sha256, fileExt, bytes: new Uint8Array(data) });
+  }
+  return { images, skippedFormats };
 }
 
 async function parsePdf(bytes: Uint8Array): Promise<string> {
@@ -2304,7 +2379,12 @@ export class MaterialImportService {
   ): Promise<MaterialProcessResult> {
     let outcome: MaterialImagePoolOutcome = 'pooled';
     try {
-      outcome = await this.poolTaggedImage(material, bytes);
+      // 独立图片材料：字节即材料本体，sha256 沿用材料存储哈希（Rust 从
+      // 材料存储读回字节，不重复送载荷）。
+      outcome = await this.poolImageAsset(material, bytes, {
+        sha256: material.sha256,
+        fileExt: material.fileExt,
+      });
     } catch (error) {
       // 打标调用/入库的异常统一按降级收尾；固定码投影与文本抽取诊断同款。
       outcome = 'degraded';
@@ -2332,12 +2412,20 @@ export class MaterialImportService {
     };
   }
 
-  /** 打标入池管线：返回脱敏 outcome；调用方只用于日志与终态，不用于分支失败。 */
-  private async poolTaggedImage(material: BrandMaterial, bytes: Uint8Array): Promise<MaterialImagePoolOutcome> {
+  /**
+   * 打标入池管线（独立图片与文档内嵌图共用，ADR-0008 T3 收敛为一条路径）：
+   * 两道代码闸（尺寸、字节上限）→ 视觉打标 → 图标装饰过滤 → 持久化。
+   * 任何一步不合格都返回降级 outcome，绝不抛给导入主链。
+   */
+  private async poolImageAsset(
+    material: BrandMaterial,
+    bytes: Uint8Array,
+    identity: { sha256: string; fileExt: string; imageBytes?: Uint8Array },
+  ): Promise<MaterialImagePoolOutcome> {
     const describeImage = this.keywordSearch?.describeImage;
     if (!describeImage) return 'tagging-unavailable';
     if (bytes.byteLength > MATERIAL_IMAGE_MAX_TAGGABLE_BYTES) return 'too-large';
-    const dimensions = probeImageDimensions(bytes, material.fileExt);
+    const dimensions = probeImageDimensions(bytes, identity.fileExt);
     if (!dimensions) return 'dimensions-unreadable';
     if (!isPoolableDimensions(dimensions)) return 'below-min-dimension';
     const prompt = buildImageTaggingPrompt();
@@ -2347,7 +2435,7 @@ export class MaterialImportService {
         system: prompt.system,
         prompt: prompt.prompt,
         bytes,
-        mediaType: materialImageMediaType(material.fileExt),
+        mediaType: materialImageMediaType(identity.fileExt),
       },
       { signal: AbortSignal.timeout(this.extractionTimeoutMs) },
     );
@@ -2356,16 +2444,64 @@ export class MaterialImportService {
     if (tag.category === 'icon-decoration') return 'icon-decoration';
     const saved = await this.materialPort.saveImageAsset({
       sourceMaterialId: material.id,
-      sha256: material.sha256,
-      fileExt: material.fileExt,
-      mediaType: materialImageMediaType(material.fileExt),
+      sha256: identity.sha256,
+      fileExt: identity.fileExt,
+      mediaType: materialImageMediaType(identity.fileExt),
       byteSize: bytes.byteLength,
       width: dimensions.width,
       height: dimensions.height,
       description: tag.description.slice(0, MATERIAL_IMAGE_DESCRIPTION_MAX_CHARS),
       category: tag.category,
+      ...(identity.imageBytes ? { imageBytes: identity.imageBytes } : {}),
     });
     return saved.deduplicated ? 'deduplicated' : 'pooled';
+  }
+
+  /**
+   * 文档内嵌图提取入池（ADR-0008 T3）：docx/pptx 从 zip 媒体目录直取图片，
+   * 白名单外格式安全跳过并留痕，逐图走独立图片同款打标管线；每张图的
+   * 任何失败都只降级该图，不阻塞也不拖慢文档导入主链。整段共享与文本
+   * 抽取同款的硬性时间预算（材料不会因配图提取停在 processing）。
+   */
+  private async poolEmbeddedImages(material: BrandMaterial, bytes: Uint8Array): Promise<void> {
+    const logOutcome = (outcome: string, extra: Record<string, unknown> = {}): void => {
+      console.log(`[materials] image-extract ${JSON.stringify({ materialId: material.id, outcome, ...extra })}`);
+    };
+    let extraction: ReturnType<typeof extractEmbeddedMaterialImages>;
+    try {
+      extraction = extractEmbeddedMaterialImages(bytes, material.fileExt === 'docx' ? 'docx' : 'pptx');
+    } catch {
+      // 坏档/解压失败：零入池零报错，导入主链照走（与打标失败同款降级纪律）。
+      logOutcome('extract-failed');
+      return;
+    }
+    const skipped = Object.keys(extraction.skippedFormats);
+    if (skipped.length > 0) logOutcome('skipped-format', { formats: extraction.skippedFormats });
+    // 抽取链路硬上限纪律（material_import.md）：provider 挂起时材料也必须
+    // 有界收敛。预算耗尽即止，余量记一条 outcome 留痕（在途一次调用仍受
+    // poolImageAsset 自身的超时信号约束）。
+    const deadline = Date.now() + this.extractionTimeoutMs;
+    for (let index = 0; index < extraction.images.length; index += 1) {
+      if (Date.now() >= deadline) {
+        logOutcome('budget-exhausted', { remaining: extraction.images.length - index });
+        break;
+      }
+      const image = extraction.images[index];
+      try {
+        logOutcome(await this.poolImageAsset(material, image.bytes, {
+          sha256: image.sha256,
+          fileExt: image.fileExt,
+          imageBytes: image.bytes,
+        }));
+      } catch (error) {
+        // 打标调用/入库异常统一按降级收尾；固定码投影与独立图片诊断同款。
+        console.log(`[materials] image diagnostic ${JSON.stringify({
+          materialId: material.id,
+          errorCode: errorCode(error),
+        })}`);
+        logOutcome('degraded');
+      }
+    }
   }
 
   async process(materialId: string): Promise<MaterialProcessResult> {
@@ -2418,6 +2554,12 @@ export class MaterialImportService {
         const result = await this.importImageMaterial(attempt, material, bytes);
         await settlePermit('success');
         return result;
+      }
+      // 文档内嵌图（ADR-0008 T3）：docx/pptx 在文本抽取前从 zip 媒体目录
+      // 直取图片进候选池（复用独立图片的打标与持久化）；提取、打标、入库
+      // 的任何失败都只降级单张图，绝不阻塞文档导入。
+      if (material.fileExt === 'docx' || material.fileExt === 'pptx') {
+        await this.poolEmbeddedImages(material, bytes);
       }
       const text = await parseBrandMaterial(material, bytes).catch((error) => {
         if (error instanceof Error && ['material_type_unsupported', 'material_empty'].includes(error.message)) throw error;

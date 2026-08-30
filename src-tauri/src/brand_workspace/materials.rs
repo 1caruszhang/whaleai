@@ -1,5 +1,6 @@
 use super::*;
 
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use rusqlite::TransactionBehavior;
 use sha2::{Digest, Sha256};
 use std::io::{Read, Write};
@@ -122,8 +123,10 @@ pub struct MaterialImage {
     pub updated_at: String,
 }
 
-/// 入池写入请求：byte_size 是与来源材料本体的一致性校验值（实际入库以
-/// 读回字节为准）。
+/// 入池写入请求：byte_size 是与实际字节的一致性校验值（实际入库以落盘
+/// 字节为准）。独立图片材料不带字节（Rust 从来源材料本体读回并比对材料
+/// 存储哈希）；文档内嵌图（ADR-0008 T3）带 `embedded_image_b64`——字节与
+/// 来源材料本体无关，按声明 sha256 校验后内容寻址落盘。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MaterialImageSave {
@@ -136,6 +139,8 @@ pub struct MaterialImageSave {
     pub height: u32,
     pub description: String,
     pub category: String,
+    #[serde(default)]
+    pub embedded_image_b64: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -770,10 +775,11 @@ impl BrandWorkspaceStore {
             .collect())
     }
 
-    /// 材料图片入池（ADR-0008 T2）：sha256 全局唯一——已在池时幂等返回
-    /// 既有条目（跨来源只入池一次）。字节从来源材料本体读回并按存储哈希
-    /// 校验，内容寻址落 media/images/<sha256>.<ext>；一切校验失败给固定
-    /// 码，由 Node 侧按「该图不入池、不阻塞导入」降级。
+    /// 材料图片入池（ADR-0008 T2/T3）：sha256 全局唯一——已在池时幂等返回
+    /// 既有条目（跨来源只入池一次）。独立图片材料的字节从来源材料本体读回
+    /// 并按存储哈希校验；文档内嵌图的字节经 `embedded_image_b64` 载荷直送
+    /// 并按声明 sha256 校验。内容寻址落 media/images/<sha256>.<ext>；一切
+    /// 校验失败给固定码，由 Node 侧按「该图不入池、不阻塞导入」降级。
     pub fn save_material_image(
         &self,
         workspace_id: &str,
@@ -814,10 +820,29 @@ impl BrandWorkspaceStore {
             return Err("material_image_invalid".to_string());
         }
         let material = read_material(&connection, &workspace.id, &input.source_material_id)?;
-        if material.sha256 != sha256 {
-            return Err("material_hash_mismatch".to_string());
-        }
-        let bytes = read_material_bytes(&workspace, &material)?;
+        // 字节来源两路（ADR-0008 T3）：内嵌图经载荷直送（哈希按声明值校验，
+        // 与来源材料本体无关）；独立图片材料从材料本体读回（哈希与材料
+        // 存储值互校）。两条路汇入同一内容寻址落盘与 sha256 唯一键。
+        let bytes: Vec<u8> = match input.embedded_image_b64 {
+            Some(encoded) => {
+                let decoded = BASE64
+                    .decode(encoded.trim())
+                    .map_err(|_| "material_image_invalid".to_string())?;
+                if decoded.len() as u64 > MAX_MATERIAL_BYTES {
+                    return Err("material_too_large".to_string());
+                }
+                if format!("{:x}", Sha256::digest(&decoded)) != sha256 {
+                    return Err("material_hash_mismatch".to_string());
+                }
+                decoded
+            }
+            None => {
+                if material.sha256 != sha256 {
+                    return Err("material_hash_mismatch".to_string());
+                }
+                read_material_bytes(&workspace, &material)?
+            }
+        };
         if input.byte_size != bytes.len() as u64 {
             return Err("material_image_invalid".to_string());
         }
@@ -1716,7 +1741,7 @@ mod tests {
         bytes
     }
 
-    fn import_png_material(
+    fn import_material_file(
         store: &BrandWorkspaceStore,
         workspace: &BrandWorkspace,
         session_id: &str,
@@ -1746,6 +1771,24 @@ mod tests {
             height: 600,
             description: "门店前台的智能音箱展台实拍".to_string(),
             category: "product-photo".to_string(),
+            embedded_image_b64: None,
+        }
+    }
+
+    /// 文档内嵌图入池请求（ADR-0008 T3）：字节与来源文档材料本体无关，
+    /// sha256 按内嵌图自身内容计算，经 base64 载荷直送。
+    fn embedded_image_save(material: &BrandMaterial, bytes: &[u8]) -> MaterialImageSave {
+        MaterialImageSave {
+            source_material_id: material.id.clone(),
+            sha256: format!("{:x}", Sha256::digest(bytes)),
+            file_ext: "png".to_string(),
+            media_type: "image/png".to_string(),
+            byte_size: bytes.len() as u64,
+            width: 800,
+            height: 600,
+            description: "文档内嵌的门店前台展台实拍".to_string(),
+            category: "product-photo".to_string(),
+            embedded_image_b64: Some(BASE64.encode(bytes)),
         }
     }
 
@@ -1753,7 +1796,7 @@ mod tests {
     fn accepts_standalone_image_files_as_brand_materials() {
         let (_root, store, workspace, session_id) = fixture();
         let material =
-            import_png_material(&store, &workspace, &session_id, "展拍.png", &png_bytes(800, 600));
+            import_material_file(&store, &workspace, &session_id, "展拍.png", &png_bytes(800, 600));
         assert_eq!(material.file_ext, "png");
         assert_eq!(material.media_type, "image/png");
         assert!(material.relative_path.ends_with(".png"));
@@ -1764,7 +1807,7 @@ mod tests {
         let (_root, store, workspace, session_id) = fixture();
         let bytes = png_bytes(800, 600);
         let material =
-            import_png_material(&store, &workspace, &session_id, "展拍.png", &bytes);
+            import_material_file(&store, &workspace, &session_id, "展拍.png", &bytes);
 
         let saved = store
             .save_material_image(&workspace.id, &session_id, image_save(&material, &bytes))
@@ -1799,9 +1842,9 @@ mod tests {
         let (_root, store, workspace, session_id) = fixture();
         let bytes = png_bytes(800, 600);
         let first =
-            import_png_material(&store, &workspace, &session_id, "first.png", &bytes);
+            import_material_file(&store, &workspace, &session_id, "first.png", &bytes);
         let second =
-            import_png_material(&store, &workspace, &session_id, "second.png", &bytes);
+            import_material_file(&store, &workspace, &session_id, "second.png", &bytes);
 
         let first_save = store
             .save_material_image(&workspace.id, &session_id, image_save(&first, &bytes))
@@ -1820,11 +1863,111 @@ mod tests {
     }
 
     #[test]
+    fn saves_embedded_image_bytes_from_document_materials() {
+        let (_root, store, workspace, session_id) = fixture();
+        // 来源材料是 docx 文档本体（字节与内嵌图无关）。
+        let document = import_material_file(&store, &workspace, &session_id, "品牌介绍.docx", b"docx-bytes");
+        let image_bytes = png_bytes(800, 600);
+        let image_hash = format!("{:x}", Sha256::digest(&image_bytes));
+        assert_ne!(document.sha256, image_hash);
+
+        let saved = store
+            .save_material_image(&workspace.id, &session_id, embedded_image_save(&document, &image_bytes))
+            .expect("save");
+        assert!(!saved.deduplicated);
+
+        // 内容寻址按内嵌图自身哈希落盘（不是文档材料的哈希）。
+        let expected_path = workspace
+            .root_path
+            .join(format!("media/images/{image_hash}.png"));
+        assert!(expected_path.exists(), "content-addressed file missing");
+
+        let (image, read_back) = store
+            .read_material_image_bytes(&workspace.id, &session_id, &saved.id)
+            .expect("content");
+        assert_eq!(read_back, image_bytes);
+        assert_eq!(image.sha256, image_hash);
+        assert_eq!(image.byte_size, image_bytes.len() as u64);
+        assert_eq!(image.source_material_id, document.id);
+        assert_eq!(image.source_material_name, "品牌介绍.docx");
+    }
+
+    #[test]
+    fn deduplicates_embedded_and_standalone_sources_of_the_same_image() {
+        let (_root, store, workspace, session_id) = fixture();
+        let image_bytes = png_bytes(800, 600);
+        // 先独立上传同图入池（字节从材料本体读回的路径）。
+        let standalone =
+            import_material_file(&store, &workspace, &session_id, "展拍.png", &image_bytes);
+        let first = store
+            .save_material_image(&workspace.id, &session_id, image_save(&standalone, &image_bytes))
+            .expect("standalone save");
+        assert!(!first.deduplicated);
+
+        // 再从文档提取同一张图（字节经载荷直送的路径）→ 合一为一个候选。
+        let document =
+            import_material_file(&store, &workspace, &session_id, "品牌介绍.docx", b"docx-bytes");
+        let second = store
+            .save_material_image(&workspace.id, &session_id, embedded_image_save(&document, &image_bytes))
+            .expect("embedded save");
+        assert!(second.deduplicated);
+        assert_eq!(first.id, second.id);
+
+        let listed = store
+            .list_material_images(&workspace.id, &session_id, None)
+            .expect("list");
+        assert_eq!(listed.len(), 1);
+    }
+
+    #[test]
+    fn rejects_embedded_images_whose_payload_does_not_match_the_declared_hash() {
+        let (_root, store, workspace, session_id) = fixture();
+        let document =
+            import_material_file(&store, &workspace, &session_id, "品牌介绍.docx", b"docx-bytes");
+        let image_bytes = png_bytes(800, 600);
+
+        // 声明哈希与载荷字节不符。
+        let mut wrong_hash = embedded_image_save(&document, &image_bytes);
+        wrong_hash.sha256 = "f".repeat(64);
+        assert_eq!(
+            store.save_material_image(&workspace.id, &session_id, wrong_hash),
+            Err("material_hash_mismatch".to_string())
+        );
+
+        // 声明字节数与载荷不符。
+        let mut wrong_size = embedded_image_save(&document, &image_bytes);
+        wrong_size.byte_size += 1;
+        assert_eq!(
+            store.save_material_image(&workspace.id, &session_id, wrong_size),
+            Err("material_image_invalid".to_string())
+        );
+
+        // 非 base64 载荷。
+        let mut bad_payload = embedded_image_save(&document, &image_bytes);
+        bad_payload.embedded_image_b64 = Some("not-base64!!".to_string());
+        assert_eq!(
+            store.save_material_image(&workspace.id, &session_id, bad_payload),
+            Err("material_image_invalid".to_string())
+        );
+
+        // 一切被拒的写入不落盘、不进池。
+        assert!(store
+            .list_material_images(&workspace.id, &session_id, None)
+            .expect("list")
+            .is_empty());
+        assert!(!workspace
+            .root_path
+            .join("media")
+            .join(format!("{}.png", "f".repeat(64)))
+            .exists());
+    }
+
+    #[test]
     fn truncates_over_long_descriptions_by_code_points_instead_of_rejecting() {
         let (_root, store, workspace, session_id) = fixture();
         let bytes = png_bytes(800, 600);
         let material =
-            import_png_material(&store, &workspace, &session_id, "展拍.png", &bytes);
+            import_material_file(&store, &workspace, &session_id, "展拍.png", &bytes);
         let mut input = image_save(&material, &bytes);
         // 400 码点（其中含代理对）超长描述：截断保图，不整图拒绝。
         input.description = format!("{}长", "🌊".repeat(320));
@@ -1843,7 +1986,7 @@ mod tests {
         let (_root, store, workspace, session_id) = fixture();
         let bytes = png_bytes(800, 600);
         let material =
-            import_png_material(&store, &workspace, &session_id, "展拍.png", &bytes);
+            import_material_file(&store, &workspace, &session_id, "展拍.png", &bytes);
 
         let mut icon = image_save(&material, &bytes);
         icon.category = "icon-decoration".to_string();
@@ -1872,7 +2015,7 @@ mod tests {
         let (_root, store, workspace, session_id) = fixture();
         let bytes = png_bytes(800, 600);
         let material =
-            import_png_material(&store, &workspace, &session_id, "展拍.png", &bytes);
+            import_material_file(&store, &workspace, &session_id, "展拍.png", &bytes);
         let saved = store
             .save_material_image(&workspace.id, &session_id, image_save(&material, &bytes))
             .expect("save");
@@ -1899,7 +2042,7 @@ mod tests {
     fn finishes_image_material_attempt_with_processed_status() {
         let (_root, store, workspace, session_id) = fixture();
         let material =
-            import_png_material(&store, &workspace, &session_id, "展拍.png", &png_bytes(800, 600));
+            import_material_file(&store, &workspace, &session_id, "展拍.png", &png_bytes(800, 600));
         let attempt = store
             .begin_material_processing(&workspace.id, &session_id, &material.id)
             .expect("begin");
@@ -1924,7 +2067,7 @@ mod tests {
     fn widens_legacy_processing_status_check_in_existing_databases() {
         let (_root, store, workspace, session_id) = fixture();
         let material =
-            import_png_material(&store, &workspace, &session_id, "展拍.png", &png_bytes(800, 600));
+            import_material_file(&store, &workspace, &session_id, "展拍.png", &png_bytes(800, 600));
 
         // 把 attempt 表降级成迁移前的旧版 CHECK 形态，模拟存量库。
         {

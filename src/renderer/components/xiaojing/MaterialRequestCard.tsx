@@ -382,7 +382,7 @@ export default memo(function MaterialRequestCard({ data }: MaterialRequestCardPr
         <div className="mt-2.5">
           <div className="flex items-center justify-between gap-2">
             <p className="text-xs leading-4 text-[var(--ink-muted)]">
-              原材料先安全保存，再生成待确认事实；完成后确认卡片会出现在这里。直接上传的图片会自动进入配图候选池。
+              原材料先安全保存，再生成待确认事实；完成后确认卡片会出现在这里。直接上传的图片与文档里的内嵌图片会自动进入配图候选池。
             </p>
             <button
               type="button"
