@@ -1620,6 +1620,7 @@ describe("competitor enrichment (ADR-0007 source-grounded extraction)", () => {
     // 同名自检（用户裁决 2026-08-31：模型先判，代码归一键兜底）。
     expect(snapshotPrompt).toContain('同名自检');
     expect(snapshotPrompt).toContain('只报一次且用品类媒体最通行的叫法');
+    expect(snapshotPrompt).toContain('旗下公司/子品牌/副牌/产品线/关联运营');
     expect(snapshotPrompt).toContain('服务区域：成都新都');
     // 快照语料随提示词下发，名字只能从中识别。
     expect(snapshotPrompt).toContain('云帆信息口碑靠前');
@@ -1706,6 +1707,12 @@ describe('sameBrandIdentity（同品牌身份判定：归一键嵌套 + ·分段
     expect(sameBrandIdentity('粤食堂·经典蒸饭', '粤食堂')).toBe(true);
     // 「地域·品牌」马甲：共享品牌段「渔文乐」。
     expect(sameBrandIdentity('顺德·渔文乐', '渔文乐')).toBe(true);
+    // 注册名后缀剥离（第六写实跑，用户指认三马甲同一家）：法人形态词不是
+    // 品牌身份——剥离后「张仔纪」互相包含。
+    expect(sameBrandIdentity('张仔纪（广州）餐饮管理有限公司', '张仔纪老顺德干蒸菜')).toBe(true);
+    expect(sameBrandIdentity('广州张氏味好餐饮服务有限责任公司', '张氏味好')).toBe(true);
+    // 后缀剥离不把地域词短键误并：剥后不足 3 字保留全键。
+    expect(sameBrandIdentity('广东餐饮有限公司', '广东干蒸坊')).toBe(false);
     // 无关名字不误并。
     expect(sameBrandIdentity('云帆信息', '星河智能')).toBe(false);
   });

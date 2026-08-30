@@ -689,8 +689,9 @@ function competitorExtractionPrompt(input: {
     + '同区域不同品类的替代业态、品类标杆单店（自身不做加盟输出）等。',
     '判不准归 potential（宁低勿高）；两层都不得输出与已知竞品/排除名单重复的名字。',
     '同名自检（输出前逐行核对）：同一品牌的不同写法——全称/简称、「（城市）」地域中缀、'
-    + '「·系列/品类」尾巴、繁简体——是同一家，只报一次且用品类媒体最通行的叫法；'
-    + '两层之间也不得同品牌重复（direct 报过的 potential 不得再报）。',
+    + '「·系列/品类」尾巴、繁简体、注册名与品牌名（××餐饮管理有限公司＝××）——是同一家，'
+    + '只报一次且用品类媒体最通行的叫法；同一品牌的旗下公司/子品牌/副牌/产品线/关联运营'
+    + '主体也视为同一家，只报主品牌；两层之间不得同品牌重复（direct 报过的 potential 不得再报）。',
     '',
     '## 榜单语料警示',
     '快照常混有「国家/地区 + 品牌 + 英文名」的国际品牌榜单行文（如「以色列摩雷Morel」'
@@ -723,7 +724,7 @@ interface CompetitorSuggestion extends CompetitorDisplayDetail {
 const MATERIAL_COMPETITOR_SIGNAL =
   "(?:竞品|竞争对手|竞争者|直接竞争|二选一|比价|对比|替代(?:方案|选项)?)";
 const NON_COMPETITOR_RELATION =
-  "(?:前东家|曾任职于|供职于|曾任|出身于|工作于|师承|合作(?:方|商|伙伴|品牌)?|战略合作|供应商|供货商|经销(?:商|品牌)?|代理(?:商|品牌)?|客户|甲方|设备品牌|仪器品牌|器材品牌|平台渠道|母公司|子公司|兄弟品牌|同集团|隶属于|投资方)";
+  "(?:前东家|曾任职于|供职于|曾任|出身于|工作于|师承|合作(?:方|商|伙伴|品牌)?|战略合作|供应商|供货商|经销(?:商|品牌)?|代理(?:商|品牌)?|客户|甲方|设备品牌|仪器品牌|器材品牌|平台渠道|母公司|子公司|兄弟品牌|同集团|隶属于|投资方|旗下|子品牌|副牌|关联公司|运营主体|运营公司)";
 
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -776,7 +777,7 @@ function normalizeCompetitorKey(value: string): string {
   // 剥离后再比对，否则「张仔纪（广州）餐饮管理有限公司」与「张仔纪餐饮
   // 管理有限公司」互不为子串，同名双份上卡（2026-08-31 第三写实跑）。
   return toSimplifiedChinese(value)
-    .replace(/[（(【\[［][^（(【\[］］）)】\]]*[）)】\]］]/g, '')
+    .replace(/[（(【[［][^（(【[］）)】\]]*[）)】\]]/g, '')
     .trim()
     .toLocaleLowerCase('zh-CN');
 }
@@ -1196,7 +1197,16 @@ export function dedupeSourcesByUrl<T extends { url: string }>(sources: readonly 
  * 削成品牌（第四写实跑「顺德·渔文乐」→「顺德」事故）。纯函数。
  */
 export function sameBrandIdentity(a: string, b: string, regionHints: readonly string[] = []): boolean {
-  const keyOf = (value: string) => normalizeCompetitorKey(value);
+  // 公司形态后缀（仅比对用，不改存储名）：注册名的法人形态词不是品牌
+  // 身份——「张仔纪（广州）餐饮管理有限公司/张仔纪老顺德干蒸菜」因后缀
+  // 与马甲词序差异互不为子串漏并（第六写实跑，用户指认三马甲同一家）。
+  // 剥离后短于 3 字保留全键，防「广东××公司」剥成地域词误并。
+  const COMPANY_FORM_SUFFIX = /(?:餐饮管理|餐饮服务|企业管理|食品|供应链|科技|信息技术)?(?:集团)?(?:股份)?有限(?:责任)?公司$/;
+  const keyOf = (value: string) => {
+    const key = normalizeCompetitorKey(value);
+    const stripped = key.replace(COMPANY_FORM_SUFFIX, '');
+    return stripped.length >= 3 ? stripped : key;
+  };
   const ka = keyOf(a);
   const kb = keyOf(b);
   if (!ka || !kb) return false;

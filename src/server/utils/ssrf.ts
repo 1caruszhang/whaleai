@@ -34,8 +34,17 @@ export function isUrlSchemeSafe(parsed: URL): { ok: true } | { ok: false; reason
 export async function buildSsrfGuardedDispatcher(parsed: URL): Promise<Agent | undefined> {
   const host = parsed.hostname.replace(/^\[|\]$/g, '');
   if (isIP(host) !== 0) return undefined;
-  const addresses = await lookup(host, { all: true });
-  if (addresses.length === 0 || addresses.some(({ address }) => isBlockedAddress(address))) {
+  const all = await lookup(host, { all: true });
+  if (all.length === 0) {
+    throw new Error('URL resolves to a private or loopback address');
+  }
+  // 代理客户端 TUN/fake-IP 环境（Clash 系）会给所有外网域名同时返回 fake
+  // IPv6（fdfe::/8 ULA 段），误中私有地址判定而整域拒绝——而连接 fake
+  // IPv4 经系统 TUN 出网正是该环境的正常上网路径。优先按 IPv4 判定与
+  // 钉定；无 IPv4 时回落全量判定，内网/回环/元数据段的防护口径不变。
+  const v4 = all.filter(({ family }) => family === 4);
+  const addresses = v4.length > 0 ? v4 : all;
+  if (addresses.some(({ address }) => isBlockedAddress(address))) {
     throw new Error('URL resolves to a private or loopback address');
   }
   const pinned = addresses.map(({ address, family }) => ({ address, family }));
