@@ -1068,12 +1068,81 @@ mod tests {
         assert_eq!(orphan_retry_delay(20), Duration::from_secs(5 * 60));
     }
 
+    /// 制造「remove_file 删不掉、债务为正」的 .part 路径，跨平台手段各异：
+    /// - Unix：目录（remove_file 报 EISDIR，目录 st_size ≈ 4096 保证债务为正）。
+    /// - Windows：目录的大小元数据为 0，会把 measure_remaining_debt 的债务
+    ///   重测成 0；只读属性在特权令牌（实测本机 Administrator）下拦不住
+    ///   删除。改用「无 FILE_SHARE_DELETE 的常开句柄」持有内容为 8 字节的
+    ///   文件——共享冲突由内核强制、与特权无关，文件大小即正债务。
+    struct UndeletablePart {
+        path: std::path::PathBuf,
+        #[cfg(windows)]
+        handle: std::fs::File,
+    }
+
+    fn create_undeletable_part(path: &std::path::Path) -> UndeletablePart {
+        #[cfg(unix)]
+        std::fs::create_dir(path).expect("directory makes remove_file fail");
+        #[cfg(windows)]
+        let handle = {
+            std::fs::write(path, [0_u8; 8]).expect("held file content is the debt");
+            hold_without_share_delete(path).expect("hold file without FILE_SHARE_DELETE")
+        };
+        UndeletablePart {
+            path: path.to_path_buf(),
+            #[cfg(windows)]
+            handle,
+        }
+    }
+
+    impl UndeletablePart {
+        fn release(self) {
+            #[cfg(windows)]
+            drop(self.handle);
+            #[cfg(unix)]
+            std::fs::remove_dir(&self.path).expect("remove test blocker");
+            #[cfg(windows)]
+            std::fs::remove_file(&self.path).expect("remove test blocker");
+        }
+    }
+
+    #[cfg(windows)]
+    fn hold_without_share_delete(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+        use std::os::windows::ffi::OsStrExt;
+        use std::os::windows::io::FromRawHandle;
+        use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+        use windows_sys::Win32::Storage::FileSystem::{
+            CreateFileW, FILE_SHARE_READ, OPEN_EXISTING,
+        };
+
+        let wide = path
+            .as_os_str()
+            .encode_wide()
+            .chain([0])
+            .collect::<Vec<_>>();
+        let handle = unsafe {
+            CreateFileW(
+                wide.as_ptr(),
+                windows_sys::Win32::Storage::FileSystem::FILE_GENERIC_READ,
+                FILE_SHARE_READ,
+                std::ptr::null(),
+                OPEN_EXISTING,
+                0,
+                std::ptr::null_mut(),
+            )
+        };
+        if handle == INVALID_HANDLE_VALUE {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(unsafe { std::fs::File::from_raw_handle(handle as _) })
+    }
+
     #[tokio::test]
     async fn failed_deletion_stays_debt_until_a_demand_retry_settles_it() {
         let root = tempfile::tempdir().expect("temp refs");
         let manager = Arc::new(ProxySpillManager::with_limit(root.path().to_path_buf(), 10));
         let undeletable = root.path().join("undeletable.part");
-        std::fs::create_dir(&undeletable).expect("directory makes remove_file fail");
+        let blocker = create_undeletable_part(&undeletable);
 
         manager.reserve(8).await.expect("reserve");
         manager
@@ -1089,7 +1158,7 @@ mod tests {
             .await;
         manager.retry_orphans().await;
         assert!(manager.reserve(3).await.is_err());
-        std::fs::remove_dir(&undeletable).expect("remove test blocker");
+        blocker.release();
         manager.make_orphans_due().await;
         manager.retry_orphans().await;
         assert_eq!(manager.budget_snapshot().await, (0, 0, 0));
@@ -1211,7 +1280,7 @@ mod tests {
     async fn persistent_startup_orphan_is_counted_again_after_restart() {
         let root = tempfile::tempdir().expect("temp refs");
         let undeletable = root.path().join(format!("{}.part", "6".repeat(32)));
-        std::fs::create_dir(&undeletable).expect("directory makes remove_file fail");
+        let blocker = create_undeletable_part(&undeletable);
 
         for _ in 0..2 {
             let manager = ProxySpillManager::with_limit(root.path().to_path_buf(), 1);
@@ -1224,6 +1293,7 @@ mod tests {
             assert_eq!(groups, 1);
             assert!(manager.reserve(1).await.is_err());
         }
+        blocker.release();
     }
 
     #[tokio::test]

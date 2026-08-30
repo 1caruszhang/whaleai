@@ -1216,11 +1216,95 @@ fn delete_windows_file_by_handle(file: &fs::File) -> std::io::Result<()> {
     Ok(())
 }
 
+/// 收尾「临时文件 → 目标叶子名」的原子落位。优先走带 RootDirectory 的
+/// rename-info（句柄锚定父目录、替换已存在目标）；环境对该形态一律拒绝
+/// 时回退「句柄推导路径 + MoveFileExW」——目标路径出自已验证父目录中
+/// 临时文件的句柄身份，不出自不可信输入，仍锚定在已验证父目录内。
+/// 实测依据（Windows 11 build 26200 云主机）：RootDirectory 形态无论句
+/// 柄权限一律 ERROR_INVALID_PARAMETER；rename-info 全路径形态在并发 IO
+/// 高压下被批量拦截（ERROR_INVALID_NAME，重试无效）；MoveFileExW 全程
+/// 可用。回退路径在移动前须先关闭自身句柄（MoveFileExW 按路径打开源文
+/// 件，与未共享删除的常开句柄冲突）；正文在改名前已 sync，回退路径无
+/// 二次 flush。
 #[cfg(windows)]
-fn rename_windows_file_relative(
+fn finalize_windows_attachment(
+    root: &Path,
+    relative_parent: &Path,
+    file: fs::File,
+    parent: &fs::File,
+    leaf: &std::ffi::OsStr,
+) -> Result<(), String> {
+    if let Err(error) = set_windows_rename_info(&file, parent, leaf) {
+        if !windows_rename_form_unsupported(&error) {
+            let _ = delete_windows_file_by_handle(&file);
+            return Err(format!("Failed to finalize attachment: {}", error));
+        }
+        let temp_final = match windows_final_path_of_file(&file) {
+            Ok(path) => path,
+            Err(path_error) => {
+                let _ = delete_windows_file_by_handle(&file);
+                return Err(format!("Failed to finalize attachment: {}", path_error));
+            }
+        };
+        drop(file);
+        let Some(parent_final) = temp_final.parent() else {
+            let _ = std::fs::remove_file(&temp_final);
+            return Err("Failed to finalize attachment: temp has no parent".to_string());
+        };
+        if let Err(move_error) = move_windows_file_ex(&temp_final, &parent_final.join(leaf)) {
+            let _ = std::fs::remove_file(&temp_final);
+            return Err(format!("Failed to finalize attachment: {}", move_error));
+        }
+        verify_windows_workspace_parent(root, relative_parent, parent)?;
+        return Ok(());
+    }
+    file.sync_all()
+        .map_err(|error| format!("Failed to flush finalized attachment: {}", error))?;
+    verify_windows_workspace_parent(root, relative_parent, parent)?;
+    Ok(())
+}
+
+#[cfg(windows)]
+fn windows_rename_form_unsupported(error: &std::io::Error) -> bool {
+    use windows_sys::Win32::Foundation::{ERROR_INVALID_PARAMETER, ERROR_NOT_SUPPORTED};
+
+    matches!(error.raw_os_error(), Some(code)
+        if code == ERROR_INVALID_PARAMETER as i32 || code == ERROR_NOT_SUPPORTED as i32)
+}
+
+#[cfg(windows)]
+fn move_windows_file_ex(source: &Path, target: &Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_REPLACE_EXISTING};
+
+    let source_wide = source
+        .as_os_str()
+        .encode_wide()
+        .chain([0])
+        .collect::<Vec<_>>();
+    let target_wide = target
+        .as_os_str()
+        .encode_wide()
+        .chain([0])
+        .collect::<Vec<_>>();
+    if unsafe {
+        MoveFileExW(
+            source_wide.as_ptr(),
+            target_wide.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING,
+        )
+    } == 0
+    {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn set_windows_rename_info(
     file: &fs::File,
     parent: &fs::File,
-    target_name: &std::ffi::OsStr,
+    target: &std::ffi::OsStr,
 ) -> std::io::Result<()> {
     use std::os::windows::ffi::OsStrExt;
     use std::os::windows::io::AsRawHandle;
@@ -1228,7 +1312,7 @@ fn rename_windows_file_relative(
         FileRenameInfo, SetFileInformationByHandle, FILE_RENAME_INFO,
     };
 
-    let target_wide = target_name.encode_wide().collect::<Vec<_>>();
+    let target_wide = target.encode_wide().collect::<Vec<_>>();
     let target_bytes = target_wide
         .len()
         .checked_mul(std::mem::size_of::<u16>())
@@ -1284,6 +1368,38 @@ fn rename_windows_file_relative(
         return Err(std::io::Error::last_os_error());
     }
     Ok(())
+}
+
+#[cfg(windows)]
+fn windows_final_path_of_file(file: &fs::File) -> std::io::Result<PathBuf> {
+    use std::os::windows::ffi::OsStringExt;
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::GetFinalPathNameByHandleW;
+
+    // VOLUME_NAME_DOS | FILE_NAME_NORMALIZED（两者皆 0）：取 DOS 语法的
+    // 规范化路径。输出可能带 \\?\（UNC 时 \\?\UNC\）前缀——原样保留：
+    // 消费方 MoveFileExW 接受该形态，剥前缀反而会把 \\?\UNC\... 变成
+    // 无效路径。
+    let mut buffer = vec![0u16; 1024];
+    loop {
+        let written = unsafe {
+            GetFinalPathNameByHandleW(
+                file.as_raw_handle() as _,
+                buffer.as_mut_ptr(),
+                buffer.len() as u32,
+                0,
+            )
+        };
+        if written == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        if (written as usize) < buffer.len() {
+            return Ok(PathBuf::from(std::ffi::OsString::from_wide(
+                &buffer[..written as usize],
+            )));
+        }
+        buffer.resize(written as usize + 1, 0);
+    }
 }
 
 #[cfg(windows)]
@@ -1367,13 +1483,7 @@ fn write_relative_file_no_follow_windows_impl<F: FnOnce()>(
             let _ = delete_windows_file_by_handle(&file);
             return Err(error);
         }
-        if let Err(error) = rename_windows_file_relative(&file, &parent, leaf) {
-            let _ = delete_windows_file_by_handle(&file);
-            return Err(format!("Failed to finalize attachment: {}", error));
-        }
-        file.sync_all()
-            .map_err(|error| format!("Failed to flush finalized attachment: {}", error))?;
-        verify_windows_workspace_parent(root, relative_parent, &parent)?;
+        finalize_windows_attachment(root, relative_parent, file, &parent, leaf)?;
         return Ok(());
     }
     Err("Failed to allocate attachment temp file".to_string())
@@ -1847,6 +1957,27 @@ mod tests {
         write_workspace_file_no_follow(&ws, "a", b"first").unwrap();
         write_workspace_file_no_follow(&ws, "a", b"second").unwrap();
         assert_eq!(fs::read(ws.join("a")).unwrap(), b"second");
+        let _ = fs::remove_dir_all(&ws);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_move_file_ex_fallback_replaces_existing_file() {
+        // 部分 Windows 环境对 RootDirectory 形态的 rename-info 一律报
+        // ERROR_INVALID_PARAMETER（并发 IO 高压下全路径形态同样被拦），
+        // 生产路径回退到「句柄推导路径 + MoveFileExW」；健康环境上自动
+        // 回退永不触发，这里直接锁定回退形态本身（含替换已存在目标），
+        // 保证该分支在任何 Windows 上都被真实执行过。
+        let ws = make_tmp_workspace();
+        let existing = ws.join("result.txt");
+        fs::write(&existing, b"old").unwrap();
+        let temp = ws.join(".result.txt.probe.tmp");
+        fs::write(&temp, b"new").unwrap();
+
+        move_windows_file_ex(&temp, &existing).unwrap();
+
+        assert_eq!(fs::read(&existing).unwrap(), b"new");
+        assert!(!temp.exists(), "改名后临时文件应不复存在");
         let _ = fs::remove_dir_all(&ws);
     }
 
