@@ -1375,7 +1375,10 @@ export class MaterialImportService {
     // 不做省→市代码映射，地域相关性由抽取模型自证（ADR-0007 用户裁决
     // 2026-08-30）——查询锚定与提示词纪律兜底，过界候选由确认卡删除。
     // 检索查询（地域锚为硬性前缀）：排行榜形召回全景 + 口碑形召回本地同行。
-    const querySubject = industry || [...products][0] || '';
+    // 查询主语取具体产品/赛道（同赛道纪律：看 products 不看 industry 大类）
+    // ——「餐饮管理」这类行业伞词召回的是百强榜全国连锁（喜茶/广州酒家），
+    // 与档口加盟品牌不同赛道，抽取按宁缺毋滥必然空手而归。
+    const querySubject = [...products][0] || industry || '';
     const anchorSubject = querySubject ? `${scope.primary} ${querySubject}` : scope.primary;
     const queries = [
       `${anchorSubject} 排行榜 十大品牌 对比`,

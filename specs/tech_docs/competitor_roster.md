@@ -28,7 +28,7 @@
 `enrichCompetitors`（`material-import.ts:1056-1251`）重写为**源锚定抽取**结构，与材料腿哲学对称（材料腿=从真实材料文本抽取+逐字证据门；联网腿=从真实搜索结果抽取+逐字证据门）：
 
 ```text
-① searchSources("{主锚+行业} 排行榜 / 哪家好") × 2 次，并行
+① searchSources("{主锚+产品赛道（缺产品才用行业伞词）} 排行榜 / 哪家好") × 2 次，并行
    （豆包搜索 HTTP API，纯结构化召回 Title/Summary/Url，不经 LLM 改写，免费额度）
 ② 一次普通 LLM 抽取调用（extraction 槽，如 DeepSeek，不联网）：
    输入=①的全部快照；输出=候选竞品 {name, region, 出处快照}

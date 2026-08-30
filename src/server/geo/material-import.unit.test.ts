@@ -579,6 +579,34 @@ describe("competitor enrichment (ADR-0007 source-grounded extraction)", () => {
     expect(competitorsCallOf(current)?.[0].source.excerpt).toContain('云帆信息（深圳）：');
   });
 
+  it('builds queries from the concrete product track, not the industry umbrella (炊班主 recall regression)', async () => {
+    // 行业伞词（餐饮管理）召回百强榜全国连锁，与档口加盟不同赛道——查询
+    // 主语必须取具体产品（同赛道纪律），否则抽取按宁缺毋滥必然空手。
+    const trackResponse = JSON.stringify({ facts: [
+      { field: 'industry', value: '餐饮管理', provenance: 'extracted', sourceExcerpt: '行业：餐饮管理' },
+      { field: 'serviceArea', value: '广东省', provenance: 'extracted', sourceExcerpt: '业务区域范围：广东省' },
+      { field: 'products', value: ['干蒸菜档口项目'], provenance: 'extracted', sourceExcerpt: '核心项目：干蒸菜档口' },
+    ] });
+    const port = new FakeMaterialPort();
+    const current = service(port, {
+      completeResponses: [trackResponse, JSON.stringify({ competitors: [
+        { name: '张仔纪', region: '广州' },
+      ] })],
+      searchSources: async () => [{
+        title: '广东干蒸菜加盟品牌甄选',
+        url: 'https://example.com/gz-rank',
+        summary: '张仔纪（广州）餐饮管理有限公司以顺德干蒸技艺位居榜首',
+      }],
+    });
+    const result = await current.value.importPastedText('公司资料');
+
+    expect(result.ok).toBe(true);
+    const queries = current.searchSources!.mock.calls.map(([query]) => query);
+    expect(queries[0]).toContain('广东 干蒸菜档口项目 排行榜');
+    expect(queries[0]).not.toContain('餐饮管理');
+    expect(competitorsCallOf(current)?.[0].value).toEqual(['张仔纪']);
+  });
+
   it('normalizes autonomous-region long names and mixed declarations to the province anchor', async () => {
     const mixedResponse = JSON.stringify({ facts: [
       { field: 'industry', value: '智能客服', provenance: 'extracted', sourceExcerpt: '行业：智能客服' },
