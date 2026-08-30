@@ -90,6 +90,7 @@ Renderer 对处理中行每 3s 轮询 `/api/xiaojing/materials/status`（带 `ma
 
 - **抽取提示词**：逐字段显式定义与边界（js_ai geo-fact-extraction 契约）——事实类字段（fullName/shortNames/addresses/serviceArea/industry/contactInfo）逐字复制、没有就省略；判断类字段（products/coreAdvantages/targetCustomers/customerPainPoints/customerCases/trustEndorsements/relatedBrands/competitors）材料没有时可推断并标 inferred（唯一例外见下：competitors 禁止推断）；derivedKeywords 一律 inferred；数组字段全部要求原子项。
 - **contactInfo 数组契约**：电话号码是数组字段——多门店/多号码各占一项全部保留；`contactInfo` 与 `addresses` 同属「一品牌多实体联系点」的字段形态。
+- **行业字段（两级写法 + 确认锚定，用户裁决 2026-08-31）**：industry 抽取定义为「大类/细分品类」两级写法，禁公司形态词（餐饮管理）、招商/加盟业务模式词、大类词混进细分位；已确认权威值在抽取前经 KnowledgeAuthority inspect 注入提示词做锚（`已确认行业（先前导入经用户确认）`），材料逐字矛盾才允许推翻——修复 8 次导入 8 个候选的摇摆。
 - **同 (field, scope) 合并护栏**：抽取契约是每字段每 scope 一条事实；模型重复输出同字段同 scope 多条时（如多门店电话各成一条），`parseProfileFacts` 落库前合并为一条——数组字段拼接去重、标量字段保留 provenance 层级最高且先出现者、合并后 provenance 整体取较低层级（与竞品富化合并的保守契约一致）。否则同一 fact key 会出现多条待决候选，整卡确认时第二条必然触发 `knowledge_version_conflict`（首条 adopt 后版本已 +1）。
 - **确定性自名过滤**：`parseProfileFacts` 在落库前对 `relatedBrands`/`competitors` 值剔除品牌名、同批抽出的 fullName 与 shortNames（大小写不敏感、双向子串——目标品牌「九味牛」连「成都九味牛食品」一起拦下）；短名形近变体（材料错别字，如品牌「炊班长」被写成「炊事班」）由 `isSimilarSelfName` 兜底——去空白后等长、长度 2–4、含 CJK 的名字按忽略字序的字符多重集差异 ≤1 判为自引用，长度 1 豁免、长度 ≥5 或不等长仍只走旧规则。全部被剔除时整条丢弃，不产出空数组候选。提示词只降频，这层是结构不变式（js_ai dedupeAndFilterCompetitors 契约）；竞品富化腿的 `parseCompetitorSuggestions` 排除名单复用同一判定。
 - **原子化兜底拆分**：模型违反「数组保持原子项」契约（如把全部竞品拼成一个顿号长串）时，`cleanValue` 按中英文列表分隔符（、，,；;）把复合串拆回原子项并去重；`customerCases` 是散文式描述，句内逗号不是列表分隔，不拆。

@@ -6,7 +6,7 @@ import type { KnowledgeCandidate, KnowledgeCurrentFact, KnowledgeProposalInput }
 import { GatewayBillingError } from './billing-permit';
 import {
   MaterialImportService,
-  brandCoreName,
+  sameBrandIdentity,
   capSourcesPerDomain,
   dedupeSourcesByUrl,
   fetchWebsiteMaterial,
@@ -857,12 +857,13 @@ describe("competitor enrichment (ADR-0007 source-grounded extraction)", () => {
     const result = await current.value.importPastedText('公司资料');
 
     expect(result.ok).toBe(true);
-    // 两个马甲都归一为品牌本名；同核跨层互斥拦下潜在层的张仔纪。
-    expect(competitorsCallOf(current)?.[0].value).toEqual(['张仔纪']);
+    // 存储名忠实原报不截断；马甲同品牌由分段交叉归一识别（共享「张仔纪」
+    // 段），跨层互斥拦下潜在层的张仔纪马甲。
+    expect(competitorsCallOf(current)?.[0].value).toEqual(['张仔纪·老顺德干蒸菜']);
     const potential = current.propose.mock.calls.find(
       ([input]) => input.key.predicate.toLowerCase() === 'enterprise-profile.potentialcompetitors',
     );
-    expect(potential?.[0].value).toEqual(['蒸武门']);
+    expect(potential?.[0].value).toEqual(['蒸武门·广式蒸饭']);
     // 证据行带命中源 URL：直接层命中探店帖源。
     expect(competitorsCallOf(current)?.[0].source.excerpt).toContain('（来源：https://weitoutiao.example/store-review）');
     expect(potential?.[0].source.excerpt).toContain('（来源：https://mill.example/jm-list）');
@@ -1427,6 +1428,37 @@ describe("competitor enrichment (ADR-0007 source-grounded extraction)", () => {
     }
   });
 
+  it('anchors industry to the confirmed authority value and constrains its form (行业稳定性)', async () => {
+    // 行业摇摆事故（2026-08-31）：8 次导入 8 个候选（餐饮管理/团餐/食堂
+    // 档口招商加盟/餐饮加盟）且零确认——无锚点时模型按当次措辞抽样。修复：
+    // 字段定义两级写法 + 禁公司形态/招商词脏值；用户确认过一次即注入锚，
+    // 材料逐字矛盾才允许推翻。
+    const port = new FakeMaterialPort();
+    const current = service(port, {
+      completeResponses: [withAreaResponse, namesJson],
+      searchSources: async () => corpus,
+      inspect: async (key) => key.predicate.toLowerCase() === 'enterprise-profile.industry'
+        ? {
+          factKey: 'k1', subject: '鲸跃科技', predicate: key.predicate,
+          scopeJson: '{"entityScope":"brand"}', effectiveFrom: null, effectiveTo: null,
+          normalizedValueJson: '"餐饮/高校食堂干蒸菜档口"', unit: null,
+          version: 3, confirmedBy: 'user-1',
+        }
+        : null,
+    });
+    await current.value.importPastedText('公司资料');
+
+    const profilePrompt = (current.complete.mock.calls[0] as unknown as [
+      readonly { role: string; content: string }[],
+    ])[0][1].content;
+    expect(profilePrompt).toContain('已确认行业（先前导入经用户确认）：餐饮/高校食堂干蒸菜档口');
+    expect(profilePrompt).toContain('必须与之一致');
+    expect(profilePrompt).toContain('两级写法「大类/细分品类」');
+    expect(profilePrompt).toContain('公司形态词');
+    expect(profilePrompt).toContain('招商/加盟等业务模式词');
+    expect(profilePrompt).toContain('行业取值必须稳定');
+  });
+
   it('embeds field definitions in the profile prompt and gate disciplines in the snapshot prompt', async () => {
     const port = new FakeMaterialPort();
     const current = service(port, {
@@ -1521,24 +1553,27 @@ describe('检索语料域名封顶（语料多样性）', () => {
   });
 });
 
-describe('brandCoreName（「·」首段归一）', () => {
-  it('takes the leading brand segment, dropping article-invented product suffixes', () => {
-    // 软文/探店帖爱给品牌黏「品牌·品类/系列」尾巴（·后是文章自造的产品线
-    // 描述）：马甲归一 + 假尾巴不上卡，一个规则同时解决同品牌跨层重复与
-    // 名字带私货两个实跑问题（2026-08-31）。
-    expect(brandCoreName('张仔纪·老顺德干蒸菜')).toBe('张仔纪');
-    expect(brandCoreName('张仔纪干蒸菜')).toBe('张仔纪干蒸菜');
-    expect(brandCoreName('粤食堂·经典蒸饭')).toBe('粤食堂');
-    expect(brandCoreName('蒸武门·广式蒸饭')).toBe('蒸武门');
-    expect(brandCoreName('煲爷·瓦煲饭与蒸饭')).toBe('煲爷');
-    expect(brandCoreName('粤食堂‧经典蒸饭')).toBe('粤食堂'); // ‧（U+2027）同款处理
-    // 无「·」的名字原样保留。
-    expect(brandCoreName('顺德杨廷记')).toBe('顺德杨廷记');
+describe('sameBrandIdentity（同品牌身份判定：归一键嵌套 + ·分段交叉）', () => {
+  it('collapses registration-name variants and disguise suffixes via keys and segments', () => {
+    // 注册名变体：括号中缀剥离后相等/嵌套。
+    expect(sameBrandIdentity('张仔纪（广州）餐饮管理有限公司', '张仔纪餐饮管理有限公司')).toBe(true);
+    expect(sameBrandIdentity('顺德杨廷记餐饮有限公司', '顺德杨廷记')).toBe(true);
+    // 「品牌·系列」马甲：共享「张仔纪」段。
+    expect(sameBrandIdentity('张仔纪·老顺德干蒸菜', '张仔纪干蒸菜')).toBe(true);
+    expect(sameBrandIdentity('粤食堂·经典蒸饭', '粤食堂')).toBe(true);
+    // 「地域·品牌」马甲：共享品牌段「渔文乐」。
+    expect(sameBrandIdentity('顺德·渔文乐', '渔文乐')).toBe(true);
+    // 无关名字不误并。
+    expect(sameBrandIdentity('云帆信息', '星河智能')).toBe(false);
   });
 
-  it('keeps the full name when the leading segment is too short to be a brand', () => {
-    expect(brandCoreName('A·联合品牌')).toBe('A·联合品牌');
-    expect(brandCoreName('·张仔纪')).toBe('·张仔纪');
+  it('excludes region segments so 地域·品牌 does not merge with 同地域他牌', () => {
+    // 第四写实跑教训：「顺德·渔文乐」若按段盲比会与「顺德杨廷记」因共享
+    // 地名段误并——regionHints 剔除地域段后只剩品牌段参与交叉。
+    expect(sameBrandIdentity('顺德·渔文乐', '顺德杨廷记', ['顺德'])).toBe(false);
+    expect(sameBrandIdentity('顺德·渔文乐', '渔文乐', ['顺德'])).toBe(true);
+    // 服务区锚（广东省）同样剔除：段「广东」不参与身份比对。
+    expect(sameBrandIdentity('广东·干蒸汇', '广东干蒸坊', ['广东省'])).toBe(false);
   });
 });
 

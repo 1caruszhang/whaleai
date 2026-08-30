@@ -446,19 +446,33 @@ export async function parseBrandMaterial(material: BrandMaterial, bytes: Uint8Ar
  * 事实类逐字复制、判断类可推断、生成类一律 inferred；competitors 携带完整
  * 竞品纪律（层级原则、纳入信号、前东家最高优先级排除、宁缺毋滥）。
  */
-function extractionPrompt(context: BrandMaterialContext, material: BrandMaterial, text: string): string {
+function extractionPrompt(
+  context: BrandMaterialContext,
+  material: BrandMaterial,
+  text: string,
+  confirmedIndustry = '',
+): string {
   return [
     '你是企业 Profile 事实抽取引擎。阅读下方材料文本，抽取该品牌的企业档案。只返回 JSON，不要 markdown。',
     `品牌：${context.brandName}`,
     `允许的产品线：${context.productLines.length > 0 ? context.productLines.join('、') : '无'}`,
     `材料名：${material.displayName}`,
+    ...(confirmedIndustry
+      ? [`已确认行业（先前导入经用户确认）：${confirmedIndustry}。本次 industry 必须与之一致，`
+        + '除非新材料逐字写出了矛盾的行业信息（此时 provenance 标 extracted 并附原文证据）。']
+      : []),
     '',
     '## 事实类字段（从材料逐字复制；材料没有就省略，不要推断）',
     '- fullName（标量）：品牌完整的注册全称。',
     '- shortNames（数组）：简称/缩写/昵称。',
     '- addresses（数组）：街道级具体地址（街道+门牌号、楼栋、楼层）；区/市/区域名不是地址。',
-    '- industry（标量，必填）：单一原子行业品类词，禁止复合；复合业务选最主要品类，其余落 products。'
-    + '示例：「汽车音响改装」是原子，「汽车音响改装与隔音降噪」是复合（禁止）。',
+    '- industry（标量，必填）：两级写法「大类/细分品类」——大类用通行行业大类词'
+    + '（餐饮、教育培训、汽车服务、家居建材……），细分取材料里最具体的品类词'
+    + '（如「餐饮/高校食堂干蒸菜档口」「汽车服务/音响改装」）。材料只支撑到'
+    + '大类时可以只写大类。禁止三类脏值：公司形态词（「XX餐饮管理有限公司」'
+    + '里的「餐饮管理」是法人形态不是行业）、招商/加盟等业务模式词（行业描述'
+    + '做什么，不描述怎么卖）、行业大类词单独混进细分位（「餐饮/餐饮」无意义）。'
+    + '同一材料重复导入时行业取值必须稳定——按材料业务主体判，不按措辞抽样。',
     '- contactInfo（数组）：电话号码数字（如「028-12345678」「13800138000」）；多门店/多号码各占一项，全部保留，不合并成一项。',
     '',
     '## 判断类字段（材料有则抽取；没有可依上下文推断，标 inferred）',
@@ -808,6 +822,7 @@ function parseCompetitorNames(
     knownCompetitors: ReadonlySet<string>;
     excludedNames: ReadonlySet<string>;
     deficit: number;
+    regionHints?: readonly string[];
   },
 ): { direct: Array<{ name: string; region: string }>; potential: Array<{ name: string; region: string }> } {
   const parsed = extractJsonObject(raw);
@@ -815,10 +830,11 @@ function parseCompetitorNames(
   const parseTier = (
     rows: unknown,
     cap: number,
-    blockedBy: ReadonlySet<string> = new Set(),
+    blockedBy: ReadonlyArray<{ name: string; region: string }> = [],
   ): Array<{ name: string; region: string }> => {
-    // 层内互斥与跨层同口径：嵌套名（顺德杨廷记餐饮有限公司/顺德杨廷记）只留先出现的一份。
-    const seen: string[] = [];
+    // 层内互斥与跨层同口径：sameBrandIdentity（归一键嵌套 + ·分段交叉），
+    // 同品牌多形态（注册名变体/马甲尾巴/地域前缀）只留先出现的一份。
+    const seen: Array<{ name: string; region: string }> = [];
     const suggestions: Array<{ name: string; region: string }> = [];
     if (!Array.isArray(rows)) return suggestions;
     for (const item of rows) {
@@ -826,32 +842,34 @@ function parseCompetitorNames(
       if (!item || typeof item !== 'object' || Array.isArray(item)) continue;
       const holder = item as Record<string, unknown>;
       // 繁体源页名归一为简体存储（存在闸比对两侧同映射，证据摘录保留原文）；
+      // 存储名忠实模型原报、不做截断——「·」前的段未必是品牌（顺德·渔文乐
+      // 的品牌是渔文乐），截断会把地域削成品牌名（第四写实跑教训）；
       // 描述短语（引号包裹、「相关」句式）不是品牌名，剔除。
       const name = typeof holder.name === "string"
-        ? brandCoreName(toSimplifiedChinese(holder.name.trim())).slice(0, 30)
+        ? toSimplifiedChinese(holder.name.trim()).slice(0, 30)
         : "";
       const region = typeof holder.region === 'string' && holder.region.trim()
         ? holder.region.trim().slice(0, 40)
         : '';
       if (!name || !region) continue;
       if (/["“”‘’「」『』]/.test(name) || name.includes('相关')) continue;
-      const normalized = normalizeCompetitorKey(name);
       if (!passesCompetitorNameGates(name, limits)) continue;
       if (seen.some(
-        (existing) => existing === normalized || existing.includes(normalized) || normalized.includes(existing),
+        (existing) => sameBrandIdentity(existing.name, name,
+          [existing.region, region, ...(limits.regionHints ?? [])]),
       )) continue;
-      // 跨层互斥：与另一层已有名字归一相等或互为子串的直接丢弃。
-      if ([...blockedBy].some(
-        (blocked) => blocked === normalized || blocked.includes(normalized) || normalized.includes(blocked),
+      // 跨层互斥：与另一层已有名字同品牌的直接丢弃。
+      if (blockedBy.some(
+        (blocked) => sameBrandIdentity(blocked.name, name,
+          [blocked.region, region, ...(limits.regionHints ?? [])]),
       )) continue;
-      seen.push(normalized);
+      seen.push({ name, region });
       suggestions.push({ name, region });
     }
     return suggestions;
   };
   const direct = parseTier(parsed.direct, limits.deficit);
-  const directKeys = new Set(direct.map((row) => normalizeCompetitorKey(row.name)));
-  const potential = parseTier(parsed.potential, COMPETITOR_POTENTIAL_TARGET, directKeys);
+  const potential = parseTier(parsed.potential, COMPETITOR_POTENTIAL_TARGET, direct);
   return { direct, potential };
 }
 
@@ -876,10 +894,10 @@ function parseCompetitorSuggestions(
     if (suggestions.length >= limits.deficit) break;
     if (!item || typeof item !== 'object' || Array.isArray(item)) continue;
     const holder = item as Record<string, unknown>;
-    // 与主路径同口径：繁体归简、「·」首段归一、描述短语（引号/「相关」句式）
-    // 剔除、层内嵌套互斥。
+    // 与主路径同口径：繁体归简、描述短语（引号/「相关」句式）剔除、层内
+    // 嵌套互斥；存储名忠实原报不截断（同 brandCoreName 撤销理由）。
     const name = typeof holder.name === "string"
-      ? brandCoreName(toSimplifiedChinese(holder.name.trim())).slice(0, 30)
+      ? toSimplifiedChinese(holder.name.trim()).slice(0, 30)
       : "";
     const region = typeof holder.region === 'string' && holder.region.trim()
       ? holder.region.trim().slice(0, 40)
@@ -1085,16 +1103,38 @@ export function dedupeSourcesByUrl<T extends { url: string }>(sources: readonly 
 }
 
 /**
- * 品牌名「·」首段归一：软文与探店帖爱给品牌黏「品牌·品类/系列」尾巴
- * （粤食堂·经典蒸饭、张仔纪·老顺德干蒸菜），·后是文章自造的产品线描述、
- * 不是品牌名本身；同一品牌跨语料的多个马甲（张仔纪·老顺德干蒸菜 /
- * 张仔纪干蒸菜）也因尾巴互不为子串漏过跨层互斥（2026-08-31 实跑同品牌
- * 双份上卡）。取·前主品牌段；首段不足 2 字（单字/空）时保留全名，避免
- * 把「A·联合品牌」这类真名削成无意义单字。纯函数，主/兜底两路径同口径。
+ * 同品牌身份判定（层内/跨层互斥用）：两个名字指向同一品牌时 true。两条
+ * 通道：①归一键（简体+小写+剥括号中缀）相等或互为子串——注册名变体
+ * （张仔纪（广州）餐饮管理有限公司/张仔纪餐饮管理有限公司）；②「·」分段
+ * 交叉包含——中文命名「品牌·系列」与「地域·品牌」两种形态并存（张仔纪·
+ * 老顺德干蒸菜/顺德·渔文乐），任一段（≥2 字）被对方包含即同品牌。地域段
+ * （regionHints：双方 region + 服务区锚）剔除后再比分段，否则「顺德·渔文乐」
+ * 会因共享地名段误并「顺德杨廷记」。只判身份、不改存储名——截断会把地域
+ * 削成品牌（第四写实跑「顺德·渔文乐」→「顺德」事故）。纯函数。
  */
-export function brandCoreName(name: string): string {
-  const segment = name.split(/[·・‧•]/)[0].trim();
-  return segment.length >= 2 ? segment : name;
+export function sameBrandIdentity(a: string, b: string, regionHints: readonly string[] = []): boolean {
+  const keyOf = (value: string) => normalizeCompetitorKey(value);
+  const ka = keyOf(a);
+  const kb = keyOf(b);
+  if (!ka || !kb) return false;
+  if (ka === kb || ka.includes(kb) || kb.includes(ka)) return true;
+  const regionVariants = new Set<string>();
+  for (const hint of regionHints) {
+    const key = keyOf(hint);
+    if (key) regionVariants.add(key);
+    const stripped = key?.replace(/[省市区县]$/, '');
+    if (stripped) regionVariants.add(stripped);
+  }
+  const isRegionSegment = (segment: string) =>
+    [...regionVariants].some((variant) => segment.includes(variant) || variant.includes(segment));
+  const segmentsOf = (value: string) => value
+    .split(/[·・‧•]/)
+    .map((segment) => keyOf(segment))
+    .filter((segment) => segment.length >= 2 && !isRegionSegment(segment));
+  const aSegments = segmentsOf(a);
+  const bSegments = segmentsOf(b);
+  return aSegments.some((segment) => kb.includes(segment))
+    || bSegments.some((segment) => ka.includes(segment));
 }
 
 /** 同一可注册域最多保留 cap 条（保检索序，先到先得）。cap 非正数时原样
@@ -1693,7 +1733,9 @@ export class MaterialImportService {
     const queries = materialQueries.length > 0 ? [...materialQueries] : defaultQueries;
     // this.keywordSearch 的非空收窄进闭包即失效，提为局部常量供逐 query 调用。
     const keywordSearch = this.keywordSearch;
-    const limits = { knownCompetitors, excludedNames, deficit };
+    const limits = { knownCompetitors, excludedNames, deficit,
+      // 服务区锚作地域段提示：sameBrandIdentity 剔除地域段后再比分段。
+      regionHints: [scope.primary, ...scope.allowed] };
     // 提议 value 只含本次新增名称：KnowledgeAuthority propose 对数组字段做
     // 增量合并（current 在前、新增去重追加），既有权威值由该契约保住，
     // 不在待确认候选里重复呈现。材料抽出的名字在 process() 合并处加入。
@@ -1920,6 +1962,29 @@ export class MaterialImportService {
    * （provider 调用失败）不重试，避免掩盖 provider 故障。合法输出无其他
    * 事实时仍继续联网腿并产出必审 competitors 行。
    */
+  /**
+   * 已确认行业锚（行业稳定性，用户裁决 2026-08-31）：行业字段历次导入在
+   * 「餐饮管理/团餐/食堂档口招商加盟」间摇摆——无锚点时模型按当次措辞抽
+   * 样。用户确认过一次即锚定：后续导入的抽取提示词携带该值，材料逐字矛盾
+   * 才允许推翻（推翻需 extracted 级证据）。
+   */
+  private async confirmedIndustry(context: BrandMaterialContext): Promise<string> {
+    try {
+      const current = await this.authority.inspect({
+        subject: context.brandName,
+        predicate: 'enterprise-profile.industry',
+        scope: { entityScope: 'brand' },
+      });
+      if (!current) return '';
+      const parsed = JSON.parse(current.normalizedValueJson) as unknown;
+      const value = typeof parsed === 'string' ? parsed.trim() : '';
+      return value.slice(0, 60);
+    } catch {
+      // 读取失败按无锚处理，不阻塞抽取。
+      return '';
+    }
+  }
+
   private async extractFacts(
     context: BrandMaterialContext,
     material: BrandMaterial,
@@ -1931,7 +1996,7 @@ export class MaterialImportService {
       try {
         response = await this.extraction.complete([
           { role: 'system', content: '只执行企业 Profile 结构化抽取；不要调用工具。' },
-          { role: 'user', content: extractionPrompt(context, material, text) },
+          { role: 'user', content: extractionPrompt(context, material, text, await this.confirmedIndustry(context)) },
         ], { signal });
       } catch (cause) {
         // 保留 cause 供 process() 的故障诊断日志提取非密钥字段
