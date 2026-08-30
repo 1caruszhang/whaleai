@@ -425,6 +425,13 @@ function extractionPrompt(context: BrandMaterialContext, material: BrandMaterial
     + '判不准归 potentialCompetitors 而不是 competitors（宁低勿高）。',
     '- derivedKeywords（数组）：客户可能搜索的 GEO/SEO 关键词，生成 5-15 个，一律 inferred。',
     '',
+    '## 竞品检索词（顺手产出，管线瞬时值，不是事实）',
+    '读完材料后，以【目标客户】的口吻写 2 条搜索引擎查询词（每条 ≤25 字、含地域），',
+    '用于检索目标品牌的竞品：目标客户是经营者/采购方（加盟商、企业采购）→ 用',
+    '「地域 + 品类/项目 + 加盟/合作/供应商」这类比选项目的口吻；目标客户是终端',
+    '消费者 → 用「地域 + 品类 + 排行榜/哪家好/口碑」这类消费比价口吻。客户是谁',
+    '由材料决定（targetCustomers 字段的判定同源），不套固定模板。',
+    '',
     '## provenance、scope 与输出',
     '- extracted=材料逐字证据（必须 sourceExcerpt）；inferred=基于上下文推断（必须待用户确认）；'
     + 'asked 只用于用户结构化补充，本次不得输出。必填字段'
@@ -432,7 +439,8 @@ function extractionPrompt(context: BrandMaterialContext, material: BrandMaterial
     '- scope 只能是 {"kind":"brand"} 或 {"kind":"product-line","productLine":"允许的产品线之一"}；'
     + '同一字段可分别输出品牌整体值和产品线值。',
     '- 数组字段必须保持原子项数组，不把多个产品/客群/优势拼成一个长字符串。',
-    '- 输出：{"facts":[{"field":"industry","value":"人工智能","provenance":"extracted",'
+    '- 输出：{"competitorSearchQueries":["查询词1","查询词2"],'
+    + '"facts":[{"field":"industry","value":"人工智能","provenance":"extracted",'
     + '"sourceExcerpt":"原文","confidence":0.95,"scope":{"kind":"brand"}}]}',
     '',
     '## 材料文本',
@@ -506,6 +514,9 @@ function competitorExtractionPrompt(input: {
   brandName: string;
   industry: string;
   products: string[];
+  targetCustomers: string[];
+  customerCases: string[];
+  coreAdvantages: string[];
   anchor: string;
   knownCompetitors: string[];
   excludedNames: string[];
@@ -513,6 +524,8 @@ function competitorExtractionPrompt(input: {
   corpus: string;
 }): string {
   const productText = input.products.length > 0 ? input.products.join('、') : input.industry || '目标业务';
+  const joinLimited = (values: string[], limit: number) =>
+    (values.length > 0 ? values.slice(0, limit).join('、') : '');
   return [
     '你是同城竞品识别引擎。下方是针对目标业务的真实搜索引擎结果快照（编号）。'
     + '只返回 JSON，不要 markdown。',
@@ -521,11 +534,19 @@ function competitorExtractionPrompt(input: {
     `- 品牌：${input.brandName}`,
     `- 行业：${input.industry || '未知'}`,
     `- 核心产品/服务：${productText}`,
+    `- 目标客户：${joinLimited(input.targetCustomers, 4) || '未明示（从产品/案例推断）'}`,
+    `- 经营场景/客户案例：${joinLimited(input.customerCases, 4) || '未明示'}`,
+    `- 核心优势：${joinLimited(input.coreAdvantages, 4) || '未明示'}`,
     `- 服务区域：${input.anchor}（竞品必须在此区域或紧邻区域实体经营）`,
     '- 体量层级：按画像判断（单体门店/地方级服务商，或区域连锁）；连锁品牌按其区域层级取同层级同行。',
     '',
-    '## 判别标准——四个条件必须同时满足，缺一不可',
-    '1. 同体量层级：与目标品牌同层级争同一批散客；全国/跨区域连锁总部、上市集团、'
+    '## 判别标准',
+    '0.【客户口径，最先判】先从画像确定目标品牌的客户是谁（终端消费者 / 企业采购方 / '
+    + '创业者·加盟商……）。竞品 = 争夺**同一批客户**预算的对手；候选服务的客户群与目标'
+    + '客户群不同（例如目标客户是创业者，候选却是直接服务终端消费者的门店/品牌），无论'
+    + '品类多相近都不是竞品——direct、potential 两层都不进。例：食堂档口项目输出品牌'
+    + '（客户是创业者）——干蒸菜项目/加盟输出品牌才是竞品，直接服务食客的同品类餐厅不是。',
+    '1. 同体量层级：与目标品牌同层级争同一批客户；全国/跨区域连锁总部、上市集团、'
     + '上游原料/设备厂商、公立大机构、权威标杆是不同层级，不是竞品。',
     `2. 同赛道：经营与「${productText}」高度重叠的业务——看具体产品/服务，不看行业大类。`,
     `3. 同地域：在「${input.anchor}」或紧邻区域有实体经营。`,
@@ -585,10 +606,13 @@ function namedRelation(
   const escapedName = escapeRegExp(name.trim());
   if (!escapedName) return false;
   const gap = "[^。！？；;，,\\n]{0,120}";
+  // 文本侧过一遍繁→简：候选名已归简，繁体源页（榕邊…）不做映射时
+  // 名字永远匹配不上，关系闸会静默失效（放行）。
+  const text = toSimplifiedChinese(excerpt);
   return new RegExp(
     `(?:${relation})${gap}${escapedName}|${escapedName}${gap}(?:${relation})`,
     "i",
-  ).test(excerpt);
+  ).test(text);
 }
 
 function hasCompetitorEvidence(
@@ -604,13 +628,32 @@ function hasCompetitorEvidence(
 }
 
 function normalizeEvidenceText(value: string): string {
-  return value.toLocaleLowerCase('zh-CN').replace(/\s+/g, ' ').trim();
+  return toSimplifiedChinese(value).toLocaleLowerCase('zh-CN').replace(/\s+/g, ' ').trim();
 }
 
-/** 竞品名的唯一键口径：富化解析、已知/排除名单与 process() 合并去重共用，
- * 与 competitorDetails 的元数据按名匹配（toLocaleLowerCase('zh-CN')）一致。 */
+/** 竞品名的唯一键口径：富化解析、已知/排除名单与 process() 合并去重共用。
+ * 注意：本口径含繁→简映射（存在闸/关系闸两侧同映射）；competitorDetails
+ * 存量元数据读侧的按名匹配仍是纯 toLocaleLowerCase——繁体存量名走该读侧
+ * 时不做归一，属接受的存量兼容差异。 */
 function normalizeCompetitorKey(value: string): string {
-  return value.trim().toLocaleLowerCase('zh-CN');
+  return toSimplifiedChinese(value).trim().toLocaleLowerCase('zh-CN');
+}
+
+/** 高频繁→简映射（品牌/餐饮语境）：语料源页常为繁体（「榕邊干蒸鮮排骨」），
+ * 名字归一与存在闸比对两侧同时映射即可对齐；证据摘录保留原文引述。 */
+const TRADITIONAL_TO_SIMPLIFIED: Record<string, string> = {
+  邊: '边', 鮮: '鲜', 記: '记', 順: '顺', 廣: '广', 東: '东', 燒: '烧',
+  雞: '鸡', 魚: '鱼', 豬: '猪', 鹵: '卤', 檔: '档', 館: '馆', 廳: '厅',
+  個: '个', 陳: '陈', 黃: '黄', 葉: '叶', 萬: '万', 興: '兴', 豐: '丰',
+  寧: '宁', 龍: '龙', 鳳: '凤', 麵: '面', 飯: '饭', 雲: '云', 灣: '湾',
+  門: '门', 車: '车', 場: '场', 樂: '乐', 緣: '缘', 長: '长', 陽: '阳',
+  銘: '铭', 鋒: '锋', 華: '华', 聯: '联', 燈: '灯', 爐: '炉', 鍋: '锅',
+  鹽: '盐', 醬: '酱', 臘: '腊', 鴨: '鸭', 鵝: '鹅', 錦: '锦', 蘭: '兰',
+  應: '应', 際: '际', 級: '级', 統: '统', 銷: '销', 廠: '厂', 業: '业',
+};
+
+function toSimplifiedChinese(value: string): string {
+  return value.replace(/[\u3400-\u9fff]/g, (ch) => TRADITIONAL_TO_SIMPLIFIED[ch] ?? ch);
 }
 
 /**
@@ -678,26 +721,34 @@ function parseCompetitorNames(
     cap: number,
     blockedBy: ReadonlySet<string> = new Set(),
   ): Array<{ name: string; region: string }> => {
-    const seen = new Set<string>();
+    // 层内互斥与跨层同口径：嵌套名（顺德杨廷记餐饮有限公司/顺德杨廷记）只留先出现的一份。
+    const seen: string[] = [];
     const suggestions: Array<{ name: string; region: string }> = [];
     if (!Array.isArray(rows)) return suggestions;
     for (const item of rows) {
       if (suggestions.length >= cap) break;
       if (!item || typeof item !== 'object' || Array.isArray(item)) continue;
       const holder = item as Record<string, unknown>;
-      const name = typeof holder.name === "string" ? holder.name.trim().slice(0, 60) : "";
+      // 繁体源页名归一为简体存储（存在闸比对两侧同映射，证据摘录保留原文）；
+      // 描述短语（引号包裹、「相关」句式）不是品牌名，剔除。
+      const name = typeof holder.name === "string"
+        ? toSimplifiedChinese(holder.name.trim()).slice(0, 30)
+        : "";
       const region = typeof holder.region === 'string' && holder.region.trim()
         ? holder.region.trim().slice(0, 40)
         : '';
       if (!name || !region) continue;
+      if (/["“”‘’「」『』]/.test(name) || name.includes('相关')) continue;
       const normalized = normalizeCompetitorKey(name);
       if (!passesCompetitorNameGates(name, limits)) continue;
-      if (seen.has(normalized)) continue;
+      if (seen.some(
+        (existing) => existing === normalized || existing.includes(normalized) || normalized.includes(existing),
+      )) continue;
       // 跨层互斥：与另一层已有名字归一相等或互为子串的直接丢弃。
       if ([...blockedBy].some(
         (blocked) => blocked === normalized || blocked.includes(normalized) || normalized.includes(blocked),
       )) continue;
-      seen.add(normalized);
+      seen.push(normalized);
       suggestions.push({ name, region });
     }
     return suggestions;
@@ -723,13 +774,16 @@ function parseCompetitorSuggestions(
 ): CompetitorSuggestion[] {
   const parsed = extractJsonObject(raw);
   if (!Array.isArray(parsed.competitors)) throw new Error('model_response_invalid');
-  const seen = new Set<string>();
+  const seen: string[] = [];
   const suggestions: CompetitorSuggestion[] = [];
   for (const item of parsed.competitors) {
     if (suggestions.length >= limits.deficit) break;
     if (!item || typeof item !== 'object' || Array.isArray(item)) continue;
     const holder = item as Record<string, unknown>;
-    const name = typeof holder.name === "string" ? holder.name.trim().slice(0, 60) : "";
+    // 与主路径同口径：繁体归简、描述短语（引号/「相关」句式）剔除、层内嵌套互斥。
+    const name = typeof holder.name === "string"
+      ? toSimplifiedChinese(holder.name.trim()).slice(0, 30)
+      : "";
     const region = typeof holder.region === 'string' && holder.region.trim()
       ? holder.region.trim().slice(0, 40)
       : '';
@@ -742,13 +796,16 @@ function parseCompetitorSuggestions(
         ? holder.sourceExcerpt.trim().slice(0, 4_000)
         : "";
     if (!name || !region || !similarBusiness || !sourceExcerpt) continue;
+    if (/["“”‘’「」『』]/.test(name) || name.includes('相关')) continue;
     // 关系轻门：摘录里名字附近出现供应/合作/前东家等关系词的整条剔除，
     // 拦下模型把上下游改写成竞品的常见错误。
     if (namedRelation(sourceExcerpt, name, NON_COMPETITOR_RELATION)) continue;
     const normalized = normalizeCompetitorKey(name);
     if (!passesCompetitorNameGates(name, limits)) continue;
-    if (seen.has(normalized)) continue;
-    seen.add(normalized);
+    if (seen.some(
+      (existing) => existing === normalized || existing.includes(normalized) || normalized.includes(existing),
+    )) continue;
+    seen.push(normalized);
     suggestions.push({ name, region, similarBusiness, sourceExcerpt });
   }
   return suggestions;
@@ -883,6 +940,27 @@ export function parseProfileFacts(
     dropSelfReferences(context, mergeFactsByFieldScope(facts)),
     sourceText,
   );
+}
+
+/**
+ * 材料抽取顺手产出的竞品检索词（管线瞬时值，不落库、不上卡）：模型读完
+ * 材料后以【目标客户】的口吻写查询词——目标客户视角由模型从材料判定
+ * （经营者→项目/加盟语料池；终端消费者→榜单/口碑语料池），代码零行业
+ * 词。形状不符返回空数组，富化回落默认「品类+排行榜/口碑」形态。
+ */
+export function parseCompetitorSearchQueries(raw: string): string[] {
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = extractJsonObject(raw) as Record<string, unknown>;
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(parsed.competitorSearchQueries)) return [];
+  return parsed.competitorSearchQueries
+    .filter((query): query is string => typeof query === 'string')
+    .map((query) => query.trim().slice(0, 60))
+    .filter(Boolean)
+    .slice(0, 2);
 }
 
 /**
@@ -1245,6 +1323,7 @@ export class MaterialImportService {
     context: BrandMaterialContext,
     facts: ExtractedProfileFact[],
     signal?: AbortSignal,
+    materialQueries: readonly string[] = [],
   ): Promise<ExtractedProfileFact[]> {
     // 富化各出口的固定码投影（脱敏契约同上方 degraded 行）：只有状态码与
     // 数量，不落品牌名/检索内容，保证一次真实导入可事后诊断。
@@ -1267,6 +1346,14 @@ export class MaterialImportService {
     let industry = '';
     let serviceArea = '';
     const materialProducts = new Set<string>();
+    // 客户口径画像（用户裁决 2026-08-30「一劳永逸」版）：目标客户/场景
+    // 案例/核心优势注入富化提示词——竞品判别第一步「客户是谁」由这些
+    // 字段回答，代码零行业词。
+    const audienceProfile: Record<'targetCustomers' | 'customerCases' | 'coreAdvantages', string[]> = {
+      targetCustomers: [],
+      customerCases: [],
+      coreAdvantages: [],
+    };
     // 身份/地址字段供 resolveBrandName 与 deriveServiceScope 消费（ADR-0007
     // 接线：查询用知识库裁决名 + 派生地域锚，不再透传脏文本/工作区名）。
     const identityValues: Record<'fullName' | 'shortNames' | 'addresses', string[]> = {
@@ -1279,6 +1366,12 @@ export class MaterialImportService {
       if (trimmed) store.set(normalize(trimmed), trimmed);
     };
     for (const fact of facts) {
+      if (fact.scope.kind === 'brand'
+        && (fact.field === 'targetCustomers' || fact.field === 'customerCases' || fact.field === 'coreAdvantages')) {
+        for (const value of Array.isArray(fact.value) ? fact.value : [fact.value]) {
+          if (typeof value === 'string' && value.trim()) audienceProfile[fact.field].push(value.trim());
+        }
+      }
       for (const value of Array.isArray(fact.value) ? fact.value : [fact.value]) {
         if (fact.field === 'competitors') {
           knownCompetitors.add(normalize(value));
@@ -1436,16 +1529,18 @@ export class MaterialImportService {
     // 地域闸只在城市/区县锚（字符串可直接比对）时硬拦；省级锚（广东省等）
     // 不做省→市代码映射，地域相关性由抽取模型自证（ADR-0007 用户裁决
     // 2026-08-30）——查询锚定与提示词纪律兜底，过界候选由确认卡删除。
-    // 检索查询（地域锚为硬性前缀）：排行榜形召回全景 + 口碑形召回本地同行。
-    // 查询主语取具体产品/赛道（同赛道纪律：看 products 不看 industry 大类）
-    // ——「餐饮管理」这类行业伞词召回的是百强榜全国连锁（喜茶/广州酒家），
-    // 与档口加盟品牌不同赛道，抽取按宁缺毋滥必然空手而归。
+    // 检索查询（一劳永逸版，用户裁决 2026-08-30）：材料抽取时模型以【目标
+    // 客户口吻】顺手产出的查询词优先（经营者→项目/加盟语料池；终端消费者
+    // →榜单/口碑语料池，代码零行业词）；抽取未产出时回落默认形态——
+    // 主语取具体产品赛道（同赛道纪律：看 products 不看 industry 大类，
+    // 「餐饮管理」伞词召回百强榜全国连锁，必空手而归）。
     const querySubject = [...products][0] || industry || '';
     const anchorSubject = querySubject ? `${scope.primary} ${querySubject}` : scope.primary;
-    const queries = [
+    const defaultQueries = [
       `${anchorSubject} 排行榜 十大品牌 对比`,
       `${anchorSubject} 哪家好 推荐 口碑 本地同行`,
     ];
+    const queries = materialQueries.length > 0 ? [...materialQueries] : defaultQueries;
     // this.keywordSearch 的非空收窄进闭包即失效，提为局部常量供逐 query 调用。
     const keywordSearch = this.keywordSearch;
     const limits = { knownCompetitors, excludedNames, deficit };
@@ -1512,6 +1607,9 @@ export class MaterialImportService {
               brandName,
               industry,
               products: [...products],
+              targetCustomers: audienceProfile.targetCustomers,
+              customerCases: audienceProfile.customerCases,
+              coreAdvantages: audienceProfile.coreAdvantages,
               anchor: scope.primary,
               knownCompetitors: [...knownDisplay.values()],
               excludedNames: [...excludedDisplay.values()],
@@ -1667,7 +1765,7 @@ export class MaterialImportService {
     material: BrandMaterial,
     text: string,
     signal: AbortSignal,
-  ): Promise<ExtractedProfileFact[]> {
+  ): Promise<{ facts: ExtractedProfileFact[]; competitorSearchQueries: string[] }> {
     for (let attempt = 0; ; attempt += 1) {
       let response: string;
       try {
@@ -1681,7 +1779,12 @@ export class MaterialImportService {
         throw new Error('model_failed', { cause });
       }
       try {
-        return parseProfileFacts(response, context, text);
+        // 竞品检索词与 facts 同源同响应：抽取模型已读完材料，顺手产出
+        // 目标客户视角的查询词（管线瞬时值）。
+        return {
+          facts: parseProfileFacts(response, context, text),
+          competitorSearchQueries: parseCompetitorSearchQueries(response),
+        };
       } catch (error) {
         if (attempt === 0 && error instanceof Error && error.message === 'model_response_invalid') continue;
         throw error;
@@ -1740,8 +1843,14 @@ export class MaterialImportService {
       // provider 挂起的硬上限：信号到点后 fetch 中止，落入 catch 的
       // model_failed 终态，材料不会永远停在 processing。
       const extractionSignal = AbortSignal.timeout(this.extractionTimeoutMs);
-      const facts = await this.extractFacts(context, material, text, extractionSignal);
-      const enrichedCompetitors = await this.enrichCompetitors(context, facts, extractionSignal);
+      const extracted = await this.extractFacts(context, material, text, extractionSignal);
+      const facts = extracted.facts;
+      const enrichedCompetitors = await this.enrichCompetitors(
+        context,
+        facts,
+        extractionSignal,
+        extracted.competitorSearchQueries,
+      );
       // 两层名单（competitors/potentialCompetitors）各自并入既有同字段事实：
       // 数组值按归一键去重合并（材料名在前、富化新增追加），避免同一
       // fact key 多条候选顺序采纳互相覆盖。

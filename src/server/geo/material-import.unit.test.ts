@@ -10,6 +10,7 @@ import {
   isSimilarSelfName,
   materialLogProjection,
   parseBrandMaterial,
+  parseCompetitorSearchQueries,
   parseProfileFacts,
   type BrandMaterial,
   type BrandMaterialContext,
@@ -662,6 +663,144 @@ describe("competitor enrichment (ADR-0007 source-grounded extraction)", () => {
     expect(potential?.[0].source.profileProvenance).toBe('inferred');
   });
 
+  it('prefers the model-authored customer-voice queries from the material extraction (一劳永逸版)', async () => {
+    // 材料抽取顺手产出 competitorSearchQueries：富化直接使用（经营者→项目/
+    // 加盟语料池），代码零行业词；不再拼「品类+排行榜」默认形态。
+    const port = new FakeMaterialPort();
+    const current = service(port, {
+      completeResponses: [JSON.stringify({
+        competitorSearchQueries: ['广东 干蒸菜 食堂档口项目 加盟', '广东 干蒸菜档口 技术输出 哪家好'],
+        facts: [
+          { field: 'industry', value: '餐饮管理', provenance: 'extracted', sourceExcerpt: '行业' },
+          { field: 'serviceArea', value: '广东省', provenance: 'extracted', sourceExcerpt: '业务区域范围：广东省' },
+        ],
+      }), JSON.stringify({ direct: [
+        { name: '张仔纪', region: '广州' },
+      ], potential: [] })],
+      searchSources: async () => [{
+        title: '广东干蒸菜项目加盟甄选',
+        url: 'https://example.com/jm',
+        summary: '张仔纪以标准化干蒸技术输出位居加盟口碑榜首',
+      }],
+    });
+    const result = await current.value.importPastedText('公司资料');
+
+    expect(result.ok).toBe(true);
+    const queries = current.searchSources!.mock.calls.map(([query]) => query);
+    expect(queries).toEqual([
+      '广东 干蒸菜 食堂档口项目 加盟',
+      '广东 干蒸菜档口 技术输出 哪家好',
+    ]);
+    expect(queries[0]).not.toContain('排行榜');
+  });
+
+  it('injects the customer-profile fields into the snapshot prompt and gates by customer voice', async () => {
+    const port = new FakeMaterialPort();
+    const current = service(port, {
+      completeResponses: [JSON.stringify({ facts: [
+        { field: 'industry', value: '餐饮管理', provenance: 'extracted', sourceExcerpt: '行业' },
+        { field: 'serviceArea', value: '广东省', provenance: 'extracted', sourceExcerpt: '区域' },
+        { field: 'targetCustomers', value: ['个体创业者', '夫妻档'], provenance: 'extracted', sourceExcerpt: '合作对象' },
+        { field: 'customerCases', value: ['广东财经大学直营店'], provenance: 'extracted', sourceExcerpt: '案例' },
+        { field: 'coreAdvantages', value: ['团餐场景定向研发'], provenance: 'extracted', sourceExcerpt: '优势' },
+      ] }), JSON.stringify({ direct: [], potential: [] })],
+      searchSources: async () => [{
+        title: '干蒸菜项目加盟口碑',
+        url: 'https://example.com/jm',
+        summary: '某品牌面向创业者输出干蒸菜档口方案',
+      }],
+    });
+    await current.value.importPastedText('公司资料');
+
+    const snapshotPrompt = (current.complete.mock.calls[1] as unknown as [
+      readonly { role: string; content: string }[],
+    ])[0][1].content;
+    expect(snapshotPrompt).toContain('目标客户：个体创业者、夫妻档');
+    expect(snapshotPrompt).toContain('经营场景/客户案例：广东财经大学直营店');
+    expect(snapshotPrompt).toContain('核心优势：团餐场景定向研发');
+  });
+
+  it('keeps one entry for nested name variants within a tier and drops phrase-like names', async () => {
+    const provinceResponse = JSON.stringify({ facts: [
+      { field: 'industry', value: '餐饮管理', provenance: 'extracted', sourceExcerpt: '行业' },
+      { field: 'serviceArea', value: '广东省', provenance: 'extracted', sourceExcerpt: '业务区域范围：广东省' },
+    ] });
+    const port = new FakeMaterialPort();
+    const current = service(port, {
+      completeResponses: [provinceResponse, JSON.stringify({
+        direct: [
+          { name: '顺德杨廷记餐饮有限公司', region: '顺德' },
+          { name: '顺德杨廷记', region: '顺德' },
+          { name: '云帆信息', region: '成都新都' },
+          { name: '「某品牌」点都德相关供应链企业', region: '广州' },
+          { name: '与云帆相关的品牌', region: '成都' },
+        ],
+        potential: [],
+      })],
+      searchSources: async () => [
+        {
+          title: '顺德干蒸品牌榜',
+          url: 'https://example.com/sd',
+          summary: '顺德杨廷记餐饮有限公司主营干蒸菜品类；云帆信息亦在榜',
+        },
+      ],
+    });
+    const result = await current.value.importPastedText('公司资料');
+
+    expect(result.ok).toBe(true);
+    // 嵌套名只留先出现的一份；引号包裹/「相关」句式的描述短语剔除。
+    expect(competitorsCallOf(current)?.[0].value)
+      .toEqual(['顺德杨廷记餐饮有限公司', '云帆信息']);
+  });
+
+  it('normalizes traditional source-page names to simplified for storage and matching', async () => {
+    const provinceResponse = JSON.stringify({ facts: [
+      { field: 'industry', value: '餐饮管理', provenance: 'extracted', sourceExcerpt: '行业' },
+      { field: 'serviceArea', value: '广东省', provenance: 'extracted', sourceExcerpt: '业务区域范围：广东省' },
+    ] });
+    const port = new FakeMaterialPort();
+    const current = service(port, {
+      completeResponses: [provinceResponse, JSON.stringify({ direct: [
+        { name: '榕邊干蒸鮮排骨', region: '深圳' },
+      ], potential: [] })],
+      searchSources: async () => [{
+        title: '深圳顺德菜馆推荐',
+        url: 'https://example.com/hk',
+        summary: '榕邊干蒸鮮排骨是深圳人气顺德干蒸专门店',
+      }],
+    });
+    const result = await current.value.importPastedText('公司资料');
+
+    expect(result.ok).toBe(true);
+    // 繁体名归简存储；存在闸两侧同映射（语料繁体、名字简体仍逐字对齐）。
+    expect(competitorsCallOf(current)?.[0].value).toEqual(['榕边干蒸鲜排骨']);
+  });
+
+  it('relation gate still fires on traditional-character sources (繁简映射回归)', async () => {
+    // 繁体源页里名字附近有关系词（前東家）：名字归简后关系闸必须照样命中
+    // 剔除——文本侧不做映射时繁简失配，闸会静默放行。
+    const provinceResponse = JSON.stringify({ facts: [
+      { field: 'industry', value: '餐饮管理', provenance: 'extracted', sourceExcerpt: '行业' },
+      { field: 'serviceArea', value: '广东省', provenance: 'extracted', sourceExcerpt: '业务区域范围：广东省' },
+    ] });
+    const port = new FakeMaterialPort();
+    const current = service(port, {
+      completeResponses: [provinceResponse, JSON.stringify({ direct: [
+        { name: '榕邊干蒸鮮排骨', region: '深圳' },
+        { name: '云帆信息', region: '广州' },
+      ], potential: [] })],
+      searchSources: async () => [{
+        title: '深圳顺德菜馆推荐',
+        url: 'https://example.com/hk',
+        summary: '榕邊干蒸鮮排骨的前東家另有其人；云帆信息是独立品牌',
+      }],
+    });
+    const result = await current.value.importPastedText('公司资料');
+
+    expect(result.ok).toBe(true);
+    expect(competitorsCallOf(current)?.[0].value).toEqual(['云帆信息']);
+  });
+
   it('normalizes autonomous-region long names and mixed declarations to the province anchor', async () => {
     const mixedResponse = JSON.stringify({ facts: [
       { field: 'industry', value: '智能客服', provenance: 'extracted', sourceExcerpt: '行业：智能客服' },
@@ -1095,12 +1234,33 @@ describe("competitor enrichment (ADR-0007 source-grounded extraction)", () => {
     const snapshotPrompt = promptOf(1);
     expect(snapshotPrompt).toContain('检索快照');
     expect(snapshotPrompt).toContain('同体量层级');
-    expect(snapshotPrompt).toContain('四个条件必须同时满足');
+    // 客户口径纪律（一劳永逸版，用户裁决 2026-08-30）：判别第 0 步先定客户。
+    expect(snapshotPrompt).toContain('客户口径，最先判');
+    expect(snapshotPrompt).toContain('争夺**同一批客户**预算的对手');
+    expect(snapshotPrompt).toContain('食堂档口项目输出品牌');
+    expect(snapshotPrompt).toContain('目标客户：未明示（从产品/案例推断）');
     expect(snapshotPrompt).toContain('榜单语料警示');
     expect(snapshotPrompt).toContain('宁缺毋滥');
     expect(snapshotPrompt).toContain('服务区域：成都新都');
     // 快照语料随提示词下发，名字只能从中识别。
     expect(snapshotPrompt).toContain('云帆信息口碑靠前');
+    // 材料腿抽取提示词顺手产出目标客户视角的检索词（输出契约含该字段）。
+    expect(profilePrompt).toContain('竞品检索词（顺手产出，管线瞬时值，不是事实）');
+    expect(profilePrompt).toContain('competitorSearchQueries');
+  });
+});
+
+describe('parseCompetitorSearchQueries（材料腿顺手产出的检索词）', () => {
+  it('takes at most two non-empty string queries, trims and caps each', () => {
+    expect(parseCompetitorSearchQueries(JSON.stringify({
+      competitorSearchQueries: [' 广东 干蒸菜档口 加盟 ', 42, '  ', '广东 干蒸菜 技术输出 哪家好'],
+    }))).toEqual(['广东 干蒸菜档口 加盟', '广东 干蒸菜 技术输出 哪家好']);
+  });
+
+  it('returns [] when the field is absent or the payload is not JSON', () => {
+    expect(parseCompetitorSearchQueries(JSON.stringify({ facts: [] }))).toEqual([]);
+    expect(parseCompetitorSearchQueries('not json')).toEqual([]);
+    expect(parseCompetitorSearchQueries(JSON.stringify({ competitorSearchQueries: '非数组' }))).toEqual([]);
   });
 });
 
