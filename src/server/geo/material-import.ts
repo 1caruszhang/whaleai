@@ -1,4 +1,5 @@
 import AdmZip from 'adm-zip';
+import { appendFileSync } from 'node:fs';
 import { basename } from 'node:path';
 import { fetch as undiciFetch, type Dispatcher } from 'undici';
 import * as XLSX from 'xlsx';
@@ -56,6 +57,22 @@ const COMPETITOR_ENRICHMENT_TARGET = 10;
 /** 潜在竞品层上限（ADR-0007 两层名单）：只做排行 roster 补位与知识备查，
  * 5 家封顶足够，不占直接层的确认空间。 */
 const COMPETITOR_POTENTIAL_TARGET = 5;
+
+/**
+ * 竞品富化的本地诊断转储（仅显式设置 XIAOJING_DEBUG_COMPETITOR_DUMP 时
+ * 生效）：把查询词、检索快照标题/摘要、抽取原始响应、闸后幸存数追加到
+ * 指定文件。脱敏契约针对的是常规日志（sidecar stdout）——此开关面向
+ * 开发者本机排障，生产不设此变量即零开销零落盘。
+ */
+const COMPETITOR_DEBUG_DUMP = process.env.XIAOJING_DEBUG_COMPETITOR_DUMP?.trim();
+function debugDumpCompetitorSearch(record: Record<string, unknown>): void {
+  if (!COMPETITOR_DEBUG_DUMP) return;
+  try {
+    appendFileSync(COMPETITOR_DEBUG_DUMP, `${JSON.stringify(record)}\n`, 'utf8');
+  } catch {
+    // 诊断写盘失败不影响富化主流程。
+  }
+}
 
 const TEXT_EXTENSIONS = new Set([
   'txt', 'md', 'markdown', 'csv', 'json', 'html', 'htm', 'xml', 'log',
@@ -1450,18 +1467,29 @@ export class MaterialImportService {
     });
     // 主路径（ADR-0007）：纯引擎快照（不经 LLM 改写）→ 一次普通抽取从快照
     // 认名字 → 本地双闸。存在性由构造保证，闸门兜住抽取时的漏网幻觉。
+    debugDumpCompetitorSearch({ event: 'enrich-start', queries, scope, deficit });
     const searchSourcesFn = keywordSearch.searchSources?.bind(keywordSearch);
     const sourceGroups = searchSourcesFn
       ? await Promise.all(queries.map(async (query) => {
           try {
             return await searchSourcesFn(query, { signal, count: 20 });
-          } catch {
+          } catch (error) {
+            debugDumpCompetitorSearch({ event: 'search-source-failed', query, error: String(error) });
             // 单 query 检索失败不拖垮另一条；两条全空则走 enable_search 兜底。
             return [];
           }
         }))
       : [];
     const sources = sourceGroups.flat();
+    debugDumpCompetitorSearch({
+      event: 'sources',
+      counts: sourceGroups.map((group) => group.length),
+      sample: sources.slice(0, 20).map((source) => ({
+        title: source.title,
+        summary: (source.summary ?? '').slice(0, 200),
+        url: source.url,
+      })),
+    });
     if (sources.length > 0) {
       const sourceTexts = sources.map((source) =>
         `${source.title} ${source.summary ?? ''}`.replace(/\s+/g, ' ').trim(),
@@ -1489,6 +1517,7 @@ export class MaterialImportService {
               corpus: corpusLines.join('\n'),
             }) },
           ], { signal, maxTokens: 2048 });
+          debugDumpCompetitorSearch({ event: 'extraction-response', attempt, response: response.slice(0, 4_000) });
         } catch {
           break;
         }
@@ -1530,12 +1559,21 @@ export class MaterialImportService {
       };
       const directSuggestions = gateTier(parsedNames.direct, deficit);
       const potentialSuggestions = gateTier(parsedNames.potential, COMPETITOR_POTENTIAL_TARGET);
+      debugDumpCompetitorSearch({
+        event: 'survivors',
+        path: 'main',
+        parsedDirect: parsedNames.direct.length,
+        parsedPotential: parsedNames.potential.length,
+        directSurvivors: directSuggestions.map((row) => row.name),
+        potentialSurvivors: potentialSuggestions.map((row) => row.name),
+      });
       if (directSuggestions.length === 0 && potentialSuggestions.length === 0) {
-        logOutcome({ status: 'skipped', errorCode: 'no_qualified_suggestions' });
+        logOutcome({ status: 'skipped', errorCode: 'no_qualified_suggestions', path: 'main' });
         return [];
       }
       logOutcome({
         status: 'ok',
+        path: 'main',
         count: directSuggestions.length,
         potentialCount: potentialSuggestions.length,
       });
@@ -1548,6 +1586,7 @@ export class MaterialImportService {
     }
     // 兜底路径（ADR-0007）：enable_search 合并式调用，检索与判别同一次完成。
     // 存在闸无快照可比（明确降级）；地域闸仅城市/区县锚执行（同主路径）。
+    debugDumpCompetitorSearch({ event: 'fallback-start', queries });
     const prompts = queries.map((focus) => competitorEnrichmentPrompt({
       brandName,
       industry,
@@ -1562,13 +1601,16 @@ export class MaterialImportService {
     // 两条全失败则安全回落为空竞品待用户补充，不用未验证名称硬凑。
     const responses = (await Promise.all(prompts.map(async (prompt) => {
       try {
-        return await keywordSearch.search(prompt, { signal });
-      } catch {
+        const response = await keywordSearch.search(prompt, { signal });
+        debugDumpCompetitorSearch({ event: 'fallback-response', response: response.slice(0, 4_000) });
+        return response;
+      } catch (error) {
+        debugDumpCompetitorSearch({ event: 'fallback-failed', error: String(error) });
         return null;
       }
     }))).filter((response): response is string => typeof response === 'string' && response.trim().length > 0);
     if (responses.length === 0) {
-      logOutcome({ status: 'skipped', errorCode: 'search_corpus_empty' });
+      logOutcome({ status: 'skipped', errorCode: 'search_corpus_empty', path: 'fallback' });
       return [];
     }
     const suggestions: Array<{ name: string; region: string; evidence: string }> = [];
@@ -1601,13 +1643,14 @@ export class MaterialImportService {
       // 过闸候选是召回为空——两者都安全回落必审行，但固定码分开。
       logOutcome({
         status: 'skipped',
+        path: 'fallback',
         errorCode: invalidResponses === responses.length
           ? 'model_response_invalid'
           : 'no_qualified_suggestions',
       });
       return [];
     }
-    logOutcome({ status: 'ok-fallback', count: suggestions.length });
+    logOutcome({ status: 'ok-fallback', path: 'fallback', count: suggestions.length });
     return [buildEnrichmentFact('competitors', suggestions)];
   }
 
