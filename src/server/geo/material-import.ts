@@ -60,13 +60,15 @@ const COMPETITOR_POTENTIAL_TARGET = 5;
 
 /**
  * 竞品富化的本地诊断转储（仅显式设置 XIAOJING_DEBUG_COMPETITOR_DUMP 时
- * 生效）：把查询词、检索快照标题/摘要、抽取原始响应、闸后幸存数追加到
- * 指定文件。脱敏契约针对的是常规日志（sidecar stdout）——此开关面向
- * 开发者本机排障，生产不设此变量即零开销零落盘。
+ * 生效）：把查询词、检索快照标题/摘要、抽取原始响应、闸后幸存数落到
+ * 指定文件，并同步打进统一日志（`[materials-competitor-debug]` 前缀，
+ * 与脱敏契约的 `[materials]` 固定码投影明确区隔）。生产不设此变量即
+ * 零落盘零日志。
  */
 const COMPETITOR_DEBUG_DUMP = process.env.XIAOJING_DEBUG_COMPETITOR_DUMP?.trim();
 function debugDumpCompetitorSearch(record: Record<string, unknown>): void {
   if (!COMPETITOR_DEBUG_DUMP) return;
+  console.log(`[materials-competitor-debug] ${JSON.stringify(record)}`);
   try {
     appendFileSync(COMPETITOR_DEBUG_DUMP, `${JSON.stringify(record)}\n`, 'utf8');
   } catch {
