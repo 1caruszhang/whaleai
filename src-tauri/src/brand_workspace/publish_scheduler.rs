@@ -2518,6 +2518,37 @@ impl PublishScheduler {
     }
 }
 
+/// 发布文章页内嵌样式层（ADR-0008 Decision 5）：单文件自包含、无外链，
+/// 让所有重新发布的文章获得一致排版。只约束排版（阅读宽度、标题层级、
+/// 列表表格、图片自适应），不参与 markdown→HTML 转换语义。
+const ARTICLE_PAGE_CSS: &str = "\
+body{margin:0 auto;padding:40px 20px 80px;max-width:720px;box-sizing:border-box;\
+font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC',\
+'Hiragino Sans GB','Microsoft YaHei',sans-serif;font-size:16px;\
+line-height:1.75;color:#1f2328;background:#fff}
+h1{font-size:1.75em;line-height:1.3;margin:0 0 1em;font-weight:600}
+h2{font-size:1.4em;line-height:1.4;margin:1.8em 0 .6em;font-weight:600}
+h3{font-size:1.2em;line-height:1.4;margin:1.5em 0 .5em;font-weight:600}
+h4,h5,h6{font-size:1.05em;margin:1.5em 0 .5em;font-weight:600}
+p{margin:0 0 1em}
+ul,ol{margin:0 0 1em;padding-left:1.6em}
+li{margin:.3em 0}
+li>p{margin:0 0 .5em}
+img{max-width:100%;height:auto;display:block;margin:1.6em auto;border-radius:4px}
+table{border-collapse:collapse;width:100%;margin:1.6em 0;font-size:.95em}
+th,td{border:1px solid #d8dee4;padding:.5em .8em;text-align:left;vertical-align:top}
+th{background:#f6f8fa;font-weight:600}
+blockquote{margin:1.2em 0;padding:.1em 1.2em;border-left:4px solid #d8dee4;\
+color:#59636e;background:#f9fafb}
+code{font-family:ui-monospace,SFMono-Regular,Consolas,'Courier New',monospace;\
+font-size:.9em;background:#f6f8fa;padding:.15em .4em;border-radius:4px}
+pre{background:#f6f8fa;padding:1em 1.2em;border-radius:6px;overflow-x:auto;\
+margin:0 0 1.2em}
+pre code{background:none;padding:0}
+a{color:#0969da;text-underline-offset:.2em}
+hr{border:0;border-top:1px solid #d8dee4;margin:2.2em 0}
+";
+
 fn render_article_html(title: &str, markdown: &str) -> String {
     let mut options = Options::empty();
     options.insert(Options::ENABLE_TABLES);
@@ -2542,7 +2573,7 @@ fn render_article_html(title: &str, markdown: &str) -> String {
         .replace('>', "&gt;")
         .replace('"', "&quot;");
     format!(
-        "<!DOCTYPE html>\n<html lang=\"zh-CN\">\n<head>\n<meta charset=\"utf-8\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n<title>{escaped_title}</title>\n</head>\n<body>\n{body}</body>\n</html>\n"
+        "<!DOCTYPE html>\n<html lang=\"zh-CN\">\n<head>\n<meta charset=\"utf-8\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n<title>{escaped_title}</title>\n<style>{ARTICLE_PAGE_CSS}</style>\n</head>\n<body>\n{body}</body>\n</html>\n"
     )
 }
 
@@ -5194,6 +5225,94 @@ mod tests {
         assert_eq!(
             result.items[0].failure_code.as_deref(),
             Some("object-url-mismatch")
+        );
+    }
+
+    #[test]
+    fn render_article_html_embeds_style_layer_and_keeps_conversion_semantics() {
+        let markdown = "\
+## 小节标题
+
+正文段落，含[链接](https://example.test)与**加粗**。
+
+- 要点一
+- 要点二
+
+| 列一 | 列二 |
+| --- | --- |
+| a | b |
+
+![配图说明](https://cdn.example.test/images/a.png)
+";
+        let html = render_article_html("标题<&>", markdown);
+
+        // 既有模板结构不回归：doctype、语言、charset、viewport、标题转义。
+        assert!(html.starts_with(
+            "<!DOCTYPE html>\n<html lang=\"zh-CN\">\n<head>\n<meta charset=\"utf-8\">\n"
+        ));
+        assert!(html
+            .contains("<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"));
+        assert!(html.contains("<title>标题&lt;&amp;&gt;</title>"));
+
+        // 样式层存在，且位于 head 内、正文之前——单文件自包含（ADR-0008 D5）。
+        let style_start = html.find("<style>").expect("模板缺少内嵌 <style> 层");
+        let style_end = html.find("</style>").expect("内嵌 <style> 未闭合");
+        assert!(style_start < style_end);
+        assert!(style_end < html.find("<body>").expect("模板缺少 <body>"));
+        let css = &html[style_start + "<style>".len()..style_end];
+
+        // 排版地基四要素（观感本身不做快照，按选择器锚定样式层覆盖面）。
+        let rule = |selector: &str| {
+            css.split('}')
+                .find(|rule| {
+                    rule.split('{')
+                        .next()
+                        .is_some_and(|found| found.trim() == selector)
+                })
+                .and_then(|rule| rule.split_once('{').map(|(_, body)| body))
+        };
+        // 1) 阅读宽度约束
+        assert!(
+            rule("body").is_some_and(|declarations| declarations.contains("max-width")),
+            "样式层缺阅读宽度约束"
+        );
+        // 2) 标题层级
+        assert!(rule("h1").is_some(), "样式层缺一级标题样式");
+        assert!(rule("h2").is_some(), "样式层缺二级标题样式");
+        // 3) 列表与表格
+        assert!(rule("li").is_some(), "样式层缺列表样式");
+        assert!(
+            rule("th,td").is_some_and(|declarations| declarations.contains("border")),
+            "样式层缺表格样式"
+        );
+        // 4) 图片自适应
+        let img_rule = rule("img").expect("样式层缺 img 规则");
+        assert!(
+            img_rule.contains("max-width:100%"),
+            "img 规则缺自适应：{img_rule}"
+        );
+
+        // markdown→HTML 转换语义零变化：转换产物照旧由 pulldown-cmark 生成，
+        // 正文不带任何表现属性——样式只存在于 <style> 层。
+        let body = html
+            .split("<body>\n")
+            .nth(1)
+            .and_then(|rest| rest.split("</body>").next())
+            .expect("正文区段缺失");
+        assert!(
+            body.starts_with("<h1>标题&lt;&amp;&gt;</h1>"),
+            "标题注入 h1 的既有语义变化：{body}"
+        );
+        assert!(body.contains("<h2>小节标题</h2>"));
+        assert!(body.contains("<li>要点一</li>"));
+        assert!(body.contains("<table>"));
+        assert!(body.contains("<td>a</td>"));
+        assert!(
+            body.contains(r##"<img src="https://cdn.example.test/images/a.png" alt="配图说明""##)
+        );
+        assert!(
+            !body.contains("style=") && !body.contains("class="),
+            "样式必须只内嵌于 <style>，不得渗入正文标签：{body}"
         );
     }
 }
