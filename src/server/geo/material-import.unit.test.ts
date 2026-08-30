@@ -1454,6 +1454,9 @@ describe("competitor enrichment (ADR-0007 source-grounded extraction)", () => {
     expect(snapshotPrompt).toContain('目标客户：未明示（从产品/案例推断）');
     expect(snapshotPrompt).toContain('榜单语料警示');
     expect(snapshotPrompt).toContain('宁缺毋滥');
+    // 同名自检（用户裁决 2026-08-31：模型先判，代码归一键兜底）。
+    expect(snapshotPrompt).toContain('同名自检');
+    expect(snapshotPrompt).toContain('只报一次且用品类媒体最通行的叫法');
     expect(snapshotPrompt).toContain('服务区域：成都新都');
     // 快照语料随提示词下发，名字只能从中识别。
     expect(snapshotPrompt).toContain('云帆信息口碑靠前');
