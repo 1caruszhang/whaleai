@@ -90,6 +90,25 @@ const COMPETITOR_SOURCE_DOMAIN_CAP = 3;
 const COMPETITOR_RETRY_MIN_SURVIVORS = 2;
 
 /**
+ * 正文抓取（用户裁决 2026-08-31「正文全部读取」）：品牌最密集的列表文
+ * （「N 家服务商汇总」类）常被引擎摘要截断在第 1 家——常是品牌自身投放，
+ * 第 2~N 家在截断线下模型不可见、存在闸也不放行。对头部源抓网页正文
+ * 并进语料（复用网址导入的 SSRF 防护/重定向/类型/大小闸）。best-effort：
+ * 单页失败静默跳过，不拖垮主流程。
+ */
+const COMPETITOR_PAGE_FETCH_LIMIT = 8;
+const COMPETITOR_PAGE_TEXT_CHARS = 1_500;
+const COMPETITOR_PAGE_TIMEOUT_MS = 8_000;
+
+/** 检索源（正文抓取后）：summary 为引擎摘要，pageText 为抓取正文（已截断）。 */
+type CompetitorCorpusSource = {
+  title: string;
+  url: string;
+  summary?: string;
+  pageText?: string;
+};
+
+/**
  * 竞品富化的本地诊断转储（仅显式设置 XIAOJING_DEBUG_COMPETITOR_DUMP 时
  * 生效）：把查询词、检索快照标题/摘要、抽取原始响应、闸后幸存数落到
  * 指定文件，并同步打进统一日志（`[materials-competitor-debug]` 前缀，
@@ -1394,6 +1413,25 @@ export function materialLogProjection(input: {
   };
 }
 
+/**
+ * HTML → 纯文本（正文抓取用）：剥 script/style/noscript 块与全部标签、
+ * 解码常见实体、折叠空白。品牌名是文本节点，粗糙的正则剥离足够；不需要
+ * DOM（源页五花八门，构建树反而脆）。纯函数。
+ */
+export function textFromHtml(html: string): string {
+  return html
+    .replace(/<(script|style|noscript)\b[^>]*>[\s\S]*?<\/\1>/gi, ' ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#0?39;/g, "'")
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 export async function fetchWebsiteMaterial(
   rawUrl: string,
   deps: WebsiteFetchDependencies = {},
@@ -1853,20 +1891,63 @@ export class MaterialImportService {
       })),
     });
     if (sources.length > 0) {
+      // 正文抓取（见 COMPETITOR_PAGE_* 常量注释）：头部源抓网页正文并入
+      // 语料。单页 8s 超时上限，失败/反爬/非文本一律静默跳过。
+      const fetchPageTexts = async (
+        targets: ReadonlyArray<{ url: string }>,
+      ): Promise<Map<string, string>> => {
+        const pages = new Map<string, string>();
+        const settled = await Promise.allSettled(targets.map(async (target) => {
+          const pageSignal = signal
+            ? AbortSignal.any([signal, AbortSignal.timeout(COMPETITOR_PAGE_TIMEOUT_MS)])
+            : AbortSignal.timeout(COMPETITOR_PAGE_TIMEOUT_MS);
+          const page = await fetchWebsiteMaterial(target.url, this.websiteDeps, pageSignal);
+          const text = textFromHtml(page.html).slice(0, COMPETITOR_PAGE_TEXT_CHARS);
+          return text.length >= 40 ? ([target.url, text] as const) : null;
+        }));
+        for (const result of settled) {
+          if (result.status === 'fulfilled' && result.value) {
+            pages.set(result.value[0], result.value[1]);
+          }
+        }
+        debugDumpCompetitorSearch({
+          event: 'page-fetch',
+          attempted: targets.length,
+          ok: pages.size,
+        });
+        return pages;
+      };
+      const withPageTexts = (
+        list: ReadonlyArray<{ title: string; url: string; summary?: string }>,
+        pages: ReadonlyMap<string, string>,
+      ): CompetitorCorpusSource[] => list.map((source) => ({
+        ...source,
+        ...(pages.has(source.url) ? { pageText: pages.get(source.url) } : {}),
+      }));
+      const pageTexts = await fetchPageTexts(sources.slice(0, COMPETITOR_PAGE_FETCH_LIMIT));
+      const corpusSources = withPageTexts(sources, pageTexts);
       // 语料上下文与抽取/闸门闭包化：两段式自适应的第二轮换池补枪时复用
       // 同一套构造与闸门，保证两轮都满足「模型可见语料 = 存在闸语料」。
-      const corpusOf = (corpusSources: typeof sources) => {
+      const corpusOf = (corpusSources: readonly CompetitorCorpusSource[]) => {
         const sourceTexts = corpusSources.map((source) =>
           `${source.title} ${source.summary ?? ''}`.replace(/\s+/g, ' ').trim(),
         );
         const sourceNorms = sourceTexts.map(normalizeEvidenceText);
+        // 全文语料（摘要 + 抓取正文）：存在闸与命中定位用；关系闸仍用摘要
+        // 文本——列表文正文满是「加盟/合作」措辞，按正文判关系会整页误杀。
+        const fullNorms = corpusSources.map((source) =>
+          normalizeEvidenceText(
+            `${source.title} ${source.summary ?? ''} ${source.pageText ?? ''}`.replace(/\s+/g, ' ').trim(),
+          ),
+        );
         return {
           sourceTexts,
           sourceNorms,
-          corpusNorm: sourceNorms.join('\n'),
+          fullNorms,
+          corpusNorm: fullNorms.join('\n'),
           corpusLines: corpusSources.slice(0, 30).map((source, index) =>
             `[${index + 1}] ${(source.summary ? `${source.title} — ${source.summary}` : source.title)
-              .replace(/\s+/g, ' ').trim().slice(0, 400)}`,
+              .replace(/\s+/g, ' ').trim().slice(0, 400)}${source.pageText ? `｜正文：${source.pageText}` : ''}`,
           ),
         };
       };
@@ -1909,37 +1990,50 @@ export class MaterialImportService {
       // 模型的语义判断（用户裁决 2026-08-30），闸门只保「名字真实出自快照」。
       const gateWith = (
         corpus: ReturnType<typeof corpusOf>,
-        corpusSources: typeof sources,
+        corpusSources: readonly CompetitorCorpusSource[],
       ) => (rows: Array<{ name: string; region: string }>, cap: number) => {
         const survivors: Array<{ name: string; region: string; evidence: string; evidenceUrl: string }> = [];
         for (const { name, region } of rows) {
           if (survivors.length >= cap) break;
           const nameNorm = normalizeEvidenceText(name);
-          if (!nameNorm || !corpus.corpusNorm.includes(nameNorm)) continue; // 存在闸
+          if (!nameNorm || !corpus.corpusNorm.includes(nameNorm)) continue; // 存在闸（全文语料）
           // 地域闸（仅城市/区县锚）：省级锚无 allowed 白名单，模型自证。
           if (scope.granularity === 'city' && !regionInServiceScope(region, scope.allowed)) continue;
-          const matchedIndex = corpus.sourceNorms.findIndex((text) => text.includes(nameNorm));
+          const matchedIndex = corpus.fullNorms.findIndex((text) => text.includes(nameNorm));
           if (matchedIndex >= 0) {
-            // 关系闸：快照里名字附近出现供应/合作/前东家等关系词的剔除。
+            // 关系闸（摘要文本）：快照摘要里名字附近出现供应/合作/前东家等
+            // 关系词的剔除——正文里的招商措辞不参与，防列表文整页误杀。
             if (namedRelation(corpus.sourceTexts[matchedIndex], name, NON_COMPETITOR_RELATION)) continue;
+          }
+          let evidence = matchedIndex >= 0 ? corpus.sourceTexts[matchedIndex].slice(0, 200) : '';
+          if (
+            matchedIndex >= 0
+            && !corpus.sourceNorms[matchedIndex].includes(nameNorm)
+          ) {
+            // 摘要里没有、只在正文里的名字：证据从正文命中处就近截取。
+            const pageText = corpusSources[matchedIndex].pageText ?? '';
+            const at = pageText.indexOf(name);
+            if (at >= 0) {
+              evidence = pageText.slice(Math.max(0, at - 40), at + 160).replace(/\s+/g, ' ').trim();
+            }
           }
           survivors.push({
             name,
             region,
-            evidence: matchedIndex >= 0 ? corpus.sourceTexts[matchedIndex].slice(0, 200) : '',
+            evidence,
             evidenceUrl: matchedIndex >= 0 ? corpusSources[matchedIndex].url : '',
           });
         }
         return survivors;
       };
 
-      const corpus = corpusOf(sources);
+      const corpus = corpusOf(corpusSources);
       const parsedNames = await extractNames(corpus.corpusLines);
       if (parsedNames === null) {
         logOutcome({ status: 'skipped', errorCode: 'model_response_invalid' });
         return [];
       }
-      const gateTier = gateWith(corpus, sources);
+      const gateTier = gateWith(corpus, corpusSources);
       let directSuggestions = gateTier(parsedNames.direct, deficit);
       let potentialSuggestions = gateTier(parsedNames.potential, COMPETITOR_POTENTIAL_TARGET);
 
@@ -1975,10 +2069,17 @@ export class MaterialImportService {
                 debugDumpCompetitorSearch({ event: 'search-source-failed', query: retryQuery, error: String(error) });
                 return [] as Array<{ title: string; url: string; summary?: string }>;
               });
-            const merged = capSourcesPerDomain(
+            const retryPages = await fetchPageTexts(
+              retryGroup.slice(0, COMPETITOR_PAGE_FETCH_LIMIT),
+            );
+            const mergedRaw = capSourcesPerDomain(
               dedupeSourcesByUrl([...sources, ...retryGroup]),
               COMPETITOR_SOURCE_DOMAIN_CAP,
             );
+            const merged = withPageTexts(mergedRaw, retryPages).map((source) => ({
+              ...source,
+              ...(pageTexts.has(source.url) ? { pageText: pageTexts.get(source.url) } : {}),
+            }));
             if (merged.length > sources.length) {
               debugDumpCompetitorSearch({ event: 'retry-corpus', query: retryQuery, kept: merged.length });
               const retryCorpus = corpusOf(merged);

@@ -14,6 +14,7 @@ import {
   materialLogProjection,
   parseBrandMaterial,
   parseCompetitorSearchQueries,
+  textFromHtml,
   parseRetryQuery,
   parseProfileFacts,
   sourceDomainKey,
@@ -310,7 +311,14 @@ function service(port: FakeMaterialPort, overrides: {
       port,
       { slot: 'extraction', complete },
       { propose, inspect },
-      overrides.fetch ? { fetch: overrides.fetch, dispatcherFor: async () => undefined } : {},
+      overrides.fetch
+        ? { fetch: overrides.fetch, dispatcherFor: async () => undefined }
+        : {
+          // 正文抓取默认拒绝：单测里没有 fetch 覆写时不得打真实网络
+          // （fetchWebsiteMaterial 抛错由 fetchPageTexts 的 allSettled 静默吞掉）。
+          fetch: async () => { throw new Error('page-fetch disabled in unit tests'); },
+          dispatcherFor: async () => undefined,
+        },
       capability,
       overrides.extractionTimeoutMs,
     ),
@@ -972,6 +980,54 @@ describe("competitor enrichment (ADR-0007 source-grounded extraction)", () => {
     expect(competitorsCallOf(current)?.[0].value).toEqual(['张仔纪（广州）餐饮管理有限公司']);
   });
 
+  it('fetches top-source bodies so below-the-fold list brands pass the existence gate', async () => {
+    // 用户裁决 2026-08-31「正文全部读取」：引擎摘要常把「N 家服务商汇总」
+    // 截断在第 1 家（常是品牌自身投放），第 2~N 家在截断线下——模型看不见、
+    // 存在闸也不放行。抓头部源网页正文并入语料后，列表文里的品牌可进名单。
+    const provinceResponse = JSON.stringify({ facts: [
+      { field: 'industry', value: '餐饮/干蒸菜', provenance: 'extracted', sourceExcerpt: '行业' },
+      { field: 'serviceArea', value: '广东省', provenance: 'extracted', sourceExcerpt: '区域' },
+    ] });
+    const listHtml = '<html><body><script>track()</script><h1>2026广州干蒸排骨相关服务商信息汇总</h1>'
+      + '<p>1. 广州造卤先生餐饮管理有限公司：炊班主技术服务覆盖干蒸排骨。</p>'
+      + '<p>2. 广州张氏味好餐饮服务有限责任公司：干蒸排骨技术与档口运营。</p>'
+      + '<p>3. 蒸简单原盅蒸饭：广式蒸饭连锁品牌。</p></body></html>';
+    const fetch = vi.fn(async () => new Response(listHtml, {
+      status: 200,
+      headers: { 'content-type': 'text/html' },
+    }));
+    const port = new FakeMaterialPort();
+    const current = service(port, {
+      completeResponses: [provinceResponse, JSON.stringify({
+        direct: [{ name: '广州张氏味好餐饮服务有限责任公司', region: '广州' }],
+        potential: [{ name: '蒸简单原盅蒸饭', region: '广东' }],
+      })],
+      searchSources: async () => [{
+        title: '2026广州干蒸排骨相关服务商信息汇总',
+        url: 'https://mill.example/list',
+        summary: '本文整理多家广州本地从事干蒸排骨相关业务的服务商信息。1. 广州造卤先生餐饮管理有限公司：炊班主技术服务',
+      }],
+      fetch: fetch as unknown as typeof globalThis.fetch,
+    });
+    const result = await current.value.importPastedText('公司资料');
+
+    expect(result.ok).toBe(true);
+    expect(fetch).toHaveBeenCalled();
+    // 摘要里没有的名字（第 2、3 家）经正文进语料：存在闸放行、来源可点。
+    expect(competitorsCallOf(current)?.[0].value).toEqual(['广州张氏味好餐饮服务有限责任公司']);
+    const potential = current.propose.mock.calls.find(
+      ([input]) => input.key.predicate.toLowerCase() === 'enterprise-profile.potentialcompetitors',
+    );
+    expect(potential?.[0].value).toEqual(['蒸简单原盅蒸饭']);
+    expect(competitorsCallOf(current)?.[0].source.excerpt).toContain('（来源：https://mill.example/list）');
+    // 快照行带正文段：模型看得见截断线下的品牌。
+    const snapshotPrompt = (current.complete.mock.calls[1] as unknown as [
+      readonly { role: string; content: string }[],
+    ])[0][1].content;
+    expect(snapshotPrompt).toContain('｜正文：');
+    expect(snapshotPrompt).toContain('蒸简单原盅蒸饭');
+  });
+
   it('injects the customer-profile fields into the snapshot prompt and gates by customer voice', async () => {
     const port = new FakeMaterialPort();
     const current = service(port, {
@@ -1591,6 +1647,18 @@ describe('parseCompetitorSearchQueries（材料腿顺手产出的检索词）', 
     expect(parseCompetitorSearchQueries(JSON.stringify({ facts: [] }))).toEqual([]);
     expect(parseCompetitorSearchQueries('not json')).toEqual([]);
     expect(parseCompetitorSearchQueries(JSON.stringify({ competitorSearchQueries: '非数组' }))).toEqual([]);
+  });
+});
+
+describe('textFromHtml（正文抓取的 HTML→纯文本）', () => {
+  it('strips script/style blocks and tags, decodes entities, collapses whitespace', () => {
+    const html = '<html><head><style>.a{color:red}</style></head><body>'
+      + '<script>var x = 1;</script><h1>服务商汇总</h1>'
+      + '<p>2. 广州张氏味好餐饮服务有限责任公司：干蒸排骨&nbsp;技术服务</p>'
+      + '<a href="/x">查看&amp;更多</a></body></html>';
+    expect(textFromHtml(html)).toBe(
+      '服务商汇总 2. 广州张氏味好餐饮服务有限责任公司：干蒸排骨 技术服务 查看&更多',
+    );
   });
 });
 
