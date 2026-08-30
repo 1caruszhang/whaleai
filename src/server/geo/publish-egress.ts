@@ -4,6 +4,7 @@ import {
   GeoUpstreamHttpError,
   type GeoDistributionPlacedOrder,
   type GeoProviderCapabilities,
+  type GeoStoredImageMediaType,
 } from "./provider-capabilities";
 
 /**
@@ -31,6 +32,27 @@ export type PublishEgressFailureOutcome = {
 
 export type PublishEgressUploadResult =
   | { outcome: "success"; objectUrl: string; externalContentId: string }
+  | PublishEgressFailureOutcome;
+
+/** 发布期配图对象（ADR-0008 D4，票 #15）：字节来自材料图片资产，键由
+ * capability 按字节 sha256 内容寻址派生（images/ 层、公共读）。 */
+export interface PublishEgressImageUpload {
+  /** 材料图片资产 ID（material-image:// 占位符里的 id，回执按它映射 URL）。 */
+  imageId: string;
+  /** 声明 sha256（与字节不符时路由层确定性拒绝，不触达 Provider）。 */
+  sha256: string;
+  mediaType: GeoStoredImageMediaType;
+  bytes: Uint8Array;
+}
+
+export interface PublishEgressUploadedImage {
+  imageId: string;
+  url: string;
+  objectKey: string;
+}
+
+export type PublishEgressImagesResult =
+  | { outcome: "success"; images: PublishEgressUploadedImage[] }
   | PublishEgressFailureOutcome;
 
 export type PublishEgressOrderResult =
@@ -107,6 +129,49 @@ export class PublishEgressService {
   }
 
   /**
+   * 配图对象上传（票 #15）：逐张 putImage（sha256 内容寻址键 + 公共读
+   * ACL）。键幂等——同图重传重放同一 PUT，失败分类与 HTML 上传同款
+   * （确定性拒绝外一切可安全重试）。URL 按 imageId 映射回 Rust 渲染侧，
+   * 占位符替换在 Rust 完成后 HTML 再走 upload()。
+   */
+  async uploadImages(input: {
+    executionId: string;
+    itemId: string;
+    images: readonly PublishEgressImageUpload[];
+  }): Promise<PublishEgressImagesResult> {
+    const uploaded: PublishEgressUploadedImage[] = [];
+    for (const image of input.images) {
+      try {
+        const receipt = await this.capabilities.objectStorage.putImage({
+          bytes: image.bytes,
+          mediaType: image.mediaType,
+        });
+        // 内容寻址纪律：回执键必须锚定调用方声明的 sha256（键=内容），
+        // 否则 URL 与字节错位，重放同一键 PUT 即可纠正——安全重试。
+        if (
+          typeof receipt.url !== "string" ||
+          receipt.url.length === 0 ||
+          !receipt.objectKey.startsWith(`images/${image.sha256}.`)
+        ) {
+          return {
+            outcome: "safe-retryable",
+            code: "object-storage-response-invalid",
+            reason: "图片上传未返回有效对象 URL，可安全重试内容寻址键",
+          };
+        }
+        uploaded.push({
+          imageId: image.imageId,
+          url: receipt.url,
+          objectKey: receipt.objectKey,
+        });
+      } catch (error) {
+        return classifyUploadFailure(error);
+      }
+    }
+    return { outcome: "success", images: uploaded };
+  }
+
+  /**
    * 渠道下单：sn 由 (executionId, itemId) 确定性派生（幂等权威在网关
    * publish_orders 表）；自媒体订单自动携带结构三元组。网关按服务器侧
    * 渠道价预扣冻结，查单/回调驱动结转退点——本层只回传受理回执。
@@ -149,7 +214,7 @@ export class PublishEgressService {
  * 非限流/非服务端故障、能力未配置）外，传输中断与服务端故障都可安全
  * 重试（重试只会把同一键重写一遍）。
  */
-function classifyUploadFailure(error: unknown): PublishEgressUploadResult {
+function classifyUploadFailure(error: unknown): PublishEgressFailureOutcome {
   if (error instanceof GeoCapabilityUnavailableError) {
     return unavailable("object-storage");
   }

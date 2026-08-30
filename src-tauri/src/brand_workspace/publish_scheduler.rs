@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::future::Future;
 use std::io::Read;
 use std::path::Path;
@@ -5,6 +6,7 @@ use std::pin::Pin;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use chrono::{DateTime, SecondsFormat, Utc};
 use pulldown_cmark::{html, Options, Parser};
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
@@ -1934,6 +1936,30 @@ pub(crate) struct PublishUploadReceipt {
     external_content_id: String,
 }
 
+/// 发布配图对象（票 #15，ADR-0008 D4）：字节从材料图片资产读回，
+/// sha256 为资产存储哈希（Sidecar 路由与实测互校），objectKey 由
+/// capability 按字节内容寻址派生（images/ 层、公共读）。
+#[derive(Debug, Clone)]
+pub(crate) struct PublishImageUpload {
+    image_id: String,
+    sha256: String,
+    media_type: String,
+    bytes: Vec<u8>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct PublishImageUploadRequest {
+    route: PublishEgressRoute,
+    images: Vec<PublishImageUpload>,
+    expected_configuration_fingerprint: String,
+}
+
+/// imageId → 图片对象绝对公网 URL（供渲染侧占位符替换）。
+#[derive(Debug, Clone, Default)]
+pub(crate) struct PublishImageUploadReceipt {
+    urls: HashMap<String, String>,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct PublishOrderRequest {
     route: PublishEgressRoute,
@@ -1966,6 +1992,12 @@ pub(crate) trait PublishProvider: Send + Sync {
         &'a self,
         request: PublishUploadRequest,
     ) -> ProviderFuture<'a, PublishUploadReceipt>;
+    /// 配图对象批量上传（票 #15）：先于 HTML 上传执行——渲染侧要拿回
+    /// 公网 URL 才能做占位符替换。键为 sha256 内容寻址，重放幂等。
+    fn upload_images<'a>(
+        &'a self,
+        request: PublishImageUploadRequest,
+    ) -> ProviderFuture<'a, PublishImageUploadReceipt>;
     fn submit<'a>(
         &'a self,
         request: PublishOrderRequest,
@@ -2171,6 +2203,55 @@ fn parse_upload_egress_result(value: &Value) -> PublishProviderOutcome<PublishUp
     }
 }
 
+/// 配图上传回执解析（票 #15）：成功信封必须带非空 images 数组且每条
+/// 都有 imageId + url（按 id 映射回渲染侧）；缺失即响应不可解析——键是
+/// sha256 内容寻址，重放同一 PUT 即可纠正，安全重试。
+fn parse_image_upload_egress_result(
+    value: &Value,
+) -> PublishProviderOutcome<PublishImageUploadReceipt> {
+    match egress_outcome_kind(value) {
+        Some("success") => {
+            let Some(entries) = value.get("images").and_then(Value::as_array) else {
+                return PublishProviderOutcome::SafeRetryable {
+                    code: "object-storage-response-invalid".to_string(),
+                    reason: "配图上传回执缺少图片清单，可安全重试内容寻址键".to_string(),
+                };
+            };
+            let mut urls = HashMap::with_capacity(entries.len());
+            for entry in entries {
+                let image_id = entry.get("imageId").and_then(Value::as_str);
+                let url = entry.get("url").and_then(Value::as_str);
+                match (image_id, url) {
+                    (Some(image_id), Some(url))
+                        if !image_id.trim().is_empty() && !url.trim().is_empty() =>
+                    {
+                        urls.insert(image_id.to_string(), url.to_string());
+                    }
+                    _ => {
+                        return PublishProviderOutcome::SafeRetryable {
+                            code: "object-storage-response-invalid".to_string(),
+                            reason: "配图上传回执缺少图片 URL，可安全重试内容寻址键".to_string(),
+                        };
+                    }
+                }
+            }
+            PublishProviderOutcome::Success(PublishImageUploadReceipt { urls })
+        }
+        Some("safe-retryable") | Some("non-retryable") | Some("unknown") => {
+            let (code, reason) = egress_failure_fields(value);
+            match egress_outcome_kind(value) {
+                Some("safe-retryable") => PublishProviderOutcome::SafeRetryable { code, reason },
+                Some("non-retryable") => PublishProviderOutcome::NonRetryable { code, reason },
+                _ => PublishProviderOutcome::Unknown { code, reason },
+            }
+        }
+        _ => PublishProviderOutcome::SafeRetryable {
+            code: "object-storage-response-invalid".to_string(),
+            reason: "配图上传出口响应不可解析，可安全重试内容寻址键".to_string(),
+        },
+    }
+}
+
 fn parse_order_egress_result(value: &Value) -> PublishProviderOutcome<PublishOrderReceipt> {
     match egress_outcome_kind(value) {
         Some("success") => {
@@ -2255,6 +2336,63 @@ impl PublishProvider for ProductionPublishProvider {
                     }
                 }
                 // PUT may have been forwarded; stable-key PUT stays a safe retry.
+                Err(SidecarCallFailure::Indeterminate(reason)) => {
+                    PublishProviderOutcome::SafeRetryable {
+                        code: "object-storage-sidecar-transport".to_string(),
+                        reason,
+                    }
+                }
+            }
+        })
+    }
+
+    /// 配图对象上传（票 #15）：与 HTML 上传同一条 egress 上传路由的
+    /// 图片载荷形态（images-only），网关指纹门与失败分类同款——sha256
+    /// 内容寻址键重放幂等，一切非确定性拒绝都可安全重试。
+    fn upload_images<'a>(
+        &'a self,
+        request: PublishImageUploadRequest,
+    ) -> ProviderFuture<'a, PublishImageUploadReceipt> {
+        Box::pin(async move {
+            if current_gateway_fingerprint("gateway-oss-put")
+                != Some(request.expected_configuration_fingerprint.clone())
+            {
+                return PublishProviderOutcome::Unknown {
+                    code: "object-storage-configuration-changed".to_string(),
+                    reason: "网关传输身份在执行前变化，禁止发出请求".to_string(),
+                };
+            }
+            let payload = json!({
+                "executionId": request.route.execution_id,
+                "itemId": request.route.item_id,
+                "images": request
+                    .images
+                    .iter()
+                    .map(|image| json!({
+                        "imageId": image.image_id,
+                        "sha256": image.sha256,
+                        "mediaType": image.media_type,
+                        "bytesB64": BASE64.encode(&image.bytes),
+                    }))
+                    .collect::<Vec<_>>(),
+            });
+            match call_publish_egress_sidecar(
+                &request.route,
+                "/api/xiaojing/publish-scheduler/egress/upload",
+                payload,
+            )
+            .await
+            {
+                Ok(result) => parse_image_upload_egress_result(&result),
+                // Nothing left the machine and the object keys are stable: a
+                // later claim can replay the same PUTs.
+                Err(SidecarCallFailure::Unreachable(reason)) => {
+                    PublishProviderOutcome::SafeRetryable {
+                        code: "object-storage-sidecar-unavailable".to_string(),
+                        reason,
+                    }
+                }
+                // PUTs may have been forwarded; stable-key PUTs stay safe retries.
                 Err(SidecarCallFailure::Indeterminate(reason)) => {
                     PublishProviderOutcome::SafeRetryable {
                         code: "object-storage-sidecar-transport".to_string(),
@@ -2423,7 +2561,42 @@ impl PublishScheduler {
                     return Ok(());
                 }
             };
-            let html = render_article_html(&claim.article.title, &String::from_utf8_lossy(&body));
+            let markdown = String::from_utf8_lossy(&body).into_owned();
+            // 配图占位符（票 #15，ADR-0008 D3/D4）：发布渲染前先把
+            // material-image:// 占位符换成已上传图片对象的公网 URL。顺序固定
+            // ——绑定审查 → 材料图片资产取回（内容寻址那条路）→ 图片上传
+            // 拿 URL → 替换 → 渲染 → HTML 上传。绑定违例/超密度/资产缺失
+            // 都属批准稿破损或资产失联，fail-closed 转人工，不静默换形发布。
+            let image_urls = match self
+                .resolve_publish_image_urls(workspace, &claim, &markdown)
+                .await
+            {
+                Ok(urls) => urls,
+                Err(ImageStageFailure::Reconcile { code, reason }) => {
+                    settle_reconciliation(workspace, &claim, &code, &reason, now_ms)?;
+                    return Ok(());
+                }
+                Err(ImageStageFailure::Egress(outcome)) => {
+                    settle_upload(workspace, &claim, outcome, now_ms)?;
+                    return Ok(());
+                }
+                Err(ImageStageFailure::Internal(reason)) => return Err(reason),
+            };
+            let rendered_markdown =
+                match replace_material_image_placeholders(&markdown, &image_urls) {
+                    Ok(rendered) => rendered,
+                    Err(code) => {
+                        settle_reconciliation(
+                            workspace,
+                            &claim,
+                            code,
+                            "批准稿配图占位符无法替换为公网 URL，禁止上传",
+                            now_ms,
+                        )?;
+                        return Ok(());
+                    }
+                };
+            let html = render_article_html(&claim.article.title, &rendered_markdown);
             let route = PublishEgressRoute {
                 workspace_id: workspace.id.clone(),
                 workspace_root: workspace.root_path.clone(),
@@ -2518,6 +2691,135 @@ impl PublishScheduler {
     }
 }
 
+/// 配图阶段失败（票 #15）：三态分流——破损/资产失联转人工对账、出口
+/// 失败沿用 HTML 上传的结算分类、存储内部错误冒泡为 tick 错误。
+enum ImageStageFailure {
+    Reconcile { code: String, reason: String },
+    Egress(PublishProviderOutcome<PublishUploadReceipt>),
+    Internal(String),
+}
+
+impl PublishScheduler {
+    /// 发布配图 URL 解析（票 #15）：绑定审查 → 材料图片资产字节取回 →
+    /// egress 图片对象上传 → imageId→公网 URL 映射。无占位符的正文零
+    /// 额外出口调用（既有纯文字文章行为不变）。
+    async fn resolve_publish_image_urls(
+        &self,
+        workspace: &BrandWorkspace,
+        claim: &ClaimedPublishItem,
+        markdown: &str,
+    ) -> Result<HashMap<String, String>, ImageStageFailure> {
+        let image_ids =
+            publish_image_bindings(markdown).map_err(|code| ImageStageFailure::Reconcile {
+                code: code.to_string(),
+                reason:
+                    "批准稿配图占位符存在语法违例或超出密度上限（生成门已拦截，发布侧 fail-closed）"
+                        .to_string(),
+            })?;
+        if image_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        // 字节取回落材料图片资产的内容寻址存储（T2/T3 那条路），不从正文
+        // 重新解析；资产不可用即批准稿承诺的配图失联，禁止换形发布。
+        let mut images = Vec::with_capacity(image_ids.len());
+        for image_id in &image_ids {
+            let (image, bytes) = self
+                .store
+                .read_material_image_bytes(&workspace.id, &claim.source_session_id, image_id)
+                .map_err(|_| ImageStageFailure::Reconcile {
+                    code: "material-image-unavailable".to_string(),
+                    reason: "配图对应的材料图片资产不可用（已删除或存储失联），禁止换形发布"
+                        .to_string(),
+                })?;
+            images.push(PublishImageUpload {
+                image_id: image_id.clone(),
+                sha256: image.sha256,
+                media_type: image.media_type,
+                bytes,
+            });
+        }
+        let route = PublishEgressRoute {
+            workspace_id: workspace.id.clone(),
+            workspace_root: workspace.root_path.clone(),
+            session_id: claim.source_session_id.clone(),
+            execution_id: claim.execution_id.clone(),
+            item_id: claim.item_id.clone(),
+        };
+        let expected_configuration_fingerprint = claim
+            .provider_snapshot
+            .object_storage
+            .configuration_fingerprint
+            .clone()
+            .ok_or_else(|| {
+                ImageStageFailure::Internal("publish_provider_unavailable".to_string())
+            })?;
+        // 轻量元数据副本：回执 URL 校验要在 images move 进请求后仍可用。
+        let asset_keys: Vec<(String, String)> = images
+            .iter()
+            .map(|image| {
+                (
+                    image.image_id.clone(),
+                    format!(
+                        "images/{}.{}",
+                        image.sha256,
+                        image_extension_for_media_type(&image.media_type)
+                    ),
+                )
+            })
+            .collect();
+        match self
+            .provider
+            .upload_images(PublishImageUploadRequest {
+                route,
+                images,
+                expected_configuration_fingerprint,
+            })
+            .await
+        {
+            PublishProviderOutcome::Success(receipt) => {
+                // 回执 URL 纪律与 HTML 对象一致：必须逐段指向冻结的内容寻址
+                // 键（images/<sha256>.<ext>，ext 按 mediaType 白名单口径），
+                // 指向别处的 URL 会把公网正文引到未授权位置——fail-closed。
+                for (image_id, object_key) in &asset_keys {
+                    let Some(url) = receipt.urls.get(image_id) else {
+                        continue;
+                    };
+                    if !receipt_url_points_at_object_key(url, object_key) {
+                        return Err(ImageStageFailure::Reconcile {
+                            code: "material-image-url-mismatch".to_string(),
+                            reason: "图片上传返回 URL 不指向内容寻址对象键".to_string(),
+                        });
+                    }
+                }
+                Ok(receipt.urls)
+            }
+            PublishProviderOutcome::SafeRetryable { code, reason } => Err(
+                ImageStageFailure::Egress(PublishProviderOutcome::SafeRetryable { code, reason }),
+            ),
+            PublishProviderOutcome::NonRetryable { code, reason } => Err(
+                ImageStageFailure::Egress(PublishProviderOutcome::NonRetryable { code, reason }),
+            ),
+            PublishProviderOutcome::Unknown { code, reason } => {
+                Err(ImageStageFailure::Egress(PublishProviderOutcome::Unknown {
+                    code,
+                    reason,
+                }))
+            }
+        }
+    }
+}
+
+/// 图片对象扩展名（与 TS capability 的白名单口径逐字一致：jpeg 统一
+/// .jpg）。白名单外类型在材料入库时已被拒，这里只做映射。
+fn image_extension_for_media_type(media_type: &str) -> &'static str {
+    match media_type {
+        "image/jpeg" => "jpg",
+        "image/gif" => "gif",
+        "image/webp" => "webp",
+        _ => "png",
+    }
+}
+
 /// 发布文章页内嵌样式层（ADR-0008 Decision 5）：单文件自包含、无外链，
 /// 让所有重新发布的文章获得一致排版。只约束排版（阅读宽度、标题层级、
 /// 列表表格、图片自适应），不参与 markdown→HTML 转换语义。
@@ -2575,6 +2877,157 @@ fn render_article_html(title: &str, markdown: &str) -> String {
     format!(
         "<!DOCTYPE html>\n<html lang=\"zh-CN\">\n<head>\n<meta charset=\"utf-8\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n<title>{escaped_title}</title>\n<style>{ARTICLE_PAGE_CSS}</style>\n</head>\n<body>\n{body}</body>\n</html>\n"
     )
+}
+
+// ── material-image 占位符：发布渲染期的替换侧（ADR-0008 D3/D6，票 #15）。
+// 语法与替换语义和 TS 解析侧（src/shared/geo/material-image-placeholder.ts）
+// 同构：占位符 = `![alt](material-image://<id>)`（id 字符集 [A-Za-z0-9-]，
+// alt 不含 ] 与换行）；scheme 逃逸出该语法即违例。两侧共用同一份契约
+// 用例 JSON（materialImagePlaceholderContractCases.json），Rust 侧由
+// `material_image_contract_cases_*` 测试逐例钉死，防止「什么算一个占位
+// 符」在两端漂移。
+
+/// 受控 uri scheme（与契约 JSON 顶部 `uriScheme` 同值，测试断言锁死）。
+const MATERIAL_IMAGE_URI_SCHEME: &str = "material-image://";
+
+/// 配图密度上限（契约 JSON 顶部 `maxImagesPerArticle`；生成门在审核期
+/// 拦截，发布侧再核一次——超限说明批准稿绕过了门，fail-closed）。
+const MATERIAL_IMAGE_MAX_PER_ARTICLE: usize = 3;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MaterialImagePlaceholderScan {
+    /// 按出现顺序的合法占位符：(字节起点, 字节终点, image_id, alt)。
+    matches: Vec<(usize, usize, String, String)>,
+    /// scheme 出现但不构成合法占位符的违例字节位（文本逃逸）。
+    violations: Vec<usize>,
+}
+
+fn material_image_id_char(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'-'
+}
+
+/// 尝试在 `at` 处匹配 `![alt](material-image://<id>)`；与 TS 正则
+/// `!\[([^\]\n]*)\]\(material-image://([A-Za-z0-9-]+)\)` 逐语义等价：
+/// alt 段内出现 `]` 或换行即失败（无回溯空间），id 非空且闭括号紧跟。
+fn match_material_image_placeholder(bytes: &[u8], at: usize) -> Option<(usize, String, String)> {
+    let scheme = MATERIAL_IMAGE_URI_SCHEME.as_bytes();
+    let mut cursor = at + 2; // 跳过 "!["（调用方已确认）
+    while cursor < bytes.len() && bytes[cursor] != b']' && bytes[cursor] != b'\n' {
+        cursor += 1;
+    }
+    if cursor >= bytes.len() || bytes[cursor] != b']' {
+        return None;
+    }
+    let alt_end = cursor;
+    // "]" 之后必须紧跟 "(material-image://"。
+    cursor += 1;
+    if cursor >= bytes.len() || bytes[cursor] != b'(' {
+        return None;
+    }
+    cursor += 1;
+    if bytes
+        .get(cursor..cursor + scheme.len())
+        .is_none_or(|found| found != scheme)
+    {
+        return None;
+    }
+    cursor += scheme.len();
+    let id_start = cursor;
+    while cursor < bytes.len() && material_image_id_char(bytes[cursor]) {
+        cursor += 1;
+    }
+    if cursor == id_start {
+        return None; // 空 id 不算占位符。
+    }
+    if cursor >= bytes.len() || bytes[cursor] != b')' {
+        return None;
+    }
+    // 分隔符均为 ASCII，切片边界天然落在 UTF-8 字符边界上。
+    let alt = String::from_utf8_lossy(&bytes[at + 2..alt_end]).into_owned();
+    let image_id = String::from_utf8_lossy(&bytes[id_start..cursor]).into_owned();
+    Some((cursor + 1, image_id, alt))
+}
+
+fn scan_material_image_placeholders(markdown: &str) -> MaterialImagePlaceholderScan {
+    let bytes = markdown.as_bytes();
+    let mut matches = Vec::new();
+    let mut covered: Vec<(usize, usize)> = Vec::new();
+    let mut at = 0;
+    while at + 1 < bytes.len() {
+        if bytes[at] == b'!' && bytes[at + 1] == b'[' {
+            if let Some((end, image_id, alt)) = match_material_image_placeholder(bytes, at) {
+                covered.push((at, end));
+                matches.push((at, end, image_id, alt));
+                at = end;
+                continue;
+            }
+        }
+        at += 1;
+    }
+    let mut violations = Vec::new();
+    let mut cursor = 0;
+    while let Some(found) = markdown[cursor..].find(MATERIAL_IMAGE_URI_SCHEME) {
+        let offset = cursor + found;
+        if !covered
+            .iter()
+            .any(|(start, end)| offset >= *start && offset < *end)
+        {
+            violations.push(offset);
+        }
+        cursor = offset + MATERIAL_IMAGE_URI_SCHEME.len();
+    }
+    MaterialImagePlaceholderScan {
+        matches,
+        violations,
+    }
+}
+
+/// 发布期配图绑定：按出现顺序去重后的 image id 集合 + 发布侧纪律闸。
+/// 违例（scheme 逃逸）或超密度上限都按批准稿破损 fail-closed（生成门
+/// 已拦，走到这里说明门被绕过，不允许换内容静默发布）。
+fn publish_image_bindings(markdown: &str) -> Result<Vec<String>, &'static str> {
+    let scan = scan_material_image_placeholders(markdown);
+    if !scan.violations.is_empty() {
+        return Err("material-image-placeholder-invalid");
+    }
+    let mut ids: Vec<String> = Vec::new();
+    for (_, _, image_id, _) in &scan.matches {
+        if !ids.iter().any(|seen| seen == image_id) {
+            ids.push(image_id.clone());
+        }
+    }
+    if ids.len() > MATERIAL_IMAGE_MAX_PER_ARTICLE {
+        return Err("material-image-density-exceeded");
+    }
+    Ok(ids)
+}
+
+/// 占位符 → 公网 URL 替换（替换侧权威，票 #15）：保 alt 文本，
+/// `material-image://<id>` 换成已上传图片对象的绝对公网 URL，再交给
+/// `render_article_html` 做 markdown→HTML。映射缺失即材料图片资产不在，
+/// fail-closed（发布内容不得悄悄换形）。
+fn replace_material_image_placeholders(
+    markdown: &str,
+    urls: &HashMap<String, String>,
+) -> Result<String, &'static str> {
+    let scan = scan_material_image_placeholders(markdown);
+    if !scan.violations.is_empty() {
+        return Err("material-image-placeholder-invalid");
+    }
+    let mut replaced = String::with_capacity(markdown.len());
+    let mut cursor = 0;
+    for (start, end, image_id, alt) in &scan.matches {
+        let Some(url) = urls.get(image_id) else {
+            return Err("material-image-url-missing");
+        };
+        replaced.push_str(&markdown[cursor..*start]);
+        // URL 由 OSS 出口产出（sha256 内容寻址键 + 公网基址），不含需转义
+        // 的 markdown 控制字符；alt 原样保留（与 TS 侧同语义）。
+        replaced.push_str(&format!("![{alt}]({url})"));
+        cursor = *end;
+    }
+    replaced.push_str(&markdown[cursor..]);
+    Ok(replaced)
 }
 
 fn reconcile_provider_configuration(workspace: &BrandWorkspace, now_ms: i64) -> Result<(), String> {
@@ -3631,6 +4084,10 @@ mod tests {
 
     const TEST_GATEWAY_BASE: &str = "https://gateway.example.test";
 
+    /// setup_fixture 的首篇文章 id（= `format!("article-{}",
+    /// "long-identifier-".repeat(8))` 的字面值，与夹具构造式逐字同源）。
+    const ARTICLE_ID: &str = "article-long-identifier-long-identifier-long-identifier-long-identifier-long-identifier-long-identifier-long-identifier-long-identifier-";
+
     /// 测试网关 egress 身份注入：生产路径读 `account_auth` 的账号会话
     /// （OS 凭据库），单测不得触碰——沿既有确定性测试模式改为静态注入。
     struct TestEnvironment(Option<Option<String>>);
@@ -3667,9 +4124,12 @@ mod tests {
     #[derive(Default)]
     struct MockProvider {
         uploads: StdMutex<Vec<PublishUploadRequest>>,
+        image_uploads: StdMutex<Vec<PublishImageUploadRequest>>,
         submissions: StdMutex<Vec<PublishOrderRequest>>,
         submit_outcomes: StdMutex<VecDeque<PublishProviderOutcome<PublishOrderReceipt>>>,
         upload_urls: StdMutex<VecDeque<String>>,
+        /// 图片回执 URL 覆盖（缺省按内容寻址口径派生；测试指向别处用）。
+        image_url_overrides: StdMutex<HashMap<String, String>>,
     }
 
     impl MockProvider {
@@ -3715,6 +4175,45 @@ mod tests {
                 };
                 self.uploads.lock().unwrap().push(request);
                 PublishProviderOutcome::Success(receipt)
+            })
+        }
+
+        /// 图片上传桩（票 #15）：回执 URL 按 Sidecar/capability 的内容寻址
+        /// 口径派生（images/<sha256>.<ext>），使渲染替换产物与生产路径同形。
+        fn upload_images<'a>(
+            &'a self,
+            request: PublishImageUploadRequest,
+        ) -> ProviderFuture<'a, PublishImageUploadReceipt> {
+            Box::pin(async move {
+                let overrides = self.image_url_overrides.lock().unwrap().clone();
+                let urls = request
+                    .images
+                    .iter()
+                    .map(|image| {
+                        let derived = || {
+                            let extension = match image.media_type.as_str() {
+                                "image/jpeg" => "jpg",
+                                "image/png" => "png",
+                                "image/gif" => "gif",
+                                "image/webp" => "webp",
+                                other => other.rsplit('/').next().unwrap_or("bin"),
+                            };
+                            format!(
+                                "https://cdn.example.test/images/{}.{}",
+                                image.sha256, extension
+                            )
+                        };
+                        (
+                            image.image_id.clone(),
+                            overrides
+                                .get(&image.image_id)
+                                .cloned()
+                                .unwrap_or_else(derived),
+                        )
+                    })
+                    .collect();
+                self.image_uploads.lock().unwrap().push(request);
+                PublishProviderOutcome::Success(PublishImageUploadReceipt { urls })
             })
         }
 
@@ -5314,5 +5813,441 @@ mod tests {
             !body.contains("style=") && !body.contains("class="),
             "样式必须只内嵌于 <style>，不得渗入正文标签：{body}"
         );
+    }
+
+    // ── material-image 占位符（票 #15）：共享契约 JSON 的 Rust 消费
+    //（TS/Rust 同构，先例 rankingCompetitorContractCases.json）。
+
+    #[derive(Debug, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct MaterialImageContract {
+        uri_scheme: String,
+        max_images_per_article: usize,
+        cases: Vec<MaterialImageContractCase>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct MaterialImageContractCase {
+        name: String,
+        body: String,
+        #[serde(default)]
+        expected_image_ids: Vec<String>,
+        #[serde(default)]
+        expected_alts: Vec<String>,
+        #[serde(default)]
+        expected_parse_error: Option<String>,
+    }
+
+    #[test]
+    fn material_image_contract_cases_pin_rust_scan_and_replacement() {
+        let contract: MaterialImageContract = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../src/shared/geo/materialImagePlaceholderContractCases.json"
+        )))
+        .expect("shared material-image placeholder contract cases");
+        // 契约顶部的 scheme 与密度上限先钉死两侧常量，防漂移。
+        assert_eq!(contract.uri_scheme, MATERIAL_IMAGE_URI_SCHEME);
+        assert_eq!(
+            contract.max_images_per_article,
+            MATERIAL_IMAGE_MAX_PER_ARTICLE
+        );
+        for case in &contract.cases {
+            let scan = scan_material_image_placeholders(&case.body);
+            let ids: Vec<&str> = scan
+                .matches
+                .iter()
+                .map(|(_, _, image_id, _)| image_id.as_str())
+                .collect();
+            let alts: Vec<&str> = scan
+                .matches
+                .iter()
+                .map(|(_, _, _, alt)| alt.as_str())
+                .collect();
+            assert_eq!(
+                ids, case.expected_image_ids,
+                "占位符 id 列表：{}",
+                case.name
+            );
+            assert_eq!(alts, case.expected_alts, "占位符 alt 列表：{}", case.name);
+
+            // 发布期绑定闸：语法违例 / 超密度上限都 fail-closed。
+            // 期望集合按首次出现顺序去重（与扫描语义一致）。
+            let mut seen_ids = std::collections::BTreeSet::new();
+            let expected_unique: Vec<String> = case
+                .expected_image_ids
+                .iter()
+                .filter(|id| seen_ids.insert((*id).clone()))
+                .cloned()
+                .collect();
+            let unique_count = expected_unique.len();
+            let bindings = publish_image_bindings(&case.body);
+            if scan.violations.is_empty() && unique_count <= MATERIAL_IMAGE_MAX_PER_ARTICLE {
+                assert_eq!(
+                    bindings
+                        .unwrap_or_else(|code| panic!("合法用例绑定失败 {code}：{}", case.name)),
+                    expected_unique,
+                    "合法用例的绑定集合：{}",
+                    case.name
+                );
+            } else if unique_count > MATERIAL_IMAGE_MAX_PER_ARTICLE {
+                assert_eq!(
+                    bindings.unwrap_err(),
+                    "material-image-density-exceeded",
+                    "超密度用例：{}",
+                    case.name
+                );
+            } else {
+                assert_eq!(
+                    bindings.unwrap_err(),
+                    "material-image-placeholder-invalid",
+                    "scheme 逃逸用例：{}",
+                    case.name
+                );
+            }
+
+            // 替换语义：保 alt 文本、占位符 URL → 公网 URL、scheme 零残留。
+            // 无合法占位符且无 scheme 出现的用例（如遗留【】占位符）正文
+            // 原样通过；带 scheme 逃逸的用例替换必须失败（文本逃逸不上公网）。
+            let urls: HashMap<String, String> = case
+                .expected_image_ids
+                .iter()
+                .enumerate()
+                .map(|(index, id)| {
+                    (
+                        id.clone(),
+                        format!("https://cdn.example.test/images/contract-{index}.png"),
+                    )
+                })
+                .collect();
+            let replaced = replace_material_image_placeholders(&case.body, &urls);
+            if scan.violations.is_empty() {
+                let rendered = replaced
+                    .unwrap_or_else(|code| panic!("合法用例替换失败 {code}：{}", case.name));
+                assert!(
+                    !rendered.contains(MATERIAL_IMAGE_URI_SCHEME),
+                    "替换后 scheme 零残留：{}",
+                    case.name
+                );
+                for (index, alt) in case.expected_alts.iter().enumerate() {
+                    assert!(
+                        rendered.contains(&format!(
+                            "![{alt}](https://cdn.example.test/images/contract-{index}.png)"
+                        )),
+                        "alt 原样保留并换绝对 URL（{}）：{rendered}",
+                        case.name
+                    );
+                }
+            } else {
+                assert_eq!(
+                    replaced.unwrap_err(),
+                    "material-image-placeholder-invalid",
+                    "逃逸用例替换必须失败：{}",
+                    case.name
+                );
+            }
+            // 解析侧错误码只由 TS 侧消费；Rust 侧只确认其存在形状。
+            let _ = case.expected_parse_error;
+        }
+    }
+
+    #[test]
+    fn render_article_html_replaces_placeholders_with_absolute_public_urls() {
+        let markdown = "\
+## 门头实拍
+
+![门店外景实拍](material-image://9f1c2ab4-52d8-4f6e-8a90-1c2d3e4f5a6b)
+
+正文一段。
+
+![同一张图复用](material-image://9f1c2ab4-52d8-4f6e-8a90-1c2d3e4f5a6b)
+
+![外链图不动](https://example.test/external.png)
+";
+        let mut urls = HashMap::new();
+        urls.insert(
+            "9f1c2ab4-52d8-4f6e-8a90-1c2d3e4f5a6b".to_string(),
+            "https://cdn.example.test/images/9f2c...f5a6b.png".to_string(),
+        );
+        let replaced =
+            replace_material_image_placeholders(markdown, &urls).expect("placeholder replacement");
+        let html = render_article_html("带配图的指南", &replaced);
+
+        // 占位符 → 绝对公网 URL（alt 保留、同图同 URL 稳定）、scheme 零残留。
+        assert_eq!(
+            html.matches("https://cdn.example.test/images/9f2c...f5a6b.png")
+                .count(),
+            2
+        );
+        assert!(html.contains(
+            r##"<img src="https://cdn.example.test/images/9f2c...f5a6b.png" alt="门店外景实拍""##
+        ));
+        assert!(html.contains(r##"alt="同一张图复用""##));
+        assert!(!html.contains(MATERIAL_IMAGE_URI_SCHEME));
+        // 外链图片语法不在契约管辖内：原样透传。
+        assert!(html.contains(r##"src="https://example.test/external.png""##));
+        // 单文件自包含：内嵌样式层仍在（AC 机制层锚点）。
+        assert!(html.contains("<style>"));
+
+        // 映射缺失（材料图片资产不在）：fail-closed，不产出带占位符的 HTML。
+        assert_eq!(
+            replace_material_image_placeholders(markdown, &HashMap::new()).unwrap_err(),
+            "material-image-url-missing"
+        );
+    }
+
+    /// 端到端机制锚点（AC4 机制层）：带占位符批准稿发布后，图片对象已按
+    /// 内容寻址键送出口、HTML 内 material-image:// 已换绝对公网 URL 且
+    /// 内嵌 CSS 完整。真实浏览器观感按票面留人工验收。
+    struct IllustratedFixture {
+        fixture: Fixture,
+        image_id: String,
+        png_sha256: String,
+        png_bytes: Vec<u8>,
+    }
+
+    /// 带占位符批准稿夹具：材料图片入池（T2/T3 内容寻址那条路）+ 批准
+    /// 正文重写为占位符形态（冻结哈希同步重算）。
+    fn setup_illustrated_fixture() -> IllustratedFixture {
+        let fixture = setup_fixture(1, 0);
+        let png_bytes: Vec<u8> = vec![0x89, 0x50, 0x4e, 0x47, 1, 2, 3, 4];
+        let png_sha256 = format!("{:x}", Sha256::digest(&png_bytes));
+        let material = fixture
+            .store
+            .import_brand_text(super::super::ImportBrandTextRequest {
+                workspace_id: fixture.workspace.id.clone(),
+                session_id: "session-13".to_string(),
+                input_kind: "pasted-text".to_string(),
+                display_name: "门店介绍.txt".to_string(),
+                text: "门店介绍文本".to_string(),
+                source_url: None,
+            })
+            .expect("import material");
+        let image = fixture
+            .store
+            .save_material_image(
+                &fixture.workspace.id,
+                "session-13",
+                super::super::MaterialImageSave {
+                    source_material_id: material.id.clone(),
+                    sha256: png_sha256.clone(),
+                    file_ext: "png".to_string(),
+                    media_type: "image/png".to_string(),
+                    byte_size: png_bytes.len() as u64,
+                    width: 800,
+                    height: 600,
+                    description: "门店外景实拍".to_string(),
+                    category: "product-photo".to_string(),
+                    embedded_image_b64: Some(BASE64.encode(&png_bytes)),
+                },
+            )
+            .expect("save material image");
+        let body = format!(
+            "# 批准文章 1\n\n{marker} 1\n\n![门店外景实拍](material-image://{image_id})\n",
+            marker = fixture.body_marker,
+            image_id = image.id
+        );
+        let approved_path = fixture
+            .workspace
+            .root_path
+            .join(format!("articles/approved/{ARTICLE_ID}/v1.md"));
+        std::fs::write(&approved_path, body.as_bytes()).unwrap();
+        let connection = open_database(&fixture.workspace).unwrap();
+        connection
+            .execute(
+                "UPDATE geo_article_versions SET body_sha256=?1 WHERE article_id=?2",
+                params![sha256_hex(body.as_bytes()), ARTICLE_ID],
+            )
+            .unwrap();
+        drop(connection);
+        IllustratedFixture {
+            fixture,
+            image_id: image.id,
+            png_sha256,
+            png_bytes,
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn publishes_illustrated_article_through_image_egress_pipeline() {
+        let _lock = ENV_LOCK.lock().await;
+        let _env = TestEnvironment::configured();
+        let illustrated = setup_illustrated_fixture();
+        let IllustratedFixture {
+            fixture,
+            image_id,
+            png_sha256,
+            png_bytes,
+        } = illustrated;
+        let started = confirm_start(&fixture, &preview(&fixture));
+        let provider = Arc::new(MockProvider::default());
+        scheduler(
+            &fixture,
+            provider.clone(),
+            Arc::new(AtomicI64::new(fixture.now_ms)),
+        )
+        .tick_workspace(&fixture.workspace)
+        .await
+        .unwrap();
+
+        // 1) 图片对象：材料图片字节按 sha256/mediaType 送出口。
+        let image_requests = provider.image_uploads.lock().unwrap();
+        assert_eq!(image_requests.len(), 1, "占位符图片必须先于 HTML 上传");
+        assert_eq!(image_requests[0].images.len(), 1);
+        assert_eq!(image_requests[0].images[0].image_id, image_id);
+        assert_eq!(image_requests[0].images[0].sha256, png_sha256);
+        assert_eq!(image_requests[0].images[0].media_type, "image/png");
+        assert_eq!(image_requests[0].images[0].bytes, png_bytes);
+        // 2) HTML：占位符已换绝对公网 URL、内嵌 CSS 完整、scheme 零残留。
+        let uploads = provider.uploads.lock().unwrap();
+        assert_eq!(uploads.len(), 1);
+        let html = String::from_utf8_lossy(&uploads[0].body).into_owned();
+        assert!(
+            html.contains(&format!(
+                r##"<img src="https://cdn.example.test/images/{png_sha256}.png" alt="门店外景实拍""##
+            )),
+            "HTML 内必须是图片对象绝对公网 URL：{html}"
+        );
+        assert!(!html.contains(MATERIAL_IMAGE_URI_SCHEME));
+        assert!(html.contains("<style>"));
+        // 3) 执行收尾与既有路径一致（上传 → 下单 → submitted）。
+        let done = fixture
+            .store
+            .get_publish_execution(&fixture.workspace.id, "session-b", &started.id)
+            .unwrap();
+        assert_eq!(done.status, "succeeded");
+        assert!(done.items[0].external_order_id.is_some());
+    }
+
+    /// 图片回执指向别处（非内容寻址键）：与 HTML 对象 URL 同款纪律，
+    /// fail-closed 转人工，HTML 不上传。
+    #[tokio::test(flavor = "current_thread")]
+    async fn image_receipt_pointing_elsewhere_requires_reconciliation() {
+        let _lock = ENV_LOCK.lock().await;
+        let _env = TestEnvironment::configured();
+        let IllustratedFixture {
+            fixture,
+            image_id,
+            png_sha256: _,
+            png_bytes: _,
+        } = setup_illustrated_fixture();
+        let started = confirm_start(&fixture, &preview(&fixture));
+        let provider = MockProvider::default();
+        provider.image_url_overrides.lock().unwrap().insert(
+            image_id.clone(),
+            "https://attacker.example.test/other.png".to_string(),
+        );
+        let provider = Arc::new(provider);
+        scheduler(
+            &fixture,
+            provider.clone(),
+            Arc::new(AtomicI64::new(fixture.now_ms)),
+        )
+        .tick_workspace(&fixture.workspace)
+        .await
+        .unwrap();
+
+        let result = fixture
+            .store
+            .get_publish_execution(&fixture.workspace.id, "session-b", &started.id)
+            .unwrap();
+        assert_eq!(result.status, "reconciliation-required");
+        assert_eq!(
+            result.items[0].failure_code.as_deref(),
+            Some("material-image-url-mismatch")
+        );
+        // 图片已上传但回执不合规：HTML 绝不上传。
+        assert_eq!(provider.image_uploads.lock().unwrap().len(), 1);
+        assert!(provider.uploads.lock().unwrap().is_empty());
+    }
+
+    /// 材料图片资产失联（占位符指向已不存在的 id）：fail-closed 转人工
+    /// 对账，绝不换形（丢图）发布。
+    #[tokio::test(flavor = "current_thread")]
+    async fn missing_material_image_requires_reconciliation() {
+        let _lock = ENV_LOCK.lock().await;
+        let _env = TestEnvironment::configured();
+        let fixture = setup_fixture(1, 0);
+        let body = format!(
+            "# 批准文章 1\n\n{marker} 1\n\n![配图](material-image://00000000-0000-4000-8000-000000000000)\n",
+            marker = fixture.body_marker
+        );
+        let approved_path = fixture
+            .workspace
+            .root_path
+            .join(format!("articles/approved/{ARTICLE_ID}/v1.md"));
+        std::fs::write(&approved_path, body.as_bytes()).unwrap();
+        let connection = open_database(&fixture.workspace).unwrap();
+        connection
+            .execute(
+                "UPDATE geo_article_versions SET body_sha256=?1 WHERE article_id=?2",
+                params![sha256_hex(body.as_bytes()), ARTICLE_ID],
+            )
+            .unwrap();
+        drop(connection);
+
+        let started = confirm_start(&fixture, &preview(&fixture));
+        let provider = Arc::new(MockProvider::default());
+        scheduler(
+            &fixture,
+            provider.clone(),
+            Arc::new(AtomicI64::new(fixture.now_ms)),
+        )
+        .tick_workspace(&fixture.workspace)
+        .await
+        .unwrap();
+
+        let result = fixture
+            .store
+            .get_publish_execution(&fixture.workspace.id, "session-b", &started.id)
+            .unwrap();
+        assert_eq!(result.status, "reconciliation-required");
+        assert_eq!(
+            result.items[0].failure_code.as_deref(),
+            Some("material-image-unavailable")
+        );
+        // 未发出任何上传（图片与 HTML 都没有）。
+        assert!(provider.uploads.lock().unwrap().is_empty());
+        assert!(provider.image_uploads.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn mock_sidecar_image_envelopes_map_to_publish_outcomes() {
+        // 成功回执：按 imageId 映射公网 URL。
+        let uploaded = parse_image_upload_egress_result(&json!({
+            "outcome": "success",
+            "images": [
+                {"imageId": "img-1", "url": "https://cdn.example.test/images/aa.png", "objectKey": "images/aa.png"},
+                {"imageId": "img-2", "url": "https://cdn.example.test/images/bb.jpg", "objectKey": "images/bb.jpg"},
+            ],
+        }));
+        assert!(
+            matches!(
+                &uploaded,
+                PublishProviderOutcome::Success(receipt)
+                    if receipt.urls.get("img-1").map(String::as_str)
+                        == Some("https://cdn.example.test/images/aa.png")
+                    && receipt.urls.get("img-2").map(String::as_str)
+                        == Some("https://cdn.example.test/images/bb.jpg")
+                    && receipt.urls.len() == 2
+            ),
+            "成功信封必须按 imageId 建立完整 URL 映射"
+        );
+        // 成功信封缺图片清单：内容寻址键可安全重试。
+        assert!(matches!(
+            parse_image_upload_egress_result(&json!({"outcome": "success"})),
+            PublishProviderOutcome::SafeRetryable { ref code, .. }
+                if code == "object-storage-response-invalid"
+        ));
+        // 出口失败分类三态透传（如网关限流 429 → SafeRetryable）。
+        assert!(matches!(
+            parse_image_upload_egress_result(&json!({
+                "outcome": "safe-retryable",
+                "code": "object-storage-http-429",
+                "reason": "服务限流",
+            })),
+            PublishProviderOutcome::SafeRetryable { ref code, .. }
+                if code == "object-storage-http-429"
+        ));
     }
 }

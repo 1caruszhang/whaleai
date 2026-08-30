@@ -23,6 +23,9 @@ import {
   encodeOssObjectKey,
   invalidObjectKeyError,
   OSS_HTML_CONTENT_TYPE,
+  OSS_IMAGE_CONTENT_TYPES,
+  OSS_OBJECT_ACL_HEADER,
+  OSS_PUBLIC_READ_ACL,
   ossPutStringToSign,
   ossUpstreamUrl,
   signOssPutAuthorization,
@@ -238,10 +241,12 @@ export function createProviderProxyRoutes(deps: BackendDeps) {
     }),
   );
 
-  // ── OSS putHtml：网关 V1 HMAC-SHA1 重签，改投同地域内网 endpoint ─────
+  // ── OSS putHtml / putImage：网关 V1 HMAC-SHA1 重签，改投同地域内网 endpoint ─────
   // 契约：客户端 PUT 网关路径携带 URL 编码的 objectKey（与 sidecar 的
-  // encodeObjectKey 口径一致），body 为 HTML；网关用服务器 AK/SK 重签后投
-  // OSS，私钥不出服务器。
+  // encodeObjectKey 口径一致）；网关用服务器 AK/SK 重签后投 OSS，私钥不
+  // 出服务器。票 #15 扩展：`images/` 层的图片对象走二进制 PUT——客户端
+  // Content-Type 必须落在图片白名单内、携带公共读 ACL 头；重签时 ACL 进
+  // CanonicalizedOSSHeaders 并透传给 OSS（文章页匿名加载）。
   routes.put('/gw/oss/*', requireAccount, async c => {
     const account = c.get('account');
     const encodedPath = c.req.path.slice('/gw/oss/'.length);
@@ -255,14 +260,47 @@ export function createProviderProxyRoutes(deps: BackendDeps) {
     if (encodedKey === null) throw invalidObjectKeyError();
 
     const date = new Date(deps.now()).toUTCString();
+    // HTML 对象维持票 05 契约（服务端固定 Content-Type）；图片对象按
+    // 客户端声明校验后透传，公共读 ACL 进签名。
+    const isImageObject = objectKey.replace(/^\/+/, '').startsWith('images/');
+    let contentType: string;
+    let canonicalizedHeaders: ReadonlyArray<string> | undefined;
+    let upstreamHeaders: Record<string, string>;
+    if (isImageObject) {
+      contentType = c.req.header('content-type')?.trim() ?? '';
+      if (!OSS_IMAGE_CONTENT_TYPES.has(contentType)) {
+        throw new AppError(
+          'oss_image_content_type_invalid',
+          `图片对象 Content-Type 仅支持 ${[...OSS_IMAGE_CONTENT_TYPES].join(' / ')}。`,
+          400,
+        );
+      }
+      const acl = c.req.header(OSS_OBJECT_ACL_HEADER)?.trim();
+      if (acl !== OSS_PUBLIC_READ_ACL) {
+        throw new AppError(
+          'oss_image_acl_required',
+          '图片对象必须携带 x-oss-object-acl: public-read（文章页匿名加载）。',
+          400,
+        );
+      }
+      canonicalizedHeaders = [`${OSS_OBJECT_ACL_HEADER}:${OSS_PUBLIC_READ_ACL}`];
+      upstreamHeaders = {
+        'Content-Type': contentType,
+        [OSS_OBJECT_ACL_HEADER]: OSS_PUBLIC_READ_ACL,
+      };
+    } else {
+      contentType = OSS_HTML_CONTENT_TYPE;
+      upstreamHeaders = { 'Content-Type': OSS_HTML_CONTENT_TYPE };
+    }
     const authorization = signOssPutAuthorization(
       config.ossAccessKeyId,
       config.ossAccessKeySecret,
       ossPutStringToSign({
         bucket: config.ossBucket,
         objectKey,
-        contentType: OSS_HTML_CONTENT_TYPE,
+        contentType,
         date,
+        canonicalizedHeaders,
       }),
     );
     const upstreamUrl = ossUpstreamUrl(config.ossBucket, config.ossInternalHost, encodedKey);
@@ -270,10 +308,12 @@ export function createProviderProxyRoutes(deps: BackendDeps) {
       method: 'PUT',
       headers: {
         Authorization: authorization,
-        'Content-Type': OSS_HTML_CONTENT_TYPE,
         Date: date,
+        ...upstreamHeaders,
       },
-      body: await c.req.raw.text(),
+      // 二进制安全：HTML 逐字节不变（UTF-8 文本往返同值），图片字节绝不经
+      // 文本解码往返（text() 会把任意二进制洗成替换字符）。
+      body: await c.req.raw.arrayBuffer(),
     });
     if (!response.ok) {
       return await errorResponse(c, response, [
@@ -282,9 +322,12 @@ export function createProviderProxyRoutes(deps: BackendDeps) {
         authorization,
       ]);
     }
-    recordProviderUsage(deps, account.id, { provider: 'oss', route: 'oss.put_html' });
-    // 返回 URL 口径与 sidecar putHtml 一致：配置了公网基地址则用公网，
-    // 否则返回上游 URL（内网形态——生产必须配置 OSS_PUBLIC_BASE_URL）。
+    recordProviderUsage(deps, account.id, {
+      provider: 'oss',
+      route: isImageObject ? 'oss.put_image' : 'oss.put_html',
+    });
+    // 返回 URL 口径与 sidecar putHtml/putImage 一致：配置了公网基地址则用
+    // 公网，否则返回上游 URL（内网形态——生产必须配置 OSS_PUBLIC_BASE_URL）。
     const publicBase = config.ossPublicBaseUrl?.replace(/\/+$/, '');
     return c.json({ url: publicBase ? `${publicBase}/${encodedKey}` : upstreamUrl });
   });

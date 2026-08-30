@@ -1,4 +1,5 @@
 import { mkdtempSync, rmSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { basename, join, resolve } from 'node:path';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -7,7 +8,10 @@ import {
   distributionOrderSn,
   GeoUpstreamHttpError,
 } from '../geo/provider-capabilities';
-import type { PublishEgressOrderResult } from '../geo/publish-egress';
+import type {
+  PublishEgressImagesResult,
+  PublishEgressOrderResult,
+} from '../geo/publish-egress';
 
 // 票 08 闭环：/api/xiaojing/publish-scheduler/egress/* 是 Rust 确定性调度器
 // 专用的 localhost 控制面路由。本测试在 HTTP 边界钉住：身份门先于任何
@@ -15,10 +19,14 @@ import type { PublishEgressOrderResult } from '../geo/publish-egress';
 // 下单 sn 由服务端按 distributionOrderSn(executionId, itemId) 派生（请求
 // 体不接受 sn）、网关 402 映射为 NonRetryable（充值语义）。全程 mock
 // typed capability，不触真实网络。
+// 票 #15 扩展：上传路由同时承载配图对象（载荷与 HTML 二选一）——字节
+// base64 直送、声明 sha256 与实测互校、密度/大小/格式白名单在路由层
+// 确定性拒绝、成功回执按 imageId 映射公网 URL 供 Rust 渲染侧替换。
 
 const mocks = vi.hoisted(() => ({
   sessionId: 'session-egress-42',
   putHtml: vi.fn(),
+  putImage: vi.fn(),
   placeOrder: vi.fn(),
   requestTokens: [] as (string | undefined)[],
 }));
@@ -29,13 +37,13 @@ vi.mock('../agent-session', () => ({
 
 vi.mock('../geo/provider-runtime', () => ({
   getXiaojingGeoProviderCapabilities: () => ({
-    objectStorage: { putHtml: mocks.putHtml },
+    objectStorage: { putHtml: mocks.putHtml, putImage: mocks.putImage },
     distribution: { placeOrder: mocks.placeOrder },
   }),
   getXiaojingGeoProviderCapabilitiesForRequest: (token?: string) => {
     mocks.requestTokens.push(token);
     return {
-      objectStorage: { putHtml: mocks.putHtml },
+      objectStorage: { putHtml: mocks.putHtml, putImage: mocks.putImage },
       distribution: { placeOrder: mocks.placeOrder },
     };
   },
@@ -87,9 +95,35 @@ const ORDER_BODY = {
   contentUrl: 'https://cdn.example.test/articles/w-1/a-1/approved-v1-abc.html',
 };
 
+// 票 #15：配图对象载荷（字节与 Rust 侧材料图片资产一致，base64 直送）。
+const IMAGE_BYTES = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 9, 8, 7]);
+const IMAGE_SHA256 = createHash('sha256').update(IMAGE_BYTES).digest('hex');
+const SECOND_BYTES = new Uint8Array([1, 2, 3]);
+const SECOND_SHA256 = createHash('sha256').update(SECOND_BYTES).digest('hex');
+
+const imageUploadBody = (
+  images: Array<{
+    imageId: string;
+    sha256: string;
+    mediaType: string;
+    bytesB64: string;
+  }>,
+) => ({
+  // workspaceId 在 beforeAll 赋值；本工厂只在测试体内调用，读到的已是
+  // 当前临时工作区（身份门用）。
+  workspaceId,
+  sessionId: mocks.sessionId,
+  executionId: 'execution-egress-1',
+  itemId: 'item-egress-1',
+  images,
+});
+
+const b64 = (bytes: Uint8Array) => Buffer.from(bytes).toString('base64');
+
 describe('publish scheduler egress routes', () => {
   beforeEach(() => {
     mocks.putHtml.mockReset();
+    mocks.putImage.mockReset();
     mocks.placeOrder.mockReset();
     mocks.requestTokens.length = 0;
   });
@@ -239,6 +273,181 @@ describe('publish scheduler egress routes', () => {
     expect(
       body.result.outcome === 'non-retryable' && body.result.reason,
     ).toContain('充值');
+  });
+
+  it('uploads image objects through the port and maps urls by imageId', async () => {
+    mocks.putImage.mockImplementation(async (input: {
+      bytes: Uint8Array;
+      mediaType: string;
+    }) => {
+      const digest = createHash('sha256').update(input.bytes).digest('hex');
+      const ext = input.mediaType === 'image/jpeg' ? 'jpg' : 'png';
+      return {
+        url: `https://cdn.example.test/images/${digest}.${ext}`,
+        objectKey: `images/${digest}.${ext}`,
+      };
+    });
+    const response = await handleXiaojingRoute(
+      '/api/xiaojing/publish-scheduler/egress/upload',
+      post('/api/xiaojing/publish-scheduler/egress/upload', {
+        ...imageUploadBody([
+          {
+            imageId: '9f1c2ab4-52d8-4f6e-8a90-1c2d3e4f5a6b',
+            sha256: IMAGE_SHA256,
+            mediaType: 'image/png',
+            bytesB64: b64(IMAGE_BYTES),
+          },
+          {
+            imageId: '0a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d',
+            sha256: SECOND_SHA256,
+            mediaType: 'image/jpeg',
+            bytesB64: b64(SECOND_BYTES),
+          },
+        ]),
+        workspaceId,
+      }),
+      { workspacePath: workspace },
+    );
+
+    expect(response?.status).toBe(200);
+    const body = (await response?.json()) as {
+      success: boolean;
+      result: PublishEgressImagesResult;
+    };
+    expect(body.success).toBe(true);
+    expect(body.result).toEqual({
+      outcome: 'success',
+      images: [
+        {
+          imageId: '9f1c2ab4-52d8-4f6e-8a90-1c2d3e4f5a6b',
+          url: `https://cdn.example.test/images/${IMAGE_SHA256}.png`,
+          objectKey: `images/${IMAGE_SHA256}.png`,
+        },
+        {
+          imageId: '0a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d',
+          url: `https://cdn.example.test/images/${SECOND_SHA256}.jpg`,
+          objectKey: `images/${SECOND_SHA256}.jpg`,
+        },
+      ],
+    });
+    // 字节原样进入 typed port（base64 解码后与材料图片资产字节一致）。
+    expect(mocks.putImage).toHaveBeenCalledTimes(2);
+    const portInputs = mocks.putImage.mock.calls.map(
+      (call) => call[0] as { bytes: Uint8Array; mediaType: string },
+    );
+    expect(portInputs.map((input) => input.mediaType)).toEqual([
+      'image/png',
+      'image/jpeg',
+    ]);
+    expect(portInputs.map((input) => Buffer.from(input.bytes))).toEqual([
+      Buffer.from(IMAGE_BYTES),
+      Buffer.from(SECOND_BYTES),
+    ]);
+    // HTML 与配图载荷互斥：配图请求不触发 HTML 上传。
+    expect(mocks.putHtml).not.toHaveBeenCalled();
+  });
+
+  it('classifies image upload failures like idempotent stable-key PUTs', async () => {
+    mocks.putImage.mockRejectedValue(
+      new GeoUpstreamHttpError('object-storage', 429, 'object-storage 服务限流（HTTP 429）'),
+    );
+    const response = await handleXiaojingRoute(
+      '/api/xiaojing/publish-scheduler/egress/upload',
+      post('/api/xiaojing/publish-scheduler/egress/upload', {
+        ...imageUploadBody([
+          {
+            imageId: '9f1c2ab4-52d8-4f6e-8a90-1c2d3e4f5a6b',
+            sha256: IMAGE_SHA256,
+            mediaType: 'image/png',
+            bytesB64: b64(IMAGE_BYTES),
+          },
+        ]),
+        workspaceId,
+      }),
+      { workspacePath: workspace },
+    );
+
+    // 控制面恒 200；sha256 内容寻址键可安全重放 → SafeRetryable。    expect(response?.status).toBe(200);
+    const body = (await response?.json()) as {
+      success: boolean;
+      result: PublishEgressImagesResult;
+    };
+    expect(body.result).toMatchObject({
+      outcome: 'safe-retryable',
+      code: 'object-storage-http-429',
+    });
+  });
+
+  it('rejects malformed image egress payloads with 4xx and no provider call', async () => {
+    const cases: Array<[unknown, number, string]> = [
+      // 声明 sha256 与字节不符：内容寻址纪律的确定性拒绝。
+      [
+        imageUploadBody([
+          {
+            imageId: '9f1c2ab4-52d8-4f6e-8a90-1c2d3e4f5a6b',
+            sha256: '0'.repeat(64),
+            mediaType: 'image/png',
+            bytesB64: b64(IMAGE_BYTES),
+          },
+        ]),
+        400,
+        'publish_egress_upload_image_hash_mismatch',
+      ],
+      // 格式白名单外（emf/wmf/tiff 不进 OSS）。
+      [
+        imageUploadBody([
+          {
+            imageId: '9f1c2ab4-52d8-4f6e-8a90-1c2d3e4f5a6b',
+            sha256: IMAGE_SHA256,
+            mediaType: 'image/tiff',
+            bytesB64: b64(IMAGE_BYTES),
+          },
+        ]),
+        400,
+        'publish_egress_upload_payload_invalid',
+      ],
+      // 超密度上限（共享契约 ≤3 张）。
+      [
+        imageUploadBody(
+          Array.from({ length: 4 }, (_, index) => ({
+            imageId: `image-${index}`,
+            sha256: IMAGE_SHA256,
+            mediaType: 'image/png',
+            bytesB64: b64(IMAGE_BYTES),
+          })),
+        ),
+        400,
+        'publish_egress_upload_images_too_many',
+      ],
+      // HTML 与配图片段互斥。
+      [
+        {
+          ...UPLOAD_BODY,
+          workspaceId,
+          images: [
+            {
+              imageId: '9f1c2ab4-52d8-4f6e-8a90-1c2d3e4f5a6b',
+              sha256: IMAGE_SHA256,
+              mediaType: 'image/png',
+              bytesB64: b64(IMAGE_BYTES),
+            },
+          ],
+        },
+        400,
+        'publish_egress_upload_payload_invalid',
+      ],
+    ];
+    for (const [payload, status, error] of cases) {
+      const response = await handleXiaojingRoute(
+        '/api/xiaojing/publish-scheduler/egress/upload',
+        post('/api/xiaojing/publish-scheduler/egress/upload', payload),
+        { workspacePath: workspace },
+      );
+      expect(response?.status).toBe(status);
+      expect(await response?.json()).toMatchObject({ success: false, error });
+    }
+    expect(mocks.putImage).not.toHaveBeenCalled();
+    expect(mocks.putHtml).not.toHaveBeenCalled();
   });
 
   it('returns 403 before any provider call on identity mismatch', async () => {

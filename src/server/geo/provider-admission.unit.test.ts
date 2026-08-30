@@ -44,7 +44,11 @@ function baseCapabilities(
       concurrency: 1,
       embed: unavailable,
     },
-    objectStorage: { slot: "object-storage", putHtml: unavailable },
+    objectStorage: {
+      slot: "object-storage",
+      putHtml: unavailable,
+      putImage: unavailable,
+    },
     distribution: {
       slot: "distribution",
       listResources: unavailable,

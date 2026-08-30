@@ -305,6 +305,15 @@ function objectStorageCapability(
         work: () => capability.putHtml(objectKey, html),
       });
     },
+    putImage(input) {
+      // 配图对象与 HTML 同属发布出口计费面（票 #15）：每张图片一个
+      // publish-item 计量单元。
+      return currentAdmission().run({
+        slot: capability.slot,
+        unitKind: "publish-item",
+        work: () => capability.putImage(input),
+      });
+    },
   };
 }
 

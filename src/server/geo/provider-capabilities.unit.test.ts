@@ -1,3 +1,5 @@
+import { createHash, createHmac } from "node:crypto";
+
 import { describe, expect, it, vi } from "vitest";
 
 import {
@@ -598,6 +600,154 @@ describe("GEO typed provider capabilities", () => {
     expect((init?.headers as Record<string, string>)["Content-Type"]).toBe(
       "text/html; charset=utf-8",
     );
+  });
+
+  // ── putImage（票 #15 / ADR-0008 D4）：sha256 内容寻址 images/ 层 + 公共读
+  // ACL，网关与直连两路都在注入 fetch 上断言 URL/签名/ACL/Content-Type。
+  const IMAGE_BYTES = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 1, 2, 3]);
+  const IMAGE_SHA256 = createHash("sha256").update(IMAGE_BYTES).digest("hex");
+
+  it("puts images through the gateway route with the public-read ACL and account token", async () => {
+    const calls: Array<{
+      url: string;
+      method: string;
+      headers: Record<string, string>;
+      body: Uint8Array;
+    }> = [];
+    const gatewayFetch = vi.fn(
+      async (input: string | URL | Request, init?: RequestInit) => {
+        const request = new Request(input, init);
+        calls.push({
+          url: request.url,
+          method: request.method,
+          headers: Object.fromEntries(
+            [...request.headers].map(([k, v]) => [k.toLowerCase(), v]),
+          ),
+          body: new Uint8Array(await request.arrayBuffer()),
+        });
+        return jsonResponse({
+          url: `https://cdn.example.test/images/${IMAGE_SHA256}.jpg`,
+        });
+      },
+    );
+    const capabilities = createGeoProviderCapabilities(
+      {
+        gatewayBaseUrl: "https://gw.example.test/",
+        accountAccessToken: "account-token-1",
+      },
+      { fetch: gatewayFetch as typeof fetch },
+    );
+
+    const receipt = await capabilities.objectStorage.putImage({
+      bytes: IMAGE_BYTES,
+      mediaType: "image/jpeg",
+    });
+
+    // 独立 images/ 层 + sha256 命名（jpeg 统一 .jpg 扩展名）。
+    expect(receipt).toEqual({
+      url: `https://cdn.example.test/images/${IMAGE_SHA256}.jpg`,
+      objectKey: `images/${IMAGE_SHA256}.jpg`,
+    });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.method).toBe("PUT");
+    expect(calls[0]!.url).toBe(
+      `https://gw.example.test/gw/oss/images/${IMAGE_SHA256}.jpg`,
+    );
+    // 网关重签通道同 putHtml：账号 token Bearer + 二进制 body 原样透传。
+    expect(calls[0]!.headers.authorization).toBe("Bearer account-token-1");
+    expect(calls[0]!.headers["content-type"]).toBe("image/jpeg");
+    // 公共读 ACL 头必须透传给网关并计入其重签（部署要求见票 #15）。
+    expect(calls[0]!.headers["x-oss-object-acl"]).toBe("public-read");
+    expect(calls[0]!.body).toEqual(IMAGE_BYTES);
+  });
+
+  it("signs a direct OSS v1 image PUT with the ACL header inside the string-to-sign", async () => {
+    const calls: Array<{ url: string; headers: Record<string, string> }> = [];
+    const fakeFetch = vi.fn(
+      async (input: string | URL | Request, init?: RequestInit) => {
+        calls.push({
+          url: String(input),
+          headers: init?.headers as Record<string, string>,
+        });
+        return new Response("", { status: 200 });
+      },
+    );
+    const capabilities = createGeoProviderCapabilities(
+      {
+        ossAccessKeyId: "test-access-id",
+        ossAccessKeySecret: "test-access-secret",
+        ossBucket: "test-bucket",
+        ossRegion: "oss-cn-beijing",
+        ossPublicBaseUrl: "https://cdn.example.test",
+      },
+      {
+        fetch: fakeFetch as typeof fetch,
+        now: () => new Date("2026-08-31T00:00:00Z"),
+      },
+    );
+
+    const first = await capabilities.objectStorage.putImage({
+      bytes: IMAGE_BYTES,
+      mediaType: "image/png",
+    });
+    // 同字节重传：内容寻址键幂等（去重 + URL 稳定，用户故事 #18）。
+    const second = await capabilities.objectStorage.putImage({
+      bytes: IMAGE_BYTES,
+      mediaType: "image/png",
+    });
+
+    expect(first).toEqual(second);
+    expect(first).toEqual({
+      url: `https://cdn.example.test/images/${IMAGE_SHA256}.png`,
+      objectKey: `images/${IMAGE_SHA256}.png`,
+    });
+    expect(fakeFetch).toHaveBeenCalledTimes(2);
+    const [url, init] = fakeFetch.mock.calls[0];
+    expect(String(url)).toBe(
+      `https://test-bucket.oss-cn-beijing.aliyuncs.com/images/${IMAGE_SHA256}.png`,
+    );
+    expect(String(url)).not.toContain("test-access");
+    expect(init?.method).toBe("PUT");
+    const headers = init?.headers as Record<string, string>;
+    expect(headers["Content-Type"]).toBe("image/png");
+    expect(headers["x-oss-object-acl"]).toBe("public-read");
+    // 签名契约：ACL 头以 CanonicalizedOSSHeaders 形态进入 string-to-sign
+    //（小写、插在 Date 与资源之间），缺了它 OSS 会拒绝或按私有写覆盖。
+    const expectedStringToSign = [
+      "PUT",
+      "",
+      "image/png",
+      new Date("2026-08-31T00:00:00Z").toUTCString(),
+      "x-oss-object-acl:public-read",
+      `/test-bucket/images/${IMAGE_SHA256}.png`,
+    ].join("\n");
+    const expectedSignature = createHmac("sha1", "test-access-secret")
+      .update(expectedStringToSign)
+      .digest("base64");
+    expect(headers.Authorization).toBe(
+      `OSS test-access-id:${expectedSignature}`,
+    );
+  });
+
+  it("rejects putImage media types outside the stored-image whitelist", async () => {
+    const fakeFetch = vi.fn(async () => new Response("", { status: 200 }));
+    const capabilities = createGeoProviderCapabilities(
+      {
+        ossAccessKeyId: "test-access-id",
+        ossAccessKeySecret: "test-access-secret",
+        ossBucket: "test-bucket",
+      },
+      { fetch: fakeFetch as typeof fetch },
+    );
+
+    await expect(
+      capabilities.objectStorage.putImage({
+        bytes: IMAGE_BYTES,
+        // emf/wmf/tiff 等白名单外类型在出口即拒绝（ADR-0008 D4）。
+        mediaType: "image/tiff" as never,
+      }),
+    ).rejects.toThrow(/不支持的图片类型/);
+    expect(fakeFetch).not.toHaveBeenCalled();
   });
 
   it("exposes the ticket-08 order surface on the distribution port and requires gateway mode", async () => {

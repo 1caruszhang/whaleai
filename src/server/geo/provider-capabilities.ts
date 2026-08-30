@@ -134,9 +134,53 @@ export interface GeoEmbeddingCapability {
   ): Promise<number[][]>;
 }
 
+/**
+ * 图片对象上传的格式白名单（ADR-0008 Decision 4）：png/jpg/gif/webp——
+ * emf/wmf/tiff 浏览器渲染不了，转换显式延后，白名单外直接拒绝。
+ */
+export type GeoStoredImageMediaType =
+  | "image/png"
+  | "image/jpeg"
+  | "image/gif"
+  | "image/webp";
+
+/** 白名单 mediaType → 对象扩展名（jpeg 统一落 .jpg）。 */
+const STORED_IMAGE_EXTENSION_BY_MEDIA_TYPE: Readonly<
+  Record<GeoStoredImageMediaType, string>
+> = {
+  "image/png": "png",
+  "image/jpeg": "jpg",
+  "image/gif": "gif",
+  "image/webp": "webp",
+};
+
+/** 图片对象公共读 ACL（文章页匿名加载，用户已明示接受材料图片公网可访问）。 */
+export const GEO_OBJECT_STORAGE_PUBLIC_READ_ACL = "public-read";
+
+export interface GeoObjectStoragePutImageInput {
+  bytes: Uint8Array;
+  mediaType: GeoStoredImageMediaType;
+}
+
+export interface GeoObjectStoragePutImageReceipt {
+  /** 图片对象的绝对公网 URL（文章 HTML 引用它）。 */
+  url: string;
+  /** 内容寻址对象键 images/<sha256>.<ext>（同图重传同键，天然去重）。 */
+  objectKey: string;
+}
+
 export interface GeoObjectStorageCapability {
   readonly slot: "object-storage";
   putHtml(objectKey: string, html: string): Promise<{ url: string }>;
+  /**
+   * 图片对象上传（ADR-0008 Decision 4，票 #15）：按字节 sha256 内容寻址
+   * 命名到独立 `images/` 层并携带公共读 ACL。网关模式 PUT /gw/oss/* 由
+   * 网关重签（ACL 头需计入签名，见票面网关改动清单）；直连模式本地做
+   * OSS V1 HMAC-SHA1 签名（CanonicalizedOSSHeaders 含 x-oss-object-acl）。
+   */
+  putImage(
+    input: GeoObjectStoragePutImageInput,
+  ): Promise<GeoObjectStoragePutImageReceipt>;
 }
 
 export interface GeoDistributionResource {
@@ -1212,6 +1256,100 @@ export function createGeoProviderCapabilities(
           const publicBase = secrets.ossPublicBaseUrl?.replace(/\/+$/, "");
           return {
             url: publicBase ? `${publicBase}/${encodedKey}` : upstreamUrl,
+          };
+        } catch (error) {
+          throw sanitizeGeoProviderError(error, secrets);
+        }
+      },
+      async putImage(input) {
+        try {
+          // 内容寻址键（ADR-0008 Decision 4）：images/<sha256>.<ext>——同图
+          // 字节重传得到同一键同一 URL，重放 PUT 幂等且天然去重。
+          const extension =
+            STORED_IMAGE_EXTENSION_BY_MEDIA_TYPE[input.mediaType];
+          if (!extension) {
+            throw new Error(
+              `object-storage 不支持的图片类型：${input.mediaType}`,
+            );
+          }
+          const sha256 = createHash("sha256").update(input.bytes).digest("hex");
+          const objectKey = `images/${sha256}.${extension}`;
+          const encodedKey = encodeObjectKey(objectKey);
+          const contentType = input.mediaType;
+          // 公共读 ACL 头必须随请求透传并计入 OSS V1 签名（文章页匿名加载）。
+          const aclHeader: Record<string, string> = {
+            "x-oss-object-acl": GEO_OBJECT_STORAGE_PUBLIC_READ_ACL,
+          };
+          // 网关模式：与 putHtml 同一条 /gw/oss/* 重签通道——网关用服务器
+          // AK/SK 重签时需把 x-oss-object-acl 计入 CanonicalizedOSSHeaders
+          // 并透传二进制 body 与图片 Content-Type（部署要求见票 #15）。
+          if (gatewayMode) {
+            const response = await fetchImpl(
+              `${gatewayRoot}/gw/oss/${encodedKey}`,
+              {
+                method: "PUT",
+                headers: {
+                  Authorization: `Bearer ${bearerToken("object-storage")}`,
+                  "Content-Type": contentType,
+                  ...aclHeader,
+                },
+                body: Buffer.from(input.bytes),
+              },
+            );
+            if (!response.ok) {
+              throw await gatewayHttpFailure("object-storage", response, () =>
+                safeUpstreamFailure("object-storage", response.status),
+              );
+            }
+            const payload = (await response.json()) as { url?: string };
+            if (typeof payload.url !== "string" || payload.url.length === 0) {
+              throw new Error("object-storage 返回了无效响应");
+            }
+            return { url: payload.url, objectKey };
+          }
+          const accessKeyId = required(
+            secrets.ossAccessKeyId,
+            "object-storage",
+          );
+          const accessKeySecret = required(
+            secrets.ossAccessKeySecret,
+            "object-storage",
+          );
+          const bucket = required(secrets.ossBucket, "object-storage");
+          const region =
+            secrets.ossRegion ||
+            XIAOJING_GEO_PROVIDER_DEFAULTS.ossDefaultRegion;
+          const date = now().toUTCString();
+          // OSS V1 签名：CanonicalizedOSSHeaders（x-oss-object-acl，小写、
+          // 按头名排序、以 \n 结尾）插在 Date 与 CanonicalizedResource 之间。
+          const stringToSign = [
+            "PUT",
+            "",
+            contentType,
+            date,
+            `x-oss-object-acl:${GEO_OBJECT_STORAGE_PUBLIC_READ_ACL}`,
+            `/${bucket}/${objectKey}`,
+          ].join("\n");
+          const signature = createHmac("sha1", accessKeySecret)
+            .update(stringToSign)
+            .digest("base64");
+          const upstreamUrl = `https://${bucket}.${region}.aliyuncs.com/${encodedKey}`;
+          const response = await fetchImpl(upstreamUrl, {
+            method: "PUT",
+            headers: {
+              Authorization: `OSS ${accessKeyId}:${signature}`,
+              "Content-Type": contentType,
+              Date: date,
+              ...aclHeader,
+            },
+            body: Buffer.from(input.bytes),
+          });
+          if (!response.ok)
+            throw safeUpstreamFailure("object-storage", response.status);
+          const publicBase = secrets.ossPublicBaseUrl?.replace(/\/+$/, "");
+          return {
+            url: publicBase ? `${publicBase}/${encodedKey}` : upstreamUrl,
+            objectKey,
           };
         } catch (error) {
           throw sanitizeGeoProviderError(error, secrets);

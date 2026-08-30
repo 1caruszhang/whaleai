@@ -23,6 +23,21 @@ import { AppError } from '../errors';
 export const OSS_HTML_CONTENT_TYPE = 'text/html; charset=utf-8';
 
 /**
+ * 图片对象公共读 ACL（票 #15，ADR-0008 D4）：文章页需匿名加载，图片
+ * 对象一律 public-read；ACL 头必须计入 CanonicalizedOSSHeaders 参与签名。
+ */
+export const OSS_PUBLIC_READ_ACL = 'public-read';
+export const OSS_OBJECT_ACL_HEADER = 'x-oss-object-acl';
+
+/** 图片对象放行的 Content-Type 白名单（与 sidecar putImage 同口径）。 */
+export const OSS_IMAGE_CONTENT_TYPES: ReadonlySet<string> = new Set([
+  'image/png',
+  'image/jpeg',
+  'image/gif',
+  'image/webp',
+]);
+
+/**
  * objectKey 规范化编码（与 sidecar encodeObjectKey 同步）：去前导斜杠、
  * 逐段 encodeURIComponent、拒绝空键与 `..` 段（路径逃逸）。返回 null 表示
  * 键非法（路由层回 400），不在这里抛错以保持纯函数可测。
@@ -33,18 +48,30 @@ export function encodeOssObjectKey(objectKey: string): string | null {
   return cleaned.split('/').map(encodeURIComponent).join('/');
 }
 
-/** OSS V1 PUT 的 StringToSign（raw objectKey 参与，非 URL 编码形态）。 */
+/**
+ * OSS V1 PUT 的 StringToSign（raw objectKey 参与，非 URL 编码形态）。
+ * `canonicalizedHeaders`（票 #15）：CanonicalizedOSSHeaders 段——小写
+ * `name:value`、按头名排序、整体以 \n 结尾插在 Date 与资源之间（如
+ * `x-oss-object-acl:public-read`）。缺省时空段，输出与票 05 的 HTML
+ * 黄金向量逐字节一致（parity 测试锁定）。
+ */
 export function ossPutStringToSign(input: {
   bucket: string;
   objectKey: string;
   contentType: string;
   date: string;
+  canonicalizedHeaders?: ReadonlyArray<string>;
 }): string {
+  const canonicalized = (input.canonicalizedHeaders ?? [])
+    .map(header => header.trim().toLowerCase())
+    .sort()
+    .join('\n');
   return [
     'PUT',
     '',
     input.contentType,
     input.date,
+    ...(canonicalized ? [canonicalized] : []),
     `/${input.bucket}/${input.objectKey.replace(/^\/+/, '')}`,
   ].join('\n');
 }

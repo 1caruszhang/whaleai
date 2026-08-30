@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { createHash, createHmac } from 'node:crypto';
 import { MissingConfigError, loadBackendConfig } from '../src/config';
 import { listProviderUsageRecords } from '../src/domain/provider-usage';
 import { provisionLoggedInAccount, startTestBackend, type TestBackend } from './helpers';
@@ -481,6 +482,102 @@ describe('gateway provider proxy (ticket 05)', () => {
     expect(await rawRes.json()).toEqual({
       url: `https://test-bucket-vector.oss-cn-chengdu-internal.aliyuncs.com/${VECTOR_OBJECT_KEY_ENCODED}`,
     });
+  });
+
+  it('resigns binary image puts with the public-read ACL inside the string-to-sign (ticket 15)', async () => {
+    // 二进制安全 mock：按字节捕获（base64），不经文本解码往返。
+    interface ByteCall {
+      url: string;
+      method: string;
+      headers: Record<string, string>;
+      bodyB64: string;
+    }
+    const calls: ByteCall[] = [];
+    const fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const request = new Request(input, init);
+      calls.push({
+        url: request.url,
+        method: request.method,
+        headers: Object.fromEntries([...request.headers].map(([k, v]) => [k.toLowerCase(), v])),
+        bodyB64: Buffer.from(await request.arrayBuffer()).toString('base64'),
+      });
+      return new Response('', { status: 200 });
+    }) as typeof globalThis.fetch;
+    await tb.cleanup();
+    tb = await startTestBackend({ fetch, initialNowMs: FIXED_MS, config: vectorConfig });
+    const { accountId, accessToken } = await provisionLoggedInAccount(tb.app);
+
+    // PNG 魔数 + 非文本字节：text() 往返会洗掉替换字符，必须逐字节透传。
+    const imageBytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0xff, 0xfe, 0x80, 0x01]);
+    const sha256 = createHash('sha256').update(imageBytes).digest('hex');
+    const encodedKey = `images/${sha256}.png`;
+    const res = await tb.app.request(`/gw/oss/${encodedKey}`, {
+      method: 'PUT',
+      headers: {
+        authorization: `Bearer ${accessToken}`,
+        'content-type': 'image/png',
+        'x-oss-object-acl': 'public-read',
+      },
+      body: imageBytes,
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      url: `https://test-bucket-vector.oss-cn-chengdu-internal.aliyuncs.com/${encodedKey}`,
+    });
+
+    expect(calls).toHaveLength(1);
+    const call = calls[0]!;
+    expect(call.url).toBe(
+      `https://test-bucket-vector.oss-cn-chengdu-internal.aliyuncs.com/${encodedKey}`,
+    );
+    // 二进制字节逐位一致。
+    expect(Buffer.from(call.bodyB64, 'base64')).toEqual(Buffer.from(imageBytes));
+    // Content-Type 与公共读 ACL 透传上游。
+    expect(call.headers['content-type']).toBe('image/png');
+    expect(call.headers['x-oss-object-acl']).toBe('public-read');
+    // 重签契约：CanonicalizedOSSHeaders（x-oss-object-acl）插在 Date 与资源
+    // 之间参与 HMAC-SHA1。
+    const expectedStringToSign = [
+      'PUT',
+      '',
+      'image/png',
+      SIDECAR_OSS_DATE,
+      'x-oss-object-acl:public-read',
+      `/test-bucket-vector/images/${sha256}.png`,
+    ].join('\n');
+    const expectedAuthorization = `OSS test-oss-ak-vector:${createHmac('sha1', 'test-oss-sk-vector')
+      .update(expectedStringToSign)
+      .digest('base64')}`;
+    expect(call.headers['authorization']).toBe(expectedAuthorization);
+    expect(JSON.stringify(call.headers)).not.toContain(accessToken);
+
+    // 计量按图片路由记录。
+    const records = listProviderUsageRecords(tb.db, accountId, 10);
+    expect(records).toMatchObject([{ provider: 'oss', route: 'oss.put_image' }]);
+
+    // 白名单外 Content-Type / 缺公共读 ACL：确定性 4xx，不触上游。
+    const badType = await tb.app.request(`/gw/oss/images/${sha256}.png`, {
+      method: 'PUT',
+      headers: {
+        authorization: `Bearer ${accessToken}`,
+        'content-type': 'image/tiff',
+        'x-oss-object-acl': 'public-read',
+      },
+      body: imageBytes,
+    });
+    expect(badType.status).toBe(400);
+    expect(await badType.json()).toMatchObject({ error: 'oss_image_content_type_invalid' });
+    const missingAcl = await tb.app.request(`/gw/oss/images/${sha256}.png`, {
+      method: 'PUT',
+      headers: {
+        authorization: `Bearer ${accessToken}`,
+        'content-type': 'image/png',
+      },
+      body: imageBytes,
+    });
+    expect(missingAcl.status).toBe(400);
+    expect(await missingAcl.json()).toMatchObject({ error: 'oss_image_acl_required' });
+    expect(calls).toHaveLength(1);
   });
 
   it('rejects invalid OSS object keys without touching upstream', async () => {

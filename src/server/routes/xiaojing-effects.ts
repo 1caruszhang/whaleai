@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { basename, resolve } from 'node:path';
 
 import type { GeoBaselineEngineId } from '../../shared/geo/baseline';
@@ -14,6 +15,7 @@ import {
 import {
   distributionOrderSn,
   type GeoDistributionOrderStatus,
+  type GeoStoredImageMediaType,
 } from '../geo/provider-capabilities';
 import {
   getXiaojingGeoBillingPermitChannelForRequest,
@@ -35,6 +37,87 @@ const ORDER_QUERY_BATCH = 20;
 
 /** 发布 egress HTML 上限：Rust 侧批准正文已限 256KB + 渲染开销。 */
 const PUBLISH_EGRESS_MAX_HTML_BYTES = 320 * 1024;
+
+/**
+ * 发布配图 egress（票 #15）：单篇配图密度上限走共享契约（≤3 张），
+ * 单张字节上限与材料图片资产一致（导入时已按同一上限校验）。
+ */
+const PUBLISH_EGRESS_MAX_IMAGE_COUNT = 3;
+const PUBLISH_EGRESS_MAX_IMAGE_BYTES = 20 * 1024 * 1024;
+
+/** 配图格式白名单（ADR-0008 D4）：emf/wmf/tiff 不进 OSS。 */
+const PUBLISH_EGRESS_IMAGE_MEDIA_TYPES: ReadonlySet<string> = new Set([
+  "image/png",
+  "image/jpeg",
+  "image/gif",
+  "image/webp",
+]);
+
+/**
+ * 发布配图片段载荷（票 #15）：Rust 从材料图片资产读回字节后经
+ * base64 直送；声明 sha256 与实测不符或超限都是确定性 400，
+ * 不触达 Provider。
+ */
+function parsePublishEgressImages(
+  value: unknown,
+):
+  | {
+      images: Array<{
+        imageId: string;
+        sha256: string;
+        mediaType: GeoStoredImageMediaType;
+        bytes: Uint8Array;
+      }>;
+    }
+  | { error: string; status?: number } {
+  if (!Array.isArray(value) || value.length === 0) {
+    return { error: "publish_egress_upload_payload_invalid" };
+  }
+  if (value.length > PUBLISH_EGRESS_MAX_IMAGE_COUNT) {
+    return { error: "publish_egress_upload_images_too_many" };
+  }
+  const images = [];
+  for (const entry of value) {
+    if (typeof entry !== "object" || entry === null) {
+      return { error: "publish_egress_upload_payload_invalid" };
+    }
+    const { imageId, sha256, mediaType, bytesB64 } = entry as Record<
+      string,
+      unknown
+    >;
+    if (
+      typeof imageId !== "string" ||
+      !/^[A-Za-z0-9-]{1,64}$/.test(imageId) ||
+      typeof sha256 !== "string" ||
+      !/^[0-9a-f]{64}$/.test(sha256) ||
+      typeof mediaType !== "string" ||
+      !PUBLISH_EGRESS_IMAGE_MEDIA_TYPES.has(mediaType) ||
+      typeof bytesB64 !== "string" ||
+      !bytesB64
+    ) {
+      return { error: "publish_egress_upload_payload_invalid" };
+    }
+    const bytes = Buffer.from(bytesB64, "base64");
+    if (bytes.length === 0 || bytes.length > PUBLISH_EGRESS_MAX_IMAGE_BYTES) {
+      return {
+        error: "publish_egress_upload_image_too_large",
+        status: 413,
+      };
+    }
+    const digest = createHash("sha256").update(bytes).digest("hex");
+    if (digest !== sha256) {
+      return { error: "publish_egress_upload_image_hash_mismatch" };
+    }
+    images.push({
+      imageId,
+      sha256,
+      // 白名单成员已在上面的集合校验中钉死（运行时 Set 精确匹配）。
+      mediaType: mediaType as GeoStoredImageMediaType,
+      bytes,
+    });
+  }
+  return { images };
+}
 
 /** 发布执行器 egress 公共载荷校验（身份门之后的第一道防线）。 */
 function parsePublishEgressIdentity(
@@ -270,6 +353,9 @@ export async function handleXiaojingEffectsRoute(
   // 幂等 sn 由本路由按 distributionOrderSn(executionId, itemId) 派生，
   // Rust 不传 sn。egress 结果是分类值（success/safe-retryable/
   // non-retryable/unknown），控制面本身始终 200。
+  // 票 #15：上传路由同时承载文章 HTML 与配图对象（载荷二选一）——Rust
+  // 先传图片字节拿回公网 URL、完成占位符替换后再传最终 HTML；占位符
+  // 替换权威在 Rust 渲染侧，本路由不解析正文。
   if (
     pathname === "/api/xiaojing/publish-scheduler/egress/upload" &&
     request.method === "POST"
@@ -280,8 +366,9 @@ export async function handleXiaojingEffectsRoute(
         sessionId: string;
         executionId: string;
         itemId: string;
-        objectKey: string;
-        html: string;
+        objectKey?: string;
+        html?: string;
+        images?: unknown;
       };
       const runtimeSessionId = getRuntimeSessionIdForRequest();
       const workspaceId = basename(resolve(workspacePath));
@@ -297,6 +384,34 @@ export async function handleXiaojingEffectsRoute(
       const identity = parsePublishEgressIdentity(payload);
       if ("error" in identity) {
         return jsonResponse({ success: false, error: identity.error }, 400);
+      }
+      const capabilities = () =>
+        getXiaojingGeoProviderCapabilitiesForRequest(
+          requestAccountAccessToken(request),
+        );
+      // 配图对象上传（票 #15）：与 HTML 二选一，载荷形状互斥。
+      if (payload.images !== undefined) {
+        if (payload.html !== undefined) {
+          return jsonResponse(
+            { success: false, error: "publish_egress_upload_payload_invalid" },
+            400,
+          );
+        }
+        const parsed = parsePublishEgressImages(payload.images);
+        if ("error" in parsed) {
+          return jsonResponse(
+            { success: false, error: parsed.error },
+            parsed.status ?? 400,
+          );
+        }
+        const result = await new PublishEgressService(
+          capabilities(),
+        ).uploadImages({
+          executionId: identity.executionId,
+          itemId: identity.itemId,
+          images: parsed.images,
+        });
+        return jsonResponse({ success: true, result });
       }
       if (
         typeof payload.objectKey !== "string" ||
@@ -314,11 +429,7 @@ export async function handleXiaojingEffectsRoute(
           413,
         );
       }
-      const result = await new PublishEgressService(
-        getXiaojingGeoProviderCapabilitiesForRequest(
-          requestAccountAccessToken(request),
-        ),
-      ).upload({
+      const result = await new PublishEgressService(capabilities()).upload({
         executionId: identity.executionId,
         itemId: identity.itemId,
         objectKey: payload.objectKey,
