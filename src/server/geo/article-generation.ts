@@ -1,6 +1,7 @@
 import {
   ARTICLE_GENERATION_CONCURRENCY,
   ARTICLE_GENERATION_POLICY_VERSION,
+  ARTICLE_IMAGE_CANDIDATE_INJECTION_LIMIT,
   buildArticleGenerationMessages,
   buildArticleReflectionMessages,
   buildDirectTitleMessages,
@@ -14,6 +15,7 @@ import {
   validateDirectArticleSource,
   type ArticleBodyProjection,
   type ArticleGenerationContext,
+  type ArticleImageCandidate,
   type ArticleNarrativeSeed,
   type ArticleOperationProjection,
   type ArticleOperationSource,
@@ -314,7 +316,31 @@ export class ArticleGenerationService {
     private readonly reflection: GeoTextCapability,
     /** 网关计费（票 07）：生成 20/篇、改写 10/篇；缺省时跳过 permit。 */
     private readonly permits?: GeoBillingPermitPort,
+    /**
+     * 材料图片候选池（ADR-0008 T4）：返回品牌候选资产供正文提示词注入。
+     * MaterialImageAsset 结构上满足 ArticleImageCandidate。缺省或获取失败
+     * 都降级为零配图继续生成——配图能力绝不阻塞主链。
+     */
+    private readonly imageCandidates?: () => Promise<
+      readonly ArticleImageCandidate[]
+    >,
   ) {}
+
+  /**
+   * 候选清单加载（ADR-0008）：池不可用降级为空清单（零配图路径），并按
+   * 注入上限截断保护正文 token 预算。
+   */
+  private async loadImageCandidates(): Promise<readonly ArticleImageCandidate[]> {
+    if (!this.imageCandidates) return [];
+    try {
+      return (await this.imageCandidates()).slice(
+        0,
+        ARTICLE_IMAGE_CANDIDATE_INJECTION_LIMIT,
+      );
+    } catch {
+      return [];
+    }
+  }
 
   private assertIdentity(input: {
     workspaceId: string;
@@ -514,6 +540,7 @@ export class ArticleGenerationService {
           : context.article.requestedTitle;
       const articleProfile = projectBrandProfile(context.article.plannedFacts);
       const identityBlock = renderBrandIdentityBlock(articleProfile);
+      const imageCandidates = await this.loadImageCandidates();
       const messages = buildArticleGenerationMessages({
         // 品牌名裁决：知识库身份事实优先，workspace 名仅无身份事实时兜底。
         brandName: resolveBrandName(articleProfile, context.brandName),
@@ -526,6 +553,7 @@ export class ArticleGenerationService {
         plannedFacts: context.article.plannedFacts,
         ...(identityBlock ? { identityBlock } : {}),
         ...(narrativeSeed ? { narrativeSeed } : {}),
+        ...(imageCandidates.length > 0 ? { imageCandidates } : {}),
       });
       // ADR-0007 Decision 4：ranking 类型整篇联网（竞品条目由模型联网取材，
       // 消除名单外的结构性编造）；非排行类型保持离线。目标品牌段落的

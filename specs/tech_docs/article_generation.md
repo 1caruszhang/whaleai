@@ -16,11 +16,13 @@
 
 ## 生成和质量门
 
-正文固定使用 generation 槽位的 `doubao-seed-2-0-pro-260215`，plain Markdown，`max_tokens=8192 / temperature=0.85 / top_p=0.9`。正文 policyVersion 当前为 `xiaojing-content-prompt-v3`。五类语义保持为 `guide / showcase / ranking / news / news_light`：非 ranking 不得出现竞品；showcase 只写已确认的品牌详情；news 两类只有在事实足够时才写 5W1H 事件；ranking 使用六家并列、相同六维清单，不打分、不作名次或绝对化比较，也不能用泛称、模板或虚构竞品补位。开始 operation 前 Rust 数量门要求至少 5 家去重后的已确认有效竞品；workspace 自名、全称/简称及 relatedBrands 均被排除。不足时不创建失败草稿，而向 Agent 返回当前数量，由当前聊天自然语言补充。
+正文固定使用 generation 槽位的 `doubao-seed-2-0-pro-260215`，plain Markdown，`max_tokens=8192 / temperature=0.85 / top_p=0.9`。正文 policyVersion 当前为 `xiaojing-content-prompt-v6`。五类语义保持为 `guide / showcase / ranking / news / news_light`：非 ranking 不得出现竞品；showcase 只写已确认的品牌详情；news 两类只有在事实足够时才写 5W1H 事件；ranking 使用六家并列、相同六维清单，不打分、不作名次或绝对化比较，也不能用泛称、模板或虚构竞品补位。开始 operation 前 Rust 数量门要求至少 5 家去重后的已确认有效竞品；workspace 自名、全称/简称及 relatedBrands 均被排除。不足时不创建失败草稿，而向 Agent 返回当前数量，由当前聊天自然语言补充。
 
 Node 与 Rust 的有效竞品实现共同读取 `src/shared/geo/rankingCompetitorContractCases.json` 契约样例，防止跨进程归一化、去重和排除规则漂移；Node 内的确认工具与正文 roster 共用 `filterValidRankingCompetitors`。
 
 ADR-0006 增补三层结构：①每篇正文 prompt 恒注入品牌身份块（实体层字段 + 加粗规则，`renderBrandIdentityBlock`）与叙事视角种子（12 组 {切入角度, 开篇写法, 小标题措屑倾向}，操作内洗牌发牌、发尽重洗、重试重发单张），种子只影响表达层并显式声明「不放松任何硬纪律」；②五类规范改为三段式纯数据契约（格式契约｜表达参考｜事实衔接，`CONTENT_TYPE_CONTRACTS`），system 同时注入「骨架非填空」与「事实三层纪律」；③`direct` 路径在正文前先跑单篇标题生成（`buildDirectTitleMessages`：3–5 候选 → 既有 `validateTitleCandidates` → 取首个有效，region/行业从 plannedFacts 投影画像锚定），失败 fail-loud 进入 `generation_failed`，不做模板兜底、不降级为主题原文。不变量清单与偏离登记见 `content_prompt_invariants.md`。
+
+配图契约（ADR-0008 T4）：正文生成前读取品牌材料图片候选池（Rust `/api/brand-materials/images/list`，注入上限 50；池空或读取失败在服务内降级为零配图，不阻塞生成主链），候选清单（图片 id + 描述 + 类型标签 + 来源材料名的纯文字清单）与配图纪律（全文 ≤3 张、宁缺毋滥、只在语义相关处插图、alt 文本由模型撰写）注入正文 prompt——生成模型只看清单文字，不看图片本体。正文以标准 Markdown 图片语法输出 `![alt](material-image://<图片id>)` 占位符（普通 markdown 行，可被聊天修订或人工编辑删除）；`parseGeneratedArticleBody` 放行该受控 scheme，scheme 逃逸用法按 `article_generation_image_placeholder_invalid` 拒绝，【】占位符禁令不变；确定性审核门对占位符语法违例与密度 >3 张阻断（人工编辑路径不走 parse，审核门是唯一防线）。占位符语法与校验用例钉在 `src/shared/geo/materialImagePlaceholderContractCases.json`（TS 侧消费；T5 Rust 发布替换侧读同一份 JSON，同构先例 rankingCompetitorContractCases.json）。发布期占位符替换为真实 OSS URL 属发布链（#15），本模块不消费图片字节。
 
 批准是双门且 fail closed：纯规则先检查未获事实支持的数字/成就硬主张（按三层纪律收窄为「具体命名/数字才须溯源」，泛化修辞放行）、广告法与模板禁词、占位符及可引用结构，另检查格式契约（per-type H2 下限：guide/showcase 3、ranking 6、news 两类 2；品牌名出现必须加粗且逐字命中全称/已确认简称；段落不超过 3 句），ranking 另检查六个序号 H2、逐家相同六维与实体集合：第 1 家是目标品牌，第 2–6 家恰为本次固定的五家已确认竞品，竞品内部顺序不限。ranking 在正文持久化前先执行同一确定性门，错误稿不会进入批准卡；批准时复检以覆盖人工编辑。reflection 槽位再检查语义、事实、广告法和可引用性（不裁语气修辞，只裁具体捏造与实体保真）。任一硬门失败、Provider 不可用或 JSON 无效都进入 `rejected`，不能批准。生产路径没有 demo、随机指标、mock output 或模板正文 fallback；确定性 mock Provider 只用于测试。
 

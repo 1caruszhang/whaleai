@@ -1,3 +1,4 @@
+import { ARTICLE_IMAGE_CANDIDATE_INJECTION_LIMIT } from '../../shared/geo/articleGeneration';
 import type { GeoOperationProjection } from '../../shared/geo/operation';
 import {
   buildGeoOperationEventReminder,
@@ -6,6 +7,7 @@ import { getSessionId } from '../agent-session';
 import { ArticleGenerationService, createArticlePort } from '../geo/article-generation';
 import { GeoBaselineService, createGeoBaselinePort } from '../geo/baseline';
 import { createDistributionPlanPort, DistributionPlanningService } from '../geo/distribution-plan';
+import { createBrandMaterialPort } from '../geo/material-import';
 import { recordGeoOperationMilestone } from '../geo/operation-progress';
 import {
   getXiaojingGeoBillingPermitChannel,
@@ -95,6 +97,12 @@ function getXiaojingArticleService(identity: Identity): ArticleGenerationService
     capabilities.generation,
     capabilities.reflection,
     getXiaojingGeoBillingPermitChannel(),
+    // 配图候选池（ADR-0008 T4）：材料图片资产直传正文提示词；池空或读取
+    // 失败在服务内降级为零配图，不阻塞生成主链。
+    async () =>
+      createBrandMaterialPort(identity).listImageAssets({
+        limit: ARTICLE_IMAGE_CANDIDATE_INJECTION_LIMIT,
+      }),
   );
   articleRuntime = { key, service };
   return service;

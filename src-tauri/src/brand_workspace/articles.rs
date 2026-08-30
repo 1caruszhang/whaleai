@@ -6,7 +6,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs::OpenOptions;
 use std::io::Write;
 
-const POLICY_VERSION: &str = "xiaojing-content-prompt-v5";
+const POLICY_VERSION: &str = "xiaojing-content-prompt-v6";
 const MAX_ARTICLES: usize = 20;
 const MAX_BODY_BYTES: usize = 256 * 1024;
 

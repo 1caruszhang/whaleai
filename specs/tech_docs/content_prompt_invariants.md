@@ -47,6 +47,7 @@
 7. 篇幅与节奏（js_ai 模板已裁决语义回迁，v2）：四类总字数 1800–2100（guide/showcase/news/news_light）、ranking 全文 ≤2500（引言 ≥100、每家约 320、每条 50–55 且单条 ≥45）；news 分段导语 ≤200/主体 ≈1400/结尾 ≤250；可读节奏每约 200 字变换角度。
 8. 关键词融入（js_ai 已裁决语义回迁，v2）：全局基线约每 300 字 1 次；guide 每 500 字 1 次、news 每 300 字 1 次、news_light 每 200 字 1 次且密度 2%–5%；guide/ranking 首段嵌入 1–2 个关键词；地域/核心关键词首次出现及关键论据处加粗，单一加粗实体（品牌名与 ranking 维度名除外）≤3 次，H2 不加粗。
 9. ranking 编排细则（js_ai 已裁决语义回迁，v2）：维度按行业真实决策关切自选；标题数字=正文陈列项数；全文倒数第三段选型建议（隐性条件式点首位，数字与陈列位 1 对账）；目标品牌最强维度置首、竞品两三条专精优势加一两条客观局限。
+10. 配图契约（ADR-0008 T4，v6）：候选池非空时正文 prompt 注入材料图片候选清单（图片 id + 描述 + 类型标签 + 来源材料名的纯文字清单，模型不看图片本体，注入上限 50）与配图纪律（全文不超过 3 张、宁缺毋滥、只在语义相关处插图、alt 文本由模型撰写、占位符独立成行）；正文以标准 Markdown 图片语法输出 `![alt](material-image://<图片id>)` 占位符。`parseGeneratedArticleBody` 放行该受控 scheme 的图片语法，scheme 逃逸用法（裸文本/普通链接/坏 id）拒绝（`article_generation_image_placeholder_invalid`），【】禁令不变；确定性审核门对占位符语法与密度 >3 阻断（覆盖人工编辑路径）。候选池空或读取失败降级为零配图继续生成。
 
 ## 合法偏离登记表（相对 js_ai）
 
@@ -72,6 +73,7 @@
 | D13 | 产量纪律 | 挖词无数量指引、下游硬截断 | 挖词数量指引（4–6/8–12/12–18）+ 问题生成配额策略（高热度与意图多样优先） | ADR-0006 修正三（F2/F6 缺陷修补） |
 | D14 | 正文事实来源 | 生成模型离线，只吃已批准事实 | ranking 类型整篇联网（enable_search）：竞品条目联网取材消除结构性编造；目标品牌段落仍受「只使用已批准事实」提示词纪律约束，网络素材渗入风险由用户明示接受；非排行类型保持离线。正文段 policyVersion v3→v4 | ADR-0007 Decision 4（用户裁决） |
 | D15 | ranking 名单构成 | 五家陈列位全部来自已确认 competitors（直接层） | 两层名单（ADR-0007 Decision 6）：直接层（三同全中）优先，不足 5 家时用 potentialCompetitors（潜在层：相近场景/替代品类）按序补足到 5；跨层归一名嵌套互斥，身份/关联主体排除两层共用（TS `mergeRankingCompetitorTiers` 与 Rust `valid_ranking_competitors` 同构，契约用例共享 rankingCompetitorContractCases.json）；标题红线名单同步含两层。正文段 policyVersion v4→v5 | ADR-0007 Decision 6（用户裁决 2026-08-30） |
+| D16 | 正文配图 | 纯文字正文，无配图约定 | 材料图片候选清单注入正文 prompt（纯文字清单，模型不看图本体）+ 配图纪律（≤3 张、宁缺毋滥、语义相关处插图、alt 由模型撰写）；正文输出 `material-image://` markdown 图片占位符，发布期由 Rust 替换为真实 URL（#15）；占位符语法/校验用例共享 materialImagePlaceholderContractCases.json（TS/Rust 同构，先例 rankingCompetitorContractCases.json）。正文段 policyVersion v5→v6 | ADR-0008 Decision 3（2026-08-31） |
 
 ## 显式延后（下一批裁决）
 

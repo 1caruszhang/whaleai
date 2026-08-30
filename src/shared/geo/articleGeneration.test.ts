@@ -1,11 +1,13 @@
 import { describe, expect, it } from "vitest";
 
+import materialImagePlaceholderContract from "./materialImagePlaceholderContractCases.json";
 import rankingCompetitorContractCases from "./rankingCompetitorContractCases.json";
 
 import {
   ARTICLE_GENERATION_CONCURRENCY,
   ARTICLE_GENERATION_POLICY_VERSION,
   ARTICLE_NARRATIVE_SEEDS,
+  ARTICLE_IMAGE_CANDIDATE_INJECTION_LIMIT,
   buildArticleGenerationMessages,
   combineArticleReview,
   dealNarrativeSeeds,
@@ -18,6 +20,11 @@ import {
   shuffledNarrativeSeeds,
   validateDirectArticleSource,
 } from "./articleGeneration";
+import {
+  MATERIAL_IMAGE_MAX_PER_ARTICLE,
+  MATERIAL_IMAGE_URI_SCHEME,
+  scanMaterialImagePlaceholders,
+} from "./materialImagePlaceholder";
 
 describe("ranking competitor cross-process contract", () => {
   it.each(rankingCompetitorContractCases)("$name", (contractCase) => {
@@ -246,6 +253,123 @@ describe("direct article generation contract", () => {
     expect(() =>
       parseGeneratedArticleBody("# 企业知识库指南\n【品牌】", "企业知识库指南"),
     ).toThrow("article_generation_unresolved_placeholder");
+  });
+});
+
+describe("material-image placeholder cross-process contract (ADR-0008 T4)", () => {
+  it("pins the scheme and density constants the Rust replacement side will share", () => {
+    expect(MATERIAL_IMAGE_URI_SCHEME).toBe(materialImagePlaceholderContract.uriScheme);
+    expect(MATERIAL_IMAGE_MAX_PER_ARTICLE).toBe(
+      materialImagePlaceholderContract.maxImagesPerArticle,
+    );
+  });
+
+  it.each(materialImagePlaceholderContract.cases)("$name", (contractCase) => {
+    // 接缝二（spec #10）：同一份用例同时驱动 TS 侧三个消费点——
+    // 占位符扫描（与 #15 Rust 替换同构）、parseGeneratedArticleBody 的
+    // 放行/拒绝、deterministicArticleReview 的配图纪律阻断。
+    const scan = scanMaterialImagePlaceholders(contractCase.body);
+    expect(scan.placeholders.map((placeholder) => placeholder.imageId)).toEqual(
+      contractCase.expectedImageIds,
+    );
+    expect(scan.placeholders.map((placeholder) => placeholder.alt)).toEqual(
+      contractCase.expectedAlts,
+    );
+    if (contractCase.valid) {
+      expect(scan.violations).toEqual([]);
+    } else {
+      expect(scan.violations.length).toBeGreaterThan(0);
+    }
+    const requestedTitle = (contractCase.body.split(/\r?\n/, 1)[0] ?? "").replace(
+      /^#\s+/,
+      "",
+    );
+    if (contractCase.expectedParseError === null) {
+      expect(() =>
+        parseGeneratedArticleBody(contractCase.body, requestedTitle),
+      ).not.toThrow();
+    } else {
+      expect(() =>
+        parseGeneratedArticleBody(contractCase.body, requestedTitle),
+      ).toThrow(contractCase.expectedParseError);
+    }
+    const placeholderBlocking = deterministicArticleReview(
+      contractCase.body,
+      [],
+      "guide",
+      "",
+    ).filter(
+      (issue) =>
+        issue.severity === "blocking" &&
+        /material-image|配图|未解析占位符/.test(issue.message),
+    );
+    if (contractCase.expectedReviewBlocking) {
+      expect(placeholderBlocking.length).toBeGreaterThan(0);
+    } else {
+      expect(placeholderBlocking).toEqual([]);
+    }
+  });
+});
+
+describe("illustration contract injection (ADR-0008 T4)", () => {
+  const promptBase = {
+    brandName: "小鲸",
+    productLine: "知识服务",
+    targetRegion: "中国",
+    contentType: "guide" as const,
+    topic: "企业知识库指南",
+    requestedTitle: "企业知识库指南",
+    constraints: "",
+    plannedFacts: facts,
+  };
+  const candidates = [
+    {
+      id: "9f1c2ab4-52d8-4f6e-8a90-1c2d3e4f5a6b",
+      description: "红色门头的门店外景实拍",
+      category: "scene" as const,
+      sourceMaterialName: "品牌手册.docx",
+    },
+    {
+      id: "0a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d",
+      description: "产品三件套陈列台面",
+      category: "product-photo" as const,
+      sourceMaterialName: "产品图集.pptx",
+    },
+  ];
+
+  it("injects the candidate list and the illustration discipline when candidates exist", () => {
+    const messages = buildArticleGenerationMessages({
+      ...promptBase,
+      imageCandidates: candidates,
+    });
+    expect(messages.system).toContain("配图纪律（必须完全满足）");
+    expect(messages.system).toContain("![alt 文本](material-image://图片ID)");
+    expect(messages.system).toContain("不超过 3 张");
+    expect(messages.system).toContain("宁缺毋滥");
+    expect(messages.system).toContain("只在语义相关");
+    expect(messages.system).toContain("alt 文本由你撰写");
+    expect(messages.user).toContain("配图候选清单");
+    expect(messages.user).toContain("你看不到图片本体");
+    for (const candidate of candidates) {
+      expect(messages.user).toContain(candidate.id);
+      expect(messages.user).toContain(candidate.description);
+      expect(messages.user).toContain(candidate.sourceMaterialName);
+    }
+    expect(messages.user).toContain("环境");
+    expect(messages.user).toContain("产品实拍");
+  });
+
+  it("keeps the prompt illustration-free when no candidates exist (zero-image path)", () => {
+    const messages = buildArticleGenerationMessages(promptBase);
+    expect(messages.system).not.toContain("配图纪律");
+    expect(messages.user).not.toContain("配图候选清单");
+    expect(messages.user).not.toContain("material-image://");
+    expect(messages.system).not.toContain("material-image://");
+  });
+
+  it("exposes the injection cap as a named constant for the pool wiring", () => {
+    expect(ARTICLE_IMAGE_CANDIDATE_INJECTION_LIMIT).toBeGreaterThan(0);
+    expect(ARTICLE_IMAGE_CANDIDATE_INJECTION_LIMIT).toBeLessThanOrEqual(100);
   });
 });
 

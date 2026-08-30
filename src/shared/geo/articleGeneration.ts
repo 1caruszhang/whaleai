@@ -1,4 +1,12 @@
 import { GEO_PORT_CONTRACT, type GeoContentType } from "./portContract";
+import {
+  materialImageCategoryLabel,
+  type MaterialImageCategoryCode,
+} from "./materialImages";
+import {
+  MATERIAL_IMAGE_MAX_PER_ARTICLE,
+  scanMaterialImagePlaceholders,
+} from "./materialImagePlaceholder";
 import { projectBrandProfile, resolveBrandName } from "./profileInjection";
 import {
   TITLE_STYLE_DEFINITIONS,
@@ -7,11 +15,16 @@ import {
 } from "./topicPlan";
 
 export const ARTICLE_GENERATION_POLICY_VERSION =
-  "xiaojing-content-prompt-v5";
+  "xiaojing-content-prompt-v6";
 export const ARTICLE_GENERATION_CONCURRENCY =
   GEO_PORT_CONTRACT.concurrency.perArticleLifecycle.limit;
 export const ARTICLE_GENERATION_MAX_ARTICLES = 20;
 export const ARTICLE_BODY_MAX_BYTES = 256 * 1024;
+/**
+ * 单篇正文提示词注入的配图候选上限（ADR-0008 T4）：候选池本身可更大，
+ * 注入按入池时间倒序截到此数，避免挤占正文生成的 token 预算。
+ */
+export const ARTICLE_IMAGE_CANDIDATE_INJECTION_LIMIT = 50;
 
 export type ArticleOperationSource =
   | {
@@ -245,6 +258,33 @@ export interface ArticleNarrativeSeed {
   subtitleTendency: string;
 }
 
+/**
+ * 配图候选（ADR-0008 Decision 3）：材料图片候选池条目的提示词投影——
+ * 生成模型只看这份纯文字清单，不看图片本体。MaterialImageAsset 结构上
+ * 满足本接口，服务层可直接透传。
+ */
+export interface ArticleImageCandidate {
+  id: string;
+  /** 视觉打标产出的一句中文描述。 */
+  description: string;
+  /** 类型标签（可选）：帮助模型判断与正文段落的相关性。 */
+  category?: MaterialImageCategoryCode;
+  /** 来源材料名（展示候选出处）。 */
+  sourceMaterialName: string;
+}
+
+/**
+ * 配图纪律（ADR-0008 Decision 3，内容契约新增段）：全文 ≤3 张、宁缺毋滥、
+ * 只在语义相关处插图、alt 文本由模型撰写。仅在候选清单非空时注入——无候选
+ * 时零配图是唯一合法结果，不提示图片能力。
+ */
+export const ARTICLE_ILLUSTRATION_CONTRACT: readonly string[] = [
+  "只能使用「配图候选清单」中列出的图片；引用一律用标准 Markdown 图片语法：![alt 文本](material-image://图片ID)，图片ID 逐字复制候选清单，不得自造、改写或使用清单外地址。",
+  "alt 文本由你撰写：一句话说明图片内容及其与所在段落的关系。",
+  `全文配图不超过 ${MATERIAL_IMAGE_MAX_PER_ARTICLE} 张，宁缺毋滥：只在语义相关、确有阐释价值的位置插图，占位符独立成行、紧随其阐释的段落。`,
+  "没有合适图片或合适位置时，零配图是合法结果，不得为凑数插图。",
+];
+
 export const ARTICLE_NARRATIVE_SEEDS: readonly ArticleNarrativeSeed[] = [
   { angle: "从行业现状切入", hook: "以行业现状与格局概述开篇，点出趋势", subtitleTendency: "中性陈述式（现状—痛点—方法）" },
   { angle: "从用户痛点切入", hook: "以典型客户的痛点场景开篇，引出需求", subtitleTendency: "口语问句式" },
@@ -444,11 +484,17 @@ export function buildArticleGenerationMessages(input: {
   identityBlock?: string;
   /** 本篇叙事视角种子；只影响开篇与表达，不放松硬纪律。 */
   narrativeSeed?: ArticleNarrativeSeed;
+  /**
+   * 配图候选清单（ADR-0008 T4）：非空时注入候选清单与配图纪律；
+   * 空或缺省时不注入任何配图提示（零配图路径）。
+   */
+  imageCandidates?: readonly ArticleImageCandidate[];
 }): { system: string; user: string } {
   if (input.plannedFacts.length === 0) {
     throw new Error("article_generation_knowledge_snapshot_empty");
   }
   const contract = CONTENT_TYPE_CONTRACTS[input.contentType];
+  const hasImageCandidates = (input.imageCandidates?.length ?? 0) > 0;
   const system = [
     "你是 GEO 文章写作专家。生成一篇尚未绑定任何渠道的中文通用草稿。",
     "只使用输入中列出的已批准事实。没有列出的品牌硬事实一律视为未知：不得补写、猜测、引用行业常识冒充品牌事实，也不得虚构数据、案例、用户评价、采访、资质或来源。",
@@ -468,6 +514,12 @@ export function buildArticleGenerationMessages(input: {
     ...contract.expression.map((rule) => `- ${rule}`),
     ...(contract.fact.length > 0
       ? ["事实衔接：", ...contract.fact.map((rule) => `- ${rule}`)]
+      : []),
+    ...(hasImageCandidates
+      ? [
+          "配图纪律（必须完全满足）：",
+          ...ARTICLE_ILLUSTRATION_CONTRACT.map((rule) => `- ${rule}`),
+        ]
       : []),
   ].join("\n");
   const seedBlock = input.narrativeSeed
@@ -505,6 +557,20 @@ export function buildArticleGenerationMessages(input: {
     "",
     "已批准事实（唯一 Claim 根基）：",
     ...factLines(input.plannedFacts),
+    ...(hasImageCandidates
+      ? [
+          "",
+          "配图候选清单（材料图片，仅供选用；你看不到图片本体，仅凭描述、类型与来源材料判断与正文段落的相关性）：",
+          ...(input.imageCandidates ?? []).map(
+            (candidate) =>
+              `- 图片ID ${candidate.id}${
+                candidate.category
+                  ? `｜类型 ${materialImageCategoryLabel(candidate.category)}`
+                  : ""
+              }｜来源材料 ${candidate.sourceMaterialName}｜描述 ${candidate.description}`,
+          ),
+        ]
+      : []),
     "生成 1 篇通用文章。若事实不足以支撑某个段落，就省略该段落，不得填充看似合理的内容。",
   ]
     .filter((line) => line !== undefined)
@@ -529,6 +595,12 @@ export function parseGeneratedArticleBody(
   }
   if (body.includes("【") || body.includes("】")) {
     throw new Error("article_generation_unresolved_placeholder");
+  }
+  // ADR-0008 T4：material-image:// 是受控 uri scheme——标准 Markdown 图片
+  // 语法放行；scheme 的一切逃逸用法（裸文本/普通链接/坏 id）按未解析
+  // 占位符拒绝。【】之外的其他文本占位符禁令保持不变。
+  if (scanMaterialImagePlaceholders(body).violations.length > 0) {
+    throw new Error("article_generation_image_placeholder_invalid");
   }
   const firstLine = body.split(/\r?\n/, 1)[0]?.trim();
   // 标题实质字符一致即通过（2026-08-18 裁定）：lite 模型复现 H1 时常有
@@ -812,6 +884,26 @@ export function deterministicArticleReview(
       category: "output-contract",
       severity: "blocking",
       message: "正文仍包含未解析占位符。",
+    });
+  }
+  // 配图纪律的确定性面（ADR-0008 T4）：批准门复检覆盖人工编辑——
+  // scheme 逃逸用法与超过密度上限都阻断（人工编辑路径不走
+  // parseGeneratedArticleBody，这里是唯一防线）。
+  const imageScan = scanMaterialImagePlaceholders(body);
+  if (imageScan.violations.length > 0) {
+    issues.push({
+      source: "deterministic",
+      category: "output-contract",
+      severity: "blocking",
+      message: `正文包含不合契约的 material-image 占位符：${imageScan.violations[0]}`,
+    });
+  }
+  if (imageScan.placeholders.length > MATERIAL_IMAGE_MAX_PER_ARTICLE) {
+    issues.push({
+      source: "deterministic",
+      category: "output-contract",
+      severity: "blocking",
+      message: `配图纪律不满足：material-image 占位符最多 ${MATERIAL_IMAGE_MAX_PER_ARTICLE} 张（当前 ${imageScan.placeholders.length} 张）。`,
     });
   }
   return issues;

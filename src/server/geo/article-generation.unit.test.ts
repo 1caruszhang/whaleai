@@ -9,10 +9,12 @@ import {
 } from "./article-generation";
 import {
   ARTICLE_GENERATION_POLICY_VERSION,
+  ARTICLE_IMAGE_CANDIDATE_INJECTION_LIMIT,
   type ArticleGenerationContext,
   type ArticleOperationProjection,
   type ArticleProjection,
 } from "../../shared/geo/articleGeneration";
+import type { MaterialImageAsset } from "../../shared/geo/materialImages";
 import type { GeoTextCapability, GeoTextMessage } from "./provider-capabilities";
 
 /** direct 路径先跑标题生成（guide/知识服务，满足 validateTitleCandidates）再跑正文。 */
@@ -73,7 +75,7 @@ function operation(articles: ArticleProjection[]): ArticleOperationProjection {
     topicPlanId: null,
     topicPlanRevision: null,
     knowledgeVersion: 7,
-    policyVersion: "xiaojing-content-prompt-v5",
+    policyVersion: "xiaojing-content-prompt-v6",
     status: "running",
     articles,
     createdAt: "2026-01-01T00:00:00Z",
@@ -606,6 +608,286 @@ describe("ArticleGenerationService", () => {
       (finishReview.mock.calls[0]?.[0] as { review?: { reflection?: unknown } })
         .review?.reflection,
     ).toBeUndefined();
+  });
+});
+
+describe("ArticleGenerationService material-image candidates (ADR-0008 T4)", () => {
+  /** 独立图片候选（候选池地基的资产形态）：材料图片资产直传提示词。 */
+  function pooledImageAsset(
+    id: string,
+    description: string,
+    sourceMaterialName: string,
+    category: MaterialImageAsset["category"] = "product-photo",
+  ): MaterialImageAsset {
+    return {
+      id,
+      workspaceId: "workspace-1",
+      sha256: `sha256-${id}`,
+      fileExt: "png",
+      mediaType: "image/png",
+      byteSize: 2048,
+      width: 1024,
+      height: 768,
+      description,
+      category,
+      sourceMaterialId: `material-${id}`,
+      sourceMaterialName,
+      relativePath: `media/images/${id}.png`,
+      createdAt: "2026-01-01T00:00:00Z",
+      updatedAt: "2026-01-01T00:00:00Z",
+    };
+  }
+
+  const pooledCandidates = [
+    pooledImageAsset(
+      "9f1c2ab4-52d8-4f6e-8a90-1c2d3e4f5a6b",
+      "红色门头的门店外景实拍",
+      "品牌手册.docx",
+      "scene",
+    ),
+    pooledImageAsset(
+      "0a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d",
+      "产品三件套陈列台面",
+      "产品图集.pptx",
+    ),
+  ];
+
+  /** confirmed-topic-plan 路径（无标题生成腿）+ 回声正文：把 prompt 里的
+   * 候选清单按 material-image 占位符逐张写回正文——模拟生成模型按契约
+   * 选图，闭环演示候选池 → 提示词 → 占位符正文 → 落库。 */
+  function echoIllustrationComplete(
+    messages: readonly GeoTextMessage[],
+  ): string {
+    const prompt = messages.map((message) => message.content).join("\n");
+    const ids = [...prompt.matchAll(/- 图片ID ([0-9a-f-]{36})/g)].map(
+      (match) => match[1],
+    );
+    const images = ids
+      .map((id) => `![与段落语义相关的配图](material-image://${id})`)
+      .join("\n\n");
+    return [
+      "# 配图演示标题",
+      "",
+      "## 定义",
+      "说明文字一段。",
+      "",
+      images,
+      "",
+      "## 清单",
+      "- 核对事实",
+      "- 固定版本",
+    ].join("\n");
+  }
+
+  function illustrationPort(row: ArticleProjection) {
+    const bodyPrompts: string[] = [];
+    const finishGeneration = vi.fn(
+      async (_input: { operationId: string; articleId: string; body: string }) => ({
+        ...row,
+        status: "draft_ready" as const,
+        revision: 1,
+      }),
+    );
+    const failGeneration = vi.fn(
+      async ({ failureReason }: { failureReason: string }) => ({
+        ...row,
+        status: "generation_failed" as const,
+        failureReason,
+      }),
+    );
+    return {
+      bodyPrompts,
+      finishGeneration,
+      failGeneration,
+      port: {
+        start: vi.fn(async () => operation([row])),
+        getOperation: vi.fn(async () => operation([row])),
+        claimGeneration: vi.fn(
+          async () =>
+            ({
+              article: row,
+              brandName: "测试品牌",
+              productLine: "知识服务",
+              targetRegion: "中国",
+              claimToken: "claim-img",
+            }) satisfies ArticleGenerationContext,
+        ),
+        finishGeneration,
+        failGeneration,
+      } as unknown as ArticlePersistencePort,
+    };
+  }
+
+  it("生成链消费独立图片候选，产出一篇含 material-image 占位符的文章（AC5 演示）", async () => {
+    const row = {
+      ...article("img-1"),
+      sourcePlanItemId: "plan-img-1",
+      requestedTitle: "配图演示标题",
+    };
+    const { port, bodyPrompts, finishGeneration } = illustrationPort(row);
+    const generation = {
+      slot: "generation",
+      complete: vi.fn(async (messages: readonly GeoTextMessage[]) => {
+        const prompt = messages.map((message) => message.content).join("\n");
+        bodyPrompts.push(prompt);
+        return echoIllustrationComplete(messages);
+      }),
+    } satisfies GeoTextCapability;
+    const service = new ArticleGenerationService(
+      { workspaceId: "workspace-1", sessionId: "session-1" },
+      port,
+      generation,
+      { slot: "reflection", complete: vi.fn() },
+      undefined,
+      async () => pooledCandidates,
+    );
+
+    await service.start({
+      workspaceId: "workspace-1",
+      sessionId: "session-1",
+      source: { kind: "confirmed-topic-plan", planId: "plan-1" },
+    });
+
+    // 候选清单与配图纪律都进了正文提示词（接缝二）。
+    expect(bodyPrompts).toHaveLength(1);
+    expect(bodyPrompts[0]).toContain("配图纪律（必须完全满足）");
+    expect(bodyPrompts[0]).toContain("配图候选清单");
+    for (const candidate of pooledCandidates) {
+      expect(bodyPrompts[0]).toContain(candidate.id);
+      expect(bodyPrompts[0]).toContain(candidate.description);
+      expect(bodyPrompts[0]).toContain(candidate.sourceMaterialName);
+    }
+    // 正文以 markdown 图片语法携带占位符并通过解析落库（parse 放行该 scheme）。
+    expect(port.failGeneration).not.toHaveBeenCalled();
+    expect(finishGeneration).toHaveBeenCalledTimes(1);
+    const finishedBody = (finishGeneration.mock.calls[0]?.[0] as {
+      body: string;
+    }).body;
+    for (const candidate of pooledCandidates) {
+      expect(finishedBody).toContain(
+        `![与段落语义相关的配图](material-image://${candidate.id})`,
+      );
+    }
+  });
+
+  it("无候选时零配图照常生成（提示词不含配图块）", async () => {
+    const row = {
+      ...article("img-0"),
+      sourcePlanItemId: "plan-img-0",
+      requestedTitle: "配图演示标题",
+    };
+    const { port, bodyPrompts } = illustrationPort(row);
+    const generation = {
+      slot: "generation",
+      complete: vi.fn(async (messages: readonly GeoTextMessage[]) => {
+        const prompt = messages.map((message) => message.content).join("\n");
+        bodyPrompts.push(prompt);
+        return "# 配图演示标题\n\n## 定义\n说明。\n\n## 清单\n- 项";
+      }),
+    } satisfies GeoTextCapability;
+    const service = new ArticleGenerationService(
+      { workspaceId: "workspace-1", sessionId: "session-1" },
+      port,
+      generation,
+      { slot: "reflection", complete: vi.fn() },
+      undefined,
+      async () => [],
+    );
+
+    await service.start({
+      workspaceId: "workspace-1",
+      sessionId: "session-1",
+      source: { kind: "confirmed-topic-plan", planId: "plan-1" },
+    });
+
+    expect(bodyPrompts[0]).not.toContain("配图候选清单");
+    expect(bodyPrompts[0]).not.toContain("配图纪律");
+    expect(port.failGeneration).not.toHaveBeenCalled();
+    expect(port.finishGeneration).toHaveBeenCalledTimes(1);
+  });
+
+  it("候选池获取失败降级为零配图，不阻塞生成主链（ADR-0008 降级路径）", async () => {
+    const row = {
+      ...article("img-down"),
+      sourcePlanItemId: "plan-img-down",
+      requestedTitle: "配图演示标题",
+    };
+    const { port, bodyPrompts } = illustrationPort(row);
+    const generation = {
+      slot: "generation",
+      complete: vi.fn(async (messages: readonly GeoTextMessage[]) => {
+        const prompt = messages.map((message) => message.content).join("\n");
+        bodyPrompts.push(prompt);
+        return "# 配图演示标题\n\n## 定义\n说明。\n\n## 清单\n- 项";
+      }),
+    } satisfies GeoTextCapability;
+    const service = new ArticleGenerationService(
+      { workspaceId: "workspace-1", sessionId: "session-1" },
+      port,
+      generation,
+      { slot: "reflection", complete: vi.fn() },
+      undefined,
+      async () => {
+        throw new Error("material candidate listing unavailable");
+      },
+    );
+
+    await service.start({
+      workspaceId: "workspace-1",
+      sessionId: "session-1",
+      source: { kind: "confirmed-topic-plan", planId: "plan-1" },
+    });
+
+    expect(bodyPrompts[0]).not.toContain("配图候选清单");
+    expect(port.failGeneration).not.toHaveBeenCalled();
+    expect(port.finishGeneration).toHaveBeenCalledTimes(1);
+  });
+
+  it("注入候选清单按注入上限截断（提示词预算护栏）", async () => {
+    const row = {
+      ...article("img-cap"),
+      sourcePlanItemId: "plan-img-cap",
+      requestedTitle: "配图演示标题",
+    };
+    const { port, bodyPrompts } = illustrationPort(row);
+    const many = Array.from(
+      { length: ARTICLE_IMAGE_CANDIDATE_INJECTION_LIMIT + 10 },
+      (_, index) =>
+        pooledImageAsset(
+          `cand-${String(index).padStart(4, "0")}`,
+          `候选图 ${index}`,
+          "大图集.pptx",
+        ),
+    );
+    const generation = {
+      slot: "generation",
+      complete: vi.fn(async (messages: readonly GeoTextMessage[]) => {
+        const prompt = messages.map((message) => message.content).join("\n");
+        bodyPrompts.push(prompt);
+        return "# 配图演示标题\n\n## 定义\n说明。\n\n## 清单\n- 项";
+      }),
+    } satisfies GeoTextCapability;
+    const service = new ArticleGenerationService(
+      { workspaceId: "workspace-1", sessionId: "session-1" },
+      port,
+      generation,
+      { slot: "reflection", complete: vi.fn() },
+      undefined,
+      async () => many,
+    );
+
+    await service.start({
+      workspaceId: "workspace-1",
+      sessionId: "session-1",
+      source: { kind: "confirmed-topic-plan", planId: "plan-1" },
+    });
+
+    const injected = bodyPrompts[0].match(/- 图片ID /g) ?? [];
+    expect(injected).toHaveLength(ARTICLE_IMAGE_CANDIDATE_INJECTION_LIMIT);
+    expect(bodyPrompts[0]).toContain("- 图片ID cand-0000");
+    expect(bodyPrompts[0]).not.toContain(
+      `- 图片ID cand-${String(ARTICLE_IMAGE_CANDIDATE_INJECTION_LIMIT).padStart(4, "0")}`,
+    );
   });
 });
 
