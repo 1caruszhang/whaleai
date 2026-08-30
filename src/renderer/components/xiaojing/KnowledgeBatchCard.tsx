@@ -29,6 +29,35 @@ export { parseKnowledgeCandidatesCard };
  */
 type KnowledgeConflictChoice = 'adopt-new' | 'keep-current';
 
+/**
+ * 摘录文本按 URL 切分渲染：竞品证据行的「（来源：<url>）」留痕可直接点开
+ * 复核原文；非 URL 段保持纯文本。摘录来自服务端证据拼接，不自己构造链接。
+ */
+function ExcerptText({ text }: { text: string }) {
+  return (
+    <>
+      {text
+        .split(/(https?:\/\/[^\s，。、；）)」』】］…》]+)/)
+        .map((part, index) =>
+          part.startsWith('http://') || part.startsWith('https://')
+            ? (
+              <a
+                key={index}
+                href={part}
+                target="_blank"
+                rel="noreferrer"
+                className="break-all underline"
+                data-excerpt-source-link={part}
+              >
+                {part}
+              </a>
+            )
+            : <span key={index}>{part}</span>,
+        )}
+    </>
+  );
+}
+
 interface CandidateState {
   confirmed: boolean;
   conflictChoice: KnowledgeConflictChoice | undefined;
@@ -964,7 +993,8 @@ function FieldRow({ row, stateOf, busy, onConfirmRow, onChoose, onStageEdits, on
                 </p>
                 {candidate.source.excerpt && (
                   <p className="break-words">
-                    {t('knowledgeCard.excerptLabel', { excerpt: candidate.source.excerpt })}
+                    {t('knowledgeCard.excerptLabel', { excerpt: '' })}
+                    <ExcerptText text={candidate.source.excerpt} />
                   </p>
                 )}
                 {candidate.current && (

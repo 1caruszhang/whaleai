@@ -6,6 +6,7 @@ import type { KnowledgeCandidate, KnowledgeCurrentFact, KnowledgeProposalInput }
 import { GatewayBillingError } from './billing-permit';
 import {
   MaterialImportService,
+  brandCoreName,
   capSourcesPerDomain,
   dedupeSourcesByUrl,
   fetchWebsiteMaterial,
@@ -738,6 +739,52 @@ describe("competitor enrichment (ADR-0007 source-grounded extraction)", () => {
     expect(snapshotPrompt).toContain('泽言网络');
   });
 
+  it('collapses same-brand disguises across tiers and cites the matched source URL (马甲回归 2026-08-31)', async () => {
+    // 张仔纪实跑回归：直接层收了探店帖马甲「张仔纪·老顺德干蒸菜」，潜在层又
+    // 收了软文马甲「张仔纪干蒸菜」——跨层互斥因子串互不包含没拦住，同品牌
+    // 双份上卡；「·」首段归一后两个马甲同核「张仔纪」，潜在层被拦。证据行
+    // 带命中源 URL，确认卡展开可直接点开复核。
+    const provinceResponse = JSON.stringify({ facts: [
+      { field: 'industry', value: '餐饮管理', provenance: 'extracted', sourceExcerpt: '行业：餐饮管理' },
+      { field: 'serviceArea', value: '广东省', provenance: 'extracted', sourceExcerpt: '业务区域范围：广东省' },
+    ] });
+    const disguiseCorpus = [
+      {
+        title: '广州干蒸菜探店',
+        url: 'https://weitoutiao.example/store-review',
+        summary: '终于吃上了张仔纪·老顺德干蒸菜（金菊路店），十几块一碟白饭任装',
+      },
+      {
+        title: '干蒸菜加盟品牌盘点',
+        url: 'https://mill.example/jm-list',
+        summary: '张仔纪干蒸菜与蒸武门·广式蒸饭均入选品牌名录，面向创业者输出',
+      },
+    ];
+    const port = new FakeMaterialPort();
+    const current = service(port, {
+      completeResponses: [provinceResponse, JSON.stringify({
+        direct: [{ name: '张仔纪·老顺德干蒸菜', region: '广州' }],
+        potential: [
+          { name: '张仔纪干蒸菜', region: '广东' },
+          { name: '蒸武门·广式蒸饭', region: '广东' },
+        ],
+      })],
+      searchSources: async () => disguiseCorpus,
+    });
+    const result = await current.value.importPastedText('公司资料');
+
+    expect(result.ok).toBe(true);
+    // 两个马甲都归一为品牌本名；同核跨层互斥拦下潜在层的张仔纪。
+    expect(competitorsCallOf(current)?.[0].value).toEqual(['张仔纪']);
+    const potential = current.propose.mock.calls.find(
+      ([input]) => input.key.predicate.toLowerCase() === 'enterprise-profile.potentialcompetitors',
+    );
+    expect(potential?.[0].value).toEqual(['蒸武门']);
+    // 证据行带命中源 URL：直接层命中探店帖源。
+    expect(competitorsCallOf(current)?.[0].source.excerpt).toContain('（来源：https://weitoutiao.example/store-review）');
+    expect(potential?.[0].source.excerpt).toContain('（来源：https://mill.example/jm-list）');
+  });
+
   it('injects the customer-profile fields into the snapshot prompt and gates by customer voice', async () => {
     const port = new FakeMaterialPort();
     const current = service(port, {
@@ -1345,6 +1392,27 @@ describe('检索语料域名封顶（语料多样性）', () => {
     const input = [{ url: 'https://a.example/1' }, { url: 'https://a.example/2' }];
     expect(capSourcesPerDomain(input, 0)).toEqual(input);
     expect(capSourcesPerDomain(input, Number.NaN)).toEqual(input);
+  });
+});
+
+describe('brandCoreName（「·」首段归一）', () => {
+  it('takes the leading brand segment, dropping article-invented product suffixes', () => {
+    // 软文/探店帖爱给品牌黏「品牌·品类/系列」尾巴（·后是文章自造的产品线
+    // 描述）：马甲归一 + 假尾巴不上卡，一个规则同时解决同品牌跨层重复与
+    // 名字带私货两个实跑问题（2026-08-31）。
+    expect(brandCoreName('张仔纪·老顺德干蒸菜')).toBe('张仔纪');
+    expect(brandCoreName('张仔纪干蒸菜')).toBe('张仔纪干蒸菜');
+    expect(brandCoreName('粤食堂·经典蒸饭')).toBe('粤食堂');
+    expect(brandCoreName('蒸武门·广式蒸饭')).toBe('蒸武门');
+    expect(brandCoreName('煲爷·瓦煲饭与蒸饭')).toBe('煲爷');
+    expect(brandCoreName('粤食堂‧经典蒸饭')).toBe('粤食堂'); // ‧（U+2027）同款处理
+    // 无「·」的名字原样保留。
+    expect(brandCoreName('顺德杨廷记')).toBe('顺德杨廷记');
+  });
+
+  it('keeps the full name when the leading segment is too short to be a brand', () => {
+    expect(brandCoreName('A·联合品牌')).toBe('A·联合品牌');
+    expect(brandCoreName('·张仔纪')).toBe('·张仔纪');
   });
 });
 

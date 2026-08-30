@@ -746,7 +746,7 @@ function parseCompetitorNames(
       // 繁体源页名归一为简体存储（存在闸比对两侧同映射，证据摘录保留原文）；
       // 描述短语（引号包裹、「相关」句式）不是品牌名，剔除。
       const name = typeof holder.name === "string"
-        ? toSimplifiedChinese(holder.name.trim()).slice(0, 30)
+        ? brandCoreName(toSimplifiedChinese(holder.name.trim())).slice(0, 30)
         : "";
       const region = typeof holder.region === 'string' && holder.region.trim()
         ? holder.region.trim().slice(0, 40)
@@ -794,9 +794,10 @@ function parseCompetitorSuggestions(
     if (suggestions.length >= limits.deficit) break;
     if (!item || typeof item !== 'object' || Array.isArray(item)) continue;
     const holder = item as Record<string, unknown>;
-    // 与主路径同口径：繁体归简、描述短语（引号/「相关」句式）剔除、层内嵌套互斥。
+    // 与主路径同口径：繁体归简、「·」首段归一、描述短语（引号/「相关」句式）
+    // 剔除、层内嵌套互斥。
     const name = typeof holder.name === "string"
-      ? toSimplifiedChinese(holder.name.trim()).slice(0, 30)
+      ? brandCoreName(toSimplifiedChinese(holder.name.trim())).slice(0, 30)
       : "";
     const region = typeof holder.region === 'string' && holder.region.trim()
       ? holder.region.trim().slice(0, 40)
@@ -999,6 +1000,19 @@ export function dedupeSourcesByUrl<T extends { url: string }>(sources: readonly 
     kept.push(source);
   }
   return kept;
+}
+
+/**
+ * 品牌名「·」首段归一：软文与探店帖爱给品牌黏「品牌·品类/系列」尾巴
+ * （粤食堂·经典蒸饭、张仔纪·老顺德干蒸菜），·后是文章自造的产品线描述、
+ * 不是品牌名本身；同一品牌跨语料的多个马甲（张仔纪·老顺德干蒸菜 /
+ * 张仔纪干蒸菜）也因尾巴互不为子串漏过跨层互斥（2026-08-31 实跑同品牌
+ * 双份上卡）。取·前主品牌段；首段不足 2 字（单字/空）时保留全名，避免
+ * 把「A·联合品牌」这类真名削成无意义单字。纯函数，主/兜底两路径同口径。
+ */
+export function brandCoreName(name: string): string {
+  const segment = name.split(/[·・‧•]/)[0].trim();
+  return segment.length >= 2 ? segment : name;
 }
 
 /** 同一可注册域最多保留 cap 条（保检索序，先到先得）。cap 非正数时原样
@@ -1601,16 +1615,18 @@ export class MaterialImportService {
     // 提议 value 只含本次新增名称：KnowledgeAuthority propose 对数组字段做
     // 增量合并（current 在前、新增去重追加），既有权威值由该契约保住，
     // 不在待确认候选里重复呈现。材料抽出的名字在 process() 合并处加入。
-    // 权威值只存名称（ADR-0007 元数据退役）：region 只出现在证据文本里。
+    // 权威值只存名称（ADR-0007 元数据退役）：region 与来源链接只出现在证据
+    // 文本里——每行「名（地域）：快照（来源：<url>）」，确认卡展开可点开复核。
     const buildEnrichmentFact = (
       field: 'competitors' | 'potentialCompetitors',
-      rows: Array<{ name: string; region: string; evidence: string }>,
+      rows: Array<{ name: string; region: string; evidence: string; evidenceUrl?: string }>,
     ): ExtractedProfileFact => ({
       field,
       value: rows.map((row) => row.name),
       provenance: 'inferred',
       sourceExcerpt: rows
-        .map((row) => `${row.name}（${row.region}）：${row.evidence}`)
+        .map((row) => `${row.name}（${row.region}）：${row.evidence}`
+          + (row.evidenceUrl ? `（来源：${row.evidenceUrl}）` : ''))
         .join(' … ')
         .slice(0, KNOWLEDGE_EXCERPT_MAX_LENGTH),
       confidence: 0.5,
@@ -1697,8 +1713,8 @@ export class MaterialImportService {
       const gateTier = (
         rows: Array<{ name: string; region: string }>,
         cap: number,
-      ): Array<{ name: string; region: string; evidence: string }> => {
-        const survivors: Array<{ name: string; region: string; evidence: string }> = [];
+      ): Array<{ name: string; region: string; evidence: string; evidenceUrl: string }> => {
+        const survivors: Array<{ name: string; region: string; evidence: string; evidenceUrl: string }> = [];
         for (const { name, region } of rows) {
           if (survivors.length >= cap) break;
           const nameNorm = normalizeEvidenceText(name);
@@ -1714,6 +1730,7 @@ export class MaterialImportService {
             name,
             region,
             evidence: matchedIndex >= 0 ? sourceTexts[matchedIndex].slice(0, 200) : '',
+            evidenceUrl: matchedIndex >= 0 ? sources[matchedIndex].url : '',
           });
         }
         return survivors;

@@ -380,9 +380,37 @@ describe('KnowledgeBatchCard（字段行复核卡）', () => {
     expect(screen.queryByText('90%')).not.toBeInTheDocument();
 
     expandRow('核心优势');
-    expect(screen.getByText('依据：核心技术行业领先')).toBeInTheDocument();
+    // 摘录渲染改为标签前缀 + 链接化正文两段（URL 可点），文本分属两个节点。
+    expect(screen.getByText('依据：')).toBeInTheDocument();
+    expect(screen.getByText('核心技术行业领先')).toBeInTheDocument();
     expect(screen.getByText('90%')).toBeInTheDocument();
     expect(screen.getByText('材料原文')).toBeInTheDocument();
+  });
+
+  it('证据摘录里的来源 URL 渲染为可点击外链（竞品证据行留痕可复核）', () => {
+    render(<KnowledgeBatchCard data={cardData([
+      candidateSource({
+        id: 'c-competitors',
+        predicate: 'enterprise-profile.competitors',
+        valueJson: '["张仔纪"]',
+        normalizedValueJson: '["张仔纪"]',
+        source: {
+          materialId: 'material-1',
+          excerpt: '张仔纪（广州）：干蒸排骨现蒸现卖（来源：https://mill.example/jm-list）',
+          confidence: 0.5,
+          profileProvenance: 'inferred',
+        },
+      }),
+    ])} />);
+
+    expandRow('竞品');
+    const link = screen.getByRole('link', { name: 'https://mill.example/jm-list' });
+    expect(link).toHaveAttribute('href', 'https://mill.example/jm-list');
+    expect(link).toHaveAttribute('target', '_blank');
+    expect(link).toHaveAttribute('rel', 'noreferrer');
+    // 非 URL 段保持纯文本，标签前缀照常渲染。
+    expect(screen.getByText('依据：')).toBeInTheDocument();
+    expect(screen.getByText(/干蒸排骨现蒸现卖/)).toBeInTheDocument();
   });
 
   it('冲突行必须内联二选一，未解决前整卡确认禁用', async () => {
