@@ -83,6 +83,15 @@ export const KNOWLEDGE_CARD_MAX_CANDIDATES = 500;
  * 只携带复核所需的引用片段；完整摘录留在 KnowledgeAuthority 候选与审计里。 */
 export const KNOWLEDGE_CARD_EXCERPT_MAX_CHARS = 300;
 
+/**
+ * 竞品类候选的卡片摘录上限（2026-08-31 用户裁决：来源链接不齐全根因）：
+ * 摘录是「名（地域）：证据（来源：url） … 」分段拼接——每段 250~320 字，
+ * 300 字上限把第 2 家起的 URL 全部截掉（实跑 1746 字摘录 → 301 字，6 家
+ * 只剩第 1 家有链接）。竞品类放宽到 2000 字（服务端源摘录本身另有 4000
+ * 字上限），非竞品类维持 300 字紧凑复核。
+ */
+export const KNOWLEDGE_CARD_COMPETITOR_EXCERPT_MAX_CHARS = 2_000;
+
 export function parseKnowledgeCandidatesCard(
   raw: string,
 ): KnowledgeCandidatesCardData | null {
@@ -159,9 +168,9 @@ export interface KnowledgeCardCandidateSource {
 
 /** 卡片投影摘录：复核引用片段 + 截断省略号；原始值（valueJson）与完整摘录
  * 不进卡片载荷，避免与 normalized 值重复、把工具结果正文撑大。 */
-function projectExcerpt(excerpt: string): string {
-  return excerpt.length > KNOWLEDGE_CARD_EXCERPT_MAX_CHARS
-    ? `${excerpt.slice(0, KNOWLEDGE_CARD_EXCERPT_MAX_CHARS)}…`
+function projectExcerpt(excerpt: string, maxChars = KNOWLEDGE_CARD_EXCERPT_MAX_CHARS): string {
+  return excerpt.length > maxChars
+    ? `${excerpt.slice(0, maxChars)}…`
     : excerpt;
 }
 
@@ -170,7 +179,9 @@ export function toKnowledgeCardCandidate(
 ): KnowledgeCardCandidate {
   // ADR-0007 竞品行只显示名称：不再投影展示元数据；旧候选摘录中的
   // 版本化审计头仍要剥掉，避免标记泄漏进卡片复核文本。
-  const competitorSource = knowledgeFieldKeyOfPredicate(candidate.key.predicate) === 'competitors'
+  const fieldKey = knowledgeFieldKeyOfPredicate(candidate.key.predicate);
+  const competitorTier = fieldKey === 'competitors' || fieldKey === 'potentialCompetitors';
+  const competitorSource = fieldKey === 'competitors'
     ? decodeCompetitorEvidence(candidate.source.excerpt)
     : { details: [], evidence: candidate.source.excerpt };
   return {
@@ -191,7 +202,10 @@ export function toKnowledgeCardCandidate(
     origin: candidate.origin,
     source: {
       materialId: candidate.source.materialId ?? null,
-      excerpt: projectExcerpt(competitorSource.evidence),
+      excerpt: projectExcerpt(
+        competitorSource.evidence,
+        competitorTier ? KNOWLEDGE_CARD_COMPETITOR_EXCERPT_MAX_CHARS : undefined,
+      ),
       confidence: candidate.source.confidence,
       profileProvenance:
         candidate.source.profileProvenance === "extracted"

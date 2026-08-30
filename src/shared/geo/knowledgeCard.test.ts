@@ -50,6 +50,28 @@ function source(
   };
 }
 
+describe('竞品类卡片投影的摘录上限（来源链接不齐全回归 2026-08-31）', () => {
+  it('keeps every brand url segment alive through the card projection', () => {
+    // 实跑：1746 字竞品摘录被 300 字上限截到 301 字，6 家只剩第 1 家有
+    // 链接。竞品类投影放宽到 2000 字，非竞品类维持 300 字。
+    const names = ['广州蒸旺餐饮管理有限公司', '张仔纪（广州）餐饮管理有限公司', '蒸宫主现蒸排骨饭'];
+    const segment = (name: string) =>
+      `${name}（广东）：${'证据'.repeat(60)}（来源：https://mill.example/${names.indexOf(name)}）`;
+    const excerpt = names.map(segment).join(' … ');
+    const projected = toKnowledgeCardCandidate({
+      id: 'c1', workspaceId: 'w', sessionId: 's',
+      key: { subject: '品牌', predicate: 'enterprise-profile.competitors', scopeJson: '{"entityScope":"brand"}' },
+      valueJson: JSON.stringify(names), normalizedValueJson: JSON.stringify(names),
+      status: 'awaiting-confirmation', baseVersion: 0, origin: 'model-inferred',
+      source: { excerpt, confidence: 0.5, profileProvenance: 'inferred' },
+    });
+    const links = competitorSourceLinks(projected.source.excerpt);
+    expect([...links.keys()]).toEqual(names);
+    // 超过 2000 字仍截断（防载荷膨胀），非竞品类仍按 300 字紧凑复核。
+    expect(projected.source.excerpt.length).toBeLessThanOrEqual(2_001);
+  });
+});
+
 describe('competitorSourceLinks（竞品证据摘录 → 每品牌来源链接）', () => {
   it('parses per-brand name and source url from the enrichment excerpt format', () => {
     const links = competitorSourceLinks(

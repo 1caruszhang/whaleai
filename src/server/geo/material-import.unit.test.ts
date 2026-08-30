@@ -948,7 +948,7 @@ describe("competitor enrichment (ADR-0007 source-grounded extraction)", () => {
       { field: 'industry', value: '餐饮/干蒸菜', provenance: 'extracted', sourceExcerpt: '行业' },
       { field: 'serviceArea', value: '广东省', provenance: 'extracted', sourceExcerpt: '区域' },
     ] });
-    const fetch = vi.fn(async () => new Response('<html><body>干蒸菜品牌名录：蒸简单原盅蒸饭在列，内容足够长以通过最短正文校验，补充文字补充文字补充文字</body></html>', {
+    const fetch = vi.fn(async (_url: unknown) => new Response('<html><body>干蒸菜品牌名录：蒸简单原盅蒸饭在列，内容足够长以通过最短正文校验，补充文字补充文字补充文字</body></html>', {
       status: 200,
       headers: { 'content-type': 'text/html' },
     }));
