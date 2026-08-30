@@ -34,6 +34,9 @@ npm-debug.log*
 .env
 .env.*
 !.env.example
+# 一键环境恢复脚本与其产出的生产部署密钥（内联全部密钥与 SSH 私钥，绝不入库）
+.reset_env
+.server-deploy.env
 
 # Turbo
 .turbo/
