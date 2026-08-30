@@ -74,12 +74,34 @@ class SmokeMaterialPort implements BrandMaterialPort {
   async begin() {
     return { id: "attempt-smoke-1", materialId: "material-smoke-1", attemptNumber: 1 };
   }
-  async finish(input: { status: "awaiting-confirmation" | "failed"; errorCode?: string }) {
+  async finish(input: { status: "awaiting-confirmation" | "processed" | "failed"; errorCode?: string }) {
     this.finishes.push({ status: input.status, errorCode: input.errorCode });
     return this.stored;
   }
   async list() {
     return [];
+  }
+  async saveImageAsset(input: {
+    sourceMaterialId: string;
+    sha256: string;
+    fileExt: string;
+    mediaType: string;
+    byteSize: number;
+    width: number;
+    height: number;
+    description: string;
+    category: string;
+  }): Promise<{ id: string; deduplicated: boolean }> {
+    // 冒烟路径只走文本材料，不触达图片候选池。
+    void input;
+    throw new Error("unused");
+  }
+  async listImageAssets(): Promise<never[]> {
+    return [];
+  }
+  async imageAssetContent(imageId: string): Promise<Uint8Array> {
+    void imageId;
+    throw new Error("unused");
   }
 }
 

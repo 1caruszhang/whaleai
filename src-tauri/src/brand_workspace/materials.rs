@@ -9,8 +9,20 @@ const MAX_MATERIAL_BYTES: u64 = 20 * 1024 * 1024;
 const MAX_TEXT_MATERIAL_BYTES: usize = 2 * 1024 * 1024;
 const SUPPORTED_EXTENSIONS: &[&str] = &[
     "txt", "md", "markdown", "csv", "json", "html", "htm", "xml", "log", "pdf", "docx", "xlsx",
-    "pptx",
+    "pptx", "png", "jpg", "jpeg", "webp", "gif",
 ];
+
+/// 材料图片（ADR-0008）：可直传入池的图片扩展名。emf/wmf/tiff 不放行
+/// （浏览器渲染不了，转换显式延后）。
+const MATERIAL_IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "webp", "gif"];
+
+/// 入池分类白名单。图标装饰（icon-decoration）在导入管线就被过滤，因此
+/// 不在存储白名单里——数据库层与代码层共享同一纪律。
+const MATERIAL_IMAGE_CATEGORIES: &[&str] =
+    &["product-photo", "scene", "people", "chart", "screenshot"];
+
+/// 打标描述的入库上限（与 Node 侧截断边界一致）。
+const MATERIAL_IMAGE_DESCRIPTION_MAX_CHARS: usize = 300;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -88,6 +100,51 @@ pub struct BrandMaterialListItem {
     pub candidate_ids: Vec<String>,
 }
 
+/// 材料图片资产（ADR-0008 候选池条目）：sha256 为跨来源全局唯一键，原始
+/// 字节按内容寻址存 media/images/<sha256>.<ext>，随来源材料级联删除。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MaterialImage {
+    pub id: String,
+    pub workspace_id: String,
+    pub sha256: String,
+    pub file_ext: String,
+    pub media_type: String,
+    pub byte_size: u64,
+    pub width: u32,
+    pub height: u32,
+    pub description: String,
+    pub category: String,
+    pub source_material_id: String,
+    pub source_material_name: String,
+    pub relative_path: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// 入池写入请求：byte_size 是与来源材料本体的一致性校验值（实际入库以
+/// 读回字节为准）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MaterialImageSave {
+    pub source_material_id: String,
+    pub sha256: String,
+    pub file_ext: String,
+    pub media_type: String,
+    pub byte_size: u64,
+    pub width: u32,
+    pub height: u32,
+    pub description: String,
+    pub category: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MaterialImageSaveResult {
+    pub id: String,
+    pub deduplicated: bool,
+}
+
 pub(super) fn ensure_schema(connection: &Connection) -> Result<(), String> {
     connection
         .execute_batch(
@@ -115,15 +172,109 @@ pub(super) fn ensure_schema(connection: &Connection) -> Result<(), String> {
                 material_id TEXT NOT NULL REFERENCES brand_materials(id) ON DELETE CASCADE,
                 session_id TEXT NOT NULL,
                 attempt_number INTEGER NOT NULL CHECK(attempt_number > 0),
-                status TEXT NOT NULL CHECK(status IN ('processing', 'awaiting-confirmation', 'failed')),
+                status TEXT NOT NULL CHECK(status IN ('processing', 'awaiting-confirmation', 'processed', 'failed')),
                 candidate_ids_json TEXT NOT NULL DEFAULT '[]',
                 error_code TEXT,
                 started_at TEXT NOT NULL,
                 finished_at TEXT,
                 UNIQUE(material_id, attempt_number)
-             );",
+             );
+             CREATE TABLE IF NOT EXISTS brand_material_images (
+                id TEXT PRIMARY KEY,
+                sha256 TEXT NOT NULL UNIQUE,
+                file_ext TEXT NOT NULL,
+                media_type TEXT NOT NULL,
+                byte_size INTEGER NOT NULL CHECK(byte_size > 0),
+                width INTEGER NOT NULL CHECK(width > 0),
+                height INTEGER NOT NULL CHECK(height > 0),
+                description TEXT NOT NULL,
+                category TEXT NOT NULL CHECK(category IN ('product-photo', 'scene', 'people', 'chart', 'screenshot')),
+                source_material_id TEXT NOT NULL REFERENCES brand_materials(id) ON DELETE CASCADE,
+                source_material_name TEXT NOT NULL,
+                relative_path TEXT NOT NULL UNIQUE,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+             );
+             CREATE INDEX IF NOT EXISTS brand_material_images_created
+                ON brand_material_images(created_at DESC);",
         )
-        .map_err(|error| format!("initialize brand material schema: {error}"))
+        .map_err(|error| format!("initialize brand material schema: {error}"))?;
+    widen_material_processing_status_check(connection)?;
+    Ok(())
+}
+
+/// ADR-0008 T2 为 attempt 终态加入 `processed`（独立图片材料零候选直接
+/// 完成）。既有数据库的 CHECK 约束不含该值，SQLite 无法就地修改 CHECK——
+/// 沿用监测计划的表重建迁移（foreign_keys=OFF 包裹；索引随 DROP TABLE
+/// 消失，按 sqlite_master 原文重建）。已含 `processed` 或尚未建表的库是
+/// 幂等 no-op。
+fn widen_material_processing_status_check(connection: &Connection) -> Result<(), String> {
+    const LEGACY_STATUS_CHECK: &str = "('processing', 'awaiting-confirmation', 'failed')";
+    const WIDENED_STATUS_CHECK: &str =
+        "('processing', 'awaiting-confirmation', 'processed', 'failed')";
+    let table = "brand_material_processing";
+    let existing: Option<String> = connection
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?1",
+            [table],
+            |row| row.get(0),
+        )
+        .map_err(|error| format!("inspect {table} status check: {error}"))?;
+    let Some(existing_sql) = existing else {
+        return Ok(());
+    };
+    if !existing_sql.contains(LEGACY_STATUS_CHECK) {
+        return Ok(());
+    }
+    let mut index_ddls: Vec<String> = Vec::new();
+    {
+        let mut statement = connection
+            .prepare(
+                "SELECT sql FROM sqlite_master
+                 WHERE type = 'index' AND tbl_name = ?1 AND sql IS NOT NULL",
+            )
+            .map_err(|error| format!("list {table} indexes: {error}"))?;
+        let mut rows = statement
+            .query([table])
+            .map_err(|error| format!("read {table} indexes: {error}"))?;
+        while let Some(row) = rows
+            .next()
+            .map_err(|error| format!("advance {table} index cursor: {error}"))?
+        {
+            index_ddls.push(
+                row.get(0)
+                    .map_err(|error| format!("read {table} index ddl: {error}"))?,
+            );
+        }
+    }
+    let rebuilt_sql = existing_sql.replace(LEGACY_STATUS_CHECK, WIDENED_STATUS_CHECK);
+    let renamed_sql =
+        super::rename_table_in_ddl(&rebuilt_sql, table, &format!("{table}__status_widened"))?;
+    connection
+        .execute_batch("PRAGMA foreign_keys = OFF;")
+        .map_err(|error| format!("unlock {table} status check rebuild: {error}"))?;
+    let rebuild = connection.execute_batch(&format!(
+        "BEGIN IMMEDIATE;
+         {renamed_sql};
+         INSERT INTO {table}__status_widened SELECT * FROM {table};
+         DROP TABLE {table};
+         ALTER TABLE {table}__status_widened RENAME TO {table};
+         {}
+         COMMIT;",
+        index_ddls
+            .iter()
+            .map(|ddl| format!("{ddl};"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    ));
+    let restored = connection.execute_batch("PRAGMA foreign_keys = ON;");
+    match (rebuild, restored) {
+        (Ok(()), Ok(())) => Ok(()),
+        (rebuild, _) => {
+            let _ = connection.execute_batch("ROLLBACK;");
+            rebuild.map_err(|error| format!("rebuild {table} with widened status check: {error}"))
+        }
+    }
 }
 
 impl BrandWorkspaceStore {
@@ -321,24 +472,7 @@ impl BrandWorkspaceStore {
         let connection = open_database(&workspace)?;
         require_committed_session(&connection, session_id)?;
         let material = read_material(&connection, &workspace.id, material_id)?;
-        let path = resolve_material_path(&workspace, &material.relative_path)?;
-        let mut file = crate::workspace_files::path_safety::open_regular_file_no_follow(
-            &path,
-            "stored brand material",
-        )
-        .map_err(|_| "material_content_unavailable".to_string())?;
-        let mut bytes = Vec::with_capacity((material.byte_size as usize).min(64 * 1024));
-        Read::by_ref(&mut file)
-            .take(MAX_MATERIAL_BYTES + 1)
-            .read_to_end(&mut bytes)
-            .map_err(|_| "material_content_unavailable".to_string())?;
-        if bytes.len() as u64 > MAX_MATERIAL_BYTES {
-            return Err("material_too_large".to_string());
-        }
-        let actual_hash = format!("{:x}", Sha256::digest(&bytes));
-        if actual_hash != material.sha256 {
-            return Err("material_hash_mismatch".to_string());
-        }
+        let bytes = read_material_bytes(&workspace, &material)?;
         Ok((material, bytes))
     }
 
@@ -401,7 +535,10 @@ impl BrandWorkspaceStore {
         finish: MaterialProcessingFinish,
     ) -> Result<BrandMaterial, String> {
         validate_session_id(session_id)?;
-        if !matches!(finish.status.as_str(), "awaiting-confirmation" | "failed") {
+        if !matches!(
+            finish.status.as_str(),
+            "awaiting-confirmation" | "processed" | "failed"
+        ) {
             return Err("material_processing_status_invalid".to_string());
         }
         if finish.status == "failed" {
@@ -509,6 +646,19 @@ impl BrandWorkspaceStore {
                 [material_id],
             )
             .map_err(|_| "material_delete_failed".to_string())?;
+        // 该材料贡献的候选池图片行随 FK 级联删除；磁盘文件路径先取回，
+        // 事务提交后一并清掉。
+        let image_relative_paths: Vec<String> = {
+            let mut statement = transaction
+                .prepare(
+                    "SELECT relative_path FROM brand_material_images WHERE source_material_id=?1",
+                )
+                .map_err(|_| "material_delete_failed".to_string())?;
+            let rows = statement
+                .query_map([material_id], |row| row.get::<_, String>(0))
+                .map_err(|_| "material_delete_failed".to_string())?;
+            rows.filter_map(|row| row.ok()).collect()
+        };
         transaction
             .execute("DELETE FROM brand_materials WHERE id=?1", [material_id])
             .map_err(|_| "material_delete_failed".to_string())?;
@@ -519,6 +669,11 @@ impl BrandWorkspaceStore {
         // 缺失视为已删，幂等收尾。
         if let Ok(path) = resolve_material_path(&workspace, &material.relative_path) {
             let _ = fs::remove_file(path);
+        }
+        for relative in image_relative_paths {
+            if let Ok(path) = resolve_media_image_path(&workspace, &relative) {
+                let _ = fs::remove_file(path);
+            }
         }
         Ok(())
     }
@@ -614,6 +769,188 @@ impl BrandWorkspaceStore {
             })
             .collect())
     }
+
+    /// 材料图片入池（ADR-0008 T2）：sha256 全局唯一——已在池时幂等返回
+    /// 既有条目（跨来源只入池一次）。字节从来源材料本体读回并按存储哈希
+    /// 校验，内容寻址落 media/images/<sha256>.<ext>；一切校验失败给固定
+    /// 码，由 Node 侧按「该图不入池、不阻塞导入」降级。
+    pub fn save_material_image(
+        &self,
+        workspace_id: &str,
+        session_id: &str,
+        input: MaterialImageSave,
+    ) -> Result<MaterialImageSaveResult, String> {
+        validate_session_id(session_id)?;
+        let sha256 = validate_image_sha256(&input.sha256)?;
+        if !MATERIAL_IMAGE_EXTENSIONS.contains(&input.file_ext.as_str())
+            || input.media_type != media_type_for_extension(&input.file_ext)
+            || input.width == 0
+            || input.height == 0
+            || input.width > 100_000
+            || input.height > 100_000
+            || !MATERIAL_IMAGE_CATEGORIES.contains(&input.category.as_str())
+        {
+            return Err("material_image_invalid".to_string());
+        }
+        let workspace = self.workspace(workspace_id)?;
+        let connection = open_database(&workspace)?;
+        require_committed_session(&connection, session_id)?;
+        if let Some(existing) =
+            read_material_image_by_sha256(&connection, &workspace.id, &sha256)?
+        {
+            return Ok(MaterialImageSaveResult {
+                id: existing.id,
+                deduplicated: true,
+            });
+        }
+        // 描述按 Unicode 码点截断保图（与 Node 侧同口径），只拒绝空描述。
+        let description: String = input
+            .description
+            .trim()
+            .chars()
+            .take(MATERIAL_IMAGE_DESCRIPTION_MAX_CHARS)
+            .collect();
+        if description.is_empty() {
+            return Err("material_image_invalid".to_string());
+        }
+        let material = read_material(&connection, &workspace.id, &input.source_material_id)?;
+        if material.sha256 != sha256 {
+            return Err("material_hash_mismatch".to_string());
+        }
+        let bytes = read_material_bytes(&workspace, &material)?;
+        if input.byte_size != bytes.len() as u64 {
+            return Err("material_image_invalid".to_string());
+        }
+        let relative_path = format!("media/images/{sha256}.{}", input.file_ext);
+        let media_root = workspace.root_path.join("media").join("images");
+        fs::create_dir_all(&media_root).map_err(|_| "material_store_failed".to_string())?;
+        let target = workspace.root_path.join(&relative_path);
+        // 内容寻址：目标已在盘上（历史写入/竞态先行者）即跳过复制，字节
+        // 相同由 sha256 命名保证。
+        if !target.exists() {
+            let part_path = media_root.join(format!(".{sha256}.part"));
+            let write = (|| -> std::io::Result<()> {
+                let mut file = fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&part_path)?;
+                file.write_all(&bytes)?;
+                file.sync_all()?;
+                drop(file);
+                fs::rename(&part_path, &target)?;
+                Ok(())
+            })();
+            if write.is_err() {
+                let _ = fs::remove_file(&part_path);
+                return Err("material_store_failed".to_string());
+            }
+        }
+        let id = Uuid::new_v4().to_string();
+        let now = Utc::now().to_rfc3339();
+        let inserted = connection.execute(
+            "INSERT INTO brand_material_images
+                (id, sha256, file_ext, media_type, byte_size, width, height, description,
+                 category, source_material_id, source_material_name, relative_path,
+                 created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?13)",
+            params![
+                id,
+                sha256,
+                input.file_ext,
+                input.media_type,
+                bytes.len() as u64,
+                input.width,
+                input.height,
+                description,
+                input.category,
+                material.id,
+                material.display_name,
+                relative_path,
+                now
+            ],
+        );
+        match inserted {
+            Ok(_) => Ok(MaterialImageSaveResult {
+                id,
+                deduplicated: false,
+            }),
+            Err(_) => {
+                // 并发同键竞态：唯一约束冲突读回既有条目，按去重收场。
+                if let Some(existing) =
+                    read_material_image_by_sha256(&connection, &workspace.id, &sha256)?
+                {
+                    return Ok(MaterialImageSaveResult {
+                        id: existing.id,
+                        deduplicated: true,
+                    });
+                }
+                let _ = fs::remove_file(&target);
+                Err("material_store_failed".to_string())
+            }
+        }
+    }
+
+    /// 候选清单（生成注入与预览取回的消费面）：按入池时间倒序，limit 有界。
+    pub fn list_material_images(
+        &self,
+        workspace_id: &str,
+        session_id: &str,
+        limit: Option<usize>,
+    ) -> Result<Vec<MaterialImage>, String> {
+        validate_session_id(session_id)?;
+        let workspace = self.workspace(workspace_id)?;
+        let connection = open_database(&workspace)?;
+        require_committed_session(&connection, session_id)?;
+        let limit = limit.unwrap_or(100).clamp(1, 200);
+        let mut statement = connection
+            .prepare(&format!(
+                "SELECT {MATERIAL_IMAGE_COLUMNS}
+                 FROM brand_material_images
+                 ORDER BY created_at DESC, id
+                 LIMIT ?1"
+            ))
+            .map_err(|_| "material_read_failed".to_string())?;
+        let rows = statement
+            .query_map(params![limit as i64], |row| {
+                material_image_from_row(row, &workspace.id)
+            })
+            .map_err(|_| "material_read_failed".to_string())?;
+        Ok(rows.filter_map(|row| row.ok()).collect())
+    }
+
+    /// 候选图片内容取回：路径闸 + 字节上限 + 存储哈希校验，与材料本体
+    /// 读取同款纪律。
+    pub fn read_material_image_bytes(
+        &self,
+        workspace_id: &str,
+        session_id: &str,
+        image_id: &str,
+    ) -> Result<(MaterialImage, Vec<u8>), String> {
+        validate_session_id(session_id)?;
+        let workspace = self.workspace(workspace_id)?;
+        let connection = open_database(&workspace)?;
+        require_committed_session(&connection, session_id)?;
+        let image = read_material_image_by_id(&connection, &workspace.id, image_id)?;
+        let path = resolve_media_image_path(&workspace, &image.relative_path)?;
+        let mut file = crate::workspace_files::path_safety::open_regular_file_no_follow(
+            &path,
+            "stored material image",
+        )
+        .map_err(|_| "material_content_unavailable".to_string())?;
+        let mut bytes = Vec::with_capacity((image.byte_size as usize).min(64 * 1024));
+        Read::by_ref(&mut file)
+            .take(MAX_MATERIAL_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|_| "material_content_unavailable".to_string())?;
+        if bytes.len() as u64 > MAX_MATERIAL_BYTES {
+            return Err("material_too_large".to_string());
+        }
+        let actual_hash = format!("{:x}", Sha256::digest(&bytes));
+        if actual_hash != image.sha256 {
+            return Err("material_hash_mismatch".to_string());
+        }
+        Ok((image, bytes))
+    }
 }
 
 fn require_committed_session(connection: &Connection, session_id: &str) -> Result<(), String> {
@@ -666,6 +1003,10 @@ fn media_type_for_extension(extension: &str) -> &'static str {
         "json" => "application/json",
         "xml" => "application/xml",
         "csv" => "text/csv",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "webp" => "image/webp",
+        "gif" => "image/gif",
         _ => "text/plain",
     }
 }
@@ -791,6 +1132,133 @@ fn resolve_material_path(workspace: &BrandWorkspace, relative: &str) -> Result<P
         return Err("material_path_invalid".to_string());
     }
     Ok(resolved)
+}
+
+/// 候选池图片路径闸：只接受 media/images/<name> 形态且 canonical 后仍在
+/// media/images 根内（与材料本体路径闸同款纪律）。
+fn resolve_media_image_path(
+    workspace: &BrandWorkspace,
+    relative: &str,
+) -> Result<PathBuf, String> {
+    let path = Path::new(relative);
+    let mut components = path.components();
+    if components.next() != Some(Component::Normal("media".as_ref()))
+        || components.next() != Some(Component::Normal("images".as_ref()))
+        || components
+            .clone()
+            .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        return Err("material_path_invalid".to_string());
+    }
+    let resolved = workspace.root_path.join(path);
+    let canonical_root = fs::canonicalize(workspace.root_path.join("media").join("images"))
+        .map_err(|_| "material_content_unavailable".to_string())?;
+    let canonical =
+        fs::canonicalize(&resolved).map_err(|_| "material_content_unavailable".to_string())?;
+    if !canonical.starts_with(canonical_root) {
+        return Err("material_path_invalid".to_string());
+    }
+    Ok(resolved)
+}
+
+/// 读材料本体字节并按存储哈希校验（内容完整性闸）。
+fn read_material_bytes(
+    workspace: &BrandWorkspace,
+    material: &BrandMaterial,
+) -> Result<Vec<u8>, String> {
+    let path = resolve_material_path(workspace, &material.relative_path)?;
+    let mut file = crate::workspace_files::path_safety::open_regular_file_no_follow(
+        &path,
+        "stored brand material",
+    )
+    .map_err(|_| "material_content_unavailable".to_string())?;
+    let mut bytes = Vec::with_capacity((material.byte_size as usize).min(64 * 1024));
+    Read::by_ref(&mut file)
+        .take(MAX_MATERIAL_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| "material_content_unavailable".to_string())?;
+    if bytes.len() as u64 > MAX_MATERIAL_BYTES {
+        return Err("material_too_large".to_string());
+    }
+    let actual_hash = format!("{:x}", Sha256::digest(&bytes));
+    if actual_hash != material.sha256 {
+        return Err("material_hash_mismatch".to_string());
+    }
+    Ok(bytes)
+}
+
+const MATERIAL_IMAGE_COLUMNS: &str = "id, sha256, file_ext, media_type, byte_size, width, height, \
+     description, category, source_material_id, source_material_name, relative_path, \
+     created_at, updated_at";
+
+fn material_image_from_row(
+    row: &rusqlite::Row<'_>,
+    workspace_id: &str,
+) -> rusqlite::Result<MaterialImage> {
+    Ok(MaterialImage {
+        id: row.get(0)?,
+        workspace_id: workspace_id.to_string(),
+        sha256: row.get(1)?,
+        file_ext: row.get(2)?,
+        media_type: row.get(3)?,
+        byte_size: row.get::<_, i64>(4)?.max(0) as u64,
+        width: row.get::<_, i64>(5)?.max(0) as u32,
+        height: row.get::<_, i64>(6)?.max(0) as u32,
+        description: row.get(7)?,
+        category: row.get(8)?,
+        source_material_id: row.get(9)?,
+        source_material_name: row.get(10)?,
+        relative_path: row.get(11)?,
+        created_at: row.get(12)?,
+        updated_at: row.get(13)?,
+    })
+}
+
+fn read_material_image_by_id(
+    connection: &Connection,
+    workspace_id: &str,
+    image_id: &str,
+) -> Result<MaterialImage, String> {
+    connection
+        .query_row(
+            &format!(
+                "SELECT {MATERIAL_IMAGE_COLUMNS} FROM brand_material_images WHERE id=?1"
+            ),
+            [image_id],
+            |row| material_image_from_row(row, workspace_id),
+        )
+        .optional()
+        .map_err(|_| "material_read_failed".to_string())?
+        .ok_or_else(|| "material_not_found".to_string())
+}
+
+fn read_material_image_by_sha256(
+    connection: &Connection,
+    workspace_id: &str,
+    sha256: &str,
+) -> Result<Option<MaterialImage>, String> {
+    connection
+        .query_row(
+            &format!(
+                "SELECT {MATERIAL_IMAGE_COLUMNS} FROM brand_material_images WHERE sha256=?1"
+            ),
+            [sha256],
+            |row| material_image_from_row(row, workspace_id),
+        )
+        .optional()
+        .map_err(|_| "material_read_failed".to_string())
+}
+
+fn validate_image_sha256(value: &str) -> Result<String, String> {
+    let trimmed = value.trim();
+    if trimmed.len() != 64
+        || !trimmed
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err("material_image_invalid".to_string());
+    }
+    Ok(trimmed.to_string())
 }
 
 fn sanitize_source_url(raw: &str) -> Result<String, String> {
@@ -1235,5 +1703,289 @@ mod tests {
                 .status,
             "processing"
         );
+    }
+
+    /// 最小 PNG 头（签名 + IHDR 宽高）：材料存储只按字节收档，不解码像素。
+    fn png_bytes(width: u32, height: u32) -> Vec<u8> {
+        let mut bytes = vec![0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+        bytes.extend_from_slice(&13u32.to_be_bytes());
+        bytes.extend_from_slice(b"IHDR");
+        bytes.extend_from_slice(&width.to_be_bytes());
+        bytes.extend_from_slice(&height.to_be_bytes());
+        bytes.extend_from_slice(&[0_u8; 9]);
+        bytes
+    }
+
+    fn import_png_material(
+        store: &BrandWorkspaceStore,
+        workspace: &BrandWorkspace,
+        session_id: &str,
+        name: &str,
+        bytes: &[u8],
+    ) -> BrandMaterial {
+        let source_dir = external_source_dir();
+        let source = source_dir.path().join(name);
+        fs::write(&source, bytes).expect("source");
+        store
+            .import_brand_file(ImportBrandFileRequest {
+                workspace_id: workspace.id.clone(),
+                session_id: session_id.to_string(),
+                source_path: source.to_string_lossy().into_owned(),
+            })
+            .expect("import")
+    }
+
+    fn image_save(material: &BrandMaterial, bytes: &[u8]) -> MaterialImageSave {
+        MaterialImageSave {
+            source_material_id: material.id.clone(),
+            sha256: material.sha256.clone(),
+            file_ext: "png".to_string(),
+            media_type: "image/png".to_string(),
+            byte_size: bytes.len() as u64,
+            width: 800,
+            height: 600,
+            description: "门店前台的智能音箱展台实拍".to_string(),
+            category: "product-photo".to_string(),
+        }
+    }
+
+    #[test]
+    fn accepts_standalone_image_files_as_brand_materials() {
+        let (_root, store, workspace, session_id) = fixture();
+        let material =
+            import_png_material(&store, &workspace, &session_id, "展拍.png", &png_bytes(800, 600));
+        assert_eq!(material.file_ext, "png");
+        assert_eq!(material.media_type, "image/png");
+        assert!(material.relative_path.ends_with(".png"));
+    }
+
+    #[test]
+    fn saves_tagged_image_to_candidate_pool_with_content_addressed_bytes() {
+        let (_root, store, workspace, session_id) = fixture();
+        let bytes = png_bytes(800, 600);
+        let material =
+            import_png_material(&store, &workspace, &session_id, "展拍.png", &bytes);
+
+        let saved = store
+            .save_material_image(&workspace.id, &session_id, image_save(&material, &bytes))
+            .expect("save");
+        assert!(!saved.deduplicated);
+
+        let expected_path = workspace
+            .root_path
+            .join(format!("media/images/{}.png", material.sha256));
+        assert!(expected_path.exists(), "content-addressed file missing");
+
+        let (image, read_back) = store
+            .read_material_image_bytes(&workspace.id, &session_id, &saved.id)
+            .expect("content");
+        assert_eq!(read_back, bytes);
+        assert_eq!(image.description, "门店前台的智能音箱展台实拍");
+        assert_eq!(image.category, "product-photo");
+        assert_eq!(image.width, 800);
+        assert_eq!(image.height, 600);
+        assert_eq!(image.source_material_id, material.id);
+        assert_eq!(image.source_material_name, "展拍.png");
+
+        let listed = store
+            .list_material_images(&workspace.id, &session_id, None)
+            .expect("list");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, saved.id);
+    }
+
+    #[test]
+    fn deduplicates_pool_entries_by_sha256_across_source_materials() {
+        let (_root, store, workspace, session_id) = fixture();
+        let bytes = png_bytes(800, 600);
+        let first =
+            import_png_material(&store, &workspace, &session_id, "first.png", &bytes);
+        let second =
+            import_png_material(&store, &workspace, &session_id, "second.png", &bytes);
+
+        let first_save = store
+            .save_material_image(&workspace.id, &session_id, image_save(&first, &bytes))
+            .expect("first save");
+        let second_save = store
+            .save_material_image(&workspace.id, &session_id, image_save(&second, &bytes))
+            .expect("second save");
+        assert!(!first_save.deduplicated);
+        assert!(second_save.deduplicated);
+        assert_eq!(first_save.id, second_save.id);
+
+        let listed = store
+            .list_material_images(&workspace.id, &session_id, None)
+            .expect("list");
+        assert_eq!(listed.len(), 1);
+    }
+
+    #[test]
+    fn truncates_over_long_descriptions_by_code_points_instead_of_rejecting() {
+        let (_root, store, workspace, session_id) = fixture();
+        let bytes = png_bytes(800, 600);
+        let material =
+            import_png_material(&store, &workspace, &session_id, "展拍.png", &bytes);
+        let mut input = image_save(&material, &bytes);
+        // 400 码点（其中含代理对）超长描述：截断保图，不整图拒绝。
+        input.description = format!("{}长", "🌊".repeat(320));
+
+        let saved = store
+            .save_material_image(&workspace.id, &session_id, input)
+            .expect("save");
+        let (image, _bytes) = store
+            .read_material_image_bytes(&workspace.id, &session_id, &saved.id)
+            .expect("content");
+        assert_eq!(image.description.chars().count(), 300);
+    }
+
+    #[test]
+    fn rejects_invalid_image_metadata_and_hash_mismatch() {
+        let (_root, store, workspace, session_id) = fixture();
+        let bytes = png_bytes(800, 600);
+        let material =
+            import_png_material(&store, &workspace, &session_id, "展拍.png", &bytes);
+
+        let mut icon = image_save(&material, &bytes);
+        icon.category = "icon-decoration".to_string();
+        assert_eq!(
+            store.save_material_image(&workspace.id, &session_id, icon),
+            Err("material_image_invalid".to_string())
+        );
+
+        let mut wrong_hash = image_save(&material, &bytes);
+        wrong_hash.sha256 = "f".repeat(64);
+        assert_eq!(
+            store.save_material_image(&workspace.id, &session_id, wrong_hash),
+            Err("material_hash_mismatch".to_string())
+        );
+
+        let mut wrong_size = image_save(&material, &bytes);
+        wrong_size.byte_size += 1;
+        assert_eq!(
+            store.save_material_image(&workspace.id, &session_id, wrong_size),
+            Err("material_image_invalid".to_string())
+        );
+    }
+
+    #[test]
+    fn deleting_source_material_cascades_pool_rows_and_files() {
+        let (_root, store, workspace, session_id) = fixture();
+        let bytes = png_bytes(800, 600);
+        let material =
+            import_png_material(&store, &workspace, &session_id, "展拍.png", &bytes);
+        let saved = store
+            .save_material_image(&workspace.id, &session_id, image_save(&material, &bytes))
+            .expect("save");
+        let image_path = workspace
+            .root_path
+            .join(format!("media/images/{}.png", material.sha256));
+
+        store
+            .delete_brand_material(&workspace.id, &session_id, &material.id)
+            .expect("delete");
+
+        assert!(!image_path.exists(), "pool file should follow the material");
+        assert!(store
+            .list_material_images(&workspace.id, &session_id, None)
+            .expect("list")
+            .is_empty());
+        assert_eq!(
+            store.read_material_image_bytes(&workspace.id, &session_id, &saved.id),
+            Err("material_not_found".to_string())
+        );
+    }
+
+    #[test]
+    fn finishes_image_material_attempt_with_processed_status() {
+        let (_root, store, workspace, session_id) = fixture();
+        let material =
+            import_png_material(&store, &workspace, &session_id, "展拍.png", &png_bytes(800, 600));
+        let attempt = store
+            .begin_material_processing(&workspace.id, &session_id, &material.id)
+            .expect("begin");
+        let finished = store
+            .finish_material_processing(
+                &workspace.id,
+                &session_id,
+                MaterialProcessingFinish {
+                    attempt_id: attempt.id,
+                    material_id: material.id.clone(),
+                    status: "processed".to_string(),
+                    candidate_ids: vec![],
+                    error_code: None,
+                },
+            )
+            .expect("finish");
+        assert_eq!(finished.status, "processed");
+        assert_eq!(finished.last_error_code, None);
+    }
+
+    #[test]
+    fn widens_legacy_processing_status_check_in_existing_databases() {
+        let (_root, store, workspace, session_id) = fixture();
+        let material =
+            import_png_material(&store, &workspace, &session_id, "展拍.png", &png_bytes(800, 600));
+
+        // 把 attempt 表降级成迁移前的旧版 CHECK 形态，模拟存量库。
+        {
+            let connection =
+                Connection::open(workspace.root_path.join("project.sqlite")).expect("open");
+            connection
+                .execute_batch("PRAGMA foreign_keys = OFF;")
+                .expect("unlock");
+            connection
+                .execute_batch("DROP TABLE brand_material_processing;")
+                .expect("drop");
+            connection
+                .execute_batch(
+                    "CREATE TABLE brand_material_processing (
+                        id TEXT PRIMARY KEY,
+                        material_id TEXT NOT NULL REFERENCES brand_materials(id) ON DELETE CASCADE,
+                        session_id TEXT NOT NULL,
+                        attempt_number INTEGER NOT NULL CHECK(attempt_number > 0),
+                        status TEXT NOT NULL CHECK(status IN ('processing', 'awaiting-confirmation', 'failed')),
+                        candidate_ids_json TEXT NOT NULL DEFAULT '[]',
+                        error_code TEXT,
+                        started_at TEXT NOT NULL,
+                        finished_at TEXT,
+                        UNIQUE(material_id, attempt_number)
+                     );",
+                )
+                .expect("legacy schema");
+            connection
+                .execute_batch("PRAGMA foreign_keys = ON;")
+                .expect("restore");
+        }
+
+        // 下一次 store 调用经 open_database 重走 ensure_schema：迁移把
+        // 'processed' 放进 CHECK，随后旧库也能落 processed 终态。
+        let attempt = store
+            .begin_material_processing(&workspace.id, &session_id, &material.id)
+            .expect("begin");
+        let finished = store
+            .finish_material_processing(
+                &workspace.id,
+                &session_id,
+                MaterialProcessingFinish {
+                    attempt_id: attempt.id,
+                    material_id: material.id.clone(),
+                    status: "processed".to_string(),
+                    candidate_ids: vec![],
+                    error_code: None,
+                },
+            )
+            .expect("finish after migration");
+        assert_eq!(finished.status, "processed");
+
+        let connection = open_database(&workspace).expect("reopen");
+        let sql: String = connection
+            .query_row(
+                "SELECT sql FROM sqlite_master
+                 WHERE type = 'table' AND name = 'brand_material_processing'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("schema");
+        assert!(sql.contains("'processed'"));
     }
 }

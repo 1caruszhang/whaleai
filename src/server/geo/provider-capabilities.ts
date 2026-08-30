@@ -92,6 +92,22 @@ export interface GeoKeywordSearchCapability {
     },
   ): Promise<string>;
   /**
+   * 视觉打标（ADR-0008）：同款 lite 模型的 image_url 输入调用，供材料
+   * 图片导入管线产出「一句中文描述 + 类型分类」。与 search 同模型、同
+   * 端点、同凭证（零新供应商）；实现先尝试关闭 thinking，参数不被上游
+   * 接受时去掉该参数重试一次。未实现（旧能力注入）时调用方降级为该图
+   * 不入池，不阻塞导入。
+   */
+  describeImage?(
+    input: {
+      system: string;
+      prompt: string;
+      bytes: Uint8Array;
+      mediaType: string;
+    },
+    options?: { signal?: AbortSignal },
+  ): Promise<string>;
+  /**
    * 结构化检索（豆包搜索 API）：纯搜索引擎的逐条 Title/Summary/Url 召回，
    * 不经 LLM 改写。供需要「搜索引擎真实召回语料」的消费方（竞品富化）；
    * 未实现（旧能力注入）时调用方回落 search() 的 enable_search 生成语料。
@@ -824,6 +840,71 @@ export function createGeoProviderCapabilities(
           if (typeof content !== "string")
             throw new Error("keyword-search 返回了无效响应");
           return content;
+        } catch (error) {
+          throw sanitizeGeoProviderError(error, secrets);
+        }
+      },
+      async describeImage(input, options) {
+        // 视觉打标（ADR-0008 Decision 2）：spike 经生产网关 /gw/ark 实测
+        // lite 模型 image_url 输入可用。lite 对简单任务也产 reasoning，
+        // 首选关闭 thinking 省时省钱；上游拒收该参数（HTTP 4xx）时去掉
+        // 参数重试一次，能力结论不受影响。
+        const dataUrl = `data:${input.mediaType};base64,${Buffer.from(input.bytes).toString("base64")}`;
+        const buildBody = (thinkingDisabled: boolean) =>
+          JSON.stringify({
+            model: XIAOJING_GEO_PROVIDER_DEFAULTS.keywordSearchModel,
+            messages: [
+              { role: "system", content: input.system },
+              {
+                role: "user",
+                content: [
+                  { type: "text", text: input.prompt },
+                  { type: "image_url", image_url: { url: dataUrl } },
+                ],
+              },
+            ],
+            stream: false,
+            max_tokens: 2048,
+            ...(thinkingDisabled
+              ? { thinking: { type: "disabled" } }
+              : {}),
+          });
+        const request = async (body: string): Promise<string> => {
+          const response = await fetchImpl(arkEndpoint, {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${
+                gatewayMode
+                  ? bearerToken("keyword-search")
+                  : required(secrets.arkApiKey, "keyword-search")
+              }`,
+              "Content-Type": "application/json",
+            },
+            body,
+            signal: options?.signal,
+          });
+          if (!response.ok)
+            throw safeUpstreamFailure("keyword-search", response.status);
+          const payload = (await response.json()) as {
+            choices?: Array<{ message?: { content?: string } }>;
+          };
+          const content = payload.choices?.[0]?.message?.content;
+          if (typeof content !== "string" || content.length === 0)
+            throw new Error("keyword-search 返回了无效响应");
+          return content;
+        };
+        try {
+          try {
+            return await request(buildBody(true));
+          } catch (error) {
+            // 只在 400（参数不被模型接受）时去掉 thinking 重试一次；鉴权
+            // （401/403）、载荷（413）等确定性 4xx 重发同样的 body 只会再
+            // 失败一次，不烧这一次。
+            if (error instanceof GeoUpstreamHttpError && error.status === 400) {
+              return await request(buildBody(false));
+            }
+            throw error;
+          }
         } catch (error) {
           throw sanitizeGeoProviderError(error, secrets);
         }

@@ -42,6 +42,8 @@ export const MATERIAL_ERROR_CODES = [
   'website_content_type_unsupported',
   'material_processing_failed',
   'material_identity_mismatch',
+  // 材料图片入池元数据校验（ADR-0008）：分类/尺寸/描述不合入库约束。
+  'material_image_invalid',
 ] as const;
 
 export type MaterialErrorCode = (typeof MATERIAL_ERROR_CODES)[number];
@@ -51,6 +53,8 @@ export interface BrandMaterialProjection {
   workspaceId: string;
   inputKind: 'file' | 'pasted-text' | 'website-url';
   displayName: string;
+  /** 小写扩展名：图片扩展名（png/jpg/jpeg/webp/gif）标识独立图片材料。 */
+  fileExt: string;
   status: 'stored' | 'processing' | 'awaiting-confirmation' | 'processed' | 'failed';
   attemptCount: number;
   lastErrorCode?: string | null;

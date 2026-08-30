@@ -175,6 +175,18 @@ pub async fn start_management_api() -> Result<u16, String> {
             post(brand_material_processing_finish_handler),
         )
         .route(
+            "/api/brand-materials/images/save",
+            post(brand_material_image_save_handler),
+        )
+        .route(
+            "/api/brand-materials/images/list",
+            post(brand_material_image_list_handler),
+        )
+        .route(
+            "/api/brand-materials/images/content",
+            post(brand_material_image_content_handler),
+        )
+        .route(
             "/api/brand-question-pools/latest",
             post(brand_question_pool_latest_handler),
         )
@@ -434,6 +446,18 @@ struct BrandMaterialListPayload {
     /// 材料（会话恢复重建确认卡）。
     material_ids: Option<Vec<String>>,
     limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MaterialImageListPayload {
+    limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MaterialImageContentPayload {
+    image_id: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1201,6 +1225,73 @@ async fn brand_material_processing_finish_handler(
     ) {
         Ok(material) => Json(serde_json::json!({ "ok": true, "material": material })),
         Err(error) => Json(serde_json::json!({ "ok": false, "error": error })),
+    }
+}
+
+// 材料图片候选池（ADR-0008 T2）：入池写入 / 候选清单 / 内容取回三条
+// Session 作用域端点，鉴权与既有材料端点同款（sidecar 代 + 品牌会话）。
+async fn brand_material_image_save_handler(
+    headers: HeaderMap,
+    Json(request): Json<BrandKnowledgeEnvelope<crate::brand_workspace::MaterialImageSave>>,
+) -> Json<serde_json::Value> {
+    let store = match validate_brand_knowledge_request(&headers, &request) {
+        Ok(store) => store,
+        Err(error) => return Json(error),
+    };
+    match store.save_material_image(
+        &request.workspace_id,
+        &request.session_id,
+        request.payload,
+    ) {
+        Ok(image) => Json(serde_json::json!({ "ok": true, "image": image })),
+        Err(error) => Json(serde_json::json!({ "ok": false, "error": error })),
+    }
+}
+
+async fn brand_material_image_list_handler(
+    headers: HeaderMap,
+    Json(request): Json<BrandKnowledgeEnvelope<MaterialImageListPayload>>,
+) -> Json<serde_json::Value> {
+    let store = match validate_brand_knowledge_request(&headers, &request) {
+        Ok(store) => store,
+        Err(error) => return Json(error),
+    };
+    match store.list_material_images(
+        &request.workspace_id,
+        &request.session_id,
+        request.payload.limit,
+    ) {
+        Ok(images) => Json(serde_json::json!({ "ok": true, "images": images })),
+        Err(error) => Json(serde_json::json!({ "ok": false, "error": error })),
+    }
+}
+
+async fn brand_material_image_content_handler(
+    headers: HeaderMap,
+    Json(request): Json<BrandKnowledgeEnvelope<MaterialImageContentPayload>>,
+) -> Response {
+    let store = match validate_brand_knowledge_request(&headers, &request) {
+        Ok(store) => store,
+        Err(error) => return (StatusCode::FORBIDDEN, Json(error)).into_response(),
+    };
+    match store.read_material_image_bytes(
+        &request.workspace_id,
+        &request.session_id,
+        &request.payload.image_id,
+    ) {
+        Ok((image, bytes)) => {
+            let mut response_headers = HeaderMap::new();
+            response_headers.insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
+            if let Ok(value) = HeaderValue::from_str(&image.media_type) {
+                response_headers.insert(CONTENT_TYPE, value);
+            }
+            (response_headers, Body::from(bytes)).into_response()
+        }
+        Err(error) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "ok": false, "error": error })),
+        )
+            .into_response(),
     }
 }
 

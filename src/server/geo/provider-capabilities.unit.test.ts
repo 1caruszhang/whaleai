@@ -265,6 +265,133 @@ describe("GEO typed provider capabilities", () => {
     ]);
   });
 
+  it("sends image tagging through the lite model with an image_url block and thinking disabled first", async () => {
+    const calls: Array<{
+      url: string;
+      body: Record<string, unknown>;
+      auth?: string;
+    }> = [];
+    const fakeFetch = vi.fn(
+      async (input: string | URL | Request, init?: RequestInit) => {
+        calls.push({
+          url: String(input),
+          body: JSON.parse(String(init?.body)),
+          auth: (init?.headers as Record<string, string>)?.Authorization,
+        });
+        return jsonResponse({
+          choices: [
+            { message: { content: '{"description":"展台实拍","category":"产品实拍"}' } },
+          ],
+        });
+      },
+    );
+    const capabilities = createGeoProviderCapabilities(
+      { arkApiKey: "ark-test" },
+      { fetch: fakeFetch as typeof fetch },
+    );
+
+    const bytes = new Uint8Array([1, 2, 3]);
+    const content = await capabilities.keywordSearch.describeImage!({
+      system: "你是打标引擎",
+      prompt: "打标",
+      bytes,
+      mediaType: "image/png",
+    });
+
+    expect(content).toContain("产品实拍");
+    expect(calls).toHaveLength(1);
+    expect(calls[0].url).toBe(
+      "https://ark.cn-beijing.volces.com/api/v3/chat/completions",
+    );
+    expect(calls[0].auth).toBe("Bearer ark-test");
+    const body = calls[0].body as {
+      model: string;
+      messages: unknown;
+      thinking?: { type: string };
+      stream: boolean;
+      max_tokens: number;
+    };
+    expect(body.model).toBe("doubao-seed-2-0-lite-260428");
+    expect(body.thinking).toEqual({ type: "disabled" });
+    expect(body.stream).toBe(false);
+    expect(body.max_tokens).toBeGreaterThan(0);
+    expect(body.messages).toEqual([
+      { role: "system", content: "你是打标引擎" },
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "打标" },
+          {
+            type: "image_url",
+            image_url: {
+              url: `data:image/png;base64,${Buffer.from(bytes).toString("base64")}`,
+            },
+          },
+        ],
+      },
+    ]);
+  });
+
+  it("retries image tagging once without thinking when the upstream rejects the parameter", async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    let call = 0;
+    const fakeFetch = vi.fn(
+      async (_input: string | URL | Request, init?: RequestInit) => {
+        call += 1;
+        bodies.push(JSON.parse(String(init?.body)));
+        if (call === 1) {
+          return jsonResponse(
+            { error: { message: "thinking parameter not supported" } },
+            400,
+          );
+        }
+        return jsonResponse({ choices: [{ message: { content: "ok" } }] });
+      },
+    );
+    const capabilities = createGeoProviderCapabilities(
+      { arkApiKey: "ark-test" },
+      { fetch: fakeFetch as typeof fetch },
+    );
+
+    const content = await capabilities.keywordSearch.describeImage!({
+      system: "s",
+      prompt: "p",
+      bytes: new Uint8Array([9]),
+      mediaType: "image/jpeg",
+    });
+
+    expect(content).toBe("ok");
+    expect(bodies).toHaveLength(2);
+    expect(bodies[0].thinking).toEqual({ type: "disabled" });
+    expect(bodies[1]).not.toHaveProperty("thinking");
+  });
+
+  it("does not retry image tagging on deterministic rejections or server failures", async () => {
+    const statuses = [401, 503];
+    let call = 0;
+    const fakeFetch = vi.fn(async () => {
+      const status = statuses[call] ?? 500;
+      call += 1;
+      return jsonResponse({ error: { message: "upstream says no" } }, status);
+    });
+    const capabilities = createGeoProviderCapabilities(
+      { arkApiKey: "ark-test" },
+      { fetch: fakeFetch as typeof fetch },
+    );
+
+    for (const _status of statuses) {
+      await expect(
+        capabilities.keywordSearch.describeImage!({
+          system: "s",
+          prompt: "p",
+          bytes: new Uint8Array([9]),
+          mediaType: "image/png",
+        }),
+      ).rejects.toThrow();
+    }
+    expect(call).toBe(2);
+  });
+
   it("redirects every provider wire route to injected endpoint overrides without changing wire shapes", async () => {
     const urls: string[] = [];
     const okFetch = vi.fn(

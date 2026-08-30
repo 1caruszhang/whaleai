@@ -19,7 +19,9 @@ import {
   type BrandMaterial,
   type BrandMaterialContext,
   type BrandMaterialPort,
+  type SaveMaterialImageInput,
 } from './material-import';
+import { MATERIAL_IMAGE_MAX_TAGGABLE_BYTES } from './material-image';
 
 const context: BrandMaterialContext = {
   workspaceId: 'brand-07',
@@ -56,23 +58,57 @@ function material(overrides: Partial<BrandMaterial> = {}): BrandMaterial {
   };
 }
 
+/** 最小 PNG 头（签名 + IHDR 宽高），尺寸探测只读头部。 */
+function pngFixtureBytes(width: number, height: number): Uint8Array {
+  const bytes = new Uint8Array(32);
+  bytes.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], 0);
+  const view = new DataView(bytes.buffer);
+  view.setUint32(8, 13);
+  bytes.set([0x49, 0x48, 0x44, 0x52], 12);
+  view.setUint32(16, width);
+  view.setUint32(20, height);
+  return bytes;
+}
+
 class FakeMaterialPort implements BrandMaterialPort {
   readonly trace: string[] = [];
   readonly finishes: Array<{
     attemptId: string;
     materialId: string;
-    status: 'awaiting-confirmation' | 'failed';
+    status: 'awaiting-confirmation' | 'processed' | 'failed';
     candidateIds: string[];
     errorCode?: string;
   }> = [];
   readonly materials = new Map<string, BrandMaterial>();
   readonly bytes = new Map<string, Uint8Array>();
+  readonly savedImages: SaveMaterialImageInput[] = [];
+  readonly imageAssets = new Map<string, {
+    id: string;
+    input: SaveMaterialImageInput;
+    deduplicated: boolean;
+  }>();
   next = 0;
+  /** saveImageAsset 抛错开关（存储故障降级用例）。 */
+  failImageSave = false;
 
   async context() { return context; }
   async importFile(sourcePath: string) {
     this.trace.push(`store:file:${sourcePath}`);
     if (sourcePath.includes('broken')) throw new Error('material_import_failed');
+    if (sourcePath.endsWith('.png') || sourcePath.endsWith('.jpg')) {
+      const ext = sourcePath.split('.').at(-1) as 'png' | 'jpg';
+      const item = material({
+        id: `file-${++this.next}`,
+        inputKind: 'file',
+        displayName: '实拍.png',
+        fileExt: ext,
+        mediaType: ext === 'png' ? 'image/png' : 'image/jpeg',
+        sha256: 'b'.repeat(64),
+      });
+      this.materials.set(item.id, item);
+      this.bytes.set(item.id, pngFixtureBytes(800, 600));
+      return item;
+    }
     const item = material({ id: `file-${++this.next}`, inputKind: 'file', displayName: 'profile.md' });
     this.materials.set(item.id, item);
     this.bytes.set(item.id, new TextEncoder().encode('公司全称：鲸跃科技'));
@@ -104,7 +140,7 @@ class FakeMaterialPort implements BrandMaterialPort {
     if (item) item.attemptCount += 1;
     return { id: `attempt-${id}-${item?.attemptCount ?? 1}`, materialId: id, attemptNumber: item?.attemptCount ?? 1 };
   }
-  async finish(input: { attemptId: string; materialId: string; status: 'awaiting-confirmation' | 'failed'; candidateIds: string[]; errorCode?: string }) {
+  async finish(input: { attemptId: string; materialId: string; status: 'awaiting-confirmation' | 'processed' | 'failed'; candidateIds: string[]; errorCode?: string }) {
     this.trace.push(`finish:${input.materialId}:${input.status}`);
     this.finishes.push(input);
     const item = this.materials.get(input.materialId) ?? material({ id: input.materialId });
@@ -112,6 +148,42 @@ class FakeMaterialPort implements BrandMaterialPort {
     item.lastErrorCode = input.errorCode;
     this.materials.set(item.id, item);
     return item;
+  }
+  async saveImageAsset(input: SaveMaterialImageInput) {
+    this.trace.push(`save-image:${input.sha256.slice(0, 8)}`);
+    if (this.failImageSave) throw new Error('material_store_failed');
+    this.savedImages.push(input);
+    const existing = [...this.imageAssets.values()].find((asset) => asset.input.sha256 === input.sha256);
+    if (existing) return { id: existing.id, deduplicated: true };
+    const id = `image-${this.imageAssets.size + 1}`;
+    this.imageAssets.set(id, { id, input, deduplicated: false });
+    return { id, deduplicated: false };
+  }
+  async listImageAssets(input: { limit?: number } = {}) {
+    return [...this.imageAssets.values()]
+      .slice(0, input.limit ?? 100)
+      .map(({ id, input: saved }) => ({
+        id,
+        workspaceId: 'brand-07',
+        sha256: saved.sha256,
+        fileExt: saved.fileExt,
+        mediaType: saved.mediaType,
+        byteSize: saved.byteSize,
+        width: saved.width,
+        height: saved.height,
+        description: saved.description,
+        category: saved.category,
+        sourceMaterialId: saved.sourceMaterialId,
+        sourceMaterialName: '实拍.png',
+        relativePath: `media/images/${saved.sha256}.${saved.fileExt}`,
+        createdAt: '2026-08-31T00:00:00Z',
+        updatedAt: '2026-08-31T00:00:00Z',
+      }));
+  }
+  async imageAssetContent(imageId: string) {
+    const asset = this.imageAssets.get(imageId);
+    if (!asset) throw new Error('material_not_found');
+    return new TextEncoder().encode(JSON.stringify(asset.input));
   }
   readonly listed: BrandMaterial[] = [];
   async list(input: { materialIds?: string[]; limit?: number }) {
@@ -188,6 +260,11 @@ function service(port: FakeMaterialPort, overrides: {
     query: string,
     options?: { signal?: AbortSignal; count?: number },
   ) => Promise<Array<{ title: string; url: string; summary?: string }>>;
+  /** 材料图片视觉打标（lite image_url 调用的 fake）。 */
+  describeImage?: (
+    input: { system: string; prompt: string; bytes: Uint8Array; mediaType: string },
+    options?: { signal?: AbortSignal },
+  ) => Promise<string>;
   /** 缩短抽取硬上限，验证 provider 挂起会落回 failed 终态。 */
   extractionTimeoutMs?: number;
 } = {}) {
@@ -206,14 +283,19 @@ function service(port: FakeMaterialPort, overrides: {
   )));
   const inspect = vi.fn(overrides.inspect ?? (async () => null));
   const searchSources = overrides.searchSources ? vi.fn(overrides.searchSources) : undefined;
-  // 结构化召回可用性测试需要断言「生成语料未被调用」，兜底 spy 同时暴露到返回对象。
+  const describeImage = overrides.describeImage ? vi.fn(overrides.describeImage) : undefined;
+  // 结构化召回/打标可用性测试需要断言「生成语料未被调用」，兜底 spy 同时暴露到返回对象。
   const search = overrides.search
     ? vi.fn(overrides.search)
-    : searchSources
+    : (searchSources || describeImage)
       ? vi.fn(async () => { throw new Error('generated search unavailable'); })
       : undefined;
-  const capability = search || searchSources
-    ? { search: search!, ...(searchSources ? { searchSources } : {}) }
+  const capability = search || searchSources || describeImage
+    ? {
+      search: search!,
+      ...(searchSources ? { searchSources } : {}),
+      ...(describeImage ? { describeImage } : {}),
+    }
     : undefined;
   return {
     complete,
@@ -221,6 +303,7 @@ function service(port: FakeMaterialPort, overrides: {
     inspect,
     search,
     searchSources,
+    describeImage,
     value: new MaterialImportService(
       { workspaceId: 'brand-07', sessionId: 'session-07' },
       port,
@@ -1934,5 +2017,149 @@ describe('MaterialImportService billing permits (ticket 07)', () => {
     } finally {
       spy.mockRestore();
     }
+  });
+});
+
+describe('MaterialImportService standalone image materials (ADR-0008 T2)', () => {
+  const taggingResponse = (
+    category = '产品实拍',
+    description = '门店前台的智能音箱展台实拍',
+  ) => JSON.stringify({ description, category });
+
+  async function storedImage(port: FakeMaterialPort, bytes: Uint8Array) {
+    const item = await port.importFile('C:/pics/展拍.png');
+    port.bytes.set(item.id, bytes);
+    return item;
+  }
+
+  it('imports a standalone image straight into the candidate pool, skipping text and profile extraction', async () => {
+    const port = new FakeMaterialPort();
+    const current = service(port, { describeImage: async () => taggingResponse() });
+
+    const results = await current.value.importFiles(['C:/pics/展拍.png']);
+
+    expect(results[0]).toMatchObject({ ok: true, candidateIds: [], candidates: [] });
+    // 文本/画像抽取零调用：图片材料不进抽取模型与知识权威。
+    expect(current.complete).not.toHaveBeenCalled();
+    expect(current.propose).not.toHaveBeenCalled();
+    expect(current.describeImage).toHaveBeenCalledTimes(1);
+    // 打标产出 + 尺寸/来源/sha256 一并入池。
+    const saved = port.savedImages[0];
+    expect(saved).toMatchObject({
+      sha256: 'b'.repeat(64),
+      fileExt: 'png',
+      mediaType: 'image/png',
+      byteSize: pngFixtureBytes(800, 600).byteLength,
+      width: 800,
+      height: 600,
+      description: '门店前台的智能音箱展台实拍',
+      category: 'product-photo',
+    });
+    expect(saved?.sourceMaterialId).toMatch(/^file-/);
+    // 终态 processed、零候选；导入成功而非 failed。
+    expect(port.finishes.at(-1)).toMatchObject({ status: 'processed', candidateIds: [] });
+  });
+
+  it('filters small images before tagging while keeping the import successful', async () => {
+    const port = new FakeMaterialPort();
+    const item = await storedImage(port, pngFixtureBytes(120, 80));
+    const current = service(port, { describeImage: async () => taggingResponse() });
+
+    const result = await current.value.process(item.id);
+
+    expect(result).toMatchObject({ ok: true, candidateIds: [] });
+    expect(current.describeImage).not.toHaveBeenCalled();
+    expect(port.savedImages).toHaveLength(0);
+    expect(port.finishes.at(-1)?.status).toBe('processed');
+  });
+
+  it('filters oversized images without spending a tagging call', async () => {
+    const port = new FakeMaterialPort();
+    const item = await storedImage(port, new Uint8Array(MATERIAL_IMAGE_MAX_TAGGABLE_BYTES + 1));
+    const current = service(port, { describeImage: async () => taggingResponse() });
+
+    const result = await current.value.process(item.id);
+
+    expect(result).toMatchObject({ ok: true });
+    expect(current.describeImage).not.toHaveBeenCalled();
+    expect(port.savedImages).toHaveLength(0);
+  });
+
+  it('drops icon-decoration tags out of the pool', async () => {
+    const port = new FakeMaterialPort();
+    const item = await storedImage(port, pngFixtureBytes(800, 600));
+    const current = service(port, { describeImage: async () => taggingResponse('图标装饰', '品牌 logo 圆形图标') });
+
+    const result = await current.value.process(item.id);
+
+    expect(result).toMatchObject({ ok: true });
+    expect(port.savedImages).toHaveLength(0);
+    expect(port.finishes.at(-1)?.status).toBe('processed');
+  });
+
+  it('degrades to not-pooled on unparseable tagging output', async () => {
+    const port = new FakeMaterialPort();
+    const item = await storedImage(port, pngFixtureBytes(800, 600));
+    const current = service(port, { describeImage: async () => '这张图我识别不了。' });
+
+    const result = await current.value.process(item.id);
+
+    expect(result).toMatchObject({ ok: true });
+    expect(port.savedImages).toHaveLength(0);
+    expect(port.finishes.at(-1)?.status).toBe('processed');
+  });
+
+  it('degrades to not-pooled when the tagging call throws', async () => {
+    const port = new FakeMaterialPort();
+    const item = await storedImage(port, pngFixtureBytes(800, 600));
+    const current = service(port, {
+      describeImage: async () => { throw new Error('keyword-search upstream failed'); },
+    });
+
+    const result = await current.value.process(item.id);
+
+    expect(result).toMatchObject({ ok: true });
+    expect(port.savedImages).toHaveLength(0);
+    expect(port.finishes.at(-1)?.status).toBe('processed');
+  });
+
+  it('degrades to not-pooled when the capability has no describeImage (legacy injection)', async () => {
+    const port = new FakeMaterialPort();
+    const item = await storedImage(port, pngFixtureBytes(800, 600));
+    const current = service(port, { search: async () => '搜索结果' });
+
+    const result = await current.value.process(item.id);
+
+    expect(result).toMatchObject({ ok: true });
+    expect(port.savedImages).toHaveLength(0);
+    expect(current.complete).not.toHaveBeenCalled();
+    expect(port.finishes.at(-1)?.status).toBe('processed');
+  });
+
+  it('keeps the import successful when image persistence fails', async () => {
+    const port = new FakeMaterialPort();
+    const item = await storedImage(port, pngFixtureBytes(800, 600));
+    port.failImageSave = true;
+    const current = service(port, { describeImage: async () => taggingResponse() });
+
+    const result = await current.value.process(item.id);
+
+    expect(result).toMatchObject({ ok: true });
+    expect(port.finishes.at(-1)?.status).toBe('processed');
+  });
+
+  it('routes duplicate content to one pool entry via the sha256 key', async () => {
+    const port = new FakeMaterialPort();
+    const first = await storedImage(port, pngFixtureBytes(800, 600));
+    const second = await storedImage(port, pngFixtureBytes(1024, 768));
+    const current = service(port, { describeImage: async () => taggingResponse() });
+
+    await current.value.process(first.id);
+    await current.value.process(second.id);
+
+    // 两次保存都发生，但同一 sha256 在端口层幂等为一个条目。
+    expect(port.savedImages).toHaveLength(2);
+    expect(port.imageAssets.size).toBe(1);
+    expect(port.finishes.at(-1)?.status).toBe('processed');
   });
 });

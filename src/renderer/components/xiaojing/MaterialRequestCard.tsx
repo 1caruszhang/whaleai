@@ -25,6 +25,7 @@ import { useCurrentWorkspace } from '@/context/CurrentWorkspaceContext';
 import { useTabApi, useTabState } from '@/context/TabContext';
 import { isPendingSessionId } from '../../../shared/constants';
 import type { KnowledgeCandidatesCardData } from '../../../shared/geo/knowledgeCard';
+import { isMaterialImageExtension, MATERIAL_IMAGE_EXTENSIONS } from '../../../shared/geo/materialImages';
 import { parseMaterialRequestCard, type MaterialRequestCardData } from '../../../shared/geo/materialRequestCard';
 import KnowledgeBatchCard from './KnowledgeBatchCard';
 
@@ -41,6 +42,8 @@ interface MaterialRow {
   materialId?: string;
   candidateCount?: number;
   errorCode?: string;
+  /** 独立图片材料行：文案走配图候选池口径而非「待确认事实」口径。 */
+  image?: boolean;
   /**
    * 挂载恢复接管的在途行：原 Sidecar 的后台队列可能已随进程消失，
    * 允许用户直接重试，避免永远停在 processing。
@@ -63,20 +66,27 @@ function displayNameFromPath(path: string): string {
 function rowPatchFromEntry(entry: BrandMaterialProcessResult | undefined): Partial<MaterialRow> {
   if (!entry) return { status: 'failed', errorCode: 'material_processing_failed' };
   if (entry.ok) {
-    return { status: 'processing', materialId: entry.material.id, errorCode: undefined };
+    return {
+      status: 'processing',
+      materialId: entry.material.id,
+      image: isMaterialImageExtension(entry.material.fileExt),
+      errorCode: undefined,
+    };
   }
   return { status: 'failed', materialId: undefined, errorCode: entry.errorCode };
 }
 
 function rowPatchFromStatus(entry: BrandMaterialStatusEntry): Partial<MaterialRow> {
   const { material, card } = entry;
+  const image = isMaterialImageExtension(material.fileExt);
   if (material.status === 'failed') {
-    return { status: 'failed', errorCode: material.lastErrorCode ?? 'material_processing_failed' };
+    return { status: 'failed', image, errorCode: material.lastErrorCode ?? 'material_processing_failed' };
   }
   if (material.status === 'awaiting-confirmation' || material.status === 'processed') {
     return {
       status: 'success',
       materialId: material.id,
+      image,
       candidateCount: card?.candidates.length ?? 0,
       errorCode: undefined,
     };
@@ -192,6 +202,7 @@ export default memo(function MaterialRequestCard({ data }: MaterialRequestCardPr
                 label: entry.material.displayName,
                 status: 'processing',
                 materialId: entry.material.id,
+                image: isMaterialImageExtension(entry.material.fileExt ?? ''),
                 recoverable: true,
               }, ...current];
             });
@@ -220,6 +231,7 @@ export default memo(function MaterialRequestCard({ data }: MaterialRequestCardPr
           extensions: [
             'txt', 'md', 'markdown', 'csv', 'json', 'html', 'htm', 'xml', 'log',
             'pdf', 'docx', 'xlsx', 'pptx',
+            ...MATERIAL_IMAGE_EXTENSIONS,
           ],
         }],
       });
@@ -240,6 +252,7 @@ export default memo(function MaterialRequestCard({ data }: MaterialRequestCardPr
       kind: 'file' as const,
       label: displayNameFromPath(path),
       status: 'processing' as const,
+      image: isMaterialImageExtension(path.split('.').at(-1) ?? ''),
     }));
     setRows((current) => [...pendingRows, ...current]);
     try {
@@ -369,7 +382,7 @@ export default memo(function MaterialRequestCard({ data }: MaterialRequestCardPr
         <div className="mt-2.5">
           <div className="flex items-center justify-between gap-2">
             <p className="text-xs leading-4 text-[var(--ink-muted)]">
-              原材料先安全保存，再生成待确认事实；完成后确认卡片会出现在这里。
+              原材料先安全保存，再生成待确认事实；完成后确认卡片会出现在这里。直接上传的图片会自动进入配图候选池。
             </p>
             <button
               type="button"
@@ -435,8 +448,12 @@ export default memo(function MaterialRequestCard({ data }: MaterialRequestCardPr
                 <div className="min-w-0 flex-1">
                   <p className="truncate font-medium">{row.label}</p>
                   <p className="mt-0.5 text-xs text-[var(--ink-muted)]">
-                    {row.status === 'processing' && '正在保存并抽取…（完成后自动弹出确认卡）'}
-                    {row.status === 'success' && `已生成 ${row.candidateCount ?? 0} 条待确认事实`}
+                    {row.status === 'processing' && (row.image
+                      ? '正在保存并识别图片…'
+                      : '正在保存并抽取…（完成后自动弹出确认卡）')}
+                    {row.status === 'success' && (row.image
+                      ? '图片已保存；符合配图要求的图片自动进入配图候选池'
+                      : `已生成 ${row.candidateCount ?? 0} 条待确认事实`)}
                     {row.status === 'failed' && `处理失败：${row.errorCode ?? 'material_processing_failed'}`}
                   </p>
                   {row.materialId && (

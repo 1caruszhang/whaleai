@@ -59,6 +59,7 @@ function started(id: string, kind: 'file' | 'pasted-text' | 'website-url'): Bran
       workspaceId: 'brand-07',
       inputKind: kind,
       displayName: `${id}.txt`,
+      fileExt: 'txt',
       status: 'stored',
       attemptCount: 0,
     },
@@ -71,6 +72,7 @@ function statusEntry(input: {
   status: 'processing' | 'awaiting-confirmation' | 'processed' | 'failed';
   lastErrorCode?: string;
   candidateCount?: number;
+  fileExt?: string;
 }) {
   const candidates = Array.from({ length: input.candidateCount ?? 0 }, (_unused, index) => ({
     id: `candidate-${input.id}-${index}`,
@@ -103,6 +105,7 @@ function statusEntry(input: {
       workspaceId: 'brand-07',
       inputKind: 'file' as const,
       displayName: input.displayName ?? `${input.id}.txt`,
+      fileExt: input.fileExt ?? 'txt',
       status: input.status,
       attemptCount: 1,
       ...(input.lastErrorCode ? { lastErrorCode: input.lastErrorCode } : {}),
@@ -158,6 +161,61 @@ describe('MaterialRequestCard', () => {
     expect(screen.getByPlaceholderText('粘贴企业介绍、产品资料或品牌事实')).toBeInTheDocument();
     expect(screen.getByPlaceholderText('https://example.com/about')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '选择文件' })).toBeInTheDocument();
+  });
+
+  it('offers image files in the picker and tells the user images join the illustration pool', async () => {
+    mocks.open.mockResolvedValue([]);
+    renderRequestCard();
+
+    fireEvent.click(screen.getByRole('button', { name: '选择文件' }));
+    await waitFor(() => expect(mocks.open).toHaveBeenCalled());
+
+    const options = mocks.open.mock.calls[0]?.[0] as { filters?: Array<{ extensions: string[] }> };
+    const extensions = options.filters?.[0]?.extensions ?? [];
+    for (const extension of ['png', 'jpg', 'jpeg', 'webp', 'gif']) {
+      expect(extensions).toContain(extension);
+    }
+    expect(
+      screen.getByText(/直接上传的图片会自动进入配图候选池/),
+    ).toBeInTheDocument();
+  });
+
+  it('shows image-specific row copy for standalone image materials', async () => {
+    vi.useFakeTimers();
+    mocks.open.mockResolvedValue(['C:\\selected\\展拍.png']);
+    mocks.importFiles.mockResolvedValue([
+      {
+        ok: true,
+        material: {
+          id: 'material-image',
+          workspaceId: 'brand-07',
+          inputKind: 'file',
+          displayName: '展拍.png',
+          fileExt: 'png',
+          status: 'stored',
+          attemptCount: 0,
+        },
+      },
+    ] satisfies BrandMaterialProcessResult[]);
+    renderRequestCard();
+
+    fireEvent.click(screen.getByRole('button', { name: '选择文件' }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    expect(screen.getByText(/正在保存并识别图片/)).toBeInTheDocument();
+
+    mocks.fetchStatuses.mockResolvedValue([
+      statusEntry({
+        id: 'material-image',
+        displayName: '展拍.png',
+        status: 'processed',
+        fileExt: 'png',
+      }),
+    ]);
+    await act(async () => { await vi.advanceTimersByTimeAsync(3000); });
+    expect(
+      screen.getByText(/图片已保存；符合配图要求的图片自动进入配图候选池/),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/条待确认事实/)).not.toBeInTheDocument();
   });
 
   it('imports selected files, keeps per-file storage success/failure visible, and retries only one material', async () => {

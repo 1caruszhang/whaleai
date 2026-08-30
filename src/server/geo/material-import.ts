@@ -19,6 +19,11 @@ import {
   type MaterialProcessResult as SharedMaterialProcessResult,
   type MaterialProcessSuccess as SharedMaterialProcessSuccess,
 } from '../../shared/geo/materials';
+import {
+  isMaterialImageExtension,
+  type MaterialImageAsset,
+  type MaterialImageCategoryCode,
+} from '../../shared/geo/materialImages';
 import { toKnowledgeCardCandidate } from '../../shared/geo/knowledgeCard';
 import { registeredDomain } from '../../shared/geo/channelRecall';
 import type { CompetitorDisplayDetail } from '../../shared/geo/competitorDetails';
@@ -38,6 +43,15 @@ import type {
   GeoKeywordSearchCapability,
   GeoTextCapability,
 } from './provider-capabilities';
+import {
+  buildImageTaggingPrompt,
+  isPoolableDimensions,
+  MATERIAL_IMAGE_DESCRIPTION_MAX_CHARS,
+  MATERIAL_IMAGE_MAX_TAGGABLE_BYTES,
+  materialImageMediaType,
+  parseImageTaggingResponse,
+  probeImageDimensions,
+} from './material-image';
 
 const MAX_WEBSITE_BYTES = 2 * 1024 * 1024;
 const MAX_EXTRACTED_TEXT_CHARS = 120_000;
@@ -145,6 +159,19 @@ export interface BrandMaterialListItem {
   candidateIds: string[];
 }
 
+/** 材料图片入池写入（ADR-0008）：sha256 为跨来源唯一键，重复内容幂等跳过。 */
+export interface SaveMaterialImageInput {
+  sourceMaterialId: string;
+  sha256: string;
+  fileExt: string;
+  mediaType: string;
+  byteSize: number;
+  width: number;
+  height: number;
+  description: string;
+  category: MaterialImageCategoryCode;
+}
+
 export interface BrandMaterialPort {
   context(): Promise<BrandMaterialContext>;
   importFile(sourcePath: string): Promise<BrandMaterial>;
@@ -161,11 +188,17 @@ export interface BrandMaterialPort {
   finish(input: {
     attemptId: string;
     materialId: string;
-    status: 'awaiting-confirmation' | 'failed';
+    status: 'awaiting-confirmation' | 'processed' | 'failed';
     candidateIds: string[];
     errorCode?: string;
   }): Promise<BrandMaterial>;
   list(input: { materialIds?: string[]; limit?: number }): Promise<BrandMaterialListItem[]>;
+  /** 材料图片候选池写入；同 sha256 已在池时返回既有条目并标记 deduplicated。 */
+  saveImageAsset(input: SaveMaterialImageInput): Promise<{ id: string; deduplicated: boolean }>;
+  /** 候选清单（供生成注入与预览取回消费方）。 */
+  listImageAssets(input?: { limit?: number }): Promise<MaterialImageAsset[]>;
+  /** 候选图片内容取回（预览换 blob 的字节源）。 */
+  imageAssetContent(imageId: string): Promise<Uint8Array>;
 }
 
 interface ExtractedProfileFact {
@@ -180,6 +213,18 @@ interface ExtractedProfileFact {
 export type MaterialProcessSuccess = SharedMaterialProcessSuccess<BrandMaterial>;
 export type MaterialProcessResult = SharedMaterialProcessResult<BrandMaterial>;
 export type { MaterialProcessFailure, MaterialErrorCode };
+
+/** 图片入池的脱敏 outcome（诊断日志固定码，字面量联合防拼错）。 */
+type MaterialImagePoolOutcome =
+  | 'pooled'
+  | 'deduplicated'
+  | 'tagging-unavailable'
+  | 'too-large'
+  | 'dimensions-unreadable'
+  | 'below-min-dimension'
+  | 'tagging-unparsed'
+  | 'icon-decoration'
+  | 'degraded';
 
 export interface WebsiteFetchDependencies {
   fetch?: (
@@ -263,7 +308,7 @@ export class RustBrandMaterialPort implements BrandMaterialPort {
   async finish(input: {
     attemptId: string;
     materialId: string;
-    status: 'awaiting-confirmation' | 'failed';
+    status: 'awaiting-confirmation' | 'processed' | 'failed';
     candidateIds: string[];
     errorCode?: string;
   }): Promise<BrandMaterial> {
@@ -279,6 +324,28 @@ export class RustBrandMaterialPort implements BrandMaterialPort {
     }));
     if (result.ok !== true) throw managementError(result);
     return result.materials as BrandMaterialListItem[];
+  }
+
+  async saveImageAsset(input: SaveMaterialImageInput): Promise<{ id: string; deduplicated: boolean }> {
+    const result = await managementApi('/api/brand-materials/images/save', 'POST', this.envelope({ ...input }));
+    if (result.ok !== true) throw managementError(result);
+    return result.image as { id: string; deduplicated: boolean };
+  }
+
+  async listImageAssets(input: { limit?: number } = {}): Promise<MaterialImageAsset[]> {
+    const result = await managementApi('/api/brand-materials/images/list', 'POST', this.envelope(
+      input.limit !== undefined ? { limit: input.limit } : {},
+    ));
+    if (result.ok !== true) throw managementError(result);
+    return result.images as MaterialImageAsset[];
+  }
+
+  async imageAssetContent(imageId: string): Promise<Uint8Array> {
+    return (await managementApiBytes(
+      '/api/brand-materials/images/content',
+      this.envelope({ imageId }),
+      { maxBytes: 20 * 1024 * 1024, timeoutMs: 30_000 },
+    )).bytes;
   }
 }
 
@@ -1318,7 +1385,7 @@ export class MaterialImportService {
     private readonly authority: Pick<KnowledgeAuthority, 'propose' | 'inspect'>,
     private readonly websiteDeps: WebsiteFetchDependencies = {},
     private readonly keywordSearch?:
-      Pick<GeoKeywordSearchCapability, 'search' | 'searchSources'>,
+      Pick<GeoKeywordSearchCapability, 'search' | 'searchSources' | 'describeImage'>,
     private readonly extractionTimeoutMs: number = DEFAULT_EXTRACTION_TIMEOUT_MS,
     /** 网关计费（票 07）：材料导入 20 点/份，失败份退回；缺省跳过。 */
     private readonly permits?: GeoBillingPermitPort,
@@ -1872,6 +1939,82 @@ export class MaterialImportService {
     }
   }
 
+  /**
+   * 独立图片材料的导入终态（ADR-0008 T2）：不产出任何知识候选，材料直接
+   * 落 processed。配图候选池的每一步（尺寸闸、打标、入库）失败都只影响
+   * 该图是否入池，绝不把材料导入打成 failed——一次模型抖动不能卡死导入。
+   */
+  private async importImageMaterial(
+    attempt: MaterialProcessingAttempt,
+    material: BrandMaterial,
+    bytes: Uint8Array,
+  ): Promise<MaterialProcessResult> {
+    let outcome: MaterialImagePoolOutcome = 'pooled';
+    try {
+      outcome = await this.poolTaggedImage(material, bytes);
+    } catch (error) {
+      // 打标调用/入库的异常统一按降级收尾；固定码投影与文本抽取诊断同款。
+      outcome = 'degraded';
+      console.log(`[materials] image diagnostic ${JSON.stringify({
+        materialId: material.id,
+        errorCode: errorCode(error),
+      })}`);
+    }
+    console.log(`[materials] image-import ${JSON.stringify({
+      materialId: material.id,
+      outcome,
+    })}`);
+    const updated = await this.materialPort.finish({
+      attemptId: attempt.id,
+      materialId: material.id,
+      status: 'processed',
+      candidateIds: [],
+    });
+    return {
+      ok: true,
+      material: updated,
+      candidateIds: [],
+      candidates: [],
+      attemptNumber: attempt.attemptNumber,
+    };
+  }
+
+  /** 打标入池管线：返回脱敏 outcome；调用方只用于日志与终态，不用于分支失败。 */
+  private async poolTaggedImage(material: BrandMaterial, bytes: Uint8Array): Promise<MaterialImagePoolOutcome> {
+    const describeImage = this.keywordSearch?.describeImage;
+    if (!describeImage) return 'tagging-unavailable';
+    if (bytes.byteLength > MATERIAL_IMAGE_MAX_TAGGABLE_BYTES) return 'too-large';
+    const dimensions = probeImageDimensions(bytes, material.fileExt);
+    if (!dimensions) return 'dimensions-unreadable';
+    if (!isPoolableDimensions(dimensions)) return 'below-min-dimension';
+    const prompt = buildImageTaggingPrompt();
+    // 与文本抽取同款硬上限：打标挂起到期即降级，材料不停在 processing。
+    const raw = await describeImage(
+      {
+        system: prompt.system,
+        prompt: prompt.prompt,
+        bytes,
+        mediaType: materialImageMediaType(material.fileExt),
+      },
+      { signal: AbortSignal.timeout(this.extractionTimeoutMs) },
+    );
+    const tag = parseImageTaggingResponse(raw);
+    if (!tag) return 'tagging-unparsed';
+    if (tag.category === 'icon-decoration') return 'icon-decoration';
+    const saved = await this.materialPort.saveImageAsset({
+      sourceMaterialId: material.id,
+      sha256: material.sha256,
+      fileExt: material.fileExt,
+      mediaType: materialImageMediaType(material.fileExt),
+      byteSize: bytes.byteLength,
+      width: dimensions.width,
+      height: dimensions.height,
+      description: tag.description.slice(0, MATERIAL_IMAGE_DESCRIPTION_MAX_CHARS),
+      category: tag.category,
+    });
+    return saved.deduplicated ? 'deduplicated' : 'pooled';
+  }
+
   async process(materialId: string): Promise<MaterialProcessResult> {
     let attempt: MaterialProcessingAttempt;
     const candidateIds: string[] = [];
@@ -1915,6 +2058,13 @@ export class MaterialImportService {
       if (context.workspaceId !== this.identity.workspaceId
         || material.workspaceId !== this.identity.workspaceId) {
         throw new Error('material_identity_mismatch');
+      }
+      // 独立图片材料（ADR-0008 T2）：跳过文本/画像抽取，直接走视觉打标
+      // 入池；打标与入池的一切失败都是降级（不入池、不阻塞导入）。
+      if (isMaterialImageExtension(material.fileExt)) {
+        const result = await this.importImageMaterial(attempt, material, bytes);
+        await settlePermit('success');
+        return result;
       }
       const text = await parseBrandMaterial(material, bytes).catch((error) => {
         if (error instanceof Error && ['material_type_unsupported', 'material_empty'].includes(error.message)) throw error;
