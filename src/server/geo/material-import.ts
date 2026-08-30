@@ -19,10 +19,13 @@ import {
   type MaterialProcessSuccess as SharedMaterialProcessSuccess,
 } from '../../shared/geo/materials';
 import { toKnowledgeCardCandidate } from '../../shared/geo/knowledgeCard';
+import type { CompetitorDisplayDetail } from '../../shared/geo/competitorDetails';
 import {
-  encodeCompetitorEvidence,
-  type CompetitorDisplayDetail,
-} from '../../shared/geo/competitorDetails';
+  deriveServiceScope,
+  resolveBrandName,
+  type BrandProfile,
+  type ServiceScope,
+} from '../../shared/geo/profileInjection';
 import { buildSsrfGuardedDispatcher, isUrlSchemeSafe } from '../utils/ssrf';
 import { withAbortSignal } from '../utils/cancellation';
 import { managementApi, managementApiBytes } from '../utils/management-api-client';
@@ -411,11 +414,9 @@ function extractionPrompt(context: BrandMaterialContext, material: BrandMaterial
 }
 
 /**
- * 竞品富化合并提示词：检索与结构化抽取在同一次 enable_search 调用内完成，
- * 不再有独立的二次抽取级（LLM 改写语料无法通过逐字证据门，冷门品牌近乎
- * 必然全灭）。四条件判别与榜单语料警示仍是提示词层质量纪律；反虚构落点
- * 从「逐字存在于语料」改为「检索确认真实存在，不得凭记忆输出」，最终
- * 由确认卡裁决。
+ * 竞品富化兜底提示词（ADR-0007）：仅当结构化召回（searchSources）不可用
+ * 或返回为空时，回落到 enable_search 合并式调用——检索与结构化抽取在同一
+ * 次调用内完成，无快照可比对（存在闸降级），地域闸照常执行。
  */
 function competitorEnrichmentPrompt(input: {
   brandName: string;
@@ -465,6 +466,61 @@ function competitorEnrichmentPrompt(input: {
     + '（检索所得中支撑该品牌真实存在与竞争关系的事实摘要，不超过 200 字）；'
     + '数量不足时按实际数量输出，检索不到同层级本地同行就输出空数组——宁缺毋滥，凑不够不硬凑。',
     '输出：{"competitors":[{"name":"公司名","region":"所在地域","similarBusiness":"具体同类业务","sourceExcerpt":"事实摘要"}]}',
+  ].join('\n');
+}
+
+/**
+ * 快照内竞品识别提示词（ADR-0007 主路径）：输入是 searchSources 的真实
+ * 检索快照（纯引擎召回、不经 LLM 改写），模型只做「从语料认名字」——
+ * 与材料腿「从材料文本抽 15 字段」哲学对称。名字必须逐字取自快照，
+ * 存在闸（本地字符串比对）随后兜住漏网幻觉。
+ */
+function competitorExtractionPrompt(input: {
+  brandName: string;
+  industry: string;
+  products: string[];
+  anchor: string;
+  knownCompetitors: string[];
+  excludedNames: string[];
+  deficit: number;
+  corpus: string;
+}): string {
+  const productText = input.products.length > 0 ? input.products.join('、') : input.industry || '目标业务';
+  return [
+    '你是同城竞品识别引擎。下方是针对目标业务的真实搜索引擎结果快照（编号）。'
+    + '只返回 JSON，不要 markdown。',
+    '',
+    '## 目标品牌画像',
+    `- 品牌：${input.brandName}`,
+    `- 行业：${input.industry || '未知'}`,
+    `- 核心产品/服务：${productText}`,
+    `- 服务区域：${input.anchor}（竞品必须在此区域或紧邻区域实体经营）`,
+    '- 体量层级：按画像判断（单体门店/地方级服务商，或区域连锁）；连锁品牌按其区域层级取同层级同行。',
+    '',
+    '## 判别标准——四个条件必须同时满足，缺一不可',
+    '1. 同体量层级：与目标品牌同层级争同一批散客；全国/跨区域连锁总部、上市集团、'
+    + '上游原料/设备厂商、公立大机构、权威标杆是不同层级，不是竞品。',
+    `2. 同赛道：经营与「${productText}」高度重叠的业务——看具体产品/服务，不看行业大类。`,
+    `3. 同地域：在「${input.anchor}」或紧邻区域有实体经营。`,
+    '4. 竞争关系：客户会拿来与目标品牌二选一比价——供应商、客户/甲方、合作方、'
+    + '平台渠道（美团/抖音/新氧/小红书等）都不是竞品。',
+    '',
+    '## 榜单语料警示',
+    '快照常混有「国家/地区 + 品牌 + 英文名」的国际品牌榜单行文（如「以色列摩雷Morel」'
+    + '「美国来福Rockford Fosgate」）——这类国际/全国级设备或商品品牌与本地服务商不在同一层级，一律不取；'
+    + '「选择一家靠谱的」「三大」「性价比高」等散文/品类/评价语不是企业专名，不取。',
+    '',
+    `已知竞品（不得重复输出）：${input.knownCompetitors.length > 0 ? input.knownCompetitors.join('、') : '无'}`,
+    `排除名称（品牌自身、别名、合作商、上下游、关联品牌，绝不能作为竞品输出）：${input.excludedNames.join('、')}`,
+    '',
+    `只允许从下方快照文本中识别最多 ${input.deficit} 个真实存在的直接竞争品牌（四个条件同时满足），`
+    + '禁止输出快照里没有出现的名字；每家输出 name（逐字取自快照原文的企业/品牌名）和 region'
+    + '（快照显示的经营地域）；数量不足时按实际数量输出，快照里没有同层级本地同行就输出空数组'
+    + '——宁缺毋滥，凑不够不硬凑。',
+    '输出：{"competitors":[{"name":"公司名","region":"所在地域"}]}',
+    '',
+    '## 检索快照',
+    input.corpus,
   ].join('\n');
 }
 
@@ -523,10 +579,85 @@ function normalizeCompetitorKey(value: string): string {
 }
 
 /**
- * 联网候选轻过滤：合并式调用里检索语料与候选同源，逐字证据门不再适用；
- * 反虚构落点收窄为结构校验（name/region/similarBusiness/sourceExcerpt 齐）
- * + 摘录内非竞争关系排除 + 自名/排除名单 + 已知竞品/重复去重。质量纪律
- * 由提示词四条件承担，最终裁决在确认卡（inferred 低置信必审）。
+ * 竞品名公共闸（两条富化路径共用）：排除名单（品牌自身/别名/关联主体）
+ * 按双向子串匹配——目标品牌「九味牛」要连「成都九味牛食品」一起拦下
+ * （js_ai dedupeAndFilterCompetitors 契约）；短名形近变体（错别字）由
+ * isSimilarSelfName 一并拦下；已知竞品去重。
+ */
+function passesCompetitorNameGates(
+  name: string,
+  limits: {
+    knownCompetitors: ReadonlySet<string>;
+    excludedNames: ReadonlySet<string>;
+  },
+): boolean {
+  const normalized = normalizeCompetitorKey(name);
+  if (!normalized) return false;
+  if ([...limits.excludedNames].some(
+    (excluded) => excluded === normalized || excluded.includes(normalized) || normalized.includes(excluded)
+      || isSimilarSelfName(normalized, excluded),
+  )) return false;
+  return !limits.knownCompetitors.has(normalized);
+}
+
+/**
+ * 地域闸（ADR-0007 代码硬闸）：候选 region 必须落在地域锚白名单内。
+ * 白名单段可含「市/区/县」后缀或为「城市+区县」复合短名（如「成都新都」），
+ * 双向按去后缀的包含关系比对——拦的是「武汉 vs 成都新都」级跨城错配，
+ * 不做精确地理判定（同市跨区放行，紧邻语义由确认卡裁决）。
+ */
+function regionInServiceScope(region: string, scope: ServiceScope): boolean {
+  const parts = region.split(/[，,、；;/|\s]+/).map((part) => part.trim()).filter(Boolean);
+  return parts.some((part) => {
+    const candidate = part.replace(/[市区县]$/, '');
+    if (!candidate) return false;
+    return scope.allowed.some((allowed) => {
+      const anchor = allowed.replace(/[市区县]$/, '');
+      if (candidate.length >= 2 && anchor.includes(candidate)) return true;
+      return anchor.length >= 2 && candidate.includes(anchor);
+    });
+  });
+}
+
+/**
+ * 快照内候选解析（主路径）：name 逐字取自快照 + region 必填；名字闸同
+ * 兜底路径。存在性不在此判——本地比对快照语料是后续 enrichCompetitors
+ * 的确定性闸门，构造保证 + 兜底校验双层。
+ */
+function parseCompetitorNames(
+  raw: string,
+  limits: {
+    knownCompetitors: ReadonlySet<string>;
+    excludedNames: ReadonlySet<string>;
+    deficit: number;
+  },
+): Array<{ name: string; region: string }> {
+  const parsed = extractJsonObject(raw);
+  if (!Array.isArray(parsed.competitors)) throw new Error('model_response_invalid');
+  const seen = new Set<string>();
+  const suggestions: Array<{ name: string; region: string }> = [];
+  for (const item of parsed.competitors) {
+    if (suggestions.length >= limits.deficit) break;
+    if (!item || typeof item !== 'object' || Array.isArray(item)) continue;
+    const holder = item as Record<string, unknown>;
+    const name = typeof holder.name === "string" ? holder.name.trim().slice(0, 60) : "";
+    const region = typeof holder.region === 'string' && holder.region.trim()
+      ? holder.region.trim().slice(0, 40)
+      : '';
+    if (!name || !region) continue;
+    const normalized = normalizeCompetitorKey(name);
+    if (!passesCompetitorNameGates(name, limits)) continue;
+    if (seen.has(normalized)) continue;
+    seen.add(normalized);
+    suggestions.push({ name, region });
+  }
+  return suggestions;
+}
+
+/**
+ * 兜底路径（enable_search 合并式）候选解析：结构校验（name/region/
+ * similarBusiness/sourceExcerpt 齐）+ 摘录内非竞争关系排除 + 名字闸。
+ * 存在闸在此路径无快照可比，明确降级（ADR-0007）。
  */
 function parseCompetitorSuggestions(
   raw: string,
@@ -561,14 +692,7 @@ function parseCompetitorSuggestions(
     // 拦下模型把上下游改写成竞品的常见错误。
     if (namedRelation(sourceExcerpt, name, NON_COMPETITOR_RELATION)) continue;
     const normalized = normalizeCompetitorKey(name);
-    // 排除名单（品牌自身/别名/关联主体）按双向子串匹配——目标品牌「九味牛」
-    // 要连「成都九味牛食品」一起拦下（js_ai dedupeAndFilterCompetitors 契约）；
-    // 短名形近变体（错别字）由 isSimilarSelfName 一并拦下。
-    if ([...limits.excludedNames].some(
-      (excluded) => excluded === normalized || excluded.includes(normalized) || normalized.includes(excluded)
-        || isSimilarSelfName(normalized, excluded),
-    )) continue;
-    if (limits.knownCompetitors.has(normalized)) continue;
+    if (!passesCompetitorNameGates(name, limits)) continue;
     if (seen.has(normalized)) continue;
     seen.add(normalized);
     suggestions.push({ name, region, similarBusiness, sourceExcerpt });
@@ -985,7 +1109,8 @@ export class MaterialImportService {
     private readonly extraction: GeoTextCapability,
     private readonly authority: Pick<KnowledgeAuthority, 'propose' | 'inspect'>,
     private readonly websiteDeps: WebsiteFetchDependencies = {},
-    private readonly keywordSearch?: Pick<GeoKeywordSearchCapability, 'search'>,
+    private readonly keywordSearch?:
+      Pick<GeoKeywordSearchCapability, 'search' | 'searchSources'>,
     private readonly extractionTimeoutMs: number = DEFAULT_EXTRACTION_TIMEOUT_MS,
     /** 网关计费（票 07）：材料导入 20 点/份，失败份退回；缺省跳过。 */
     private readonly permits?: GeoBillingPermitPort,
@@ -1045,13 +1170,14 @@ export class MaterialImportService {
   }
 
   /**
-   * js_ai material-to-facts 契约的 "enrich real competitors"：品牌整体竞品
-   * （本次抽取 + 已确认权威值）不足 10 家备选时，用联网模型补足。检索与
-   * 结构化抽取在同一次 enable_search 调用内完成（合并式），候选只过轻过滤
-   * （结构校验 + 非竞争关系 + 自名/排除名单 + 去重）。富化名一律 inferred
-   * （低置信）并携带检索事实摘录，最终由确认卡裁决；与材料已抽出的竞品合并
-   * 为同一条候选，避免同键多条候选顺序采纳时互相覆盖。检索或解析失败不
-   * 影响其他字段，但 process() 随后仍会产出可补充的 competitors 必审行。
+   * js_ai material-to-facts 契约的 "enrich real competitors"（ADR-0007 重写）：
+   * 品牌整体竞品（本次抽取 + 已确认权威值）不足 10 家备选时联网补足。主路径
+   * 为「取名于真实检索」——searchSources 纯引擎快照 ×2 → 一次普通抽取从快照
+   * 认名字 → 本地双闸（存在闸：名字逐字见于快照；地域闸：region 命中地域锚
+   * 白名单）；enable_search 合并式调用降级为兜底（无快照，存在闸降级）。
+   * 无地域锚（serviceArea 缺失/全国类）整轮跳过，不联网。富化名一律
+   * inferred（低置信），最终由确认卡裁决；与材料已抽出的竞品合并为同一条
+   * 候选，避免同键多条候选顺序采纳时互相覆盖。
    */
   private async enrichCompetitors(
     context: BrandMaterialContext,
@@ -1079,6 +1205,13 @@ export class MaterialImportService {
     let industry = '';
     let serviceArea = '';
     const materialProducts = new Set<string>();
+    // 身份/地址字段供 resolveBrandName 与 deriveServiceScope 消费（ADR-0007
+    // 接线：查询用知识库裁决名 + 派生地域锚，不再透传脏文本/工作区名）。
+    const identityValues: Record<'fullName' | 'shortNames' | 'addresses', string[]> = {
+      fullName: [],
+      shortNames: [],
+      addresses: [],
+    };
     const remember = (store: Map<string, string>, value: string) => {
       const trimmed = value.trim();
       if (trimmed) store.set(normalize(trimmed), trimmed);
@@ -1096,6 +1229,10 @@ export class MaterialImportService {
         }
         if (fact.field === 'industry' && !industry) industry = value.trim();
         if (fact.field === 'serviceArea' && !serviceArea) serviceArea = value.trim();
+        if ((fact.field === 'fullName' || fact.field === 'shortNames' || fact.field === 'addresses')
+          && value.trim()) {
+          identityValues[fact.field].push(value.trim());
+        }
         if (fact.field === 'products' && fact.scope.kind === 'brand' && value.trim()) {
           materialProducts.add(value.trim());
         }
@@ -1124,66 +1261,235 @@ export class MaterialImportService {
       logOutcome({ status: 'skipped', errorCode: 'deficit_zero' });
       return null;
     }
-    // 画像注入（js_ai 契约）：四条件判别需要 products/serviceArea——本次材料值
-    // 优先，缺失时用已确认权威值补齐；都没有时提示词声明未知并收紧判别。
+    // 画像注入（ADR-0007 接线）：本次材料值优先，缺失时用已确认权威值补齐
+    // （products/serviceArea/addresses/fullName/shortNames），供
+    // resolveBrandName（查询与提示词用知识库裁决名，非工作区名）与
+    // deriveServiceScope（地域锚派生，不再透传 serviceArea 脏文本）消费。
     const products = new Set<string>(materialProducts);
+    const identityProfile: Record<
+      'fullName' | 'shortNames' | 'addresses' | 'serviceArea',
+      string[]
+    > = {
+      fullName: [...identityValues.fullName],
+      shortNames: [...identityValues.shortNames],
+      addresses: [...identityValues.addresses],
+      serviceArea: serviceArea ? [serviceArea] : [],
+    };
     try {
-      const [productsFact, serviceAreaFact] = await Promise.all([
+      const [
+        productsFact,
+        serviceAreaFact,
+        addressesFact,
+        fullNameFact,
+        shortNamesFact,
+      ] = await Promise.all([
         products.size > 0
           ? null
           : this.authority.inspect({
-            subject: context.brandName,
-            predicate: 'enterprise-profile.products',
-            scope: { entityScope: 'brand' },
-          }),
-        serviceArea
+              subject: context.brandName,
+              predicate: 'enterprise-profile.products',
+              scope: { entityScope: 'brand' },
+            }),
+        identityProfile.serviceArea.length > 0
           ? null
           : this.authority.inspect({
-            subject: context.brandName,
-            predicate: 'enterprise-profile.servicearea',
-            scope: { entityScope: 'brand' },
-          }),
+              subject: context.brandName,
+              predicate: 'enterprise-profile.servicearea',
+              scope: { entityScope: 'brand' },
+            }),
+        identityProfile.addresses.length > 0
+          ? null
+          : this.authority.inspect({
+              subject: context.brandName,
+              predicate: 'enterprise-profile.addresses',
+              scope: { entityScope: 'brand' },
+            }),
+        identityProfile.fullName.length > 0
+          ? null
+          : this.authority.inspect({
+              subject: context.brandName,
+              predicate: 'enterprise-profile.fullname',
+              scope: { entityScope: 'brand' },
+            }),
+        identityProfile.shortNames.length > 0
+          ? null
+          : this.authority.inspect({
+              subject: context.brandName,
+              predicate: 'enterprise-profile.shortnames',
+              scope: { entityScope: 'brand' },
+            }),
       ]);
-      for (const fact of [productsFact, serviceAreaFact]) {
-        if (!fact) continue;
-        const parsed = JSON.parse(fact.normalizedValueJson) as unknown;
+      const merge = (
+        fact: { normalizedValueJson: string } | null,
+        into: 'products' | 'serviceArea' | 'addresses' | 'fullName' | 'shortNames',
+      ) => {
+        if (!fact) return;
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(fact.normalizedValueJson);
+        } catch {
+          return;
+        }
         for (const value of Array.isArray(parsed) ? parsed : [parsed]) {
           if (typeof value !== 'string' || !value.trim()) continue;
-          if (fact === productsFact) products.add(value.trim());
-          else if (!serviceArea) serviceArea = value.trim();
+          if (into === 'products') products.add(value.trim());
+          else if (into === 'serviceArea') identityProfile.serviceArea.push(value.trim());
+          else identityProfile[into].push(value.trim());
+        }
+      };
+      merge(productsFact, 'products');
+      merge(serviceAreaFact, 'serviceArea');
+      merge(addressesFact, 'addresses');
+      merge(fullNameFact, 'fullName');
+      merge(shortNamesFact, 'shortNames');
+    } catch {
+      // 画像补齐失败不阻断富化，按已有材料值降级。
+    }
+    const profile: BrandProfile = {
+      ...(identityProfile.fullName.length > 0 ? { fullName: identityProfile.fullName } : {}),
+      ...(identityProfile.shortNames.length > 0 ? { shortNames: identityProfile.shortNames } : {}),
+      ...(identityProfile.addresses.length > 0 ? { addresses: identityProfile.addresses } : {}),
+      ...(identityProfile.serviceArea.length > 0 ? { serviceArea: identityProfile.serviceArea } : {}),
+    };
+    const brandName = resolveBrandName(profile, context.brandName);
+    const scope = deriveServiceScope(profile);
+    if (!scope) {
+      // 无锚不富化（ADR-0007）：serviceArea 缺失或「全国/线上」类声明时，
+      // 联网查询必然退化为全国榜文形态，是跨城错配的主要来源——整轮跳过，
+      // 不追问。卡上若无任何竞品行则以空值行被动说明原因。
+      logOutcome({ status: 'skipped', errorCode: 'service_scope_missing' });
+      const hasCompetitorRow = facts.some((fact) => fact.field === 'competitors')
+        || brandCompetitors.size > 0;
+      if (hasCompetitorRow) return null;
+      return {
+        field: 'competitors',
+        value: [],
+        provenance: 'inferred',
+        sourceExcerpt:
+          '服务区域未确认，竞品联网补全已跳过——请先确认服务区域，确认后可让助手补查本地竞品',
+        confidence: 0,
+        scope: { kind: 'brand' },
+      };
+    }
+    // 检索查询（地域锚为硬性前缀）：排行榜形召回全景 + 口碑形召回本地同行。
+    const querySubject = industry || [...products][0] || '';
+    const anchorSubject = querySubject ? `${scope.primary} ${querySubject}` : scope.primary;
+    const queries = [
+      `${anchorSubject} 排行榜 十大品牌 对比`,
+      `${anchorSubject} 哪家好 推荐 口碑 本地同行`,
+    ];
+    // this.keywordSearch 的非空收窄进闭包即失效，提为局部常量供逐 query 调用。
+    const keywordSearch = this.keywordSearch;
+    const limits = { knownCompetitors, excludedNames, deficit };
+    // 提议 value 只含本次新增名称：KnowledgeAuthority propose 对数组字段做
+    // 增量合并（current 在前、新增去重追加），既有权威值由该契约保住，
+    // 不在待确认候选里重复呈现。材料抽出的名字在 process() 合并处加入。
+    // 权威值只存名称（ADR-0007 元数据退役）：region 只出现在证据文本里。
+    const buildEnrichmentFact = (
+      rows: Array<{ name: string; region: string; evidence: string }>,
+    ): ExtractedProfileFact => ({
+      field: 'competitors',
+      value: rows.map((row) => row.name),
+      provenance: 'inferred',
+      sourceExcerpt: rows
+        .map((row) => `${row.name}（${row.region}）：${row.evidence}`)
+        .join(' … ')
+        .slice(0, KNOWLEDGE_EXCERPT_MAX_LENGTH),
+      confidence: 0.5,
+      scope: { kind: 'brand' },
+    });
+    // 主路径（ADR-0007）：纯引擎快照（不经 LLM 改写）→ 一次普通抽取从快照
+    // 认名字 → 本地双闸。存在性由构造保证，闸门兜住抽取时的漏网幻觉。
+    const searchSourcesFn = keywordSearch.searchSources?.bind(keywordSearch);
+    const sourceGroups = searchSourcesFn
+      ? await Promise.all(queries.map(async (query) => {
+          try {
+            return await searchSourcesFn(query, { signal, count: 20 });
+          } catch {
+            // 单 query 检索失败不拖垮另一条；两条全空则走 enable_search 兜底。
+            return [];
+          }
+        }))
+      : [];
+    const sources = sourceGroups.flat();
+    if (sources.length > 0) {
+      const sourceTexts = sources.map((source) =>
+        `${source.title} ${source.summary ?? ''}`.replace(/\s+/g, ' ').trim(),
+      );
+      const sourceNorms = sourceTexts.map(normalizeEvidenceText);
+      const corpusNorm = sourceNorms.join('\n');
+      const corpusLines = sources.slice(0, 30).map((source, index) =>
+        `[${index + 1}] ${(source.summary ? `${source.title} — ${source.summary}` : source.title)
+          .replace(/\s+/g, ' ').trim().slice(0, 400)}`,
+      );
+      let parsedNames: Array<{ name: string; region: string }> | null = null;
+      for (let attempt = 0; attempt < 2 && parsedNames === null; attempt += 1) {
+        let response: string;
+        try {
+          response = await this.extraction.complete([
+            { role: 'system', content: '只执行快照内的竞品名识别；不要调用工具，不要输出快照之外的品牌。' },
+            { role: 'user', content: competitorExtractionPrompt({
+              brandName,
+              industry,
+              products: [...products],
+              anchor: scope.primary,
+              knownCompetitors: [...knownDisplay.values()],
+              excludedNames: [...excludedDisplay.values()],
+              deficit,
+              corpus: corpusLines.join('\n'),
+            }) },
+          ], { signal, maxTokens: 2048 });
+        } catch {
+          break;
+        }
+        try {
+          parsedNames = parseCompetitorNames(response, limits);
+        } catch {
+          // 坏 JSON 重抽一次（同 extractFacts 契约），两次都坏落 invalid。
         }
       }
-    } catch {
-      // 画像补齐失败不阻断富化，提示词按未知降级。
+      if (parsedNames === null) {
+        logOutcome({ status: 'skipped', errorCode: 'model_response_invalid' });
+        return null;
+      }
+      const suggestions: Array<{ name: string; region: string; evidence: string }> = [];
+      for (const { name, region } of parsedNames) {
+        if (suggestions.length >= deficit) break;
+        const nameNorm = normalizeEvidenceText(name);
+        if (!nameNorm || !corpusNorm.includes(nameNorm)) continue; // 存在闸
+        if (!regionInServiceScope(region, scope)) continue; // 地域闸
+        const matchedIndex = sourceNorms.findIndex((text) => text.includes(nameNorm));
+        if (matchedIndex >= 0) {
+          // 关系闸：快照里名字附近出现供应/合作/前东家等关系词的剔除。
+          if (namedRelation(sourceTexts[matchedIndex], name, NON_COMPETITOR_RELATION)) continue;
+        }
+        suggestions.push({
+          name,
+          region,
+          evidence: matchedIndex >= 0 ? sourceTexts[matchedIndex].slice(0, 200) : '',
+        });
+      }
+      if (suggestions.length === 0) {
+        logOutcome({ status: 'skipped', errorCode: 'no_qualified_suggestions' });
+        return null;
+      }
+      logOutcome({ status: 'ok', count: suggestions.length });
+      return buildEnrichmentFact(suggestions);
     }
-    // 联网模型单路径：3 个互补检索重点（排行榜形召回全景、口碑形召回
-    // 本地同行、品牌点名形补足直接对手），检索与结构化抽取合并为同一次
-    // enable_search 调用——独立二次抽取级的逐字证据门对 LLM 改写语料近乎
-    // 不可通过，冷门品牌必然 0 候选。不再分叉到 searchSources/web_leg，
-    // 避免两条召回链的可用性漂移。
-    const areaIndustry = [serviceArea, industry].filter(Boolean).join(' ');
-    const searchFocus = areaIndustry
-      ? [
-          `${areaIndustry} 排行榜、十大品牌、对比榜单`,
-          `${areaIndustry} 哪家好、推荐、口碑和本地同行`,
-          `${context.brandName} 主要竞争对手与替代选项`,
-        ]
-      : [`${context.brandName} 主要竞争对手、同行品牌和替代选项`];
-    const limits = { knownCompetitors, excludedNames, deficit };
-    const prompts = searchFocus.map((focus) => competitorEnrichmentPrompt({
-      brandName: context.brandName,
+    // 兜底路径（ADR-0007）：enable_search 合并式调用，检索与判别同一次完成。
+    // 存在闸无快照可比（明确降级）；地域闸照常执行。
+    const prompts = queries.map((focus) => competitorEnrichmentPrompt({
+      brandName,
       industry,
       products: [...products],
-      serviceArea,
+      serviceArea: scope.primary,
       knownCompetitors: [...knownDisplay.values()],
       excludedNames: [...excludedDisplay.values()],
       deficit,
       searchFocus: focus,
     }));
-    // this.keywordSearch 的非空收窄进闭包即失效，提为局部常量供逐 query 调用。
-    const keywordSearch = this.keywordSearch;
-    // 逐 query 容错：一条联网回答失败（检索异常或非 JSON）不拖垮其他两条；
-    // 三条全失败则安全回落为空竞品待用户补充，不用未验证名称硬凑。
+    // 逐 query 容错：一条联网回答失败（检索异常或非 JSON）不拖垮另一条；
+    // 两条全失败则安全回落为空竞品待用户补充，不用未验证名称硬凑。
     const responses = (await Promise.all(prompts.map(async (prompt) => {
       try {
         return await keywordSearch.search(prompt, { signal });
@@ -1195,7 +1501,7 @@ export class MaterialImportService {
       logOutcome({ status: 'skipped', errorCode: 'search_corpus_empty' });
       return null;
     }
-    const suggestions: CompetitorSuggestion[] = [];
+    const suggestions: Array<{ name: string; region: string; evidence: string }> = [];
     const seen = new Set<string>();
     let invalidResponses = 0;
     for (const response of responses) {
@@ -1208,15 +1514,20 @@ export class MaterialImportService {
       }
       for (const suggestion of parsed) {
         if (suggestions.length >= deficit) break;
+        if (!regionInServiceScope(suggestion.region, scope)) continue;
         const normalized = normalizeCompetitorKey(suggestion.name);
         if (seen.has(normalized)) continue;
         seen.add(normalized);
-        suggestions.push(suggestion);
+        suggestions.push({
+          name: suggestion.name,
+          region: suggestion.region,
+          evidence: suggestion.sourceExcerpt.slice(0, 200),
+        });
       }
     }
     if (suggestions.length === 0) {
       // 全部响应都不是合法 JSON 是模型输出质量问题；有合法响应但没有
-      // 过轻过滤的候选是召回为空——两者都安全回落必审行，但固定码分开。
+      // 过闸候选是召回为空——两者都安全回落必审行，但固定码分开。
       logOutcome({
         status: 'skipped',
         errorCode: invalidResponses === responses.length
@@ -1225,29 +1536,8 @@ export class MaterialImportService {
       });
       return null;
     }
-    logOutcome({ status: 'ok', count: suggestions.length });
-    // 提议 value 只含本次新增名称：KnowledgeAuthority propose 对数组字段做
-    // 增量合并（current 在前、新增去重追加），既有权威值由该契约保住，
-    // 不在待确认候选里重复呈现。材料抽出的名字在 process() 合并处加入。
-    const evidence = suggestions
-      .map((suggestion) => `${suggestion.name}：${suggestion.sourceExcerpt}`)
-      .join(' … ');
-    return {
-      field: 'competitors',
-      value: suggestions.map((suggestion) => suggestion.name),
-      provenance: 'inferred',
-      sourceExcerpt: encodeCompetitorEvidence(
-        suggestions.map(({ name, region, similarBusiness }) => ({
-          name,
-          region,
-          similarBusiness,
-        })),
-        evidence,
-        KNOWLEDGE_EXCERPT_MAX_LENGTH,
-      ),
-      confidence: 0.5,
-      scope: { kind: 'brand' },
-    };
+    logOutcome({ status: 'ok-fallback', count: suggestions.length });
+    return buildEnrichmentFact(suggestions);
   }
 
   /**

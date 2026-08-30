@@ -2,29 +2,13 @@ import { describe, expect, it } from 'vitest';
 
 import {
   decodeCompetitorEvidence,
-  encodeCompetitorEvidence,
   formatCompetitorFactValue,
 } from './competitorDetails';
 
-describe('encodeCompetitorEvidence', () => {
-  it('clamps the evidence text so the encoded excerpt stays within the caller budget', () => {
-    const encoded = encodeCompetitorEvidence(
-      [{ name: '云帆信息', region: '成都', similarBusiness: '智能客服' }],
-      '证'.repeat(500),
-      120,
-    );
-    expect(encoded.length).toBeLessThanOrEqual(120);
-    expect(encoded.startsWith('[[xiaojing-competitor-details:v1]]')).toBe(true);
-    expect(encoded).toContain('"region":"成都"');
-    expect(decodeCompetitorEvidence(encoded).evidence.length).toBeGreaterThan(0);
-  });
-
-  it('returns the plain trimmed evidence when no details survive normalization', () => {
-    expect(
-      encodeCompetitorEvidence([], '  证据文本  ', 4_000),
-    ).toBe('证据文本');
-  });
-});
+/** ADR-0007：编码已退役，存量头以字面构造（读侧兼容是唯一的持久契约）。 */
+function legacyHeader(details: string, evidence: string): string {
+  return `[[xiaojing-competitor-details:v1]]${details}\n${evidence}`;
+}
 
 describe('decodeCompetitorEvidence', () => {
   it('keeps malformed headers out of the projected evidence', () => {
@@ -43,31 +27,32 @@ describe('decodeCompetitorEvidence', () => {
       .toEqual({ details: [], evidence: '' });
   });
 
-  it('round-trips details and evidence for well-formed headers', () => {
-    const encoded = encodeCompetitorEvidence(
-      [{ name: '云帆信息', region: '成都', similarBusiness: '智能客服' }],
+  it('decodes details and evidence from well-formed legacy headers', () => {
+    expect(decodeCompetitorEvidence(legacyHeader(
+      '[{"name":"云帆信息","region":"成都","similarBusiness":"智能客服"}]',
       '成都智能客服榜单提到云帆信息',
-      4_000,
-    );
-    expect(decodeCompetitorEvidence(encoded)).toEqual({
+    ))).toEqual({
       details: [{ name: '云帆信息', region: '成都', similarBusiness: '智能客服' }],
       evidence: '成都智能客服榜单提到云帆信息',
     });
+  });
+
+  it('returns the excerpt as-is when no legacy header is present (new facts)', () => {
+    expect(decodeCompetitorEvidence('云帆信息（成都）：榜单快照证据'))
+      .toEqual({ details: [], evidence: '云帆信息（成都）：榜单快照证据' });
   });
 });
 
 describe('formatCompetitorFactValue', () => {
   it('merges per-source metadata and keeps unknown names as plain names', () => {
     const excerpts = [
-      encodeCompetitorEvidence(
-        [{ name: '云帆信息', region: '成都', similarBusiness: '智能客服' }],
+      legacyHeader(
+        '[{"name":"云帆信息","region":"成都","similarBusiness":"智能客服"}]',
         '来源一',
-        4_000,
       ),
-      encodeCompetitorEvidence(
-        [{ name: '星河智能', region: '绵阳', similarBusiness: '智能客服' }],
+      legacyHeader(
+        '[{"name":"星河智能","region":"绵阳","similarBusiness":"智能客服"}]',
         '来源二',
-        4_000,
       ),
       '旧事实来源：仅审计文本，无元数据头',
     ];

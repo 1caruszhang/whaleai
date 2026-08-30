@@ -28,24 +28,10 @@ function normalizeDetails(input: unknown): CompetitorDisplayDetail[] {
 }
 
 /**
- * KnowledgeAuthority 不为单一展示需求扩展事实 schema：竞品展示元数据
- * 以版本化头附在候选审计摘录中，确认后的权威值仍是纯名称数组。
- * `totalLimit` 是 KnowledgeAuthority 的 excerpt 长度闸门：证据文本按剩余
- * 预算截断，保证编码产物不超限（元数据头超限时原样返回、由闸门显式报错）。
+ * ADR-0007 元数据退役：`[[xiaojing-competitor-details:v1]]` 审计头已停止
+ * 新增编码（新竞品事实只存名称），本模块仅保留读侧——品牌知识面板与品牌
+ * 档案页对存量事实的摘录解码出旧三元组做兼容展示；新事实无头即纯名称。
  */
-export function encodeCompetitorEvidence(
-  details: readonly CompetitorDisplayDetail[],
-  evidence: string,
-  totalLimit: number,
-): string {
-  const normalized = normalizeDetails(details);
-  const text = evidence.trim();
-  if (normalized.length === 0) return text.slice(0, totalLimit);
-  const head = `${COMPETITOR_DETAILS_PREFIX}${JSON.stringify(normalized)}\n`;
-  const remaining = totalLimit - head.length;
-  return remaining > 0 ? `${head}${text.slice(0, remaining)}` : head;
-}
-
 export function decodeCompetitorEvidence(excerpt: string): {
   details: CompetitorDisplayDetail[];
   evidence: string;

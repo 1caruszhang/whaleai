@@ -11,10 +11,7 @@ import {
   ENTERPRISE_PROFILE_FIELDS,
   PROFILE_PREDICATE_PREFIX,
 } from './enterpriseProfile';
-import {
-  decodeCompetitorEvidence,
-  type CompetitorDisplayDetail,
-} from './competitorDetails';
+import { decodeCompetitorEvidence } from './competitorDetails';
 
 export type KnowledgeCardDecision =
   | 'keep-current'
@@ -60,8 +57,6 @@ export interface KnowledgeCardCandidate {
   baseVersion: number;
   origin: string;
   source: KnowledgeCardSource;
-  /** 仅用于竞品确认卡展示；权威事实值仍是纯名称数组。 */
-  competitorDetails?: CompetitorDisplayDetail[];
   current?: KnowledgeCardCurrent | null;
 }
 
@@ -173,6 +168,8 @@ function projectExcerpt(excerpt: string): string {
 export function toKnowledgeCardCandidate(
   candidate: KnowledgeCardCandidateSource,
 ): KnowledgeCardCandidate {
+  // ADR-0007 竞品行只显示名称：不再投影展示元数据；旧候选摘录中的
+  // 版本化审计头仍要剥掉，避免标记泄漏进卡片复核文本。
   const competitorSource = knowledgeFieldKeyOfPredicate(candidate.key.predicate) === 'competitors'
     ? decodeCompetitorEvidence(candidate.source.excerpt)
     : { details: [], evidence: candidate.source.excerpt };
@@ -203,9 +200,6 @@ export function toKnowledgeCardCandidate(
           ? candidate.source.profileProvenance
           : null,
     },
-    ...(competitorSource.details.length > 0
-      ? { competitorDetails: competitorSource.details }
-      : {}),
     current: candidate.current
       ? {
         normalizedValueJson: candidate.current.normalizedValueJson,

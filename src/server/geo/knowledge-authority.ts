@@ -390,8 +390,8 @@ function mergeArraySupplement(
 }
 
 /**
- * 候选审计摘录的长度闸门（propose 与 MCP 工具 schema 同源）。竞品展示
- * 元数据头等编码产物必须在本预算内自截（见 competitorDetails 编码契约）。
+ * 候选审计摘录的长度闸门（propose 与 MCP 工具 schema 同源）。ADR-0007 后
+ * 竞品摘录是纯证据文本（无元数据头），仍在预算内自截。
  */
 export const KNOWLEDGE_EXCERPT_MAX_LENGTH = 4_000;
 

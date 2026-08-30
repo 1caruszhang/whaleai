@@ -527,6 +527,11 @@ export class ArticleGenerationService {
         ...(identityBlock ? { identityBlock } : {}),
         ...(narrativeSeed ? { narrativeSeed } : {}),
       });
+      // ADR-0007 Decision 4：ranking 类型整篇联网（竞品条目由模型联网取材，
+      // 消除名单外的结构性编造）；非排行类型保持离线。目标品牌段落的
+      // 「只使用已批准事实」纪律仍在 system prompt 中，属提示词层尽力约束
+      // （联网素材渗入目标品牌段落的风险已由用户明示接受，登记于 ADR-0007）。
+      const webSearch = context.article.contentType === "ranking";
       const raw = await this.generation.complete([
         { role: "system", content: messages.system },
         { role: "user", content: messages.user },
@@ -534,6 +539,7 @@ export class ArticleGenerationService {
         maxTokens: 8_192,
         temperature: 0.85,
         topP: 0.9,
+        webSearch,
       });
       const body = parseGeneratedArticleBody(
         raw,
@@ -568,6 +574,7 @@ export class ArticleGenerationService {
           maxTokens: 8_192,
           temperature: 0.85,
           topP: 0.9,
+          ...(webSearch ? { webSearch: true } : {}),
         },
       });
       await reportOutcome("success");

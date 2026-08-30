@@ -73,7 +73,7 @@ function operation(articles: ArticleProjection[]): ArticleOperationProjection {
     topicPlanId: null,
     topicPlanRevision: null,
     knowledgeVersion: 7,
-    policyVersion: "xiaojing-content-prompt-v3",
+    policyVersion: "xiaojing-content-prompt-v4",
     status: "running",
     articles,
     createdAt: "2026-01-01T00:00:00Z",
@@ -154,10 +154,14 @@ describe("ArticleGenerationService", () => {
         failureReason,
       })),
     } as unknown as ArticlePersistencePort;
+    const generation = {
+      slot: "generation",
+      complete: vi.fn(async () => rankingBody),
+    } satisfies GeoTextCapability;
     const service = new ArticleGenerationService(
       { workspaceId: "workspace-1", sessionId: "session-1" },
       port,
-      { slot: "generation", complete: vi.fn(async () => rankingBody) },
+      generation,
       { slot: "reflection", complete: vi.fn() },
     );
 
@@ -166,6 +170,13 @@ describe("ArticleGenerationService", () => {
       sessionId: "session-1",
       source: { kind: "confirmed-topic-plan", planId: "plan-1" },
     });
+
+    // ADR-0007 Decision 4：ranking 类型生成调用整篇联网，竞品条目由模型
+    // 联网取材；非排行类型不传 webSearch（见 direct 路径用例）。
+    expect(generation.complete).toHaveBeenCalledWith(
+      expect.any(Array),
+      expect.objectContaining({ webSearch: true }),
+    );
 
     expect(port.finishGeneration).not.toHaveBeenCalled();
     expect(port.failGeneration).toHaveBeenCalledWith(
@@ -246,7 +257,7 @@ describe("ArticleGenerationService", () => {
     );
     expect(generation.complete).toHaveBeenCalledWith(
       expect.any(Array),
-      { maxTokens: 8_192, temperature: 0.85, topP: 0.9 },
+      { maxTokens: 8_192, temperature: 0.85, topP: 0.9, webSearch: false },
     );
     // direct 路径的标题生成调用（ADR-0006 §2）。
     expect(generation.complete).toHaveBeenCalledWith(

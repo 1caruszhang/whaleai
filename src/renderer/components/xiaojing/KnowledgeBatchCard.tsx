@@ -1,10 +1,9 @@
-import { Check, ChevronDown, ChevronRight, ShieldCheck } from 'lucide-react';
+import { Check, ChevronDown, ChevronRight, ShieldCheck, X } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { useTabApi } from '@/context/TabContext';
 import { isEnterpriseProfileField } from '../../../shared/geo/enterpriseProfile';
-import { formatCompetitorDisplayNames } from '../../../shared/geo/competitorDetails';
 import {
   buildKnowledgeFieldRows,
   KNOWLEDGE_CARD_MAX_CANDIDATES,
@@ -60,7 +59,6 @@ function serverFingerprintOf(candidate: KnowledgeCardCandidate): string {
     candidate.normalizedValueJson,
     candidate.unit ?? '',
     candidate.source.profileProvenance ?? '',
-    JSON.stringify(candidate.competitorDetails ?? []),
   ].join('|');
 }
 
@@ -600,26 +598,37 @@ function FieldRow({ row, stateOf, busy, onConfirmRow, onChoose, onStageEdits, on
     return candidateTier(candidate) === 'inferred' && !state.confirmed;
   }).length;
   const readyCount = active.length - pendingCount;
-  /** 候选当前值（或已暂存编辑）→ 胶囊文本数组：数组值一值一胶囊。 */
+  /** 候选当前值（或已暂存编辑）→ 胶囊文本数组：数组值一值一胶囊。
+   * ADR-0007：竞品行只显示名称，不再合并「地域｜业务」展示元数据。 */
   const candidateValueTexts = (candidate: KnowledgeCardCandidate) => {
     const state = stateOf(candidate);
     const raw = state.editedValue !== undefined
       ? JSON.stringify(state.editedValue)
       : candidate.normalizedValueJson;
-    // 联网补全的竞品候选把三项关键信息合并进同一枚胶囊，用户无需展开
-    // 摘录即可判断「是不是同地域、同具体业务」。用户编辑后仍按名称精确匹配：
-    // 未改名的条目保留三元组，新名称没有旧元数据则只显示名称，绝不错误挂接。
-    if (
-      row.field === 'competitors'
-      && candidate.competitorDetails?.length
-    ) {
-      const value = parseCandidateValue(raw);
-      const names = Array.isArray(value) ? value : [value];
-      if (names.every((name): name is string => typeof name === 'string')) {
-        return formatCompetitorDisplayNames(names, candidate.competitorDetails);
-      }
-    }
     return displayValueTexts(raw, candidate.unit);
+  };
+
+  /** 候选生效值（含已暂存编辑）：✕ 剔除与空值说明共用同一口径。 */
+  const effectiveValueOf = (candidate: KnowledgeCardCandidate) => {
+    const state = stateOf(candidate);
+    return state.editedValue !== undefined
+      ? state.editedValue
+      : candidateBaseValue(candidate);
+  };
+
+  /** 数组值逐项 ✕（ADR-0007）：剔除一项 = 暂存「数组减一」，随整卡确认以
+   * adopt-edited 提交；胶囊文本与数组项一一对应，按索引定位。 */
+  const removeArrayItem = (candidate: KnowledgeCardCandidate, index: number) => {
+    const value = effectiveValueOf(candidate);
+    if (!Array.isArray(value)) return;
+    onStageEdits([{ candidate, value: value.filter((_, itemIndex) => itemIndex !== index) }]);
+  };
+
+  /** 空值数组候选（无锚跳过提示行 / 必审说明行）：胶囊区直接显示摘录文本
+   * 作被动说明，不要求用户展开详情才能看到原因（ADR-0007 零主动询问）。 */
+  const isEmptyArrayCandidate = (candidate: KnowledgeCardCandidate): boolean => {
+    const value = effectiveValueOf(candidate);
+    return Array.isArray(value) && value.length === 0;
   };
 
   const startEditing = () => {
@@ -770,12 +779,30 @@ function FieldRow({ row, stateOf, busy, onConfirmRow, onChoose, onStageEdits, on
                   <span aria-hidden className="text-[var(--ink-subtle)]">→</span>
                 </>
               )}
+              {isEmptyArrayCandidate(candidate) && (
+                <span
+                  className="text-[var(--ink-muted)]"
+                  data-candidate-empty-note={candidate.id}
+                >
+                  {candidate.source.excerpt}
+                </span>
+              )}
               {candidateValueTexts(candidate).map((text, index) => (
-                <ValuePill
-                  key={`${candidate.id}:${index}`}
-                  text={text}
-                  wrap={row.field === 'competitors'}
-                />
+                <span key={`${candidate.id}:${index}`} className="inline-flex items-center gap-0.5">
+                  <ValuePill text={text} wrap={row.field === 'competitors'} />
+                  {isArrayShapedCandidate(candidate) && !isFailed && !editing && (
+                    <button
+                      type="button"
+                      disabled={busy}
+                      aria-label={t('knowledgeCard.removeValueAria', { value: text })}
+                      data-remove-value={`${candidate.id}:${index}`}
+                      onClick={() => removeArrayItem(candidate, index)}
+                      className="rounded-full p-0.5 text-[var(--ink-subtle)] hover:bg-[var(--hover-bg)] hover:text-[var(--ink)] disabled:opacity-50"
+                    >
+                      <X className="h-3 w-3" />
+                    </button>
+                  )}
+                </span>
               ))}
               {isFailed && (
                 <button

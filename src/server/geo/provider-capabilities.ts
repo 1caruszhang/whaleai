@@ -63,6 +63,12 @@ export interface GeoTextCapability {
       maxTokens?: number;
       temperature?: number;
       topP?: number;
+      /**
+       * ADR-0007 Decision 4：ranking 类型文章生成整篇联网（用户明示接受
+       * 目标品牌段落可能被网络素材渗透的风险）。仅 ARK 端点生效；既有
+       * 「只使用已批准事实」提示词纪律仍是目标品牌段落的唯一防线。
+       */
+      webSearch?: boolean;
     },
   ): Promise<string>;
 }
@@ -533,12 +539,14 @@ async function openAiChat(
     maxTokens?: number;
     temperature?: number;
     topP?: number;
+    webSearch?: boolean;
   },
 ): Promise<string> {
   const body = JSON.stringify({
     model,
     messages,
     stream: false,
+    ...(options?.webSearch ? { enable_search: true } : {}),
     ...(options?.maxTokens !== undefined
       ? { max_tokens: options.maxTokens }
       : {}),

@@ -1,6 +1,5 @@
 import { describe, expect, it } from 'vitest';
 
-import { encodeCompetitorEvidence } from './competitorDetails';
 import {
   buildKnowledgeCandidatesCardData,
   buildKnowledgeFieldRows,
@@ -171,26 +170,22 @@ describe('knowledge candidates card contract', () => {
     expect('valueJson' in projected).toBe(false);
   });
 
-  it('projects versioned competitor display details without leaking the metadata marker', () => {
+  it('strips legacy metadata headers from competitor excerpts and projects names only', () => {
+    // ADR-0007：竞品行只显示名称——旧候选摘录中的版本化审计头剥掉、不投影
+    // 任何展示元数据；新事实摘录是纯证据文本，无头即原样。
     const projected = toKnowledgeCardCandidate(source({
       predicate: 'enterprise-profile.competitors',
       valueJson: '["成实外教育","为明教育"]',
       normalizedValueJson: '["成实外教育","为明教育"]',
       source: {
         materialId: 'material-1',
-        excerpt: encodeCompetitorEvidence([
-          { name: '成实外教育', region: '成都', similarBusiness: '民办中学教育' },
-          { name: '为明教育', region: '成都', similarBusiness: '民办中学教育' },
-        ], '成都民办中学排名提到成实外教育和为明教育', 4_000),
+        excerpt: '[[xiaojing-competitor-details:v1]][{"name":"成实外教育","region":"成都","similarBusiness":"民办中学教育"}]\n成都民办中学排名提到成实外教育和为明教育',
         confidence: 0.5,
         profileProvenance: 'inferred',
       },
     }));
 
-    expect(projected.competitorDetails).toEqual([
-      { name: '成实外教育', region: '成都', similarBusiness: '民办中学教育' },
-      { name: '为明教育', region: '成都', similarBusiness: '民办中学教育' },
-    ]);
+    expect('competitorDetails' in projected).toBe(false);
     expect(projected.source.excerpt).toBe('成都民办中学排名提到成实外教育和为明教育');
     expect(projected.source.excerpt).not.toContain('xiaojing-competitor-details');
   });
@@ -207,9 +202,9 @@ describe('knowledge candidates card contract', () => {
         profileProvenance: 'inferred',
       },
     }));
-    expect(projected.competitorDetails).toBeUndefined();
     expect(projected.source.excerpt).toBe('成都民办中学排名提到成实外教育');
     expect(projected.source.excerpt).not.toContain('xiaojing-competitor-details');
+    expect('competitorDetails' in projected).toBe(false);
   });
 
   it('groups candidates into fixed-order field rows, merging same-field candidates', () => {

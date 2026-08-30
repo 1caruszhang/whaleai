@@ -85,6 +85,7 @@
     "rowRetryAria": "重试：{{field}}",
     "rowEdit": "更改",
     "rowEditAria": "更改：{{field}}",
+    "removeValueAria": "移除{{value}}",
     "editSave": "保存",
     "editSaveAria": "保存：{{field}}",
     "editCancel": "取消",

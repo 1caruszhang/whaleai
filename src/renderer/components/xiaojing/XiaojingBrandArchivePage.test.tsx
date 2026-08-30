@@ -2,8 +2,13 @@ import { fireEvent, render, screen, waitFor, within } from "@testing-library/rea
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { BrandWorkspace } from "@/api/brandWorkspaceClient";
-import { encodeCompetitorEvidence } from '../../../shared/geo/competitorDetails';
 import XiaojingBrandArchivePage from "./XiaojingBrandArchivePage";
+
+/** ADR-0007：编码已退役，存量审计头以字面构造（读侧兼容是唯一持久契约）。 */
+function legacyCompetitorHeader(details: string, evidence: string): string {
+  return `[[xiaojing-competitor-details:v1]]${details}
+${evidence}`;
+}
 
 const mocks = vi.hoisted(() => ({ load: vi.fn() }));
 
@@ -144,10 +149,7 @@ describe("XiaojingBrandArchivePage", () => {
   });
 
   it('已确认竞品在品牌档案中持久显示三元组，证据不泄露内部标记', async () => {
-    const evidence = encodeCompetitorEvidence([
-      { name: '成实外教育', region: '成都', similarBusiness: '民办中学教育' },
-      { name: '为明教育', region: '成都', similarBusiness: '民办中学教育' },
-    ], '成都民办中学联网竞品证据', 4_000);
+    const evidence = legacyCompetitorHeader('[{"name":"成实外教育","region":"成都","similarBusiness":"民办中学教育"},{"name":"为明教育","region":"成都","similarBusiness":"民办中学教育"}]', '成都民办中学联网竞品证据');
     mocks.load.mockResolvedValue({
       workspaceId: 'brand-17',
       knowledgeVersions: [{

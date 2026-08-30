@@ -1,9 +1,14 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { encodeCompetitorEvidence } from '../../../shared/geo/competitorDetails';
 import XiaojingBrandKnowledgePanel from './XiaojingBrandKnowledgePanel';
 import { KNOWLEDGE_DECIDED_EVENT } from './KnowledgeBatchCard';
+
+/** ADR-0007：编码已退役，存量审计头以字面构造（读侧兼容是唯一持久契约）。 */
+function legacyCompetitorHeader(details: string, evidence: string): string {
+  return `[[xiaojing-competitor-details:v1]]${details}
+${evidence}`;
+}
 
 const mocks = vi.hoisted(() => ({ load: vi.fn() }));
 
@@ -125,10 +130,7 @@ describe('XiaojingBrandKnowledgePanel', () => {
           normalizedValueJson: '["成实外教育","为明教育"]',
           sources: [{
             materialId: 'material-1',
-            excerpt: encodeCompetitorEvidence([
-              { name: '成实外教育', region: '成都', similarBusiness: '民办中学教育' },
-              { name: '为明教育', region: '成都', similarBusiness: '民办中学教育' },
-            ], '联网竞品证据', 4_000),
+            excerpt: legacyCompetitorHeader('[{"name":"成实外教育","region":"成都","similarBusiness":"民办中学教育"},{"name":"为明教育","region":"成都","similarBusiness":"民办中学教育"}]', '联网竞品证据'),
             origin: 'user-approved-material',
             createdAt: '2026-08-16T00:00:00Z',
           }],

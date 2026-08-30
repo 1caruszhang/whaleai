@@ -85,6 +85,7 @@
     "rowRetryAria": "Retry {{field}}",
     "rowEdit": "Edit",
     "rowEditAria": "Edit: {{field}}",
+    "removeValueAria": "Remove {{value}}",
     "editSave": "Save",
     "editSaveAria": "Save: {{field}}",
     "editCancel": "Cancel",

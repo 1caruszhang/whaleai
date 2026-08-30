@@ -7,7 +7,7 @@ import {
 } from "./topicPlan";
 
 export const ARTICLE_GENERATION_POLICY_VERSION =
-  "xiaojing-content-prompt-v3";
+  "xiaojing-content-prompt-v4";
 export const ARTICLE_GENERATION_CONCURRENCY =
   GEO_PORT_CONTRACT.concurrency.perArticleLifecycle.limit;
 export const ARTICLE_GENERATION_MAX_ARTICLES = 20;

@@ -76,7 +76,7 @@ function operation(overrides: Partial<ArticleOperationProjection> = {}): Article
     topicPlanId: null,
     topicPlanRevision: null,
     knowledgeVersion: 7,
-    policyVersion: "xiaojing-content-prompt-v3",
+    policyVersion: "xiaojing-content-prompt-v4",
     status: "running",
     articles: [article()],
     createdAt: "2026-08-15T00:00:00Z",
