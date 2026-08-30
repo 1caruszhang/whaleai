@@ -145,6 +145,24 @@ function candidateBaseValue(candidate: KnowledgeCardCandidate): unknown {
 }
 
 /** 候选当前值（或已暂存编辑）→ 编辑框文本：字符串数组顿号连接，标量保持原文。 */
+/** 编辑视图的多候选标签：竞品行按层级（直接/潜在）标注——事实主体标签
+ * 在竞品行恒为品牌名（两条候选同主体），显示出来会被误读成竞品值的一部分
+ * （用户反馈 2026-08-31）；其他字段仍用主体名区分归属。 */
+function editLabelOf(
+  candidate: KnowledgeCardCandidate,
+  fieldText: string,
+  tierDirect: string,
+  tierPotential: string,
+): string {
+  if (knowledgeFieldKeyOfPredicate(candidate.key.predicate) === 'potentialCompetitors') {
+    return `${fieldText}·${tierPotential}`;
+  }
+  if (knowledgeFieldKeyOfPredicate(candidate.key.predicate) === 'competitors') {
+    return `${fieldText}·${tierDirect}`;
+  }
+  return candidate.key.subject;
+}
+
 function editableTextOf(candidate: KnowledgeCardCandidate, state: CandidateState): string {
   return plainTextOfValue(
     state.editedValue !== undefined ? state.editedValue : candidateBaseValue(candidate),
@@ -939,13 +957,13 @@ function FieldRow({ row, stateOf, busy, onConfirmRow, onChoose, onStageEdits, on
           {active.map((candidate) => (
             <div key={candidate.id} data-candidate-edit={candidate.id} className="space-y-1">
               {active.length > 1 && (
-                <span className="text-[var(--ink-secondary)]">{candidate.key.subject}</span>
+                <span className="text-[var(--ink-secondary)]">{editLabelOf(candidate, fieldText, t('knowledgeCard.tierDirect'), t('knowledgeCard.tierPotential'))}</span>
               )}
               <input
                 type="text"
                 value={drafts[candidate.id] ?? ''}
                 aria-label={active.length > 1
-                  ? `${candidate.key.subject} · ${fieldText}`
+                  ? `${editLabelOf(candidate, fieldText, t('knowledgeCard.tierDirect'), t('knowledgeCard.tierPotential'))} · ${fieldText}`
                   : fieldText}
                 onChange={(event) => setDrafts((current) => ({
                   ...current,

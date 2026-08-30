@@ -134,7 +134,9 @@
       "potentialCompetitors": "Adjacent scenarios or substitute categories; backfill the ranking roster only when direct competitors fall below 5"
     },
     "potentialDivider": "Potential: ",
-    "sourceLink": "Source"
+    "sourceLink": "Source",
+    "tierDirect": "Direct",
+    "tierPotential": "Potential"
   },
   "shell": {
     "common": {
