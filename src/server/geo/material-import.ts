@@ -21,10 +21,9 @@ import {
 import { toKnowledgeCardCandidate } from '../../shared/geo/knowledgeCard';
 import type { CompetitorDisplayDetail } from '../../shared/geo/competitorDetails';
 import {
-  deriveServiceScope,
+  deriveCompetitorScope,
   resolveBrandName,
   type BrandProfile,
-  type ServiceScope,
 } from '../../shared/geo/profileInjection';
 import { buildSsrfGuardedDispatcher, isUrlSchemeSafe } from '../utils/ssrf';
 import { withAbortSignal } from '../utils/cancellation';
@@ -601,18 +600,19 @@ function passesCompetitorNameGates(
 }
 
 /**
- * 地域闸（ADR-0007 代码硬闸）：候选 region 必须落在地域锚白名单内。
+ * 地域闸（城市/区县锚专用，ADR-0007）：候选 region 必须落在锚白名单内。
  * 白名单段可含「市/区/县」后缀或为「城市+区县」复合短名（如「成都新都」），
  * 双向按去后缀的包含关系比对——拦的是「武汉 vs 成都新都」级跨城错配，
  * 不做精确地理判定（同市跨区放行，紧邻语义由确认卡裁决）。
+ * 省级锚（allowed 为空）不经此闸：地域相关性由抽取模型自证。
  */
-function regionInServiceScope(region: string, scope: ServiceScope): boolean {
+function regionInServiceScope(region: string, allowed: readonly string[]): boolean {
   const parts = region.split(/[，,、；;/|\s]+/).map((part) => part.trim()).filter(Boolean);
   return parts.some((part) => {
     const candidate = part.replace(/[市区县]$/, '');
     if (!candidate) return false;
-    return scope.allowed.some((allowed) => {
-      const anchor = allowed.replace(/[市区县]$/, '');
+    return allowed.some((anchorRaw) => {
+      const anchor = anchorRaw.replace(/[市区县]$/, '');
       if (candidate.length >= 2 && anchor.includes(candidate)) return true;
       return anchor.length >= 2 && candidate.includes(anchor);
     });
@@ -1173,11 +1173,11 @@ export class MaterialImportService {
    * js_ai material-to-facts 契约的 "enrich real competitors"（ADR-0007 重写）：
    * 品牌整体竞品（本次抽取 + 已确认权威值）不足 10 家备选时联网补足。主路径
    * 为「取名于真实检索」——searchSources 纯引擎快照 ×2 → 一次普通抽取从快照
-   * 认名字 → 本地双闸（存在闸：名字逐字见于快照；地域闸：region 命中地域锚
-   * 白名单）；enable_search 合并式调用降级为兜底（无快照，存在闸降级）。
-   * 无地域锚（serviceArea 缺失/全国类）整轮跳过，不联网。富化名一律
-   * inferred（低置信），最终由确认卡裁决；与材料已抽出的竞品合并为同一条
-   * 候选，避免同键多条候选顺序采纳时互相覆盖。
+   * 认名字 → 本地双闸（存在闸：名字逐字见于快照，恒开；地域闸：城市/区县
+   * 锚字符串比对，省级锚交模型自证）；enable_search 合并式调用降级为兜底
+   * （无快照，存在闸降级）。无地域锚（serviceArea 缺失/全国类）整轮跳过，
+   * 不联网。富化名一律 inferred（低置信），最终由确认卡裁决；与材料已抽出
+   * 的竞品合并为同一条候选，避免同键多条候选顺序采纳时互相覆盖。
    */
   private async enrichCompetitors(
     context: BrandMaterialContext,
@@ -1352,7 +1352,7 @@ export class MaterialImportService {
       ...(identityProfile.serviceArea.length > 0 ? { serviceArea: identityProfile.serviceArea } : {}),
     };
     const brandName = resolveBrandName(profile, context.brandName);
-    const scope = deriveServiceScope(profile);
+    const scope = deriveCompetitorScope(profile);
     if (!scope) {
       // 无锚不富化（ADR-0007）：serviceArea 缺失或「全国/线上」类声明时，
       // 联网查询必然退化为全国榜文形态，是跨城错配的主要来源——整轮跳过，
@@ -1366,11 +1366,14 @@ export class MaterialImportService {
         value: [],
         provenance: 'inferred',
         sourceExcerpt:
-          '服务区域未确认，竞品联网补全已跳过——请先确认服务区域，确认后可让助手补查本地竞品',
+          '材料未提供可定位的服务区域，竞品联网补全已跳过——可补充服务区域后重新导入，或直接让助手补查本地竞品',
         confidence: 0,
         scope: { kind: 'brand' },
       };
     }
+    // 地域闸只在城市/区县锚（字符串可直接比对）时硬拦；省级锚（广东省等）
+    // 不做省→市代码映射，地域相关性由抽取模型自证（ADR-0007 用户裁决
+    // 2026-08-30）——查询锚定与提示词纪律兜底，过界候选由确认卡删除。
     // 检索查询（地域锚为硬性前缀）：排行榜形召回全景 + 口碑形召回本地同行。
     const querySubject = industry || [...products][0] || '';
     const anchorSubject = querySubject ? `${scope.primary} ${querySubject}` : scope.primary;
@@ -1457,7 +1460,8 @@ export class MaterialImportService {
         if (suggestions.length >= deficit) break;
         const nameNorm = normalizeEvidenceText(name);
         if (!nameNorm || !corpusNorm.includes(nameNorm)) continue; // 存在闸
-        if (!regionInServiceScope(region, scope)) continue; // 地域闸
+        // 地域闸（仅城市/区县锚）：省级锚无 allowed 白名单，模型自证。
+        if (scope.granularity === 'city' && !regionInServiceScope(region, scope.allowed)) continue;
         const matchedIndex = sourceNorms.findIndex((text) => text.includes(nameNorm));
         if (matchedIndex >= 0) {
           // 关系闸：快照里名字附近出现供应/合作/前东家等关系词的剔除。
@@ -1477,7 +1481,7 @@ export class MaterialImportService {
       return buildEnrichmentFact(suggestions);
     }
     // 兜底路径（ADR-0007）：enable_search 合并式调用，检索与判别同一次完成。
-    // 存在闸无快照可比（明确降级）；地域闸照常执行。
+    // 存在闸无快照可比（明确降级）；地域闸仅城市/区县锚执行（同主路径）。
     const prompts = queries.map((focus) => competitorEnrichmentPrompt({
       brandName,
       industry,
@@ -1514,7 +1518,8 @@ export class MaterialImportService {
       }
       for (const suggestion of parsed) {
         if (suggestions.length >= deficit) break;
-        if (!regionInServiceScope(suggestion.region, scope)) continue;
+        if (scope.granularity === 'city'
+          && !regionInServiceScope(suggestion.region, scope.allowed)) continue;
         const normalized = normalizeCompetitorKey(suggestion.name);
         if (seen.has(normalized)) continue;
         seen.add(normalized);

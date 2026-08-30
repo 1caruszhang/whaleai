@@ -98,6 +98,78 @@ export interface ServiceScope {
 }
 
 /**
+ * 省级行政区短名名单（竞品腿锚分类用，ADR-0007 用户裁决 2026-08-30）。
+ * 只用于识别「声明段是不是一个省」（同华南/全国用正则名单识别），不做
+ * 省→市归属映射——城市属于哪个省的地理推理交由抽取模型判断。
+ */
+const PROVINCE_SHORT_NAMES = new Set([
+  "北京", "天津", "上海", "重庆", "河北", "山西", "辽宁", "吉林", "黑龙江",
+  "江苏", "浙江", "安徽", "福建", "江西", "山东", "河南", "湖北", "湖南",
+  "广东", "海南", "四川", "贵州", "云南", "陕西", "甘肃", "青海", "台湾",
+  "内蒙古", "广西", "西藏", "宁夏", "新疆", "香港", "澳门",
+]);
+
+/** 整段声明是否为省级行政区（广东省 / 广西壮族自治区 / 广东），是则归一成短名。 */
+function matchProvinceSegment(segment: string): string | undefined {
+  const autonomous = segment.match(
+    /^([\u4e00-\u9fa5]{2,3}?)(?:维吾尔|壮族|回族)?自治区$/,
+  );
+  if (autonomous && PROVINCE_SHORT_NAMES.has(autonomous[1])) return autonomous[1];
+  const withSuffix = segment.match(/^([\u4e00-\u9fa5]{2,4})省$/);
+  if (withSuffix && PROVINCE_SHORT_NAMES.has(withSuffix[1])) return withSuffix[1];
+  if (PROVINCE_SHORT_NAMES.has(segment)) return segment;
+  return undefined;
+}
+
+/**
+ * 竞品腿地域锚（ADR-0007）：声明什么粒度就锚什么粒度。
+ * - 城市级（成都 / 成都新都 / 四川省成都市→成都）：allowed 白名单可做
+ *   字符串包含比对，地域闸继续代码硬拦；
+ * - 省级（广东省 / 广西壮族自治区 / 广东）：主锚直接用归一短名（广东），
+ *   不做省→市映射——地域相关性由抽取模型自证（查询锚定 + 提示词纪律
+ *   兜底），代码不拦；
+ * - 全国/线上/宏观区（华南等）与 deriveServiceScope 同判：无地缘，不锚。
+ * 混合声明（广东省、长沙市）含省段即按省级宽口径处理（无代码闸，
+ * 宁松勿拦，过界候选由确认卡逐行删除兜底）。
+ */
+export interface CompetitorScope {
+  primary: string;
+  allowed: readonly string[];
+  granularity: "city" | "province";
+}
+
+export function deriveCompetitorScope(
+  profile: BrandProfile,
+): CompetitorScope | undefined {
+  const serviceArea = firstProfileValue(profile, "serviceArea");
+  if (serviceArea) {
+    if (
+      isGenericTargetRegion(serviceArea) ||
+      BOUNDLESS_SERVICE_RE.test(serviceArea)
+    ) {
+      return undefined;
+    }
+    const rawSegments = serviceArea
+      .split(/[，,、；;（）()及]/)
+      .map((segment) => segment.trim().replace(/(全省|全市)$/, ""))
+      .filter(Boolean);
+    const province = rawSegments
+      .map(matchProvinceSegment)
+      .find((matched): matched is string => matched !== undefined);
+    if (province) return { primary: province, allowed: [], granularity: "province" };
+    const allowed = extractServiceAreaSegments(serviceArea);
+    if (allowed.length > 0) return { primary: allowed[0], allowed, granularity: "city" };
+  }
+  for (const address of profileValues(profile, "addresses")) {
+    const stripped = address.replace(/^[\u4e00-\u9fa5]{2,4}(?:省|自治区)/, "");
+    const cityMatch = stripped.match(/([\u4e00-\u9fa5]{2,4})市/);
+    if (cityMatch && isValidCityName(cityMatch[1]))
+      return { primary: cityMatch[1], allowed: [cityMatch[1]], granularity: "city" };
+  }
+  return undefined;
+}
+
+/**
  * 地域锚（ADR-0006 修正四）：用户声明的服务范围 = 锚 + 上限，粒度保留
  * （声明「新都区」就是新都区，不升格为成都市）；地址只在声明不可用时兜底
  * 提取城市短名；全国/线上类声明 → 无地缘模式（不落地址兜底）。

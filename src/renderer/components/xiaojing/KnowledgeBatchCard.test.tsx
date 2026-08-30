@@ -271,14 +271,14 @@ describe('KnowledgeBatchCard（字段行复核卡）', () => {
         normalizedValueJson: '[]',
         source: {
           materialId: 'material-1',
-          excerpt: '服务区域未确认，竞品联网补全已跳过——请先确认服务区域',
+          excerpt: '材料未提供可定位的服务区域，竞品联网补全已跳过',
           confidence: 0,
           profileProvenance: 'inferred',
         },
       }),
     ])} />);
 
-    expect(screen.getByText(/服务区域未确认，竞品联网补全已跳过/)).toBeInTheDocument();
+    expect(screen.getByText(/材料未提供可定位的服务区域，竞品联网补全已跳过/)).toBeInTheDocument();
   });
 
   it('材料原文行零控件、徽章已就绪；整卡全原文零冲突也必须点一次确认才提交', async () => {

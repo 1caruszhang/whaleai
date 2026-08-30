@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  deriveCompetitorScope,
   deriveServiceScope,
   firstProfileValue,
   projectBrandProfile,
@@ -210,6 +211,94 @@ describe("deriveServiceScope（ADR-0006 修正四：声明服务范围 = 锚 + �
         projectBrandProfile([fact("brand.industry", "MES系统")]),
       ),
     ).toBeUndefined();
+  });
+});
+
+describe("deriveCompetitorScope（ADR-0007：声明什么粒度锚什么粒度）", () => {
+  it("city-level declarations keep the whitelist granularity (gate-able)", () => {
+    expect(
+      deriveCompetitorScope(
+        projectBrandProfile([fact("brand.serviceArea", "成都新都")]),
+      ),
+    ).toEqual({ primary: "成都新都", allowed: ["成都新都"], granularity: "city" });
+    expect(
+      deriveCompetitorScope(
+        projectBrandProfile([fact("brand.serviceArea", "四川省成都市")]),
+      ),
+    ).toEqual({ primary: "成都", allowed: ["成都"], granularity: "city" });
+  });
+
+  it("bare province declarations anchor at province granularity without a city whitelist", () => {
+    // 炊班主事故回归：省级服务区域不再被判「无锚」整轮跳过。
+    expect(
+      deriveCompetitorScope(
+        projectBrandProfile([fact("brand.serviceArea", "广东省")]),
+      ),
+    ).toEqual({ primary: "广东", allowed: [], granularity: "province" });
+    expect(
+      deriveCompetitorScope(
+        projectBrandProfile([fact("brand.serviceArea", "广东")]),
+      ),
+    ).toEqual({ primary: "广东", allowed: [], granularity: "province" });
+  });
+
+  it("normalizes autonomous-region long names to short anchors", () => {
+    expect(
+      deriveCompetitorScope(
+        projectBrandProfile([fact("brand.serviceArea", "广西壮族自治区")]),
+      ),
+    ).toEqual({ primary: "广西", allowed: [], granularity: "province" });
+    expect(
+      deriveCompetitorScope(
+        projectBrandProfile([fact("brand.serviceArea", "新疆维吾尔自治区")]),
+      ),
+    ).toEqual({ primary: "新疆", allowed: [], granularity: "province" });
+    expect(
+      deriveCompetitorScope(
+        projectBrandProfile([fact("brand.serviceArea", "内蒙古自治区")]),
+      ),
+    ).toEqual({ primary: "内蒙古", allowed: [], granularity: "province" });
+  });
+
+  it("mixed province+city declarations resolve to the lenient province scope", () => {
+    // 含省段即按省级宽口径：无代码地域闸，过界候选由确认卡删除兜底。
+    expect(
+      deriveCompetitorScope(
+        projectBrandProfile([fact("brand.serviceArea", "广东省、长沙市")]),
+      ),
+    ).toEqual({ primary: "广东", allowed: [], granularity: "province" });
+  });
+
+  it("non-administrative economic regions flow through the city path as anchors", () => {
+    // 珠三角无行政区后缀，走城市清洗路径成锚（查询可用），不做展开映射。
+    expect(
+      deriveCompetitorScope(
+        projectBrandProfile([fact("brand.serviceArea", "珠三角")]),
+      ),
+    ).toEqual({ primary: "珠三角", allowed: ["珠三角"], granularity: "city" });
+  });
+
+  it("keeps boundless and macro-region declarations anchor-free", () => {
+    expect(
+      deriveCompetitorScope(
+        projectBrandProfile([fact("brand.serviceArea", "全国，支持线上交付")]),
+      ),
+    ).toBeUndefined();
+    expect(
+      deriveCompetitorScope(
+        projectBrandProfile([fact("brand.serviceArea", "华南地区")]),
+      ),
+    ).toBeUndefined();
+  });
+
+  it("falls back to the address city at city granularity", () => {
+    expect(
+      deriveCompetitorScope(
+        projectBrandProfile([
+          fact("brand.addresses", ["四川省成都市龙泉驿区大面街道某城F区12号"]),
+        ]),
+      ),
+    ).toEqual({ primary: "成都", allowed: ["成都"], granularity: "city" });
   });
 });
 

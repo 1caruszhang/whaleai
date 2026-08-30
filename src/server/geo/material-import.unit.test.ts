@@ -544,6 +544,65 @@ describe("competitor enrichment (ADR-0007 source-grounded extraction)", () => {
     expect(competitorsCallOf(current)?.[0].value).toEqual(['云帆信息']);
   });
 
+  it('province-level service areas anchor the search and leave region relevance to the model', async () => {
+    // 炊班主事故回归 + ADR-0007 用户裁决 2026-08-30：省级锚（广东省）不再
+    // 整轮跳过；地域相关性由抽取模型自证，代码不做省→市映射——深圳/广州
+    // 候选不经字符串地域闸直接进卡，过界者由确认卡逐行删除兜底。
+    const provinceResponse = JSON.stringify({ facts: [
+      { field: 'industry', value: '智能客服', provenance: 'extracted', sourceExcerpt: '行业：智能客服' },
+      { field: 'serviceArea', value: '广东省', provenance: 'extracted', sourceExcerpt: '业务区域范围：广东省' },
+    ] });
+    const provinceCorpus = [
+      {
+        title: '广东智能客服公司排行榜',
+        url: 'https://example.com/gd-rank',
+        summary: '广东智能客服十大品牌：云帆信息（深圳）口碑靠前，星河智能（广州）位列第二',
+      },
+    ];
+    const port = new FakeMaterialPort();
+    const current = service(port, {
+      completeResponses: [provinceResponse, JSON.stringify({ competitors: [
+        { name: '云帆信息', region: '深圳' },
+        { name: '星河智能', region: '广州' },
+      ] })],
+      searchSources: async () => provinceCorpus,
+    });
+    const result = await current.value.importPastedText('公司资料');
+
+    expect(result.ok).toBe(true);
+    expect(current.searchSources).toHaveBeenCalledTimes(2);
+    const queries = current.searchSources!.mock.calls.map(([query]) => query);
+    expect(queries[0]).toContain('广东 智能客服 排行榜');
+    expect(queries[1]).toContain('广东 智能客服 哪家好');
+    // 省级锚 allowed 为空：存在闸照常（名字逐字见于快照），地域闸不拦。
+    expect(competitorsCallOf(current)?.[0].value).toEqual(['云帆信息', '星河智能']);
+    expect(competitorsCallOf(current)?.[0].source.excerpt).toContain('云帆信息（深圳）：');
+  });
+
+  it('normalizes autonomous-region long names and mixed declarations to the province anchor', async () => {
+    const mixedResponse = JSON.stringify({ facts: [
+      { field: 'industry', value: '智能客服', provenance: 'extracted', sourceExcerpt: '行业：智能客服' },
+      { field: 'serviceArea', value: '广西壮族自治区', provenance: 'extracted', sourceExcerpt: '业务区域范围：广西壮族自治区' },
+    ] });
+    const port = new FakeMaterialPort();
+    const current = service(port, {
+      completeResponses: [mixedResponse, JSON.stringify({ competitors: [
+        { name: '云帆信息', region: '南宁' },
+      ] })],
+      searchSources: async () => [{
+        title: '广西智能客服排行榜',
+        url: 'https://example.com/gx-rank',
+        summary: '广西智能客服十大品牌：云帆信息（南宁）排名第一',
+      }],
+    });
+    const result = await current.value.importPastedText('公司资料');
+
+    expect(result.ok).toBe(true);
+    const queries = current.searchSources!.mock.calls.map(([query]) => query);
+    expect(queries[0]).toContain('广西 智能客服 排行榜');
+    expect(competitorsCallOf(current)?.[0].value).toEqual(['云帆信息']);
+  });
+
   it('relation gate drops names whose snippet states a non-competitive relation', async () => {
     const port = new FakeMaterialPort();
     const supplierCorpus = [...corpus, {
@@ -578,7 +637,7 @@ describe("competitor enrichment (ADR-0007 source-grounded extraction)", () => {
     expect(current.search).not.toHaveBeenCalled();
     const competitorsCall = competitorsCallOf(current);
     expect(competitorsCall?.[0].value).toEqual([]);
-    expect(competitorsCall?.[0].source.excerpt).toContain('服务区域未确认');
+    expect(competitorsCall?.[0].source.excerpt).toContain('材料未提供可定位的服务区域');
   });
 
   it('skips silently without an anchor when the material already carries competitors', async () => {

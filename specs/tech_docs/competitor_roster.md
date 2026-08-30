@@ -35,7 +35,7 @@
    （继承现有提示词纪律：同层级/同赛道/前东家排除/上下游排除/自名与形近排除/已知竞品去重）
 ③ 本地字符串校验（零 API 调用）：
    - 存在校：name 归一化后逐字出现在其所引快照里，否则丢弃
-   - 地域闸：region 归一化后命中 deriveServiceScope 白名单，否则丢弃
+   - 地域闸（仅城市/区县锚）：region 归一化后命中白名单，否则丢弃
    - 关系闸：所引快照里名字附近出现供应/合作/前东家等非竞争关系词的丢弃
      （沿用既有 NON_COMPETITOR_RELATION 词表，从「摘录门」迁移为「快照门」）
 ④ 幸存者作为 inferred/0.5 候选走既有 propose → 确认卡
@@ -45,7 +45,8 @@
 
 - **存在性由构造保证**：名字从真实检索结果里长出来，不是模型记忆凭空生成；③的存在闸只是兜住抽取时的漏网幻觉，对已持有数据做字符串匹配，不发起任何 API 调用。
 - **两步职责分离**：`searchSources` 是手（弄到真实语料），抽取是眼（从语料认名字）。品牌名是开放词汇（「留香卤坊」不在任何词典里），纯规则/分词无法从散文中识别，LLM 阅读是「机器读中文」的最小代价，且该调用读两路各 20 条短摘要（最多前 30 条进提示词）仅数千 token，是全链路最便宜的一笔，替代的恰是现状 3 次昂贵的 enable_search 合并调用——总账下降。
-- **查询接线**：查询品牌名改用 `resolveBrandName`（知识库裁决名）；服务区改用 `deriveServiceScope` 派生主锚（不再透传脏文本）。**无锚（serviceArea 缺失或「全国/线上」类）时整轮富化跳过**，卡上以一行被动提示「服务区域未确认，竞品联网补全已跳过」，不追问。
+- **查询接线**：查询品牌名改用 `resolveBrandName`（知识库裁决名）；服务区改用 `deriveCompetitorScope` 派生主锚（不再透传脏文本）。**无锚（serviceArea 缺失或「全国/线上」类）时整轮富化跳过**，卡上以一行被动提示「材料未提供可定位的服务区域，竞品联网补全已跳过」，不追问。
+- **地域锚粒度（2026-08-30 用户裁决）**：声明什么粒度锚什么粒度。城市/区县锚（成都新都）白名单字符串比对硬拦跨城；**省级锚（广东省/广西壮族自治区等）归一短名（广东/广西）直接拼进查询**——查询锚定本身是最强地域过滤，地域相关性由抽取模型自证，代码不做省→市映射；混合声明（广东省、长沙市）含省段即按省级宽口径处理。已接受残余风险：省级锚下偶有真实但外省品牌进卡，确认卡逐行删除兜底。
 - **enable_search 合并式调用降级为兜底**：仅当 `searchSources` 不可用（无 key/调用失败/返回为空）时回落，回落路径同样过③的本地地域闸（存在闸在回落路径无快照可比，接受降级并保持 inferred 必审）。
 - **≥5 家可用为目标**（缓冲 10 家不变）。闸门永不放水凑数；不足时卡上被动展示可用家数，编辑框既有能力可补名（用户点名走既有 `confirm_ranking_competitors` 窄通道）。不设检索阶梯重试——先观察固定 2 查询 + 闸门的存活率，不够再议（见显式延后）。
 
@@ -86,7 +87,7 @@
 
 | 层 | 文件 | 改动 |
 |---|---|---|
-| 导入管线 | `src/server/geo/material-import.ts` | `enrichCompetitors` 重写为「searchSources×2 → 1 次抽取 → 本地双闸」；`competitorEnrichmentPrompt` 重写为快照抽取式（输入快照、输出名+出处）；enable_search 降为兜底；查询名/锚解析改 `resolveBrandName`/`deriveServiceScope`；无锚跳过 |
+| 导入管线 | `src/server/geo/material-import.ts` | `enrichCompetitors` 重写为「searchSources×2 → 1 次抽取 → 本地双闸」；`competitorEnrichmentPrompt` 重写为快照抽取式（输入快照、输出名+出处）；enable_search 降为兜底；查询名/锚解析改 `resolveBrandName`/`deriveCompetitorScope`；无锚跳过 |
 | 检索能力 | `src/server/geo/provider-capabilities.ts` | 复用 `searchSources` 与 extraction 槽，无新增能力 |
 | 卡片投影 | `src/shared/geo/knowledgeCard.ts` | 候选投影瘦身（纯名称） |
 | 卡片 UI | `src/renderer/components/xiaojing/KnowledgeBatchCard.tsx` | 数组行逐行 ✕；竞品胶囊去元数据；（可选）过滤计数行 |
@@ -98,5 +99,5 @@
 
 ## 验收
 
-- 单测：抽取输出的名字未逐字出现在所引快照 → 被存在闸丢弃；region 不在白名单 → 被地域闸丢弃；无锚时富化整体跳过且卡上出现提示行；逐行 ✕ 产出 adopt-edited 减一数组；enable_search 兜底路径在 searchSources 失败时接通且过地域闸。
+- 单测：抽取输出的名字未逐字出现在所引快照 → 被存在闸丢弃；region 不在城市/区县锚白名单 → 被地域闸丢弃；省级锚（广东省）不跳过、查询含省短名、深圳候选不被字符串闸拦；无锚时富化整体跳过且卡上出现提示行；逐行 ✕ 产出 adopt-edited 减一数组；enable_search 兜底路径在 searchSources 失败时接通且过地域闸。
 - 回归：炊班长/炊事班形近变体测试（`material-import.unit.test.ts:1127-1213`）、材料腿逐字证据门（`:785-816`）不动；排行 <5 fail-closed 行为不变；现有断言「searchSources 不得被调用」的测试（`:827-850、880-900`）随设计翻转而改写。
