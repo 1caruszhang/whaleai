@@ -6,7 +6,7 @@ import {
   RotateCcw,
   SquarePen,
 } from "lucide-react";
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import {
   approveArticle,
@@ -23,6 +23,7 @@ import {
   type ArticleProjection,
 } from "../../../shared/geo/articleGeneration";
 import { unwrapToolResultText } from "../../../shared/toolResult";
+import ArticleBodyPreview from "./ArticleBodyPreview";
 import GateCardFooter, { GateCardSuccess } from "./GateCardFooter";
 import { useGateCardRefresh } from "./useGateCardRefresh";
 
@@ -31,6 +32,10 @@ import { useGateCardRefresh } from "./useGateCardRefresh";
  * 展开/收起正文、直接编辑稿件并整卡批准（走既有 /articles/edit 与
  * /articles/approve，CAS revision）；批准后 reminder 通知 agent 继续。
  *
+ * 展开的默认态是渲染预览（#16 / ADR-0008 Decision 6）：正文按 markdown
+ * 渲染，material-image:// 占位符经材料内容取回换本地 blob，配图位置在
+ * 批准前即可验收；「编辑源文」切回可编辑文本域，删占位符行即删图。
+ *
  * 编辑保存的是 user-edited 新版本（revision+1，回到 draft_ready），整卡
  * 「批准并继续」逐篇提交，expectedRevision 取合并后的最新投影——用户刚
  * 编辑过的文章按新 revision 批准，编辑后的稿件才是进入分发计划的事实
@@ -38,7 +43,8 @@ import { useGateCardRefresh } from "./useGateCardRefresh";
  * 已批准）。
  *
  * 待决期间每 3s 轮询 /latest（票 38）：聊天修订后的文章以新版本与
- * draft_ready 状态重渲染，批准继续走既有审批门。
+ * draft_ready 状态重渲染（正文缓存按 revision 失效、展开态自动重拉），
+ * 批准继续走既有审批门。
  */
 export interface ArticleApprovalGateCardData {
   kind: "article-operation";
@@ -133,6 +139,10 @@ function ArticleRow({
   const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // 每个版本只自动拉一次正文：失败不无限重试，收起再展开重置（允许手动重试）。
+  const triedRevisionRef = useRef<number | null>(null);
+  // 在途标记走 ref：loadingBody 若进依赖会因 effect 内 setState 自我取消。
+  const bodyInFlightRef = useRef(false);
   const review = article.currentVersion?.review ?? null;
   const bodyReady = bodyCache !== null && bodyCache.revision === article.revision;
   const canEdit = article.status === "draft_ready" && bodyReady;
@@ -140,32 +150,59 @@ function ArticleRow({
   // article_version_not_found；恢复入口是单篇重试而不是读正文。
   const hasVersion = article.currentVersion !== null;
 
-  const ensureBody = async () => {
-    if (bodyReady || loadingBody) return;
-    setLoadingBody(true);
-    setError(null);
-    try {
-      const projection = await loadArticleBody(
-        apiPost,
-        { workspaceId: operation.workspaceId, sessionId: sessionId ?? "" },
-        { operationId: operation.id, articleId: article.id },
-      );
-      setBodyCache({ revision: projection.revision, body: projection.body });
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
-    } finally {
-      setLoadingBody(false);
-    }
-  };
-
-  const toggleBody = () => {
-    if (editing || loadingBody) return;
-    if (expanded) {
-      setExpanded(false);
+  // 展开即取正文；缓存按 revision 失效——聊天闸门修订产出新版本（3s 轮询
+  // 到达）或本卡编辑保存后，展开态下自动重拉，修订对占位符的增删在卡片
+  // 重渲染中立即可见（#16）。取数走 ref 读取的最新 apiPost（稳定规则）。
+  useEffect(() => {
+    if (!expanded) {
+      triedRevisionRef.current = null;
       return;
     }
-    setExpanded(true);
-    if (!bodyReady) void ensureBody();
+    if (editing || bodyReady || bodyInFlightRef.current) return;
+    if (triedRevisionRef.current === article.revision) return;
+    triedRevisionRef.current = article.revision;
+    bodyInFlightRef.current = true;
+    let cancelled = false;
+    setLoadingBody(true);
+    setError(null);
+    loadArticleBody(
+      apiPost,
+      { workspaceId: operation.workspaceId, sessionId: sessionId ?? "" },
+      { operationId: operation.id, articleId: article.id },
+    )
+      .then((projection) => {
+        if (!cancelled) {
+          setBodyCache({ revision: projection.revision, body: projection.body });
+        }
+      })
+      .catch((cause) => {
+        if (!cancelled) {
+          setError(cause instanceof Error ? cause.message : String(cause));
+        }
+      })
+      .finally(() => {
+        bodyInFlightRef.current = false;
+        setLoadingBody(false);
+      });
+    return () => {
+      cancelled = true;
+      bodyInFlightRef.current = false;
+    };
+  }, [
+    apiPost,
+    article.id,
+    article.revision,
+    bodyReady,
+    editing,
+    expanded,
+    operation.id,
+    operation.workspaceId,
+    sessionId,
+  ]);
+
+  const toggleBody = () => {
+    if (editing) return;
+    setExpanded((current) => !current);
   };
 
   const startEditing = () => {
@@ -301,10 +338,10 @@ function ArticleRow({
             type="button"
             onClick={startEditing}
             className="flex items-center gap-1 rounded px-2 py-1 text-xs text-[var(--accent)]"
-            aria-label={`编辑正文 ${article.currentVersion?.title ?? article.requestedTitle}`}
+            aria-label={`编辑源文 ${article.currentVersion?.title ?? article.requestedTitle}`}
           >
             <SquarePen className="h-3 w-3" />
-            编辑正文
+            编辑源文
           </button>
         )}
         {article.status === "approved" && (
@@ -323,7 +360,7 @@ function ArticleRow({
           <textarea
             value={draft}
             onChange={(event) => setDraft(event.target.value)}
-            aria-label={`编辑正文输入 ${article.currentVersion?.title ?? article.requestedTitle}`}
+            aria-label={`编辑源文输入 ${article.currentVersion?.title ?? article.requestedTitle}`}
             className="h-56 w-full resize-y overflow-auto rounded bg-[var(--paper-inset)] p-2 font-mono text-xs leading-5"
           />
           <div className="flex items-center gap-2">
@@ -353,9 +390,13 @@ function ArticleRow({
         </div>
       )}
       {expanded && !editing && bodyReady && (
-        <pre className="mt-2 max-h-72 overflow-auto whitespace-pre-wrap rounded bg-[var(--paper-inset)] p-2 text-xs leading-5">
-          {bodyCache.body}
-        </pre>
+        // 预览默认态（#16）：正文按 markdown 渲染，material-image 占位符经
+        // 材料内容取回换本地 blob；切到「编辑源文」才回到可编辑文本域。
+        <ArticleBodyPreview
+          body={bodyCache.body}
+          workspaceId={operation.workspaceId}
+          className="mt-2 max-h-72 overflow-auto rounded bg-[var(--paper-inset)] p-2 text-xs leading-5"
+        />
       )}
       {error && (
         <p role="alert" className="mt-1 break-words text-xs text-[var(--error)]">

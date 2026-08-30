@@ -14,6 +14,7 @@ import {
   type ArticleProjection,
 } from "../../../shared/geo/articleGeneration";
 import { CONTENT_TYPE_LABELS } from "./contentTypeLabels";
+import ArticleBodyPreview from "./ArticleBodyPreview";
 
 interface XiaojingArticleGenerationPanelProps {
   workspaceId: string;
@@ -216,9 +217,13 @@ export default memo(function XiaojingArticleGenerationPanel({
           <p className="text-xs font-medium text-emerald-700">
             批准稿 v{opened.revision}（只读）
           </p>
-          <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap text-xs leading-5">
-            {opened.body}
-          </pre>
+          {/* #16 / ADR-0008：批准稿是渲染态（与发布产物同构的图文复核），
+              material-image 占位符经材料内容取回换本地 blob 显示。 */}
+          <ArticleBodyPreview
+            body={opened.body}
+            workspaceId={workspaceId}
+            className="mt-2 max-h-64 overflow-auto text-xs leading-5"
+          />
         </div>
       )}
     </section>

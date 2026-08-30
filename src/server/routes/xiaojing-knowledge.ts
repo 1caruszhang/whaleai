@@ -531,5 +531,49 @@ export async function handleXiaojingKnowledgeRoute(
     }
   }
 
+  // 材料图片内容取回（ADR-0008 批准预览换 blob 的唯一字节源）：renderer 经
+  // 本 Session 控制面请求，Sidecar 走 T2 的 management images/content 端点
+  // （Rust 侧 sha256 校验 + committed-session 闸）。字节以 base64 过控制面
+  // （预览单图 ≤10MB，与 egress 上传载荷同款形态）。
+  if (pathname === '/api/xiaojing/material-images/content' && request.method === 'POST') {
+    try {
+      const payload = await request.json() as {
+        workspaceId: string;
+        sessionId: string;
+        imageId: string;
+      };
+      const runtimeSessionId = getRuntimeSessionIdForRequest();
+      const workspaceId = basename(resolve(workspacePath));
+      if (payload.workspaceId !== workspaceId
+        || payload.sessionId !== runtimeSessionId) {
+        return jsonResponse({ success: false, error: 'material_identity_mismatch' }, 403);
+      }
+      if (typeof payload.imageId !== 'string'
+        || !/^[A-Za-z0-9-]{1,64}$/.test(payload.imageId)) {
+        return jsonResponse({ success: false, error: 'material_image_id_invalid' }, 400);
+      }
+      const identity = { workspaceId, sessionId: runtimeSessionId };
+      const { bytes, mediaType } = await createBrandMaterialPort(identity)
+        .imageAssetContent(payload.imageId);
+      return jsonResponse({
+        success: true,
+        image: {
+          imageId: payload.imageId,
+          mediaType,
+          bytesB64: Buffer.from(bytes).toString('base64'),
+        },
+      });
+    } catch (error) {
+      logMaterial({
+        operation: 'image-content', workspaceId: basename(resolve(workspacePath)),
+        sessionId: getRuntimeSessionIdForRequest(), status: 'failed', error,
+      });
+      const message = error instanceof Error ? error.message : '';
+      const code = MATERIAL_ERROR_CODES.find((candidate) => message.includes(candidate))
+        ?? 'material_image_content_failed';
+      return jsonResponse({ success: false, error: code }, 400);
+    }
+  }
+
   return null;
 }

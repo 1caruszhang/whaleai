@@ -1,5 +1,5 @@
-import { fireEvent, screen, waitFor, within } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type {
   ArticleOperationProjection,
@@ -14,6 +14,9 @@ const mocks = vi.hoisted(() => ({
   edit: vi.fn(),
   approve: vi.fn(),
   retry: vi.fn(),
+  fetchImage: vi.fn(),
+  createObjectURL: vi.fn(),
+  revokeObjectURL: vi.fn(),
 }));
 
 vi.mock("@/context/TabContext", () => ({
@@ -29,11 +32,32 @@ vi.mock("@/api/articleGenerationClient", () => ({
   retryArticle: mocks.retry,
 }));
 
+vi.mock("@/api/brandMaterialClient", () => ({
+  fetchMaterialImageContent: mocks.fetchImage,
+}));
+
 import ArticleApprovalGateCard, {
   parseArticleApprovalGateCard,
 } from "./ArticleApprovalGateCard";
 
 const BODY = "# 成都车载音响选购指南\n\n## 选购要点\n\n- 预算先行";
+
+// #16：带占位符的正文——预览态占位符渲染为图片，编辑源文态删行即删图。
+const BODY_WITH_IMAGES = [
+  "# 成都车载音响选购指南",
+  "",
+  "![产品实拍](material-image://image-1)",
+  "",
+  "## 选购要点",
+  "",
+  "![环境照](material-image://image-2)",
+  "",
+  "- 预算先行",
+].join("\n");
+
+function pngBytes(): Uint8Array {
+  return new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+}
 
 function makeArticle(
   overrides: Partial<ArticleProjection> = {},
@@ -109,6 +133,25 @@ beforeEach(() => {
   mocks.edit.mockReset();
   mocks.approve.mockReset();
   mocks.retry.mockReset();
+  mocks.fetchImage.mockReset().mockResolvedValue({ mediaType: "image/png", bytes: pngBytes() });
+  mocks.createObjectURL.mockReset().mockImplementation(() => `blob:gate-${Math.random()}`);
+  mocks.revokeObjectURL.mockReset();
+  if (!("createObjectURL" in URL)) {
+    Object.defineProperty(URL, "createObjectURL", {
+      configurable: true,
+      writable: true,
+      value: mocks.createObjectURL,
+    });
+    Object.defineProperty(URL, "revokeObjectURL", {
+      configurable: true,
+      writable: true,
+      value: mocks.revokeObjectURL,
+    });
+  }
+});
+
+afterEach(() => {
+  vi.useRealTimers();
 });
 
 describe("ArticleApprovalGateCard", () => {
@@ -200,11 +243,11 @@ describe("ArticleApprovalGateCard", () => {
     );
     fireEvent.click(
       await within(card).findByRole("button", {
-        name: "编辑正文 成都车载音响选购指南",
+        name: "编辑源文 成都车载音响选购指南",
       }),
     );
     const textarea = within(card).getByRole("textbox", {
-      name: "编辑正文输入 成都车载音响选购指南",
+      name: "编辑源文输入 成都车载音响选购指南",
     });
     fireEvent.change(textarea, {
       target: { value: "# 新标题\n\n编辑后的正文" },
@@ -226,9 +269,11 @@ describe("ArticleApprovalGateCard", () => {
     await waitFor(() =>
       expect(within(card).getByText(/· 已编辑/)).toBeInTheDocument(),
     );
-    expect(within(card).getByText("新标题")).toBeInTheDocument();
     expect(
-      within(card).queryByRole("textbox", { name: /编辑正文输入/ }),
+      within(card).getByRole("heading", { name: "新标题" }),
+    ).toBeInTheDocument();
+    expect(
+      within(card).queryByRole("textbox", { name: /编辑源文输入/ }),
     ).not.toBeInTheDocument();
 
     fireEvent.click(within(card).getByRole("button", { name: "批准并继续（1 篇）" }));
@@ -271,12 +316,12 @@ describe("ArticleApprovalGateCard", () => {
     );
     fireEvent.click(
       await within(card).findByRole("button", {
-        name: "编辑正文 成都车载音响选购指南",
+        name: "编辑源文 成都车载音响选购指南",
       }),
     );
     fireEvent.change(
       within(card).getByRole("textbox", {
-        name: "编辑正文输入 成都车载音响选购指南",
+        name: "编辑源文输入 成都车载音响选购指南",
       }),
       { target: { value: "新标题\n\n正文没有 H1" } },
     );
@@ -541,5 +586,180 @@ describe("ArticleApprovalGateCard", () => {
     expect(
       within(card).getByRole("button", { name: /重试本篇/ }),
     ).toBeInTheDocument();
+  });
+
+  // #16 AC1：展开默认是渲染预览；占位符经材料内容取回（mock）换本地 blob
+  // 显示为图片，不出现裸文本 scheme。
+  it("expands to a rendered preview by default with placeholders as blob images", async () => {
+    mocks.loadBody.mockResolvedValue({
+      articleId: "article-1",
+      revision: 3,
+      title: "成都车载音响选购指南",
+      body: BODY_WITH_IMAGES,
+      approved: false,
+    });
+    render(
+      <ArticleApprovalGateCard
+        data={{ kind: "article-operation", operation: makeOperation([makeArticle()]) }}
+      />,
+    );
+    const card = screen.getByRole("region", { name: "文章审核批准" });
+    fireEvent.click(
+      within(card).getByRole("button", { name: "查看正文 成都车载音响选购指南" }),
+    );
+
+    const images = await waitFor(() => {
+      const found = within(card).getAllByRole("img");
+      expect(found).toHaveLength(2);
+      return found;
+    });
+    expect(images[0]).toHaveAttribute("src", expect.stringMatching(/^blob:gate-/));
+    expect(images[0]).toHaveAttribute("alt", "产品实拍");
+    expect(images[1]).toHaveAttribute("alt", "环境照");
+    expect(
+      within(card).getByRole("heading", { level: 2, name: "选购要点" }),
+    ).toBeInTheDocument();
+    expect(card.textContent).not.toContain("material-image:");
+    expect(mocks.fetchImage).toHaveBeenCalledTimes(2);
+  });
+
+  // #16 AC2：预览/编辑源文切换；编辑态删除占位符行保存后，预览不再有该图
+  // （删占位符行即删图），blob 被回收。
+  it("deletes the placeholder line in edit mode and the saved preview drops that image", async () => {
+    mocks.loadBody.mockResolvedValue({
+      articleId: "article-1",
+      revision: 3,
+      title: "成都车载音响选购指南",
+      body: BODY_WITH_IMAGES,
+      approved: false,
+    });
+    const edited = makeArticle({
+      revision: 4,
+      currentVersion: {
+        revision: 4,
+        title: "成都车载音响选购指南",
+        bodyPath: "operations/operation-17/articles/article-1/v4.md",
+        bodySha256: "hash-4",
+        origin: "user-edited",
+        basedOnRevision: 3,
+        review: null,
+        createdAt: "2026-08-18T00:01:00Z",
+        approvedAt: null,
+      },
+    });
+    mocks.edit.mockResolvedValue(edited);
+    render(
+      <ArticleApprovalGateCard
+        data={{ kind: "article-operation", operation: makeOperation([makeArticle()]) }}
+      />,
+    );
+    const card = screen.getByRole("region", { name: "文章审核批准" });
+    fireEvent.click(
+      within(card).getByRole("button", { name: "查看正文 成都车载音响选购指南" }),
+    );
+    fireEvent.click(
+      await within(card).findByRole("button", { name: "编辑源文 成都车载音响选购指南" }),
+    );
+
+    const textarea = within(card).getByRole("textbox", {
+      name: "编辑源文输入 成都车载音响选购指南",
+    });
+    expect(textarea).toHaveValue(BODY_WITH_IMAGES);
+    // 删除第二张占位符所在的行（「删掉第二张图」的手动路径）。
+    const revised = BODY_WITH_IMAGES
+      .split("\n")
+      .filter((line) => line !== "![环境照](material-image://image-2)")
+      .join("\n");
+    fireEvent.change(textarea, { target: { value: revised } });
+    fireEvent.click(within(card).getByRole("button", { name: "保存修改" }));
+
+    await waitFor(() => expect(mocks.edit).toHaveBeenCalledTimes(1));
+    expect(mocks.edit.mock.calls[0][2].body).not.toContain("material-image://image-2");
+    await waitFor(() =>
+      expect(within(card).getAllByRole("img")).toHaveLength(1),
+    );
+    expect(within(card).getByRole("img", { name: "产品实拍" })).toBeInTheDocument();
+    expect(
+      within(card).queryByRole("img", { name: "环境照" }),
+    ).not.toBeInTheDocument();
+    expect(mocks.revokeObjectURL).toHaveBeenCalled();
+  });
+
+  // #16 AC3：聊天闸门修订（「删掉第二张图」类指令作用于占位符）——3s 轮询
+  // 投递新版本投影，卡片重渲染并按新 revision 重拉正文：第二张图消失，
+  // 仅对仍在正文的占位符做内容取回。
+  it("re-renders the preview from the chat-revised body, dropping the deleted image", async () => {
+    vi.useFakeTimers();
+    const initial = makeArticle();
+    const revised = makeArticle({
+      revision: 4,
+      currentVersion: {
+        revision: 4,
+        title: "成都车载音响选购指南",
+        bodyPath: "operations/operation-17/articles/article-1/v4.md",
+        bodySha256: "hash-4",
+        origin: "generated",
+        basedOnRevision: 3,
+        review: null,
+        createdAt: "2026-08-18T00:02:00Z",
+        approvedAt: null,
+      },
+    });
+    mocks.loadBody.mockResolvedValueOnce({
+      articleId: "article-1",
+      revision: 3,
+      title: "成都车载音响选购指南",
+      body: BODY_WITH_IMAGES,
+      approved: false,
+    });
+    render(
+      <ArticleApprovalGateCard
+        data={{ kind: "article-operation", operation: makeOperation([initial]) }}
+      />,
+    );
+    const card = screen.getByRole("region", { name: "文章审核批准" });
+    await act(async () => {
+      fireEvent.click(
+        within(card).getByRole("button", { name: "查看正文 成都车载音响选购指南" }),
+      );
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(within(card).getAllByRole("img")).toHaveLength(2);
+
+    // 聊天修订产出新版本（updatedAt 变化驱动轮询投递）。
+    mocks.loadLatest.mockResolvedValue({
+      ...makeOperation([revised]),
+      updatedAt: "2026-08-18T00:02:30Z",
+    });
+    const revisedBody = BODY_WITH_IMAGES
+      .split("\n")
+      .filter((line) => line !== "![环境照](material-image://image-2)")
+      .join("\n");
+    mocks.loadBody.mockResolvedValueOnce({
+      articleId: "article-1",
+      revision: 4,
+      title: "成都车载音响选购指南",
+      body: revisedBody,
+      approved: false,
+    });
+
+    // 3s 轮询窗口过后：新版本到达 → 正文按新 revision 重拉 → 第二张图消失。
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3_100);
+    });
+    expect(mocks.loadBody).toHaveBeenCalledTimes(2);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10);
+    });
+    expect(within(card).getAllByRole("img")).toHaveLength(1);
+    expect(within(card).getByRole("img", { name: "产品实拍" })).toBeInTheDocument();
+    expect(
+      within(card).queryByRole("img", { name: "环境照" }),
+    ).not.toBeInTheDocument();
+    // 取回次数：初始 2 张 + 修订重挂载后对仅存占位符（image-1）重取 1 次
+    // （旧实例卸载时 blob 已回收，重挂载必须重取，不泄漏也不复用失效 URL）。
+    expect(mocks.fetchImage).toHaveBeenCalledTimes(3);
   });
 });

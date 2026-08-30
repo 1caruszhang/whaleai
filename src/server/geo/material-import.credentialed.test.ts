@@ -99,7 +99,9 @@ class SmokeMaterialPort implements BrandMaterialPort {
   async listImageAssets(): Promise<never[]> {
     return [];
   }
-  async imageAssetContent(imageId: string): Promise<Uint8Array> {
+  async imageAssetContent(
+    imageId: string,
+  ): Promise<{ bytes: Uint8Array; mediaType: string }> {
     void imageId;
     throw new Error("unused");
   }

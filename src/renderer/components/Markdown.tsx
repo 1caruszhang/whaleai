@@ -26,10 +26,13 @@ import { openExternal } from '@/utils/openExternal';
 import { preprocessMarkdownContent } from '@/utils/markdownPreprocess';
 import {
   MARKDOWN_REHYPE_PLUGINS,
+  MARKDOWN_REHYPE_PLUGINS_MATERIAL_IMAGE,
   MARKDOWN_REMARK_PLUGINS_DEFAULT,
   MARKDOWN_REMARK_PLUGINS_WITH_BREAKS,
   convertFrontmatter,
+  materialImageUrlTransform,
 } from '@/utils/markdownPipeline';
+import { MATERIAL_IMAGE_URI_SCHEME } from '../../shared/geo/materialImagePlaceholder';
 
 // ── Streaming leading-edge fade ──
 // While streaming, wrap the LAST few characters of the last text node in a
@@ -351,6 +354,11 @@ interface MarkdownProps {
    *  `basePath` is the doc's directory inside the workspace, not the
    *  workspace itself. */
   workspacePath?: string | null;
+  /** material-image:// 占位符解析器（ADR-0008 批准预览）：提供时 markdown
+   *  渲染走材料图片预览管线（sanitize/urlTransform 放行受控 scheme），
+   *  占位符 <img> 按解析态渲染为本地 blob/加载/失败。解析器身份变化
+   *  （useCallback 依赖取回结果）即驱动重渲染。 */
+  resolveMaterialImage?: MaterialImageResolver;
 }
 
 /**
@@ -488,7 +496,51 @@ const MarkdownImage = memo(MarkdownImageInner, (prev, next) =>
   && prev.alt === next.alt,
 );
 
-const Markdown = memo(function Markdown({ children, compact = false, preserveNewlines = false, raw = false, basePath, workspacePath = null, streaming = false }: MarkdownProps) {
+/** material-image 占位符（ADR-0008）在预览里的解析态：调用方（批准卡/工作台
+ * 批准稿）先经材料内容取回把字节换成 blob URL，这里只按解析态渲染。 */
+export type MaterialImageResolution =
+  | { kind: 'ready'; url: string }
+  | { kind: 'loading' }
+  | { kind: 'failed'; reason?: string };
+
+export type MaterialImageResolver = (imageId: string) => MaterialImageResolution;
+
+function MaterialImage({
+  imageId,
+  alt,
+  resolve,
+}: {
+  imageId: string;
+  alt?: string;
+  resolve: MaterialImageResolver;
+}) {
+  const resolution = resolve(imageId);
+  if (resolution.kind === 'ready') {
+    return (
+      <img
+        src={resolution.url}
+        alt={alt ?? ''}
+        data-material-image={imageId}
+        className="max-w-full"
+      />
+    );
+  }
+  if (resolution.kind === 'failed') {
+    return (
+      <span className="text-xs italic text-[var(--ink-muted)]">
+        [{resolution.reason ? `材料图片加载失败：${resolution.reason}` : '材料图片加载失败'}]
+      </span>
+    );
+  }
+  return (
+    <span
+      aria-label={`材料图片加载中 ${imageId}`}
+      className="inline-block h-24 w-48 animate-pulse rounded bg-[var(--paper-inset)]"
+    />
+  );
+}
+
+const Markdown = memo(function Markdown({ children, compact = false, preserveNewlines = false, raw = false, basePath, workspacePath = null, streaming = false, resolveMaterialImage }: MarkdownProps) {
   // Skip preprocessing for raw mode (file preview) - preprocessing is for streaming chat messages.
   // In raw mode, convert YAML frontmatter to a fenced code block for proper rendering.
   //
@@ -509,22 +561,56 @@ const Markdown = memo(function Markdown({ children, compact = false, preserveNew
   // doc's own location.
 
   // Merge img handler when basePath is provided (for resolving relative image paths)
+  // or when a material-image resolver is provided (ADR-0008 approval preview).
   // Use == null to allow empty string basePath (root-level files)
   const components = useMemo(() => {
-    if (basePath == null) return markdownComponents;
+    if (basePath == null && !resolveMaterialImage) return markdownComponents;
     return {
       ...markdownComponents,
-      img: (props: React.ImgHTMLAttributes<HTMLImageElement>) => (
-        <MarkdownImage src={props.src} alt={props.alt} basePath={basePath} workspacePath={workspacePath} />
-      ),
+      img: (props: React.ImgHTMLAttributes<HTMLImageElement>) => {
+        const { src, alt } = props;
+        // 占位符优先：受控 scheme 只在提供解析器（预览管线）时被拦截换 blob；
+        // 其余 src 维持既有两条路径（工作区相对路径解析 / 直接渲染）。
+        if (
+          resolveMaterialImage
+          && typeof src === 'string'
+          && src.startsWith(MATERIAL_IMAGE_URI_SCHEME)
+        ) {
+          return (
+            <MaterialImage
+              imageId={src.slice(MATERIAL_IMAGE_URI_SCHEME.length)}
+              alt={alt}
+              resolve={resolveMaterialImage}
+            />
+          );
+        }
+        if (basePath == null) {
+          return <img src={src} alt={alt ?? ''} className="max-w-full" />;
+        }
+        return (
+          <MarkdownImage
+            src={src}
+            alt={alt}
+            basePath={basePath}
+            workspacePath={workspacePath}
+          />
+        );
+      },
     };
-  }, [basePath, workspacePath]);
+  }, [basePath, workspacePath, resolveMaterialImage]);
 
   return (
     <div className={`markdown-content break-words${compact ? ' markdown-content--compact' : ''}`}>
       <ReactMarkdown
         remarkPlugins={preserveNewlines ? MARKDOWN_REMARK_PLUGINS_WITH_BREAKS : MARKDOWN_REMARK_PLUGINS_DEFAULT}
-        rehypePlugins={streaming && !raw ? REHYPE_PLUGINS_STREAMING : MARKDOWN_REHYPE_PLUGINS}
+        rehypePlugins={
+          resolveMaterialImage
+            ? MARKDOWN_REHYPE_PLUGINS_MATERIAL_IMAGE
+            : streaming && !raw
+              ? REHYPE_PLUGINS_STREAMING
+              : MARKDOWN_REHYPE_PLUGINS
+        }
+        urlTransform={resolveMaterialImage ? materialImageUrlTransform : undefined}
         components={components}
       >
         {processedContent}

@@ -91,6 +91,38 @@ export async function deleteBrandMaterial(
   ).then(requireResult);
 }
 
+export interface MaterialImageContent {
+  mediaType: string;
+  /** 新建 Uint8Array（ArrayBuffer 支撑），可直接作为 BlobPart 建 object URL。 */
+  bytes: Uint8Array<ArrayBuffer>;
+}
+
+/**
+ * 材料图片内容取回（ADR-0008 批准预览换 blob 的字节源）：经 Session 控制面
+ * 由 Sidecar 转 T2 的 management images/content 端点（Rust 侧 sha256 校验）。
+ * 字节以 base64 过控制面（单图 ≤10MB）。
+ */
+export async function fetchMaterialImageContent(
+  apiPost: TabApiPost,
+  identity: { workspaceId: string; sessionId: string },
+  imageId: string,
+): Promise<MaterialImageContent> {
+  const response = await apiPost<{
+    success: boolean;
+    image?: { imageId: string; mediaType: string; bytesB64: string };
+    error?: string;
+  }>('/api/xiaojing/material-images/content', { ...identity, imageId });
+  if (!response.success || !response.image || response.image.imageId !== imageId) {
+    throw new Error(response.error ?? 'material_image_content_failed');
+  }
+  const binary = atob(response.image.bytesB64);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+  return { mediaType: response.image.mediaType, bytes };
+}
+
 /**
  * 状态轮询/会话恢复。`materialIds` 提供时只查指定材料（处理中行的周期
  * 轮询）；缺省返回本 Session 最近材料（挂载时重建确认卡与在途行）。

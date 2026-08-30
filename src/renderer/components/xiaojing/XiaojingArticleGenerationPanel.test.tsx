@@ -13,6 +13,9 @@ const mocks = vi.hoisted(() => ({
   latest: vi.fn(),
   exact: vi.fn(),
   body: vi.fn(),
+  fetchImage: vi.fn(),
+  createObjectURL: vi.fn(),
+  revokeObjectURL: vi.fn(),
 }));
 
 vi.mock("@/context/TabContext", () => ({
@@ -24,6 +27,10 @@ vi.mock("@/api/articleGenerationClient", () => ({
   loadLatestArticleOperation: mocks.latest,
   loadArticleOperation: mocks.exact,
   loadArticleBody: mocks.body,
+}));
+
+vi.mock("@/api/brandMaterialClient", () => ({
+  fetchMaterialImageContent: mocks.fetchImage,
 }));
 
 function article(overrides: Partial<ArticleProjection> = {}): ArticleProjection {
@@ -185,6 +192,71 @@ describe("XiaojingArticleGenerationPanel read-only projection", () => {
     expect(
       within(panel).queryByRole("button", { name: "保存为新版本" }),
     ).not.toBeInTheDocument();
+  });
+
+  // #16 AC4：工作台只读批准稿是渲染态——markdown 渲染 + material-image
+  // 占位符经材料内容取回（mock）换本地 blob 显示为图片。
+  it("renders the approved draft as markdown with placeholders resolved to blob images", async () => {
+    if (!("createObjectURL" in URL)) {
+      Object.defineProperty(URL, "createObjectURL", {
+        configurable: true,
+        writable: true,
+        value: mocks.createObjectURL,
+      });
+      Object.defineProperty(URL, "revokeObjectURL", {
+        configurable: true,
+        writable: true,
+        value: mocks.revokeObjectURL,
+      });
+    }
+    mocks.createObjectURL.mockReset().mockImplementation(() => `blob:wb-${Math.random()}`);
+    mocks.revokeObjectURL.mockReset();
+    mocks.fetchImage
+      .mockReset()
+      .mockResolvedValue({
+        mediaType: "image/png",
+        bytes: new Uint8Array([0x89, 0x50, 0x4e, 0x47]),
+      });
+    mocks.latest.mockResolvedValue(
+      operation({
+        articles: [
+          article({ status: "approved", approvedRevision: 1 }),
+        ],
+      }),
+    );
+    mocks.body.mockResolvedValue({
+      articleId: "article-11",
+      revision: 1,
+      title: "企业知识库怎么选",
+      body: [
+        "# 企业知识库怎么选",
+        "",
+        "![产品界面](material-image://image-9)",
+        "",
+        "批准稿正文。",
+      ].join("\n"),
+      approved: true,
+    });
+    render(<XiaojingArticleGenerationPanel workspaceId="brand-11" />);
+    const panel = await screen.findByRole("region", { name: "文章生成与审核" });
+
+    fireEvent.click(
+      await within(panel).findByRole("button", { name: "查看批准稿" }),
+    );
+
+    const image = await within(panel).findByRole("img", { name: "产品界面" });
+    expect(image).toHaveAttribute("src", expect.stringMatching(/^blob:wb-/));
+    expect(image).toHaveAttribute("data-material-image", "image-9");
+    expect(
+      await within(panel).findByRole("heading", { name: "企业知识库怎么选" }),
+    ).toBeInTheDocument();
+    expect(mocks.fetchImage).toHaveBeenCalledWith(
+      mocks.apiPost,
+      { workspaceId: "brand-11", sessionId: "session-11" },
+      "image-9",
+    );
+    expect(panel.textContent).not.toContain("material-image:");
+    expect(within(panel).queryByRole("textbox")).not.toBeInTheDocument();
   });
 
   it("reloads the projection when the session tool signal advances", async () => {

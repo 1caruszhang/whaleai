@@ -201,7 +201,10 @@ class FakeMaterialPort implements BrandMaterialPort {
   async imageAssetContent(imageId: string) {
     const asset = this.imageAssets.get(imageId);
     if (!asset) throw new Error('material_not_found');
-    return new TextEncoder().encode(JSON.stringify(asset.input));
+    return {
+      bytes: new TextEncoder().encode(JSON.stringify(asset.input)),
+      mediaType: asset.input.mediaType,
+    };
   }
   readonly listed: BrandMaterial[] = [];
   async list(input: { materialIds?: string[]; limit?: number }) {

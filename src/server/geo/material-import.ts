@@ -231,8 +231,8 @@ export interface BrandMaterialPort {
   saveImageAsset(input: SaveMaterialImageInput): Promise<{ id: string; deduplicated: boolean }>;
   /** 候选清单（供生成注入与预览取回消费方）。 */
   listImageAssets(input?: { limit?: number }): Promise<MaterialImageAsset[]>;
-  /** 候选图片内容取回（预览换 blob 的字节源）。 */
-  imageAssetContent(imageId: string): Promise<Uint8Array>;
+  /** 候选图片内容取回（预览换 blob 的字节源；mediaType 供 renderer 建 Blob）。 */
+  imageAssetContent(imageId: string): Promise<{ bytes: Uint8Array; mediaType: string }>;
 }
 
 interface ExtractedProfileFact {
@@ -387,12 +387,13 @@ export class RustBrandMaterialPort implements BrandMaterialPort {
     return result.images as MaterialImageAsset[];
   }
 
-  async imageAssetContent(imageId: string): Promise<Uint8Array> {
-    return (await managementApiBytes(
+  async imageAssetContent(imageId: string): Promise<{ bytes: Uint8Array; mediaType: string }> {
+    const { bytes, contentType } = await managementApiBytes(
       '/api/brand-materials/images/content',
       this.envelope({ imageId }),
       { maxBytes: 20 * 1024 * 1024, timeoutMs: 30_000 },
-    )).bytes;
+    );
+    return { bytes, mediaType: contentType };
   }
 }
 
@@ -1480,7 +1481,7 @@ function failureDiagnostic(error: unknown): Record<string, unknown> {
 }
 
 export function materialLogProjection(input: {
-  operation: 'import-file' | 'import-text' | 'fetch-website' | 'parse' | 'extract' | 'propose-candidates' | 'retry' | 'delete';
+  operation: 'import-file' | 'import-text' | 'fetch-website' | 'parse' | 'extract' | 'propose-candidates' | 'retry' | 'delete' | 'image-content';
   workspaceId: string;
   sessionId: string;
   materialId?: string;

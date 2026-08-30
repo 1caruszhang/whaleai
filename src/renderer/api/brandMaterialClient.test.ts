@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import {
+  fetchMaterialImageContent,
   importBrandMaterialFiles,
   importBrandMaterialText,
   importBrandMaterialWebsite,
@@ -27,5 +28,45 @@ describe('Brand material structured client', () => {
       ['/api/xiaojing/materials/import', { ...identity, input: { kind: 'website-url', url: 'https://brand.example/about' } }],
       ['/api/xiaojing/materials/retry', { ...identity, materialId: 'material-07' }],
     ]);
+  });
+
+  it('fetches material image bytes for the approval preview over the session control plane', async () => {
+    const bytes = new Uint8Array([1, 2, 250, 0]);
+    const apiPostMock = vi.fn(async () => ({
+      success: true,
+      image: {
+        imageId: 'image-07',
+        mediaType: 'image/png',
+        bytesB64: Buffer.from(bytes).toString('base64'),
+      },
+    }));
+    const identity = { workspaceId: 'brand-07', sessionId: 'session-07' };
+
+    const content = await fetchMaterialImageContent(
+      apiPostMock as unknown as TabApiPost,
+      identity,
+      'image-07',
+    );
+
+    expect(apiPostMock).toHaveBeenCalledWith(
+      '/api/xiaojing/material-images/content',
+      { ...identity, imageId: 'image-07' },
+    );
+    expect(content.mediaType).toBe('image/png');
+    expect(Array.from(content.bytes)).toEqual([1, 2, 250, 0]);
+  });
+
+  it('surfaces the stable error code when image content retrieval fails', async () => {
+    const apiPostMock = vi.fn(async () => ({
+      success: false,
+      error: 'material_not_found',
+    }));
+    await expect(
+      fetchMaterialImageContent(
+        apiPostMock as unknown as TabApiPost,
+        { workspaceId: 'brand-07', sessionId: 'session-07' },
+        'image-gone',
+      ),
+    ).rejects.toThrow('material_not_found');
   });
 });
