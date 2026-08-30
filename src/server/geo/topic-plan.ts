@@ -208,7 +208,12 @@ function deriveProfile(context: TopicPlanContext) {
     // shortNames 优先，workspace 名仅无身份事实时兜底。
     brandName: resolveBrandName(projected, context.brandName),
     shortNames: valuesFor(".shortNames"),
-    competitors: valuesFor(".competitors"),
+    // 标题红线名单含两层竞品（ADR-0007）：排行 roster 潜在层会补位进正文，
+    // 标题里同样禁止出现它们的真实品牌名。
+    competitors: [
+      ...valuesFor(".competitors"),
+      ...valuesFor(".potentialcompetitors"),
+    ],
     industry,
     // 业务词锚集来源（用户裁决 2026-08-19 修正）：品牌已确认产品与衍生关键词。
     businessTerms: [

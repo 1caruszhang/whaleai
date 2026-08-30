@@ -7,7 +7,7 @@ import {
 } from "./topicPlan";
 
 export const ARTICLE_GENERATION_POLICY_VERSION =
-  "xiaojing-content-prompt-v4";
+  "xiaojing-content-prompt-v5";
 export const ARTICLE_GENERATION_CONCURRENCY =
   GEO_PORT_CONTRACT.concurrency.perArticleLifecycle.limit;
 export const ARTICLE_GENERATION_MAX_ARTICLES = 20;
@@ -374,9 +374,38 @@ export function filterValidRankingCompetitors(
 }
 
 /**
+ * 两层竞品合并（ADR-0007，与 Rust `valid_ranking_competitors` 同构、由
+ * rankingCompetitorContractCases.json 共同约束）：直接层在前，潜在层
+ * 补位；跨层按归一名嵌套互斥（张仔纪/张纪仔类变体不留双份），身份/关联
+ * 主体排除两层共用。
+ */
+export function mergeRankingCompetitorTiers(
+  directNames: readonly string[],
+  potentialNames: readonly string[],
+  identity: RankingCompetitorIdentity,
+): string[] {
+  const direct = filterValidRankingCompetitors(directNames, identity);
+  const directNormalized = direct.map(normalizeEntityName);
+  return [
+    ...direct,
+    ...filterValidRankingCompetitors(potentialNames, identity).filter(
+      (name) => {
+        const normalized = normalizeEntityName(name);
+        return !directNormalized.some((kept) =>
+          sameOrNestedEntityName(normalized, kept),
+        );
+      },
+    ),
+  ];
+}
+
+/**
  * ranking 的唯一名单投影：目标品牌来自身份事实（无身份事实才回退 workspace
- * 名），竞品只来自 immutable plannedFacts 中已确认的 competitors。选五家
- * 时保持权威数组顺序；正文可自由调整这五家在陈列位 2–6 的顺序。
+ * 名），竞品来自 immutable plannedFacts 中已确认的 competitors（直接层），
+ * 不足 5 家时用 potentialCompetitors（潜在层，相近场景/替代品类）按序补足
+ * ——两层都只含真实检索来源的名称（ADR-0007 两层名单，用户裁决 2026-08-30）。
+ * 选五家时保持「直接层在前、补位在后」的顺序；正文可自由调整这五家在
+ * 陈列位 2–6 的顺序。
  */
 export function resolveRankingRoster(
   facts: readonly TopicPlanKnowledgeFact[],
@@ -384,8 +413,9 @@ export function resolveRankingRoster(
 ): RankingRoster {
   const profile = projectBrandProfile(facts);
   const targetBrand = resolveBrandName(profile, workspaceBrandName).trim();
-  const competitors = filterValidRankingCompetitors(
+  const competitors = mergeRankingCompetitorTiers(
     profile.competitors ?? [],
+    profile.potentialCompetitors ?? [],
     {
       workspaceBrandName,
       fullNames: profile.fullName ?? [],

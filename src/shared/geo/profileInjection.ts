@@ -23,6 +23,7 @@ const PROFILE_FIELD_LABELS: Record<EnterpriseProfileField, string> = {
   products: "产品与服务",
   relatedBrands: "相关品牌",
   competitors: "竞品名单",
+  potentialCompetitors: "潜在竞品",
   targetCustomers: "目标客户",
   coreAdvantages: "核心优势",
   trustEndorsements: "信任背书",
@@ -214,7 +215,7 @@ function stringValues(value: unknown): string[] {
     .filter(Boolean);
 }
 
-/** 按谓词后缀（`brand.<field>`）把品牌事实投影成 15 字段画像。 */
+/** 按谓词后缀（`brand.<field>`）把品牌事实投影成 16 字段画像。 */
 export function projectBrandProfile(
   facts: readonly BrandProfileFact[],
 ): BrandProfile {

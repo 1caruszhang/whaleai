@@ -8,6 +8,7 @@ export const ENTERPRISE_PROFILE_FIELDS = [
   'products',
   'relatedBrands',
   'competitors',
+  'potentialCompetitors',
   'targetCustomers',
   'coreAdvantages',
   'trustEndorsements',

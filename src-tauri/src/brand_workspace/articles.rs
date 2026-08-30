@@ -6,7 +6,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs::OpenOptions;
 use std::io::Write;
 
-const POLICY_VERSION: &str = "xiaojing-content-prompt-v4";
+const POLICY_VERSION: &str = "xiaojing-content-prompt-v5";
 const MAX_ARTICLES: usize = 20;
 const MAX_BODY_BYTES: usize = 256 * 1024;
 
@@ -1435,11 +1435,20 @@ fn normalize_ranking_entity_name(value: &str) -> String {
 }
 
 fn ranking_roster_predicate(fact: &Value) -> bool {
-    [".fullname", ".shortnames", ".relatedbrands", ".competitors"]
-        .iter()
-        .any(|suffix| fact_predicate_matches(fact, suffix))
+    [
+        ".fullname",
+        ".shortnames",
+        ".relatedbrands",
+        ".competitors",
+        ".potentialcompetitors",
+    ]
+    .iter()
+    .any(|suffix| fact_predicate_matches(fact, suffix))
 }
 
+/// 与 Node 侧 `mergeRankingCompetitorTiers` 同构（ADR-0007 两层名单）：
+/// 直接层（.competitors）优先，潜在层（.potentialcompetitors）补位——
+/// 跨层按归一名互斥去重，排除身份/关联主体规则两层共用。
 fn valid_ranking_competitors(facts: &Value, workspace_name: &str) -> HashSet<String> {
     let excluded_names = std::iter::once(workspace_name.to_string())
         .chain(fact_string_values(facts, ".fullname"))
@@ -1448,17 +1457,31 @@ fn valid_ranking_competitors(facts: &Value, workspace_name: &str) -> HashSet<Str
         .map(|name| normalize_ranking_entity_name(&name))
         .filter(|name| !name.is_empty())
         .collect::<Vec<_>>();
-    let competitors = fact_string_values(facts, ".competitors")
+    let valid = |name: String| {
+        let normalized = normalize_ranking_entity_name(&name);
+        !normalized.is_empty()
+            && !excluded_names.iter().any(|blocked| {
+                blocked == &normalized
+                    || blocked.contains(normalized.as_str())
+                    || normalized.contains(blocked.as_str())
+            })
+    };
+    let nested_overlap = |left: &str, kept: &[String]| {
+        kept.iter()
+            .any(|kept| kept == left || kept.contains(left) || left.contains(kept.as_str()))
+    };
+    let direct = fact_string_values(facts, ".competitors")
         .into_iter()
+        .filter(|name| valid(name.clone()))
         .map(|name| normalize_ranking_entity_name(&name))
-        .filter(|name| {
-            !name.is_empty()
-                && !excluded_names.iter().any(|blocked| {
-                    blocked == name || blocked.contains(name.as_str()) || name.contains(blocked)
-                })
-        })
-        .collect::<HashSet<_>>();
-    competitors
+        .collect::<Vec<_>>();
+    let potential = fact_string_values(facts, ".potentialcompetitors")
+        .into_iter()
+        .filter(|name| valid(name.clone()))
+        .map(|name| normalize_ranking_entity_name(&name))
+        .filter(|name| !nested_overlap(name, &direct))
+        .collect::<Vec<_>>();
+    direct.into_iter().chain(potential).collect::<HashSet<_>>()
 }
 
 fn validate_ranking_competitors(facts: &Value, workspace_name: &str) -> Result<(), String> {
@@ -2050,24 +2073,34 @@ mod tests {
                     .cloned()
                     .unwrap_or_default()
             };
-            let facts = json!([
-                {
-                    "predicate": "enterprise-profile.fullName",
-                    "normalizedValueJson": serde_json::to_string(&values("fullNames")).unwrap()
-                },
-                {
-                    "predicate": "enterprise-profile.shortNames",
-                    "normalizedValueJson": serde_json::to_string(&values("shortNames")).unwrap()
-                },
-                {
-                    "predicate": "enterprise-profile.relatedBrands",
-                    "normalizedValueJson": serde_json::to_string(&values("relatedBrands")).unwrap()
-                },
-                {
-                    "predicate": "enterprise-profile.competitors",
-                    "normalizedValueJson": serde_json::to_string(&values("competitors")).unwrap()
+            let facts = {
+                let mut fact_list = vec![
+                    json!({
+                        "predicate": "enterprise-profile.fullName",
+                        "normalizedValueJson": serde_json::to_string(&values("fullNames")).unwrap()
+                    }),
+                    json!({
+                        "predicate": "enterprise-profile.shortNames",
+                        "normalizedValueJson": serde_json::to_string(&values("shortNames")).unwrap()
+                    }),
+                    json!({
+                        "predicate": "enterprise-profile.relatedBrands",
+                        "normalizedValueJson": serde_json::to_string(&values("relatedBrands")).unwrap()
+                    }),
+                    json!({
+                        "predicate": "enterprise-profile.competitors",
+                        "normalizedValueJson": serde_json::to_string(&values("competitors")).unwrap()
+                    }),
+                ];
+                let potential = values("potentialCompetitors");
+                if !potential.is_empty() {
+                    fact_list.push(json!({
+                        "predicate": "enterprise-profile.potentialCompetitors",
+                        "normalizedValueJson": serde_json::to_string(&potential).unwrap()
+                    }));
                 }
-            ]);
+                Value::Array(fact_list)
+            };
             let workspace_name = contract_case
                 .get("workspaceBrandName")
                 .and_then(Value::as_str)

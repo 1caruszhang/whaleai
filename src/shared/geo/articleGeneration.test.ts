@@ -11,6 +11,7 @@ import {
   dealNarrativeSeeds,
   deterministicArticleReview,
   filterValidRankingCompetitors,
+  mergeRankingCompetitorTiers,
   parseArticleReflection,
   parseGeneratedArticleBody,
   resolveRankingRoster,
@@ -20,8 +21,21 @@ import {
 
 describe("ranking competitor cross-process contract", () => {
   it.each(rankingCompetitorContractCases)("$name", (contractCase) => {
+    // 两层联合（与 Rust valid_ranking_competitors 同构）恒为断言主体：
+    // 直接层在前、潜在层补位，跨层互斥与身份排除两层共用；expected 是
+    // 联合结果。纯直接层用例额外校验单层过滤行为不变。
+    const potential = contractCase.potentialCompetitors ?? [];
+    if (potential.length === 0) {
+      expect(
+        filterValidRankingCompetitors(contractCase.competitors, contractCase),
+      ).toEqual(contractCase.expected);
+    }
     expect(
-      filterValidRankingCompetitors(contractCase.competitors, contractCase),
+      mergeRankingCompetitorTiers(
+        contractCase.competitors,
+        potential,
+        contractCase,
+      ),
     ).toEqual(contractCase.expected);
   });
 });
@@ -192,6 +206,30 @@ describe("direct article generation contract", () => {
     expect(roster).toEqual({
       targetBrand: "工作区品牌",
       competitors: ["竞品甲", "竞品乙", "竞品丙", "竞品丁", "竞品戊"],
+    });
+  });
+
+  it("backfills the ranking roster with potential competitors when direct tier is short", () => {
+    // ADR-0007 两层名单：直接层 4 家不足 5，潜在层按序补位到 5；
+    // 与直接层重复/嵌套的潜在名（竞品甲）不留双份。
+    const roster = resolveRankingRoster(
+      [
+        {
+          factKey: "competitors",
+          predicate: "enterprise-profile.competitors",
+          normalizedValueJson: '["竞品甲","竞品乙","竞品丙","竞品丁"]',
+        },
+        {
+          factKey: "potential",
+          predicate: "enterprise-profile.potentialcompetitors",
+          normalizedValueJson: '["竞品甲","潜在品牌甲","潜在品牌乙","潜在品牌丙"]',
+        },
+      ],
+      "工作区品牌",
+    );
+    expect(roster).toEqual({
+      targetBrand: "工作区品牌",
+      competitors: ["竞品甲", "竞品乙", "竞品丙", "竞品丁", "潜在品牌甲"],
     });
   });
 

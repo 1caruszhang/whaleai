@@ -125,6 +125,11 @@ function isArrayShapedCandidate(candidate: KnowledgeCardCandidate): boolean {
   return Array.isArray(candidateBaseValue(candidate));
 }
 
+/** 两层竞品行（ADR-0007）共享的胶囊排版形态：品牌名可换行陈列。 */
+function isCompetitorTierField(field: string): boolean {
+  return field === 'competitors' || field === 'potentialCompetitors';
+}
+
 function parseEditedInput(text: string, candidate: KnowledgeCardCandidate): unknown {
   if (isArrayShapedCandidate(candidate)) {
     return text.split('、').map((item) => item.trim()).filter((item) => item.length > 0);
@@ -561,6 +566,8 @@ function FieldRow({ row, stateOf, busy, onConfirmRow, onChoose, onStageEdits, on
   const fieldText = isEnterpriseProfileField(row.field)
     ? t(`knowledgeCard.fields.${row.field}`)
     : row.field;
+  // 字段级小注（i18n 可扩展）：潜在竞品行说明补位语义，其余字段默认无。
+  const fieldNote = t(`knowledgeCard.fieldNotes.${row.field}`, { defaultValue: '' });
   const active = row.candidates.filter(
     (candidate) => stateOf(candidate).outcome !== 'settled',
   );
@@ -698,6 +705,15 @@ function FieldRow({ row, stateOf, busy, onConfirmRow, onChoose, onStageEdits, on
         )}
       </div>
 
+      {fieldNote && (
+        <p
+          data-field-note={row.field}
+          className="mt-1 text-xs text-[var(--ink-subtle)]"
+        >
+          {fieldNote}
+        </p>
+      )}
+
       <div className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1.5">
         {row.candidates.map((candidate) => {
           const state = stateOf(candidate);
@@ -712,7 +728,7 @@ function FieldRow({ row, stateOf, busy, onConfirmRow, onChoose, onStageEdits, on
                     key={`${candidate.id}:${index}`}
                     text={text}
                     muted
-                    wrap={row.field === 'competitors'}
+                    wrap={isCompetitorTierField(row.field)}
                   />
                 ))}
                 <span
@@ -789,7 +805,7 @@ function FieldRow({ row, stateOf, busy, onConfirmRow, onChoose, onStageEdits, on
               )}
               {candidateValueTexts(candidate).map((text, index) => (
                 <span key={`${candidate.id}:${index}`} className="inline-flex items-center gap-0.5">
-                  <ValuePill text={text} wrap={row.field === 'competitors'} />
+                  <ValuePill text={text} wrap={isCompetitorTierField(row.field)} />
                   {isArrayShapedCandidate(candidate) && !isFailed && !editing && (
                     <button
                       type="button"

@@ -71,6 +71,7 @@
 | D12 | 词库沉淀时机 | 挖完即存（keyword_library） | 池确认后才写入 `brand_keyword_library`；重挖注入已有词库增量挖新 | ADR-0006 修正三（用户裁决） |
 | D13 | 产量纪律 | 挖词无数量指引、下游硬截断 | 挖词数量指引（4–6/8–12/12–18）+ 问题生成配额策略（高热度与意图多样优先） | ADR-0006 修正三（F2/F6 缺陷修补） |
 | D14 | 正文事实来源 | 生成模型离线，只吃已批准事实 | ranking 类型整篇联网（enable_search）：竞品条目联网取材消除结构性编造；目标品牌段落仍受「只使用已批准事实」提示词纪律约束，网络素材渗入风险由用户明示接受；非排行类型保持离线。正文段 policyVersion v3→v4 | ADR-0007 Decision 4（用户裁决） |
+| D15 | ranking 名单构成 | 五家陈列位全部来自已确认 competitors（直接层） | 两层名单（ADR-0007 Decision 6）：直接层（三同全中）优先，不足 5 家时用 potentialCompetitors（潜在层：相近场景/替代品类）按序补足到 5；跨层归一名嵌套互斥，身份/关联主体排除两层共用（TS `mergeRankingCompetitorTiers` 与 Rust `valid_ranking_competitors` 同构，契约用例共享 rankingCompetitorContractCases.json）；标题红线名单同步含两层。正文段 policyVersion v4→v5 | ADR-0007 Decision 6（用户裁决 2026-08-30） |
 
 ## 显式延后（下一批裁决）
 

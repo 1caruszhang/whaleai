@@ -137,12 +137,12 @@ describe('knowledge candidates card contract', () => {
   });
 
   it('keeps natural per-field distribution and only guarantees one slot per field over the bound', () => {
-    // 490 条 products + 其余 14 个已知字段各 1 条（共 504，超总量 4 条）：
-    // 不设单字段上限——products 按自然分布拿到 486 条，其余每类保住 1 个格子，
+    // 490 条 products + 其余 15 个已知字段各 1 条（共 505，超总量 5 条）：
+    // 不设单字段上限——products 按自然分布拿到 485 条，其余每类保住 1 个格子，
     // 溢出只落在 products 上。
     const otherFields = [
       'fullName', 'shortNames', 'addresses', 'serviceArea', 'industry',
-      'relatedBrands', 'competitors', 'targetCustomers', 'coreAdvantages',
+      'relatedBrands', 'competitors', 'potentialCompetitors', 'targetCustomers', 'coreAdvantages',
       'trustEndorsements', 'customerPainPoints', 'customerCases', 'contactInfo', 'derivedKeywords',
     ];
     const candidates = [
@@ -154,10 +154,10 @@ describe('knowledge candidates card contract', () => {
     const card = buildKnowledgeCandidatesCardData({ id: 'material-1', displayName: '大材料' }, candidates);
     const selectedFields = card!.candidates.map(
       (candidate) => knowledgeFieldKeyOfPredicate(candidate.key.predicate));
-    expect(new Set(selectedFields).size).toBe(15);
-    expect(selectedFields.filter((field) => field === 'products').length).toBe(486);
-    expect(card?.overflowCount).toBe(4);
-    expect(card?.overflowByField).toEqual({ products: 4 });
+    expect(new Set(selectedFields).size).toBe(16);
+    expect(selectedFields.filter((field) => field === 'products').length).toBe(485);
+    expect(card?.overflowCount).toBe(5);
+    expect(card?.overflowByField).toEqual({ products: 5 });
   });
 
   it('trims the excerpt to a review-sized quote and omits the duplicated raw value', () => {

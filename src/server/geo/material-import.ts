@@ -53,6 +53,10 @@ const DEFAULT_EXTRACTION_TIMEOUT_MS = 10 * 60_000;
  */
 const COMPETITOR_ENRICHMENT_TARGET = 10;
 
+/** 潜在竞品层上限（ADR-0007 两层名单）：只做排行 roster 补位与知识备查，
+ * 5 家封顶足够，不占直接层的确认空间。 */
+const COMPETITOR_POTENTIAL_TARGET = 5;
+
 const TEXT_EXTENSIONS = new Set([
   'txt', 'md', 'markdown', 'csv', 'json', 'html', 'htm', 'xml', 'log',
 ]);
@@ -67,6 +71,7 @@ const ARRAY_PROFILE_FIELDS = new Set<EnterpriseProfileField>([
   'products',
   'relatedBrands',
   'competitors',
+  'potentialCompetitors',
   'targetCustomers',
   'coreAdvantages',
   'trustEndorsements',
@@ -395,6 +400,10 @@ function extractionPrompt(context: BrandMaterialContext, material: BrandMaterial
     '  【其他禁止】供应商/设备品牌（使用 X 品牌仪器/器材）、客户/甲方、合作方、'
     + '平台渠道（美团/抖音/新氧/小红书等）、上下游公司、权威标杆与对标学习对象、'
     + '不同层级大牌；品牌自身及其别名绝对不得进入 competitors。',
+    '- potentialCompetitors（数组）：抢同一批客户、但三同（同品类/同模式/同区域）'
+    + '缺一角的潜在竞品：同品类不同区域的连锁、同区域不同品类的替代业态、'
+    + '品类标杆单店（无加盟输出）等。同样只收材料明确点名的名字，禁止编造；'
+    + '判不准归 potentialCompetitors 而不是 competitors（宁低勿高）。',
     '- derivedKeywords（数组）：客户可能搜索的 GEO/SEO 关键词，生成 5-15 个，一律 inferred。',
     '',
     '## provenance、scope 与输出',
@@ -471,7 +480,7 @@ function competitorEnrichmentPrompt(input: {
 /**
  * 快照内竞品识别提示词（ADR-0007 主路径）：输入是 searchSources 的真实
  * 检索快照（纯引擎召回、不经 LLM 改写），模型只做「从语料认名字」——
- * 与材料腿「从材料文本抽 15 字段」哲学对称。名字必须逐字取自快照，
+ * 与材料腿「从材料文本抽 16 字段」哲学对称。名字必须逐字取自快照，
  * 存在闸（本地字符串比对）随后兜住漏网幻觉。
  */
 function competitorExtractionPrompt(input: {
@@ -504,6 +513,13 @@ function competitorExtractionPrompt(input: {
     '4. 竞争关系：客户会拿来与目标品牌二选一比价——供应商、客户/甲方、合作方、'
     + '平台渠道（美团/抖音/新氧/小红书等）都不是竞品。',
     '',
+    '## 两层名单（ADR-0007）',
+    '- direct（直接竞品）：四条件全部满足——同品类、同模式（加盟/档口/连锁形态一致）、'
+    + '同区域，与目标品牌强竞争。',
+    '- potential（潜在竞品）：抢同一批客户、但四条件缺一角——同品类不同区域的连锁、'
+    + '同区域不同品类的替代业态、品类标杆单店（自身不做加盟输出）等。',
+    '判不准归 potential（宁低勿高）；两层都不得输出与已知竞品/排除名单重复的名字。',
+    '',
     '## 榜单语料警示',
     '快照常混有「国家/地区 + 品牌 + 英文名」的国际品牌榜单行文（如「以色列摩雷Morel」'
     + '「美国来福Rockford Fosgate」）——这类国际/全国级设备或商品品牌与本地服务商不在同一层级，一律不取；'
@@ -512,11 +528,12 @@ function competitorExtractionPrompt(input: {
     `已知竞品（不得重复输出）：${input.knownCompetitors.length > 0 ? input.knownCompetitors.join('、') : '无'}`,
     `排除名称（品牌自身、别名、合作商、上下游、关联品牌，绝不能作为竞品输出）：${input.excludedNames.join('、')}`,
     '',
-    `只允许从下方快照文本中识别最多 ${input.deficit} 个真实存在的直接竞争品牌（四个条件同时满足），`
-    + '禁止输出快照里没有出现的名字；每家输出 name（逐字取自快照原文的企业/品牌名）和 region'
-    + '（快照显示的经营地域）；数量不足时按实际数量输出，快照里没有同层级本地同行就输出空数组'
-    + '——宁缺毋滥，凑不够不硬凑。',
-    '输出：{"competitors":[{"name":"公司名","region":"所在地域"}]}',
+    `只允许从下方快照文本中识别：direct 最多 ${input.deficit} 个直接竞争品牌（四条件同时满足）、`
+    + `potential 最多 ${COMPETITOR_POTENTIAL_TARGET} 个潜在竞品，禁止输出快照里没有出现的名字；每家输出 name`
+    + '（逐字取自快照原文的企业/品牌名）和 region（快照显示的经营地域）；数量不足时按实际'
+    + '数量输出，快照里没有同层级本地同行就输出空数组——宁缺毋滥，凑不够不硬凑。',
+    '输出：{"direct":[{"name":"公司名","region":"所在地域"}],'
+    + '"potential":[{"name":"公司名","region":"所在地域"}]}',
     '',
     '## 检索快照',
     input.corpus,
@@ -620,9 +637,12 @@ function regionInServiceScope(region: string, allowed: readonly string[]): boole
 }
 
 /**
- * 快照内候选解析（主路径）：name 逐字取自快照 + region 必填；名字闸同
- * 兜底路径。存在性不在此判——本地比对快照语料是后续 enrichCompetitors
+ * 快照内候选解析（主路径，ADR-0007 两层名单）：name 逐字取自快照 + region
+ * 必填；名字闸同兜底路径。潜在层与直接层做跨层互斥（归一名相等或互为子串
+ * 的不留双份）。存在性不在此判——本地比对快照语料是后续 enrichCompetitors
  * 的确定性闸门，构造保证 + 兜底校验双层。
+ * 形状校验与兜底路径同契约：direct 数组缺失（含旧版 competitors 形态）抛
+ * model_response_invalid 触发同信号内重抽一次；potential 缺失容忍为空层。
  */
 function parseCompetitorNames(
   raw: string,
@@ -631,27 +651,42 @@ function parseCompetitorNames(
     excludedNames: ReadonlySet<string>;
     deficit: number;
   },
-): Array<{ name: string; region: string }> {
+): { direct: Array<{ name: string; region: string }>; potential: Array<{ name: string; region: string }> } {
   const parsed = extractJsonObject(raw);
-  if (!Array.isArray(parsed.competitors)) throw new Error('model_response_invalid');
-  const seen = new Set<string>();
-  const suggestions: Array<{ name: string; region: string }> = [];
-  for (const item of parsed.competitors) {
-    if (suggestions.length >= limits.deficit) break;
-    if (!item || typeof item !== 'object' || Array.isArray(item)) continue;
-    const holder = item as Record<string, unknown>;
-    const name = typeof holder.name === "string" ? holder.name.trim().slice(0, 60) : "";
-    const region = typeof holder.region === 'string' && holder.region.trim()
-      ? holder.region.trim().slice(0, 40)
-      : '';
-    if (!name || !region) continue;
-    const normalized = normalizeCompetitorKey(name);
-    if (!passesCompetitorNameGates(name, limits)) continue;
-    if (seen.has(normalized)) continue;
-    seen.add(normalized);
-    suggestions.push({ name, region });
-  }
-  return suggestions;
+  if (!Array.isArray(parsed.direct)) throw new Error('model_response_invalid');
+  const parseTier = (
+    rows: unknown,
+    cap: number,
+    blockedBy: ReadonlySet<string> = new Set(),
+  ): Array<{ name: string; region: string }> => {
+    const seen = new Set<string>();
+    const suggestions: Array<{ name: string; region: string }> = [];
+    if (!Array.isArray(rows)) return suggestions;
+    for (const item of rows) {
+      if (suggestions.length >= cap) break;
+      if (!item || typeof item !== 'object' || Array.isArray(item)) continue;
+      const holder = item as Record<string, unknown>;
+      const name = typeof holder.name === "string" ? holder.name.trim().slice(0, 60) : "";
+      const region = typeof holder.region === 'string' && holder.region.trim()
+        ? holder.region.trim().slice(0, 40)
+        : '';
+      if (!name || !region) continue;
+      const normalized = normalizeCompetitorKey(name);
+      if (!passesCompetitorNameGates(name, limits)) continue;
+      if (seen.has(normalized)) continue;
+      // 跨层互斥：与另一层已有名字归一相等或互为子串的直接丢弃。
+      if ([...blockedBy].some(
+        (blocked) => blocked === normalized || blocked.includes(normalized) || normalized.includes(blocked),
+      )) continue;
+      seen.add(normalized);
+      suggestions.push({ name, region });
+    }
+    return suggestions;
+  };
+  const direct = parseTier(parsed.direct, limits.deficit);
+  const directKeys = new Set(direct.map((row) => normalizeCompetitorKey(row.name)));
+  const potential = parseTier(parsed.potential, COMPETITOR_POTENTIAL_TARGET, directKeys);
+  return { direct, potential };
 }
 
 /**
@@ -892,7 +927,12 @@ function dropSelfReferences(
     );
   };
   return facts.flatMap((fact) => {
-    if (fact.field !== 'relatedBrands' && fact.field !== 'competitors') return [fact];
+    // 两层竞品（ADR-0007）同受自名/形近剔除——品牌自身进哪层都不是竞品。
+    if (
+      fact.field !== 'relatedBrands'
+      && fact.field !== 'competitors'
+      && fact.field !== 'potentialCompetitors'
+    ) return [fact];
     const values = Array.isArray(fact.value) ? fact.value : [fact.value];
     const kept = values.filter((value) => !isSelf(value));
     // 全部被剔除时整条丢弃，不产出空数组候选。
@@ -926,7 +966,8 @@ function dropUnsupportedMaterialCompetitors(
     );
   };
   return facts.flatMap((fact) => {
-    if (fact.field !== "competitors") return [fact];
+    // 两层竞品同过竞争信号/关系/交叉排除门（ADR-0007：本地闸对两层恒开）。
+    if (fact.field !== "competitors" && fact.field !== "potentialCompetitors") return [fact];
     const excerpt = fact.sourceExcerpt?.trim() ?? "";
     const values = Array.isArray(fact.value) ? fact.value : [fact.value];
     const kept = values.filter(
@@ -1173,17 +1214,19 @@ export class MaterialImportService {
    * js_ai material-to-facts 契约的 "enrich real competitors"（ADR-0007 重写）：
    * 品牌整体竞品（本次抽取 + 已确认权威值）不足 10 家备选时联网补足。主路径
    * 为「取名于真实检索」——searchSources 纯引擎快照 ×2 → 一次普通抽取从快照
-   * 认名字 → 本地双闸（存在闸：名字逐字见于快照，恒开；地域闸：城市/区县
-   * 锚字符串比对，省级锚交模型自证）；enable_search 合并式调用降级为兜底
-   * （无快照，存在闸降级）。无地域锚（serviceArea 缺失/全国类）整轮跳过，
-   * 不联网。富化名一律 inferred（低置信），最终由确认卡裁决；与材料已抽出
-   * 的竞品合并为同一条候选，避免同键多条候选顺序采纳时互相覆盖。
+   * 认名字（两层名单：direct 直接竞品 + potential 潜在竞品，用户裁决
+   * 2026-08-30）→ 本地双闸（存在闸：名字逐字见于快照，恒开；地域闸：城市/
+   * 区县锚字符串比对，省级锚交模型自证）；enable_search 合并式调用降级为
+   * 兜底（无快照，存在闸降级，仅直接层）。无地域锚（serviceArea 缺失/全国类）
+   * 整轮跳过，不联网。富化名一律 inferred（低置信），最终由确认卡裁决；与
+   * 材料已抽出的同字段竞品合并为同一条候选，避免同键多条候选顺序采纳时
+   * 互相覆盖。
    */
   private async enrichCompetitors(
     context: BrandMaterialContext,
     facts: ExtractedProfileFact[],
     signal?: AbortSignal,
-  ): Promise<ExtractedProfileFact | null> {
+  ): Promise<ExtractedProfileFact[]> {
     // 富化各出口的固定码投影（脱敏契约同上方 degraded 行）：只有状态码与
     // 数量，不落品牌名/检索内容，保证一次真实导入可事后诊断。
     const logOutcome = (projection: Record<string, unknown>): void => {
@@ -1194,7 +1237,7 @@ export class MaterialImportService {
     };
     if (!this.keywordSearch) {
       logOutcome({ status: 'skipped', errorCode: 'keyword_search_unavailable' });
-      return null;
+      return [];
     }
     const normalize = normalizeCompetitorKey;
     const brandCompetitors = new Set<string>();
@@ -1259,7 +1302,7 @@ export class MaterialImportService {
     const deficit = COMPETITOR_ENRICHMENT_TARGET - brandCompetitors.size;
     if (deficit <= 0) {
       logOutcome({ status: 'skipped', errorCode: 'deficit_zero' });
-      return null;
+      return [];
     }
     // 画像注入（ADR-0007 接线）：本次材料值优先，缺失时用已确认权威值补齐
     // （products/serviceArea/addresses/fullName/shortNames），供
@@ -1360,8 +1403,8 @@ export class MaterialImportService {
       logOutcome({ status: 'skipped', errorCode: 'service_scope_missing' });
       const hasCompetitorRow = facts.some((fact) => fact.field === 'competitors')
         || brandCompetitors.size > 0;
-      if (hasCompetitorRow) return null;
-      return {
+      if (hasCompetitorRow) return [];
+      return [{
         field: 'competitors',
         value: [],
         provenance: 'inferred',
@@ -1369,7 +1412,7 @@ export class MaterialImportService {
           '材料未提供可定位的服务区域，竞品联网补全已跳过——可补充服务区域后重新导入，或直接让助手补查本地竞品',
         confidence: 0,
         scope: { kind: 'brand' },
-      };
+      }];
     }
     // 地域闸只在城市/区县锚（字符串可直接比对）时硬拦；省级锚（广东省等）
     // 不做省→市代码映射，地域相关性由抽取模型自证（ADR-0007 用户裁决
@@ -1392,9 +1435,10 @@ export class MaterialImportService {
     // 不在待确认候选里重复呈现。材料抽出的名字在 process() 合并处加入。
     // 权威值只存名称（ADR-0007 元数据退役）：region 只出现在证据文本里。
     const buildEnrichmentFact = (
+      field: 'competitors' | 'potentialCompetitors',
       rows: Array<{ name: string; region: string; evidence: string }>,
     ): ExtractedProfileFact => ({
-      field: 'competitors',
+      field,
       value: rows.map((row) => row.name),
       provenance: 'inferred',
       sourceExcerpt: rows
@@ -1428,7 +1472,7 @@ export class MaterialImportService {
         `[${index + 1}] ${(source.summary ? `${source.title} — ${source.summary}` : source.title)
           .replace(/\s+/g, ' ').trim().slice(0, 400)}`,
       );
-      let parsedNames: Array<{ name: string; region: string }> | null = null;
+      let parsedNames: ReturnType<typeof parseCompetitorNames> | null = null;
       for (let attempt = 0; attempt < 2 && parsedNames === null; attempt += 1) {
         let response: string;
         try {
@@ -1456,32 +1500,51 @@ export class MaterialImportService {
       }
       if (parsedNames === null) {
         logOutcome({ status: 'skipped', errorCode: 'model_response_invalid' });
-        return null;
+        return [];
       }
-      const suggestions: Array<{ name: string; region: string; evidence: string }> = [];
-      for (const { name, region } of parsedNames) {
-        if (suggestions.length >= deficit) break;
-        const nameNorm = normalizeEvidenceText(name);
-        if (!nameNorm || !corpusNorm.includes(nameNorm)) continue; // 存在闸
-        // 地域闸（仅城市/区县锚）：省级锚无 allowed 白名单，模型自证。
-        if (scope.granularity === 'city' && !regionInServiceScope(region, scope.allowed)) continue;
-        const matchedIndex = sourceNorms.findIndex((text) => text.includes(nameNorm));
-        if (matchedIndex >= 0) {
-          // 关系闸：快照里名字附近出现供应/合作/前东家等关系词的剔除。
-          if (namedRelation(sourceTexts[matchedIndex], name, NON_COMPETITOR_RELATION)) continue;
+      // 两层名单走同一组本地闸（存在/关系恒开，地域闸仅城市锚）——分层是
+      // 模型的语义判断（用户裁决 2026-08-30），闸门只保「名字真实出自快照」。
+      const gateTier = (
+        rows: Array<{ name: string; region: string }>,
+        cap: number,
+      ): Array<{ name: string; region: string; evidence: string }> => {
+        const survivors: Array<{ name: string; region: string; evidence: string }> = [];
+        for (const { name, region } of rows) {
+          if (survivors.length >= cap) break;
+          const nameNorm = normalizeEvidenceText(name);
+          if (!nameNorm || !corpusNorm.includes(nameNorm)) continue; // 存在闸
+          // 地域闸（仅城市/区县锚）：省级锚无 allowed 白名单，模型自证。
+          if (scope.granularity === 'city' && !regionInServiceScope(region, scope.allowed)) continue;
+          const matchedIndex = sourceNorms.findIndex((text) => text.includes(nameNorm));
+          if (matchedIndex >= 0) {
+            // 关系闸：快照里名字附近出现供应/合作/前东家等关系词的剔除。
+            if (namedRelation(sourceTexts[matchedIndex], name, NON_COMPETITOR_RELATION)) continue;
+          }
+          survivors.push({
+            name,
+            region,
+            evidence: matchedIndex >= 0 ? sourceTexts[matchedIndex].slice(0, 200) : '',
+          });
         }
-        suggestions.push({
-          name,
-          region,
-          evidence: matchedIndex >= 0 ? sourceTexts[matchedIndex].slice(0, 200) : '',
-        });
-      }
-      if (suggestions.length === 0) {
+        return survivors;
+      };
+      const directSuggestions = gateTier(parsedNames.direct, deficit);
+      const potentialSuggestions = gateTier(parsedNames.potential, COMPETITOR_POTENTIAL_TARGET);
+      if (directSuggestions.length === 0 && potentialSuggestions.length === 0) {
         logOutcome({ status: 'skipped', errorCode: 'no_qualified_suggestions' });
-        return null;
+        return [];
       }
-      logOutcome({ status: 'ok', count: suggestions.length });
-      return buildEnrichmentFact(suggestions);
+      logOutcome({
+        status: 'ok',
+        count: directSuggestions.length,
+        potentialCount: potentialSuggestions.length,
+      });
+      return [
+        ...directSuggestions.length > 0 ? [buildEnrichmentFact('competitors', directSuggestions)] : [],
+        ...potentialSuggestions.length > 0
+          ? [buildEnrichmentFact('potentialCompetitors', potentialSuggestions)]
+          : [],
+      ];
     }
     // 兜底路径（ADR-0007）：enable_search 合并式调用，检索与判别同一次完成。
     // 存在闸无快照可比（明确降级）；地域闸仅城市/区县锚执行（同主路径）。
@@ -1506,7 +1569,7 @@ export class MaterialImportService {
     }))).filter((response): response is string => typeof response === 'string' && response.trim().length > 0);
     if (responses.length === 0) {
       logOutcome({ status: 'skipped', errorCode: 'search_corpus_empty' });
-      return null;
+      return [];
     }
     const suggestions: Array<{ name: string; region: string; evidence: string }> = [];
     const seen = new Set<string>();
@@ -1542,10 +1605,10 @@ export class MaterialImportService {
           ? 'model_response_invalid'
           : 'no_qualified_suggestions',
       });
-      return null;
+      return [];
     }
     logOutcome({ status: 'ok-fallback', count: suggestions.length });
-    return buildEnrichmentFact(suggestions);
+    return [buildEnrichmentFact('competitors', suggestions)];
   }
 
   /**
@@ -1634,23 +1697,26 @@ export class MaterialImportService {
       const extractionSignal = AbortSignal.timeout(this.extractionTimeoutMs);
       const facts = await this.extractFacts(context, material, text, extractionSignal);
       const enrichedCompetitors = await this.enrichCompetitors(context, facts, extractionSignal);
-      if (enrichedCompetitors) {
+      // 两层名单（competitors/potentialCompetitors）各自并入既有同字段事实：
+      // 数组值按归一键去重合并（材料名在前、富化新增追加），避免同一
+      // fact key 多条候选顺序采纳互相覆盖。
+      for (const enriched of enrichedCompetitors) {
         const mergeIndex = facts.findIndex(
-          (fact) => fact.field === 'competitors' && fact.scope.kind === 'brand',
+          (fact) => fact.field === enriched.field && fact.scope.kind === 'brand',
         );
         if (mergeIndex >= 0) {
           const base = facts[mergeIndex];
           const baseNames = Array.isArray(base.value) ? base.value : [base.value];
           facts[mergeIndex] = {
             ...base,
-            ...enrichedCompetitors,
+            ...enriched,
             value: [...new Map(
-              [...baseNames, ...enrichedCompetitors.value as string[]]
+              [...baseNames, ...enriched.value as string[]]
                 .map((name) => [normalizeCompetitorKey(name), name.trim()]),
             ).values()],
           };
         } else {
-          facts.push(enrichedCompetitors);
+          facts.push(enriched);
         }
       }
       // 竞品是排行榜的必审事实：材料未明写且联网腿无合格结果时也必须在

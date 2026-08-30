@@ -262,6 +262,35 @@ describe('KnowledgeBatchCard（字段行复核卡）', () => {
     });
   });
 
+  it('潜在竞品行独立成行：带补位小注，胶囊可逐项 ✕（ADR-0007 两层名单）', async () => {
+    render(<KnowledgeBatchCard data={cardData([
+      candidateSource({
+        id: 'c-potential',
+        predicate: 'enterprise-profile.potentialCompetitors',
+        valueJson: '["省外连锁品牌","替代业态品牌"]',
+        normalizedValueJson: '["省外连锁品牌","替代业态品牌"]',
+      }),
+    ])} />);
+
+    // 字段小注说明补位语义，两枚胶囊独立陈列且各带 ✕。
+    expect(screen.getByText('潜在竞品')).toBeInTheDocument();
+    expect(screen.getByText(/直接竞品不足 5 家时按序补位/)).toBeInTheDocument();
+    expect(screen.getByText('省外连锁品牌')).toBeInTheDocument();
+    expect(screen.getByText('替代业态品牌')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '移除省外连锁品牌' })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: '移除省外连锁品牌' }));
+    expect(screen.queryByText('省外连锁品牌')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '确认（采纳全部 1 条）' }));
+    await waitFor(() => expect(mocks.apiPost.mock.calls.some(([path]) => path === '/api/xiaojing/knowledge/decide-batch')).toBe(true));
+    const submit = mocks.apiPost.mock.calls.find(([path]) => path === '/api/xiaojing/knowledge/decide-batch');
+    expect(submit?.[1]?.decisions?.[0]).toMatchObject({
+      candidateId: 'c-potential',
+      decision: 'adopt-edited',
+      editedValue: ['替代业态品牌'],
+    });
+  });
+
   it('空值数组候选行直接显示摘录说明（无锚跳过提示不藏在展开区）', () => {
     render(<KnowledgeBatchCard data={cardData([
       candidateSource({

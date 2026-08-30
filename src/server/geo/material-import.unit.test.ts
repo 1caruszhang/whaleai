@@ -467,7 +467,7 @@ describe("competitor enrichment (ADR-0007 source-grounded extraction)", () => {
       summary: '本地人选智能客服，云帆信息与星河智能常被拿来对比',
     },
   ];
-  const namesJson = JSON.stringify({ competitors: [
+  const namesJson = JSON.stringify({ direct: [
     { name: '云帆信息', region: '成都新都' },
     { name: '星河智能', region: '成都' },
   ] });
@@ -510,7 +510,7 @@ describe("competitor enrichment (ADR-0007 source-grounded extraction)", () => {
   it('existence gate drops names that do not appear verbatim in any snippet', async () => {
     const port = new FakeMaterialPort();
     const current = service(port, {
-      completeResponses: [withAreaResponse, JSON.stringify({ competitors: [
+      completeResponses: [withAreaResponse, JSON.stringify({ direct: [
         { name: '云帆信息', region: '成都新都' },
         { name: '凭空科技', region: '成都新都' },
       ] })],
@@ -531,7 +531,7 @@ describe("competitor enrichment (ADR-0007 source-grounded extraction)", () => {
       summary: '武汉智能客服十大品牌：武汉楚才科技排名第一',
     }];
     const current = service(port, {
-      completeResponses: [withAreaResponse, JSON.stringify({ competitors: [
+      completeResponses: [withAreaResponse, JSON.stringify({ direct: [
         { name: '云帆信息', region: '成都新都' },
         { name: '武汉楚才科技', region: '武汉' },
       ] })],
@@ -561,7 +561,7 @@ describe("competitor enrichment (ADR-0007 source-grounded extraction)", () => {
     ];
     const port = new FakeMaterialPort();
     const current = service(port, {
-      completeResponses: [provinceResponse, JSON.stringify({ competitors: [
+      completeResponses: [provinceResponse, JSON.stringify({ direct: [
         { name: '云帆信息', region: '深圳' },
         { name: '星河智能', region: '广州' },
       ] })],
@@ -589,7 +589,7 @@ describe("competitor enrichment (ADR-0007 source-grounded extraction)", () => {
     ] });
     const port = new FakeMaterialPort();
     const current = service(port, {
-      completeResponses: [trackResponse, JSON.stringify({ competitors: [
+      completeResponses: [trackResponse, JSON.stringify({ direct: [
         { name: '张仔纪', region: '广州' },
       ] })],
       searchSources: async () => [{
@@ -607,6 +607,61 @@ describe("competitor enrichment (ADR-0007 source-grounded extraction)", () => {
     expect(competitorsCallOf(current)?.[0].value).toEqual(['张仔纪']);
   });
 
+  it('proposes a separate potential-competitor fact alongside the direct roster (ADR-0007 two tiers)', async () => {
+    // 两层名单（省级锚场景）：direct 三同全中；potential 抢同一批客户但
+    // 缺一角（同品类不同区域/替代业态）。两层同过存在/关系闸；跨层重复名
+    // （星河智能）只留直接层一份。省级锚无字符串地域闸——「省外连锁品牌
+    // （重庆）」这类同品类跨区域潜在竞品正是要留给排行补位的形态。
+    const port = new FakeMaterialPort();
+    const current = service(port, {
+      completeResponses: [JSON.stringify({ facts: [
+        { field: 'industry', value: '智能客服', provenance: 'extracted', sourceExcerpt: '行业：智能客服' },
+        { field: 'serviceArea', value: '广东省', provenance: 'extracted', sourceExcerpt: '业务区域范围：广东省' },
+      ] }), JSON.stringify({
+        direct: [
+          { name: '云帆信息', region: '深圳' },
+          { name: '星河智能', region: '广州' },
+        ],
+        potential: [
+          { name: '星河智能', region: '广州' },
+          { name: '省外连锁品牌', region: '重庆' },
+          { name: '替代业态品牌', region: '深圳' },
+        ],
+      })],
+      searchSources: async () => [
+        {
+          title: '广东智能客服公司排行榜',
+          url: 'https://example.com/gd-rank',
+          summary: '云帆信息（深圳）与星河智能（广州）位居前列',
+        },
+        {
+          title: '重庆同类项目排行',
+          url: 'https://example.com/cq',
+          summary: '省外连锁品牌在重庆开出多家同类档口',
+        },
+        {
+          title: '深圳替代业态',
+          url: 'https://example.com/alt',
+          summary: '替代业态品牌以相邻品类经营深圳社区店',
+        },
+      ],
+    });
+    const result = await current.value.importPastedText('公司资料');
+
+    expect(result.ok).toBe(true);
+    // propose 入口 predicate 保留 camelCase（大小写归一在 Authority 内做）。
+    const tierCall = (predicate: string) => current.propose.mock.calls.find(
+      ([input]) => input.key.predicate.toLowerCase() === predicate,
+    );
+    expect(tierCall('enterprise-profile.competitors')?.[0].value)
+      .toEqual(['云帆信息', '星河智能']);
+    // 跨层互斥：星河智能已在直接层，潜在层不再重复。
+    const potential = tierCall('enterprise-profile.potentialcompetitors');
+    expect(potential?.[0].value).toEqual(['省外连锁品牌', '替代业态品牌']);
+    expect(potential?.[0].source.excerpt).toContain('省外连锁品牌（重庆）：');
+    expect(potential?.[0].source.profileProvenance).toBe('inferred');
+  });
+
   it('normalizes autonomous-region long names and mixed declarations to the province anchor', async () => {
     const mixedResponse = JSON.stringify({ facts: [
       { field: 'industry', value: '智能客服', provenance: 'extracted', sourceExcerpt: '行业：智能客服' },
@@ -614,7 +669,7 @@ describe("competitor enrichment (ADR-0007 source-grounded extraction)", () => {
     ] });
     const port = new FakeMaterialPort();
     const current = service(port, {
-      completeResponses: [mixedResponse, JSON.stringify({ competitors: [
+      completeResponses: [mixedResponse, JSON.stringify({ direct: [
         { name: '云帆信息', region: '南宁' },
       ] })],
       searchSources: async () => [{
@@ -639,7 +694,7 @@ describe("competitor enrichment (ADR-0007 source-grounded extraction)", () => {
       summary: '华创精密是鲸跃科技的供应商，为其提供芯片',
     }];
     const current = service(port, {
-      completeResponses: [withAreaResponse, JSON.stringify({ competitors: [
+      completeResponses: [withAreaResponse, JSON.stringify({ direct: [
         { name: '云帆信息', region: '成都新都' },
         { name: '华创精密', region: '成都新都' },
       ] })],
@@ -752,7 +807,7 @@ describe("competitor enrichment (ADR-0007 source-grounded extraction)", () => {
       summary: '鲸悦科技位于成都新都经营智能客服',
     }];
     const current = service(port, {
-      completeResponses: [withAreaResponse, JSON.stringify({ competitors: [
+      completeResponses: [withAreaResponse, JSON.stringify({ direct: [
         { name: '鲸悦科技', region: '成都新都' },
         { name: '云帆信息', region: '成都新都' },
       ] })],
@@ -980,7 +1035,7 @@ describe("competitor enrichment (ADR-0007 source-grounded extraction)", () => {
     try {
       const port = new FakeMaterialPort();
       const current = service(port, {
-        completeResponses: [withAreaResponse, JSON.stringify({ competitors: [
+        completeResponses: [withAreaResponse, JSON.stringify({ direct: [
           { name: '武汉楚才科技', region: '武汉' },
         ] })],
         searchSources: async () => corpus,
@@ -1192,6 +1247,41 @@ describe('profile and document compatibility', () => {
       { field: 'relatedBrands', value: ['鲸跃科技'], provenance: 'inferred' },
     ] }), context);
     expect(dropped).toHaveLength(0);
+  });
+
+  it('material-leg potential tier stays an array fact and passes the same self/relation gates', () => {
+    // ADR-0007 两层名单：potentialCompetitors 是数组字段（cleanValue 不得
+    // 走标量分支丢弃），且与直接层同受自名/形近与 relatedBrands 交叉剔除、
+    // 竞争信号门——本地闸对两层恒开。
+    const facts = parseTestProfileFacts(
+      JSON.stringify({
+        facts: [
+          {
+            field: "fullName",
+            value: "鲸跃科技有限公司",
+            provenance: "extracted",
+            sourceExcerpt: "公司全称",
+          },
+          {
+            field: "relatedBrands",
+            value: ["真伙伴品牌"],
+            provenance: "extracted",
+            sourceExcerpt: "关联品牌",
+          },
+          {
+            field: "potentialCompetitors",
+            value: ["鲸跃科技有限公司", "真伙伴品牌", "潜在品牌甲"],
+            provenance: "extracted",
+            sourceExcerpt: "潜在竞品包括真伙伴品牌、潜在品牌甲；鲸跃科技有限公司为自身",
+          },
+        ],
+      }),
+      context,
+    );
+    const potential = facts.find((fact) => fact.field === "potentialCompetitors");
+    // 数组形态保住（逐项 ✕ 依赖 Array.isArray）；自名与 relatedBrands 交叉剔除。
+    expect(Array.isArray(potential?.value)).toBe(true);
+    expect(potential?.value).toEqual(["潜在品牌甲"]);
   });
 
   // 回归（品牌「炊班长」事故）：材料错别字形近变体「炊事班」不是 brandName

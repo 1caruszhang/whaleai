@@ -121,6 +121,7 @@
       "products": "Products",
       "relatedBrands": "Related brands",
       "competitors": "Competitors",
+      "potentialCompetitors": "Potential competitors",
       "targetCustomers": "Target customers",
       "coreAdvantages": "Core advantages",
       "trustEndorsements": "Trust endorsements",
@@ -128,6 +129,9 @@
       "customerCases": "Customer cases",
       "contactInfo": "Contact info",
       "derivedKeywords": "Derived keywords"
+    },
+    "fieldNotes": {
+      "potentialCompetitors": "Adjacent scenarios or substitute categories; backfill the ranking roster only when direct competitors fall below 5"
     }
   },
   "shell": {

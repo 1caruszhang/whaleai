@@ -121,6 +121,7 @@
       "products": "核心产品",
       "relatedBrands": "相关品牌",
       "competitors": "竞品",
+      "potentialCompetitors": "潜在竞品",
       "targetCustomers": "目标客户",
       "coreAdvantages": "核心优势",
       "trustEndorsements": "信任背书",
@@ -128,6 +129,9 @@
       "customerCases": "客户案例",
       "contactInfo": "联系方式",
       "derivedKeywords": "衍生关键词"
+    },
+    "fieldNotes": {
+      "potentialCompetitors": "相近场景/替代品类；直接竞品不足 5 家时按序补位进排行榜对比"
     }
   },
   "shell": {

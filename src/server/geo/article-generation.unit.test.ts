@@ -73,7 +73,7 @@ function operation(articles: ArticleProjection[]): ArticleOperationProjection {
     topicPlanId: null,
     topicPlanRevision: null,
     knowledgeVersion: 7,
-    policyVersion: "xiaojing-content-prompt-v4",
+    policyVersion: "xiaojing-content-prompt-v5",
     status: "running",
     articles,
     createdAt: "2026-01-01T00:00:00Z",
