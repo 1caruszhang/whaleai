@@ -1868,7 +1868,10 @@ export class MaterialImportService {
       value: rows.map((row) => row.name),
       provenance: 'inferred',
       sourceExcerpt: rows
-        .map((row) => `${row.name}（${row.region}）：${row.evidence}`
+        // 证据瘦身（用户裁决 2026-08-31）：来源链接已可点，200 字内联证据
+        // 冗余且把多品牌摘录撑爆卡片上限——每段只留 60 字上下文提示（一行
+        // 「它出现在什么语境」），核查靠「来源」链接进原文。
+        .map((row) => `${row.name}（${row.region}）：${row.evidence.slice(0, 60)}`
           + (row.evidenceUrl ? `（来源：${row.evidenceUrl}）` : ''))
         .join(' … ')
         .slice(0, KNOWLEDGE_EXCERPT_MAX_LENGTH),

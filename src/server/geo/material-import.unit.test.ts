@@ -971,8 +971,13 @@ describe("competitor enrichment (ADR-0007 source-grounded extraction)", () => {
     const requested = fetch.mock.calls.map(([url]) => String(url));
     expect(requested).toContain('https://wap.example.com/list');
     expect(requested).not.toContain('http://wap.example.com/list');
-    // 来源链接保持引擎原 URL（http）。
-    expect(competitorsCallOf(current)?.[0].source.excerpt).toContain('（来源：http://wap.example.com/list）');
+    // 来源链接保持引擎原 URL（http）；证据段瘦身 60 字（用户裁决）。
+    const excerpt = competitorsCallOf(current)?.[0].source.excerpt ?? '';
+    expect(excerpt).toContain('（来源：http://wap.example.com/list）');
+    for (const segment of excerpt.split(' … ')) {
+      const evidence = segment.match(/：（.*?）（来源：/);
+      expect((evidence?.[1] ?? '').length).toBeLessThanOrEqual(60);
+    }
   });
 
   it('collapses parenthesized-region disguises of the same brand (括号马甲回归 2026-08-31)', async () => {
