@@ -868,6 +868,45 @@ describe("competitor enrichment (ADR-0007 source-grounded extraction)", () => {
     expect(potential?.[0].source.excerpt).toContain('（来源：https://mill.example/jm-list）');
   });
 
+  it('collapses parenthesized-region disguises of the same brand (括号马甲回归 2026-08-31)', async () => {
+    // 第三写实跑回归：直接层同时收了「张仔纪（广州）餐饮管理有限公司」与
+    // 「张仔纪餐饮管理有限公司」——括号中缀（广州）让两个名字互不为子串，
+    // 嵌套互斥失效、同品牌双份上卡。归一键剥离括号段后两马甲同核，只留先
+    // 出现的一份。
+    const provinceResponse = JSON.stringify({ facts: [
+      { field: 'industry', value: '餐饮管理', provenance: 'extracted', sourceExcerpt: '行业：餐饮管理' },
+      { field: 'serviceArea', value: '广东省', provenance: 'extracted', sourceExcerpt: '业务区域范围：广东省' },
+    ] });
+    const parenCorpus = [
+      {
+        title: '干蒸菜加盟甄选',
+        url: 'https://mill.example/a',
+        summary: '1. 张仔纪（广州）餐饮管理有限公司：岭南古法干蒸，门店超 100 家',
+      },
+      {
+        title: '干蒸菜品牌解析',
+        url: 'https://mill.example/b',
+        summary: '张仔纪餐饮管理有限公司以非遗技艺为基础构建运营体系',
+      },
+    ];
+    const port = new FakeMaterialPort();
+    const current = service(port, {
+      completeResponses: [provinceResponse, JSON.stringify({
+        direct: [
+          { name: '张仔纪（广州）餐饮管理有限公司', region: '广州' },
+          { name: '张仔纪餐饮管理有限公司', region: '广州' },
+        ],
+        potential: [],
+      })],
+      searchSources: async () => parenCorpus,
+    });
+    const result = await current.value.importPastedText('公司资料');
+
+    expect(result.ok).toBe(true);
+    // 括号段从归一键剥离：两马甲同核，只留先出现的一份。
+    expect(competitorsCallOf(current)?.[0].value).toEqual(['张仔纪（广州）餐饮管理有限公司']);
+  });
+
   it('injects the customer-profile fields into the snapshot prompt and gates by customer voice', async () => {
     const port = new FakeMaterialPort();
     const current = service(port, {
@@ -1427,6 +1466,7 @@ describe("competitor enrichment (ADR-0007 source-grounded extraction)", () => {
     expect(profilePrompt).toContain('需求问句');
     expect(profilePrompt).toContain('品类盘点');
     expect(profilePrompt).toContain('不得出现加盟、招商、合作、供应商');
+    expect(profilePrompt).toContain('去掉材料里的经营场景限定词');
   });
 });
 
