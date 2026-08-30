@@ -1559,7 +1559,8 @@ describe("competitor enrichment (ADR-0007 source-grounded extraction)", () => {
     expect(snapshotPrompt).toContain('食堂档口项目输出品牌');
     expect(snapshotPrompt).toContain('目标客户：未明示（从产品/案例推断）');
     expect(snapshotPrompt).toContain('榜单语料警示');
-    expect(snapshotPrompt).toContain('宁缺毋滥');
+    expect(snapshotPrompt).toContain('认全展示，用户裁决');
+    expect(snapshotPrompt).toContain('宁可多报待用户逐项删除');
     // 同名自检（用户裁决 2026-08-31：模型先判，代码归一键兜底）。
     expect(snapshotPrompt).toContain('同名自检');
     expect(snapshotPrompt).toContain('只报一次且用品类媒体最通行的叫法');

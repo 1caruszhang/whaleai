@@ -452,7 +452,7 @@ export async function parseBrandMaterial(material: BrandMaterial, bytes: Uint8Ar
 /**
  * 主抽取提示词（js_ai geo-fact-extraction 契约）：逐字段显式定义与边界，
  * 事实类逐字复制、判断类可推断、生成类一律 inferred；competitors 携带完整
- * 竞品纪律（层级原则、纳入信号、前东家最高优先级排除、宁缺毋滥）。
+ * 竞品纪律（层级原则、纳入信号、前东家最高优先级排除、认全展示用户裁决）。
  */
 function extractionPrompt(
   context: BrandMaterialContext,
@@ -608,7 +608,8 @@ function competitorEnrichmentPrompt(input: {
     '规则：只允许输出经检索确认真实存在的公司/品牌名，不得凭记忆输出检索未提及的名字；'
     + '每家必须输出 region（所在地域）、similarBusiness（与目标品牌重合的具体业务）和 sourceExcerpt'
     + '（检索所得中支撑该品牌真实存在与竞争关系的事实摘要，不超过 200 字）；'
-    + '数量不足时按实际数量输出，检索不到同层级本地同行就输出空数组——宁缺毋滥，凑不够不硬凑。',
+    + '【认全展示，用户裁决】把检索所得里所有能识别出的真实品牌全部报出来——宁可多报待用户逐项删除，'
+    + '不要自我审查漏报；仍然绝对禁止：检索未提及的名字、自身与排除名单、前东家/供应商等非竞争关系。',
     '输出：{"competitors":[{"name":"公司名","region":"所在地域","similarBusiness":"具体同类业务","sourceExcerpt":"事实摘要"}]}',
   ].join('\n');
 }
@@ -680,10 +681,14 @@ function competitorExtractionPrompt(input: {
     `已知竞品（不得重复输出）：${input.knownCompetitors.length > 0 ? input.knownCompetitors.join('、') : '无'}`,
     `排除名称（品牌自身、别名、合作商、上下游、关联品牌，绝不能作为竞品输出）：${input.excludedNames.join('、')}`,
     '',
-    `只允许从下方快照文本中识别：direct 最多 ${input.deficit} 个直接竞争品牌（四条件同时满足）、`
+    `只允许从下方快照文本中识别：direct 最多 ${input.deficit} 个直接竞争品牌、`
     + `potential 最多 ${COMPETITOR_POTENTIAL_TARGET} 个潜在竞品，禁止输出快照里没有出现的名字；每家输出 name`
-    + '（逐字取自快照原文的企业/品牌名）和 region（快照显示的经营地域）；数量不足时按实际'
-    + '数量输出，快照里没有同层级本地同行就输出空数组——宁缺毋滥，凑不够不硬凑。',
+    + '（逐字取自快照原文的企业/品牌名）和 region（快照显示的经营地域）。',
+    '【认全展示，用户裁决】把快照里所有能识别出的真实品牌全部报出来——分层'
+    + '（direct/potential）只是你的最佳判断标签，宁可多报待用户逐项删除，不要'
+    + '自我审查漏报；判不准、边缘、拿不稳的都报，报了由用户在卡片上核对来源'
+    + '链接后裁决。仍然绝对禁止：快照里没有的名字（幻觉）、自身与排除名单、'
+    + '前东家/供应商等非竞争关系、平台渠道、国际品牌榜单行文。',
     '输出：{"direct":[{"name":"公司名","region":"所在地域"}],'
     + '"potential":[{"name":"公司名","region":"所在地域"}]}',
     '',
