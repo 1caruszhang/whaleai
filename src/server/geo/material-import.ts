@@ -1514,20 +1514,44 @@ function failureDiagnostic(error: unknown): Record<string, unknown> {
 }
 
 export function materialLogProjection(input: {
-  operation: 'import-file' | 'import-text' | 'fetch-website' | 'parse' | 'extract' | 'propose-candidates' | 'retry' | 'delete' | 'image-content' | 'image-list' | 'rescan-images';
+  operation: 'import-file' | 'import-text' | 'fetch-website' | 'parse' | 'extract' | 'propose-candidates' | 'retry' | 'delete' | 'image-content' | 'image-list' | 'rescan-images' | 'image-import' | 'image-extract' | 'image-diagnostic';
   workspaceId: string;
   sessionId: string;
   materialId?: string;
-  status: 'started' | 'completed' | 'failed';
+  /**
+   * 配图管线留痕的 outcome 固定码（票 #20：入池/降级路径并入结构化投影，
+   * operation 移入 JSON 体，统一日志按 [materials] {json} 形态机器可读）。
+   * 与 status 互补：status 只收 started/completed/failed 三态，outcome
+   * 承载 pooled/deduplicated/tagging-unavailable 等配图域结果。
+   */
+  outcome?: string;
+  /**
+   * 配图留痕的计数附件（跳过格式分布、预算余量）：只收固定格式键与
+   * 有限非负数字，自由文本不入日志。
+   */
+  counts?: Record<string, number>;
+  status?: 'started' | 'completed' | 'failed';
   error?: unknown;
-}): Record<string, string> {
+}): Record<string, string | number | Record<string, number>> {
   const safeIdentifier = (value: string) => /^[A-Za-z0-9-]{1,128}$/.test(value) ? value : 'invalid';
+  const safeCode = (value: string) => /^[a-z][a-z0-9-]{0,63}$/.test(value) ? value : 'invalid';
+  const safeCounts = (counts: Record<string, number>): Record<string, number> => {
+    const sanitized: Record<string, number> = {};
+    for (const [key, value] of Object.entries(counts)) {
+      if (!/^[a-z0-9][a-z0-9-]{0,31}$/.test(key)) continue;
+      if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) continue;
+      sanitized[key] = value;
+    }
+    return sanitized;
+  };
   return {
     operation: input.operation,
     workspaceId: safeIdentifier(input.workspaceId),
     sessionId: safeIdentifier(input.sessionId),
     ...(input.materialId ? { materialId: safeIdentifier(input.materialId) } : {}),
-    status: input.status,
+    ...(input.outcome !== undefined ? { outcome: safeCode(input.outcome) } : {}),
+    ...(input.counts !== undefined ? { counts: safeCounts(input.counts) } : {}),
+    ...(input.status ? { status: input.status } : {}),
     ...(input.error ? { errorCode: errorCode(input.error) } : {}),
   };
 }
@@ -2402,6 +2426,35 @@ export class MaterialImportService {
   }
 
   /**
+   * 配图管线留痕（ADR-0008 T2/T3，票 #20）：与路由层 logMaterial / 工具层
+   * logMaterialTool 同一条 [materials] 结构化投影通路——统一日志的入口是
+   * sidecar 启动时 initLogger 接管后的 console.log（logger.ts →
+   * appendUnifiedLog），服务层自持 identity 经 materialLogProjection 脱敏后
+   * 以 `[materials] {json}` 标准形态落日志，与既有 [materials] 行同一时间
+   * 线、同一机器可读形状。口径不变：只有 id/outcome/计数/固定码，不含图
+   * 片内容、材料名等敏感字段。
+   */
+  private logImageEvent(input: {
+    operation: 'image-import' | 'image-extract' | 'image-diagnostic';
+    materialId: string;
+    outcome?: string;
+    counts?: Record<string, number>;
+    status?: 'failed';
+    error?: unknown;
+  }): void {
+    console.log(`[materials] ${JSON.stringify(materialLogProjection({
+      operation: input.operation,
+      workspaceId: this.identity.workspaceId,
+      sessionId: this.identity.sessionId,
+      materialId: input.materialId,
+      ...(input.outcome !== undefined ? { outcome: input.outcome } : {}),
+      ...(input.counts !== undefined ? { counts: input.counts } : {}),
+      ...(input.status !== undefined ? { status: input.status } : {}),
+      ...(input.error !== undefined ? { error: input.error } : {}),
+    }))}`);
+  }
+
+  /**
    * 独立图片材料的导入终态（ADR-0008 T2）：不产出任何知识候选，材料直接
    * 落 processed。配图候选池的每一步（尺寸闸、打标、入库）失败都只影响
    * 该图是否入池，绝不把材料导入打成 failed——一次模型抖动不能卡死导入。
@@ -2422,15 +2475,9 @@ export class MaterialImportService {
     } catch (error) {
       // 打标调用/入库的异常统一按降级收尾；固定码投影与文本抽取诊断同款。
       outcome = 'degraded';
-      console.log(`[materials] image diagnostic ${JSON.stringify({
-        materialId: material.id,
-        errorCode: errorCode(error),
-      })}`);
+      this.logImageEvent({ operation: 'image-diagnostic', materialId: material.id, status: 'failed', error });
     }
-    console.log(`[materials] image-import ${JSON.stringify({
-      materialId: material.id,
-      outcome,
-    })}`);
+    this.logImageEvent({ operation: 'image-import', materialId: material.id, outcome });
     const updated = await this.materialPort.finish({
       attemptId: attempt.id,
       materialId: material.id,
@@ -2507,8 +2554,13 @@ export class MaterialImportService {
     bytes: Uint8Array,
     options: { alreadyPooled?: ReadonlySet<string> } = {},
   ): Promise<MaterialImagePoolTally> {
-    const logOutcome = (outcome: string, extra: Record<string, unknown> = {}): void => {
-      console.log(`[materials] image-extract ${JSON.stringify({ materialId: material.id, outcome, ...extra })}`);
+    const logOutcome = (outcome: string, counts?: Record<string, number>): void => {
+      this.logImageEvent({
+        operation: 'image-extract',
+        materialId: material.id,
+        outcome,
+        ...(counts !== undefined ? { counts } : {}),
+      });
     };
     const tally: MaterialImagePoolTally = { pooled: 0, deduplicated: 0, degraded: 0, budgetExhausted: false };
     const countOutcome = (outcome: MaterialImagePoolOutcome): void => {
@@ -2525,7 +2577,7 @@ export class MaterialImportService {
       return tally;
     }
     const skipped = Object.keys(extraction.skippedFormats);
-    if (skipped.length > 0) logOutcome('skipped-format', { formats: extraction.skippedFormats });
+    if (skipped.length > 0) logOutcome('skipped-format', extraction.skippedFormats);
     // 抽取链路硬上限纪律（material_import.md）：provider 挂起时材料也必须
     // 有界收敛。预算耗尽即止，余量记一条 outcome 留痕（在途一次调用仍受
     // poolImageAsset 自身的超时信号约束）。
@@ -2551,10 +2603,7 @@ export class MaterialImportService {
         }));
       } catch (error) {
         // 打标调用/入库异常统一按降级收尾；固定码投影与独立图片诊断同款。
-        console.log(`[materials] image diagnostic ${JSON.stringify({
-          materialId: material.id,
-          errorCode: errorCode(error),
-        })}`);
+        this.logImageEvent({ operation: 'image-diagnostic', materialId: material.id, status: 'failed', error });
         logOutcome('degraded');
         tally.degraded += 1;
       }

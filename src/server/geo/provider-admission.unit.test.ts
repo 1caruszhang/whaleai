@@ -289,4 +289,69 @@ describe("GeoProviderAdmission", () => {
     ).toBeUndefined();
     vi.unstubAllEnvs();
   });
+
+  // 票 #20 回归：T2 新增的 describeImage 曾被本包装层白名单抄送遗漏，
+  // 运行时服务拿到 undefined → 配图候选池静默零入池。
+  it("admits describeImage tagging through the same permit channel as keyword search", async () => {
+    vi.stubEnv("XIAOJING_SIDECAR_ID", "sidecar-18");
+    moduleMocks.managementApi.mockReset();
+    moduleMocks.managementApi.mockImplementation(
+      async (path: string, _method: string, body: Record<string, unknown>) => {
+        const payload = body.payload as Record<string, unknown>;
+        if (path.endsWith("/acquire")) {
+          return permit("acquired", { requestId: payload.requestId });
+        }
+        return { ok: true, released: true };
+      },
+    );
+    const describeImage = vi.fn(async () =>
+      JSON.stringify({ description: "门店前台展台实拍", category: "产品实拍" }),
+    );
+    const base = baseCapabilities({
+      keywordSearch: {
+        slot: "keyword-search",
+        search: unavailable,
+        describeImage,
+        baselineEngines: () => [],
+        probeQuestion: unavailable,
+      },
+    });
+    configureGeoProviderAdmission({
+      workspacePath: "/brands/brand-18",
+      sessionId: "session-18",
+    });
+
+    await expect(
+      wrapGeoProviderCapabilities(base).keywordSearch.describeImage!(
+        {
+          system: "打标",
+          prompt: "描述图片",
+          bytes: new Uint8Array([1, 2, 3]),
+          mediaType: "image/png",
+        },
+        { signal: undefined },
+      ),
+    ).resolves.toContain("产品实拍");
+
+    const acquire = moduleMocks.managementApi.mock.calls.find(([path]) =>
+      String(path).endsWith("/acquire"),
+    );
+    expect(acquire?.[2]).toMatchObject({
+      ...identity,
+      payload: { slot: "keyword-search", unitKind: "image-tag" },
+    });
+    expect(describeImage).toHaveBeenCalledTimes(1);
+
+    // 旧能力注入未实现 describeImage 时包装层保持缺省，不制造新入口
+    // （与 searchSources 同款守卫）。
+    const legacyKeywordSearch = { ...base.keywordSearch };
+    delete legacyKeywordSearch.describeImage;
+    expect(
+      wrapGeoProviderCapabilities({
+        ...base,
+        keywordSearch: legacyKeywordSearch,
+      }).keywordSearch.describeImage,
+    ).toBeUndefined();
+    vi.unstubAllEnvs();
+  });
 });

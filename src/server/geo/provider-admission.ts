@@ -254,6 +254,20 @@ function keywordCapability(
         work: () => searchSources.call(capability, query, options),
       });
   }
+  // 视觉打标（ADR-0008 Decision 2，票 #20 修复）：与挖词/结构化召回同槽
+  // 同模型，每张候选图一次 image-tag 计量单元走同一 permit 通道；旧能力
+  // 注入未实现 describeImage 时保持缺省，调用方（配图候选池）降级为该图
+  // 不入池，不阻塞导入。
+  const describeImage = capability.describeImage;
+  if (typeof describeImage === "function") {
+    wrapped.describeImage = (input, options) =>
+      currentAdmission().run({
+        slot: capability.slot,
+        unitKind: "image-tag",
+        signal: options?.signal,
+        work: () => describeImage.call(capability, input, options),
+      });
+  }
   return wrapped;
 }
 

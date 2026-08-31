@@ -2175,6 +2175,51 @@ describe('profile and document compatibility', () => {
     expect(invalidIdentity).toMatchObject({ workspaceId: 'invalid', materialId: 'invalid' });
     expect(JSON.stringify(invalidIdentity)).not.toContain('private');
   });
+
+  // 票 #20：配图留痕的 outcome/counts 扩展沿用同一脱敏口径——固定码词表
+  // 之外的 outcome 与非固定格式键/非有限数字的 counts 一律拦下，status
+  // 可省（配图域结果由 outcome 承载）。
+  it('projects image outcomes and counts through the same sanitization discipline', () => {
+    const projection = materialLogProjection({
+      operation: 'image-extract',
+      workspaceId: 'brand-07',
+      sessionId: 'session-07',
+      materialId: 'material-07',
+      outcome: 'skipped-format',
+      counts: { emf: 2, remaining: 3 },
+    });
+    expect(projection).toEqual({
+      operation: 'image-extract',
+      workspaceId: 'brand-07',
+      sessionId: 'session-07',
+      materialId: 'material-07',
+      outcome: 'skipped-format',
+      counts: { emf: 2, remaining: 3 },
+    });
+    expect(JSON.stringify(projection)).not.toContain('"status"');
+
+    const hostile = materialLogProjection({
+      operation: 'image-import',
+      workspaceId: 'brand-07',
+      sessionId: 'session-07',
+      materialId: 'material-07',
+      outcome: 'Pooled 自由文本',
+      counts: {
+        '文档作者可控长尾键值': 1,
+        emf: Number.POSITIVE_INFINITY,
+        wmf: -1,
+        tiff: 1,
+      },
+    });
+    expect(hostile).toEqual({
+      operation: 'image-import',
+      workspaceId: 'brand-07',
+      sessionId: 'session-07',
+      materialId: 'material-07',
+      outcome: 'invalid',
+      counts: { tiff: 1 },
+    });
+  });
 });
 
 describe('MaterialImportService billing permits (ticket 07)', () => {
@@ -2344,6 +2389,69 @@ describe('MaterialImportService standalone image materials (ADR-0008 T2)', () =>
     port.bytes.set(item.id, bytes);
     return item;
   }
+
+  // 票 #20：配图留痕走 [materials] {json} 结构化投影（operation 移入 JSON
+  // 体、identity 经 materialLogProjection 脱敏），与路由/工具层同一时间线。
+  it('emits structured [materials] projections for image import and diagnostic outcomes', async () => {
+    const spy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    try {
+      const degradedPort = new FakeMaterialPort();
+      const degraded = await storedImage(degradedPort, pngFixtureBytes(800, 600));
+      const degradedService = service(degradedPort, {
+        // 打标抛错：image-diagnostic（固定码）+ image-import outcome=degraded。
+        describeImage: async () => { throw new Error('keyword-search upstream failed'); },
+      });
+
+      const degradedResult = await degradedService.value.process(degraded.id);
+
+      expect(degradedResult).toMatchObject({ ok: true });
+      const diagnosticLine = spy.mock.calls
+        .map((call) => String(call[0]))
+        .find((entry) => entry.includes('"operation":"image-diagnostic"'));
+      expect(diagnosticLine).toBeDefined();
+      expect(JSON.parse(diagnosticLine!.slice('[materials] '.length))).toEqual({
+        operation: 'image-diagnostic',
+        workspaceId: 'brand-07',
+        sessionId: 'session-07',
+        materialId: degraded.id,
+        status: 'failed',
+        // 自由文本 message 不进日志：非登记码错误按泛化兜底码投影。
+        errorCode: 'material_processing_failed',
+      });
+      const degradedLine = spy.mock.calls
+        .map((call) => String(call[0]))
+        .find((entry) => entry.includes('"operation":"image-import"'));
+      expect(JSON.parse(degradedLine!.slice('[materials] '.length))).toEqual({
+        operation: 'image-import',
+        workspaceId: 'brand-07',
+        sessionId: 'session-07',
+        materialId: degraded.id,
+        outcome: 'degraded',
+      });
+
+      // 未实现打标能力（旧能力注入）时同样只落结构化 outcome，不进自由文本。
+      spy.mockClear();
+      const unavailablePort = new FakeMaterialPort();
+      const unavailable = await storedImage(unavailablePort, pngFixtureBytes(800, 600));
+      const unavailableService = service(unavailablePort, { search: async () => '搜索结果' });
+
+      const unavailableResult = await unavailableService.value.process(unavailable.id);
+
+      expect(unavailableResult).toMatchObject({ ok: true });
+      const unavailableLine = spy.mock.calls
+        .map((call) => String(call[0]))
+        .find((entry) => entry.includes('"operation":"image-import"'));
+      expect(JSON.parse(unavailableLine!.slice('[materials] '.length))).toEqual({
+        operation: 'image-import',
+        workspaceId: 'brand-07',
+        sessionId: 'session-07',
+        materialId: unavailable.id,
+        outcome: 'tagging-unavailable',
+      });
+    } finally {
+      spy.mockRestore();
+    }
+  });
 
   it('imports a standalone image straight into the candidate pool, skipping text and profile extraction', async () => {
     const port = new FakeMaterialPort();
@@ -2601,11 +2709,20 @@ describe('MaterialImportService embedded document images (ADR-0008 T3)', () => {
       expect(current.describeImage).toHaveBeenCalledTimes(1);
       expect(port.savedImages).toHaveLength(1);
       expect(port.savedImages[0]?.fileExt).toBe('png');
-      // 留痕：脱敏 outcome 投影记录跳过的格式与数量。
+      // 留痕：脱敏 outcome 投影记录跳过的格式与数量（票 #20：结构化
+      // [materials] {json} 形态，operation 在 JSON 体内、计数走 counts）。
       const line = spy.mock.calls
         .map((call) => String(call[0]))
         .find((entry) => entry.includes('image-extract') && entry.includes('skipped-format'));
       expect(line).toBeDefined();
+      expect(JSON.parse(line!.slice('[materials] '.length))).toMatchObject({
+        operation: 'image-extract',
+        workspaceId: 'brand-07',
+        sessionId: 'session-07',
+        materialId: document.id,
+        outcome: 'skipped-format',
+        counts: { emf: 1, wmf: 1, tiff: 1 },
+      });
       expect(line).toContain('emf');
       expect(line).toContain('wmf');
       expect(line).toContain('tiff');

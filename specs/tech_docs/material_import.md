@@ -123,7 +123,7 @@ Renderer 对处理中行每 3s 轮询 `/api/xiaojing/materials/status`（带 `ma
 
 ## 日志与测试
 
-材料流程只允许记录固定 operation、合法 workspace/session/material ID、状态和固定 error code；Sidecar 以 `[materials]` 前缀输出 `materialLogProjection` 的脱敏投影（导入/抓取启动完成、后台抽取完成或失败、重试）。该投影同时覆盖 HTTP 路由路径与 Agent 工具路径（`import_pasted_material` / `import_website_material` / `retry_brand_material`），工具发起的导入失败不会只存在于 SQLite。路径样式 identity 直接投影为 `invalid`；raw error、API Key、URL query、材料正文、模型 prompt/response 均不得写普通日志。
+材料流程只允许记录固定 operation、合法 workspace/session/material ID、状态和固定 error code；Sidecar 以 `[materials]` 前缀输出 `materialLogProjection` 的脱敏投影（导入/抓取启动完成、后台抽取完成或失败、重试）。该投影同时覆盖 HTTP 路由路径与 Agent 工具路径（`import_pasted_material` / `import_website_material` / `retry_brand_material`），工具发起的导入失败不会只存在于 SQLite。配图管线（ADR-0008 T2/T3，票 #20）的入池/降级留痕走同一投影在服务层直接落日志：`image-import` / `image-extract` / `image-diagnostic` 三个固定 operation，结果用 `outcome` 固定码（pooled/deduplicated/tagging-unavailable/skipped-format 等）承载（status 三态可省），跳过格式分布与预算余量进 `counts`（只收固定格式键与有限非负数字）；图片内容、描述文本与材料名不入日志。路径样式 identity 与词表外 outcome 直接投影为 `invalid`；raw error、API Key、URL query、材料正文、模型 prompt/response 均不得写普通日志。
 
 失败错误码精确区分：模型输出坏 JSON 落 `model_response_invalid`（同一超时信号内自动重抽一次，两次都坏才落终态）；management hop 自由文本错误落 `material_management_failed`（Rust 材料存储固定码原样透传）；计费预扣/回报的类型化 `GatewayBillingError`（`insufficient_balance`、网关不可达等，message 是自由中文文本）按类型落 `material_billing_failed`，不经子串匹配。泛化 `material_processing_failed` 只保留给真正未分类的错误。所有失败码在 Sidecar 日志各打一条脱敏诊断（异常类名 + GatewayBillingError 的 code/status + model_failed 时的上游 HTTP 状态/业务码），自由文本 message 不进日志，诊断不进 DB/返回值/renderer。真实 provider 冒烟走 `material-import.credentialed.test.ts`（显式 opt-in，不在默认测试命令内）。
 
