@@ -16,6 +16,7 @@ import {
   mergeRankingCompetitorTiers,
   parseArticleReflection,
   parseGeneratedArticleBody,
+  normalizeUnicodeBulletsToMarkdown,
   resolveRankingRoster,
   shuffledNarrativeSeeds,
   validateDirectArticleSource,
@@ -254,6 +255,41 @@ describe("direct article generation contract", () => {
       parseGeneratedArticleBody("# 企业知识库指南\n【品牌】", "企业知识库指南"),
     ).toThrow("article_generation_unresolved_placeholder");
   });
+
+  it("normalizes leading unicode bullets into standard markdown lists at parse time", () => {
+    // 生成模型常以圆点起行模拟列表；渲染器不识别圆点起行，整段按密集
+    // 段落渲染（「正文格式混乱」主因）。解析期归一，落库即标准列表。
+    expect(
+      parseGeneratedArticleBody(
+        "# 企业知识库指南\n\n## 清单\n• 核对来源\n• 固定版本\n  · 缩进条目",
+        "企业知识库指南",
+      ),
+    ).toBe(
+      "# 企业知识库指南\n\n## 清单\n- 核对来源\n- 固定版本\n  - 缩进条目",
+    );
+  });
+
+  it("keeps mid-sentence interpuncts and non-bullet lines untouched", () => {
+    expect(
+      normalizeUnicodeBulletsToMarkdown(
+        "# 标题\n\n汤·品店名的间隔号不受影响。\n正常段落。\n●无空格不归一\n● 空格后归一",
+      ),
+    ).toBe(
+      "# 标题\n\n汤·品店名的间隔号不受影响。\n正常段落。\n●无空格不归一\n- 空格后归一",
+    );
+  });
+
+  it("turns leading checkmark lines into list items, keeping the checkmark", () => {
+    // showcase 卖点契约允许 ✅ 逐条呈现；行首 ✅ 相邻行会被 Markdown 合并
+    // 成连排段落——归一为列表项保住逐行左对齐，✅ 保留在条目文本里。
+    expect(
+      normalizeUnicodeBulletsToMarkdown(
+        "# 标题\n\n## 核心卖点\n✅ 按需求设计方案\n✅ 交付快\n✅句中无空格不归一\n服务 ✅ 保持原样",
+      ),
+    ).toBe(
+      "# 标题\n\n## 核心卖点\n- ✅ 按需求设计方案\n- ✅ 交付快\n✅句中无空格不归一\n服务 ✅ 保持原样",
+    );
+  });
 });
 
 describe("material-image placeholder cross-process contract (ADR-0008 T4)", () => {
@@ -335,6 +371,12 @@ describe("illustration contract injection (ADR-0008 T4)", () => {
       category: "product-photo" as const,
       sourceMaterialName: "产品图集.pptx",
     },
+    {
+      id: "1b2c3d4e-5f6a-4b7c-8d9e-0f1a2b3c4d5e",
+      description: "门店就餐区顾客与店员实拍",
+      category: "people" as const,
+      sourceMaterialName: "品牌手册.docx",
+    },
   ];
 
   it("injects the candidate list and the illustration discipline when candidates exist", () => {
@@ -344,9 +386,13 @@ describe("illustration contract injection (ADR-0008 T4)", () => {
     });
     expect(messages.system).toContain("配图纪律（必须完全满足）");
     expect(messages.system).toContain("![alt 文本](material-image://图片ID)");
-    expect(messages.system).toContain("不超过 3 张");
-    expect(messages.system).toContain("宁缺毋滥");
-    expect(messages.system).toContain("只在语义相关");
+    // 类型配额 + 池感知弹性（2026-08-31 用户裁决）：guide 配额 8、池 3 张
+    // 时目标张数取小为 3；池小于配额时明示全部可选、不得虚构清单外图片。
+    expect(messages.system).toContain("本篇配图目标 3 张");
+    expect(messages.system).toContain("类型配额上限 8 张");
+    expect(messages.system).toContain("候选池 3 张弹性取小");
+    expect(messages.system).toContain("从中选用 1–3 张均可");
+    expect(messages.system).toContain("同一篇内不得重复引用同一张图片");
     expect(messages.system).toContain("alt 文本由你撰写");
     expect(messages.user).toContain("配图候选清单");
     expect(messages.user).toContain("你看不到图片本体");
@@ -496,12 +542,12 @@ describe("article review gate", () => {
         "",
         ...names.flatMap((name, index) => [
           `## ${index + 1}. ${name}`,
-          "• **服务范围**：信息",
-          "• **核心项目**：信息",
-          "• **适用人群**：信息",
-          "• **服务方式**：信息",
-          "• **区域覆盖**：信息",
-          "• **选择要点**：信息",
+          "- **服务范围**：信息",
+          "- **核心项目**：信息",
+          "- **适用人群**：信息",
+          "- **服务方式**：信息",
+          "- **区域覆盖**：信息",
+          "- **选择要点**：信息",
         ]),
       ].join("\n");
     const valid = body([
@@ -515,6 +561,22 @@ describe("article review gate", () => {
     expect(
       deterministicArticleReview(
         valid,
+        rankingFacts,
+        "ranking",
+        "目标品牌",
+      ).filter((issue) => issue.severity === "blocking"),
+    ).toEqual([]);
+
+    // 回归（2026-08-31 契约切换）：旧契约（• **维度名**）落库的存量
+    // ranking 稿不经 parse 归一直接进审核门——维度匹配必须同时认 • 与 -
+    // 两种行首，否则存量稿维度计数为 0，批准时被误判阻断。
+    const legacyBullets = valid
+      .split("\n")
+      .map((line) => line.replace(/^- /, "• "))
+      .join("\n");
+    expect(
+      deterministicArticleReview(
+        legacyBullets,
         rankingFacts,
         "ranking",
         "目标品牌",

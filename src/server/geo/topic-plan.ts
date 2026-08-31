@@ -16,6 +16,7 @@ import {
   selectDistinctTitles,
   selectContentTypePlannedFacts,
   selectPlannedFacts,
+  TopicPlanTitleCandidatesError,
   validateTitleCandidates,
   titleBusinessAnchors,
   type TopicPlanConfirmation,
@@ -26,7 +27,10 @@ import {
   type TopicPlanProjection,
   type TopicPlanSourceQuestion,
   type TopicPlanTopic,
+  type TopicPlanWireFact,
+  type TopicPlanWireItem,
 } from "../../shared/geo/topicPlan";
+import { GEO_PORT_CONTRACT } from "../../shared/geo/portContract";
 import { XIAOJING_GEO_PROVIDER_DEFAULTS } from "../../shared/geo/providerCapabilities";
 import {
   deriveServiceScope,
@@ -248,37 +252,66 @@ async function providerCall<T>(execute: () => Promise<T>): Promise<T> {
   }
 }
 
+/** 标题候选拒因码 → 纠正重试提示词里的中文说明（与
+ * validateTitleCandidates 的 rejected 计数键一一对应）。 */
+const TITLE_REJECTION_REASON_LABELS: Readonly<Record<string, string>> = {
+  "length-or-duplicate": "超长或彼此重复",
+  placeholder: "残留示例占位符",
+  "forbidden-term": "含极限词",
+  competitor: "含竞品名",
+  region: "缺目标地域",
+  industry: "缺业务词",
+  "showcase-brand": "showcase 缺品牌名",
+  "ranking-brand": "ranking 不得带品牌名",
+  "ranking-year": "ranking 缺年份",
+};
+
+/**
+ * 事实集相等（单一语义）：按 predicate 集合排序后比较——事实顺序不是
+ * 用户可编辑语义，信封瘦身项与库内顺序也无契约保证。校验层与变更判定
+ * 层必须同用本比较器：若一处有序一处无序，重排事实会在校验层放行、
+ * 却被变更判定算成 userEdited 并把 approval 重置回 draft。
+ */
+function samePredicateFacts(
+  a: readonly TopicPlanWireFact[],
+  b: readonly TopicPlanWireFact[],
+): boolean {
+  if (a.length !== b.length) return false;
+  const sortedPredicates = (facts: readonly TopicPlanWireFact[]) =>
+    facts.map((fact) => fact.predicate).sort();
+  return sortedPredicates(a).join("\u0000") === sortedPredicates(b).join("\u0000");
+}
+
 function materialItemChanged(
   current: TopicPlanItem,
-  incoming: TopicPlanItem,
+  incoming: TopicPlanWireItem,
 ): boolean {
-  return JSON.stringify({
-    topicId: current.topicId,
-    sourceQuestionIds: current.sourceQuestionIds,
-    contentType: current.contentType,
-    typeSelectionReason: current.typeSelectionReason,
-    title: current.title,
-    plannedFacts: current.plannedFacts,
-  }) !==
-    JSON.stringify({
-      topicId: incoming.topicId,
-      sourceQuestionIds: incoming.sourceQuestionIds,
-      contentType: incoming.contentType,
-      typeSelectionReason: incoming.typeSelectionReason,
-      title: incoming.title,
-      plannedFacts: incoming.plannedFacts,
-    });
+  // 信封瘦身项不携带 factKey/normalizedValueJson，深比较整对象会把纯
+  // 批准回传误判为内容变更（approval 重置为 draft）——事实只比 predicate
+  // 集合（samePredicateFacts），其余可编辑字段逐项比较。
+  return (
+    current.topicId !== incoming.topicId ||
+    current.sourceQuestionIds.length !== incoming.sourceQuestionIds.length ||
+    current.sourceQuestionIds.some(
+      (id, index) => id !== incoming.sourceQuestionIds[index],
+    ) ||
+    current.contentType !== incoming.contentType ||
+    current.typeSelectionReason !== incoming.typeSelectionReason ||
+    current.title !== incoming.title ||
+    !samePredicateFacts(current.plannedFacts, incoming.plannedFacts)
+  );
 }
 
 function validateEditableItems(
   plan: TopicPlanProjection,
-  incoming: readonly TopicPlanItem[],
+  incoming: readonly TopicPlanWireItem[],
 ): void {
   if (incoming.length === 0 || incoming.length > TOPIC_PLAN_MAX_ITEMS) {
     throw new Error("topic_plan_items_invalid");
   }
   const topicById = new Map(plan.topics.map((topic) => [topic.id, topic]));
-  const factKeys = new Set(
+  const currentItemById = new Map(plan.items.map((item) => [item.id, item]));
+  const planFactKeys = new Set(
     plan.items.flatMap((item) => item.plannedFacts.map((fact) => fact.factKey)),
   );
   const seen = new Set<string>();
@@ -292,10 +325,23 @@ function validateEditableItems(
       !item.typeSelectionReason.trim() ||
       item.sourceQuestionIds.length === 0 ||
       !item.sourceQuestionIds.every((id) => topic.questionIds.includes(id)) ||
-      item.plannedFacts.length === 0 ||
-      item.plannedFacts.some((fact) => !factKeys.has(fact.factKey))
+      item.plannedFacts.length === 0
     ) {
       throw new Error("topic_plan_item_invalid");
+    }
+    const current = currentItemById.get(item.id);
+    if (current) {
+      // 既有项：信封瘦身项只带 predicate，与库内当前事实按 predicate
+      // 集合一一对应即可（samePredicateFacts，与变更判定层同语义）；
+      // 用户不可编辑事实，集合不同即非法。
+      if (!samePredicateFacts(item.plannedFacts, current.plannedFacts)) {
+        throw new Error("topic_plan_item_invalid");
+      }
+    } else {
+      // 新增项必须携带合法完整 factKey（聊天修订路径构造）。
+      if (item.plannedFacts.some((fact) => !("factKey" in fact) || !planFactKeys.has(fact.factKey))) {
+        throw new Error("topic_plan_item_invalid");
+      }
     }
     seen.add(item.id);
   }
@@ -303,15 +349,29 @@ function validateEditableItems(
 
 export function applyTopicPlanUserEdits(
   plan: TopicPlanProjection,
-  incoming: readonly TopicPlanItem[],
+  incoming: readonly TopicPlanWireItem[],
 ): TopicPlanItem[] {
   validateEditableItems(plan, incoming);
   const currentById = new Map(plan.items.map((item) => [item.id, item]));
   return incoming.map((item) => {
     const current = currentById.get(item.id);
     if (!current) {
+      // 新增项必须完整构造（聊天修订路径自带 rationale 与全量事实）；
+      // 信封瘦身项不允许凭空造新项。
+      if (!item.titleRationale) {
+        throw new Error("topic_plan_item_invalid");
+      }
+      const completeFacts: TopicPlanKnowledgeFact[] = [];
+      for (const fact of item.plannedFacts) {
+        if (!("normalizedValueJson" in fact) || typeof fact.normalizedValueJson !== "string") {
+          throw new Error("topic_plan_item_invalid");
+        }
+        completeFacts.push(fact);
+      }
       return {
         ...item,
+        titleRationale: item.titleRationale,
+        plannedFacts: completeFacts,
         titleCandidates: [item.title],
         deduplication: {
           method: "not-evaluated-user-override",
@@ -324,21 +384,30 @@ export function applyTopicPlanUserEdits(
         origin: "user",
       };
     }
+    // 服务端字段权威：既有项的审计字段（titleRationale/titleCandidates）
+    // 与事实详情只信库内当前值——回传可能是信封瘦身项，铺开 `...item`
+    // 会把库里字段冲成 undefined。用户可改字段（标题/类型/理由/归属
+    // 主题/来源问题）在变更分支显式覆盖。
     const changed = materialItemChanged(current, item);
+    if (!changed) {
+      return { ...current, approvalStatus: item.approvalStatus };
+    }
     return {
-      ...item,
-      userEdited: current.userEdited || changed,
-      approvalStatus: changed ? "draft" : item.approvalStatus,
-      origin: current.origin,
-      titleCandidates: changed ? [item.title] : item.titleCandidates,
-      deduplication: changed
-        ? {
-            method: "not-evaluated-user-override",
-            comparedItemIds: [],
-            maxSimilarity: null,
-            threshold: item.deduplication.threshold,
-          }
-        : item.deduplication,
+      ...current,
+      topicId: item.topicId,
+      sourceQuestionIds: item.sourceQuestionIds,
+      contentType: item.contentType,
+      typeSelectionReason: item.typeSelectionReason,
+      title: item.title,
+      titleCandidates: [item.title],
+      deduplication: {
+        method: "not-evaluated-user-override",
+        comparedItemIds: [],
+        maxSimilarity: null,
+        threshold: item.deduplication.threshold,
+      },
+      userEdited: true,
+      approvalStatus: "draft",
     };
   });
 }
@@ -677,6 +746,8 @@ export class TopicPlanService {
               ? `每条标题必须包含「${profile.region}」；`
               : "",
             `必须逐字包含一个业务词（任选其一）：${anchors.map((anchor) => `「${anchor}」`).join("、") || `「${profile.industry}」`}；`,
+            `每条标题不超过 ${GEO_PORT_CONTRACT.promptStructures.titleGeneration.maximumCharacters[seed.contentType]} 个字符（年份、标点都计入）；`,
+            "候选彼此不得重复或高度同义，也不得与已有标题重复；",
             seed.contentType === "ranking"
               ? `必须包含年份「${this.now().getFullYear()}」且不得出现品牌名；`
               : "",
@@ -741,13 +812,25 @@ export class TopicPlanService {
           try {
             return { ...parsed, candidates: validate(parsed.candidates) };
           } catch (error) {
-            if (
-              !(error instanceof Error) ||
-              !error.message.startsWith("topic_plan_title_candidates_insufficient")
-            ) {
+            if (!(error instanceof TopicPlanTitleCandidatesError)) {
               throw error;
             }
-            raw = await complete(corrective);
+            // 把拒因与被拒候选回灌：corrective 只覆盖通用硬规则，模型看
+            // 不到自己哪里挂了（如超长重复×2）时重试只是盲重试。拒因计数
+            // 直接读结构化字段（TopicPlanTitleCandidatesError），不反解
+            // message——message 只为统一日志保留编码形态。
+            const rejectionSummary = [...error.rejectionCounts.entries()]
+              .map(([reason, count]) => {
+                const label = TITLE_REJECTION_REASON_LABELS[reason] ?? reason;
+                return count ? `${label}×${count}` : label;
+              })
+              .join("；");
+            raw = await complete(
+              corrective
+                + `上一轮被拒原因：${rejectionSummary || "未通过确定性校验"}。`
+                + `上一轮候选：${parsed.candidates.join("／") || "无"}。`
+                + "针对被拒原因重写，不要原样复述上一轮候选。",
+            );
             parsed = parseTitlePlan(raw, seed.itemId);
             return { ...parsed, candidates: validate(parsed.candidates) };
           }
@@ -832,7 +915,7 @@ export class TopicPlanService {
     sessionId: string;
     planId: string;
     expectedRevision: number;
-    items: TopicPlanItem[];
+    items: readonly TopicPlanWireItem[];
     /** 聊天修订（票 38）携带用户指令原文写入审计；面板编辑不传。 */
     reason?: string;
   }): Promise<TopicPlanMutationResult> {

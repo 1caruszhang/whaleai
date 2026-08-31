@@ -1,8 +1,9 @@
 import type {
+  TopicPlanCardItem,
+  TopicPlanCardProjection,
   TopicPlanConfirmation,
   TopicPlanItem,
   TopicPlanMutationResult,
-  TopicPlanProjection,
 } from "../../shared/geo/topicPlan";
 
 export type TopicPlanApiPost = <T>(
@@ -13,7 +14,8 @@ export type TopicPlanApiPost = <T>(
 
 interface TopicPlanResponse {
   success: boolean;
-  plan?: TopicPlanProjection | null;
+  /** /latest 已切卡片瘦身投影（审计字段与事实载体剔除）。 */
+  plan?: TopicPlanCardProjection | null;
   confirmation?: TopicPlanConfirmation;
   error?: string;
 }
@@ -28,7 +30,7 @@ export async function loadLatestTopicPlan(
   apiPost: TopicPlanApiPost,
   identity: { workspaceId: string; sessionId: string },
   confirmedOnly = false,
-): Promise<TopicPlanProjection | null> {
+): Promise<TopicPlanCardProjection | null> {
   const response = await apiPost<TopicPlanResponse>(
     "/api/xiaojing/topic-plans/latest",
     { ...identity, confirmedOnly },
@@ -45,7 +47,7 @@ export async function saveTopicPlanItems(
   input: {
     planId: string;
     expectedRevision: number;
-    items: TopicPlanItem[];
+    items: TopicPlanItem[] | TopicPlanCardItem[];
   },
 ): Promise<TopicPlanMutationResult> {
   const response = await apiPost<TopicPlanItemsResponse>(

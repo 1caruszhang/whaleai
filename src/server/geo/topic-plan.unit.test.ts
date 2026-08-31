@@ -346,6 +346,54 @@ class RetryOnceGeneration extends DeterministicGeneration {
   }
 }
 
+/**
+ * 回归（2026-08-31 线上案例）：首轮候选 1 条有效 + 2 条彼此重复，只有
+ * length-or-duplicate 挂掉。纠正重试提示词必须携带拒因与被拒候选，并
+ * 显式给出字数上限/去重规则——否则模型看不到自己错在哪，盲重试复现
+ * 同样的重复候选，整次 plan_topics 以
+ * topic_plan_title_candidates_insufficient:length-or-duplicate=2 失败。
+ */
+class DuplicateOnlyPoisonGeneration extends DeterministicGeneration {
+  readonly correctivePrompts: string[] = [];
+  private poisoned = new Set<string>();
+
+  async complete(
+    messages: Parameters<GeoTextCapability["complete"]>[0],
+    options?: Parameters<GeoTextCapability["complete"]>[1],
+  ): Promise<string> {
+    const prompt = messages.at(-1)?.content ?? "";
+    const itemId = prompt.match(/itemId：(item-[^\n]+)/)?.[1];
+    if (itemId && options?.purpose === "title-planning") {
+      if (prompt.includes("上一轮被拒原因")) {
+        this.correctivePrompts.push(prompt);
+        return super.complete(messages, options);
+      }
+      if (!this.poisoned.has(itemId)) {
+        this.poisoned.add(itemId);
+        const contentType = prompt.match(
+          /内容类型：(guide|showcase|ranking|news|news_light)/,
+        )?.[1] as keyof typeof titlesByType;
+        const base = titlesByType[contentType][0]
+          + (itemId.includes("topic-2") ? "乙" : "甲");
+        // 标点变体：parseTitlePlan 的精确去重放行 3 条，但校验器的归一化
+        // identity（剥标点）判定 2 条重复 → length-or-duplicate=2。
+        return JSON.stringify({
+          itemId,
+          candidates: [base, `${base}。`, `${base}！`],
+          rationale: {
+            questionCoverage: "覆盖来源问题核心诉求",
+            searchIntent: "匹配主题搜索意图",
+            differentiation: "与已有标题采用不同表达",
+            brandFit: contentType === "showcase" ? "使用已确认品牌简称" : "遵守品牌边界",
+            chinaMarketExpression: "使用自然中国市场搜索表达",
+          },
+        });
+      }
+    }
+    return super.complete(messages, options);
+  }
+}
+
 describe("TopicPlanService", () => {
   it("uses embeddings and LLMs for named topics, five types, factual titles and semantic dedup", async () => {
     const persistence = new FakePersistence();
@@ -427,6 +475,24 @@ describe("TopicPlanService", () => {
     );
     expect(retried.length).toBeGreaterThan(0);
     expect(retried.every((call) => call.purpose === "title-planning")).toBe(true);
+  });
+
+  it("feeds the rejection breakdown and failed candidates into the corrective retry", async () => {
+    const persistence = new FakePersistence();
+    const generation = new DuplicateOnlyPoisonGeneration();
+    const plan = await service(persistence, generation).generate({
+      ...identity,
+      questionPoolId: "pool-08",
+    });
+    // 纠正轮救回整批：重复毒化不再让 plan_topics 整体失败。
+    expect(plan.items.length).toBeGreaterThan(0);
+    expect(generation.correctivePrompts.length).toBeGreaterThan(0);
+    const corrective = generation.correctivePrompts[0]!;
+    // 拒因（中文标签×计数）、被拒候选原文、字数与去重规则都必须在提示词里。
+    expect(corrective).toContain("超长或彼此重复×2");
+    expect(corrective).toContain("上一轮候选：");
+    expect(corrective).toMatch(/每条标题不超过 \d+ 个字符/);
+    expect(corrective).toContain("候选彼此不得重复或高度同义");
   });
 
   it("uses exact plan/revision CAS and preserves edited or approved targets during partial regeneration", async () => {
@@ -547,6 +613,86 @@ describe("TopicPlanService", () => {
         items: persistence.plan.items,
       }),
     ).rejects.toThrow("topic_plan_confirmed_immutable");
+  });
+
+  it("keeps server truth when card round-trips slim (envelope) items for approval-only edits", async () => {
+    const persistence = new FakePersistence();
+    const planner = service(persistence);
+    const initial = await planner.generate({ ...identity });
+    // 卡片确认流：信封瘦身项（无 titleRationale/titleCandidates，事实仅
+    // predicate）+ 仅调整 approvalStatus。不得被误判为内容变更。
+    const slim = initial.items.map((item, index) => ({
+      ...(({ titleRationale: _r, titleCandidates: _c, ...rest }) => rest)(item),
+      plannedFacts: item.plannedFacts.map((fact) => ({
+        predicate: fact.predicate,
+      })),
+      approvalStatus: index === 0 ? ("approved" as const) : item.approvalStatus,
+    }));
+    const saved = await planner.saveItems({
+      ...identity,
+      planId: initial.id,
+      expectedRevision: 0,
+      items: slim,
+    });
+    expect(saved.plan.items).toHaveLength(initial.items.length);
+    for (const [index, item] of saved.plan.items.entries()) {
+      expect(item.approvalStatus).toBe(index === 0 ? "approved" : "draft");
+      expect(item.userEdited).toBe(initial.items[index].userEdited);
+      // 服务端字段权威：审计字段与事实详情不被瘦身回写冲掉。
+      expect(item.titleRationale).toEqual(initial.items[index].titleRationale);
+      expect(item.titleCandidates).toEqual(initial.items[index].titleCandidates);
+      expect(item.plannedFacts).toEqual(initial.items[index].plannedFacts);
+    }
+  });
+
+  it("treats fact reordering in slim round-trips as unchanged (single comparator)", async () => {
+    const persistence = new FakePersistence();
+    const planner = service(persistence);
+    const initial = await planner.generate({ ...identity });
+    // 回归（比较器分裂）：信封瘦身项事实顺序与库内相反。事实顺序不是
+    // 用户可编辑语义——校验层（samePredicateFacts）放行的回传，变更判定
+    // 层必须同样判「未变更」，不得误置 userEdited 并把 approval 重置回 draft。
+    const reordered = initial.items.map((item, index) => ({
+      ...(({ titleRationale: _r, titleCandidates: _c, ...rest }) => rest)(item),
+      plannedFacts: [...item.plannedFacts].reverse().map((fact) => ({
+        predicate: fact.predicate,
+      })),
+      approvalStatus: index === 0 ? ("approved" as const) : item.approvalStatus,
+    }));
+    const saved = await planner.saveItems({
+      ...identity,
+      planId: initial.id,
+      expectedRevision: 0,
+      items: reordered,
+    });
+    expect(saved.plan.items[0]!.approvalStatus).toBe("approved");
+    expect(saved.plan.items.every((item) => !item.userEdited)).toBe(true);
+  });
+
+  it("rejects slim items whose fact predicates diverge from the stored item", async () => {
+    const persistence = new FakePersistence();
+    const planner = service(persistence);
+    const initial = await planner.generate({ ...identity });
+    const tampered = initial.items.map((item, index) =>
+      index === 0
+        ? {
+          ...(({ titleRationale: _r, titleCandidates: _c, ...rest }) => rest)(item),
+          // 瘦身项伪造事实集（换掉一个 predicate）必须被拒：事实不可编辑。
+          plannedFacts: [
+            ...item.plannedFacts.slice(1).map((fact) => ({ predicate: fact.predicate })),
+            { predicate: "enterprise-profile.tampered" },
+          ],
+        }
+        : item,
+    );
+    await expect(
+      planner.saveItems({
+        ...identity,
+        planId: initial.id,
+        expectedRevision: 0,
+        items: tampered,
+      }),
+    ).rejects.toThrow("topic_plan_item_invalid");
   });
 });
 

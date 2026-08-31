@@ -16,16 +16,26 @@ export interface XiaojingMessageSendResult {
   error?: string;
 }
 
+export interface XiaojingMessageSendOptions {
+  /** 提醒正文（隐藏 reminder）。 */
+  text: string;
+  images?: ImagePayload[];
+  sessionFiles?: string[];
+  /** 请求级账号 token（admission 单飞轮换后的新鲜值）。 */
+  requestAccountToken?: string;
+}
+
 export async function sendXiaojingMessage(
-  text: string,
-  images: ImagePayload[] | undefined,
-  _workspacePath: string,
-  sessionFiles?: string[],
-  requestAccountToken?: string,
+  options: XiaojingMessageSendOptions,
 ): Promise<XiaojingMessageSendResult> {
   let result: Awaited<ReturnType<typeof enqueueUserMessage>>;
   try {
-    result = await enqueueUserMessage(text, images, sessionFiles, requestAccountToken);
+    result = await enqueueUserMessage(
+      options.text,
+      options.images,
+      options.sessionFiles,
+      options.requestAccountToken,
+    );
   } catch (error) {
     // 已提交的业务决策不受影响；投递失败以结构化结果返回（GD-8④）。
     return {

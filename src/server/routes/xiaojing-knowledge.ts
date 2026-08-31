@@ -27,7 +27,7 @@ import {
 } from '../geo/provider-runtime';
 import { jsonResponse } from '../utils/http';
 import { sendXiaojingMessage } from '../xiaojing-reminder-send';
-import { getRuntimeSessionIdForRequest, type XiaojingRouteContext } from './xiaojing-shared';
+import { getRuntimeSessionIdForRequest, requestAccountAccessToken, type XiaojingRouteContext } from './xiaojing-shared';
 
 type MaterialIdentity = { workspaceId: string; sessionId: string };
 
@@ -155,14 +155,17 @@ export async function handleXiaojingKnowledgeRoute(
       // respond naturally without a fabricated visible user message.
       // Notification admission is best-effort and cannot roll back or
       // obscure the authoritative knowledge result.
-      const notification = await sendXiaojingMessage(buildKnowledgeDecisionReminder({
+      const notification = await sendXiaojingMessage({
+        text: buildKnowledgeDecisionReminder({
           candidateId: payload.candidateId,
           decision: payload.decision,
           status: result.status,
           factKey: result.factKey,
           currentVersion: result.current?.version,
           brandKnowledgeVersion: result.knowledgeVersion,
-        }), undefined, workspacePath);
+        }),
+        requestAccountToken: requestAccountAccessToken(request),
+      });
       await recordGeoOperationMilestone(
         { workspaceId, sessionId: runtimeSessionId },
         'knowledge-confirmed',
@@ -240,7 +243,10 @@ export async function handleXiaojingKnowledgeRoute(
         }
       }
       const notification = reminders.length > 0
-        ? await sendXiaojingMessage(buildKnowledgeBatchDecisionReminder(reminders), undefined, workspacePath)
+        ? await sendXiaojingMessage({
+          text: buildKnowledgeBatchDecisionReminder(reminders),
+          requestAccountToken: requestAccountAccessToken(request),
+        })
         : { success: true };
       if (reminders.some((reminder) => reminder.decision !== 'reject')) {
         await recordGeoOperationMilestone(

@@ -5,7 +5,7 @@ import { loadLatestTopicPlan } from "@/api/topicPlanClient";
 import { useTabApi, useTabState } from "@/context/TabContext";
 import { isPendingSessionId } from "../../../shared/constants";
 import {
-  type TopicPlanProjection,
+  type TopicPlanCardProjection,
 } from "../../../shared/geo/topicPlan";
 import { CONTENT_TYPE_LABELS } from "./contentTypeLabels";
 
@@ -25,7 +25,7 @@ export default memo(function XiaojingTopicPlanPanel({
 }: XiaojingTopicPlanPanelProps) {
   const { apiPost } = useTabApi();
   const { sessionId } = useTabState();
-  const [plan, setPlan] = useState<TopicPlanProjection | null>(null);
+  const [plan, setPlan] = useState<TopicPlanCardProjection | null>(null);
   const [error, setError] = useState<string | null>(null);
   const hasRealSession = Boolean(sessionId && !isPendingSessionId(sessionId));
 

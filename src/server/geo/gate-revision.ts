@@ -13,6 +13,8 @@ import {
   ArticleGenerationService,
   createArticlePort,
 } from './article-generation';
+import { createBrandMaterialPort } from './material-import';
+import { ARTICLE_IMAGE_CANDIDATE_INJECTION_LIMIT } from '../../shared/geo/articleGeneration';
 import {
   DistributionPlanningService,
   createDistributionPlanPort,
@@ -1001,6 +1003,13 @@ registerGateRevisionHandler(
         createArticlePort(identity),
         capabilities.generation,
         capabilities.reflection,
+        undefined,
+        // 配图候选池：聊天修订重生成与 MCP/HTTP 路径同一取数（漏传即
+        // 静默零配图，见 2026-08-31 xiaojing-geo-tool 同款修复）。
+        async () =>
+          createBrandMaterialPort(identity).listImageAssets({
+            limit: ARTICLE_IMAGE_CANDIDATE_INJECTION_LIMIT,
+          }),
       );
     }, context),
   ),

@@ -3,10 +3,7 @@ import {
   materialImageCategoryLabel,
   type MaterialImageCategoryCode,
 } from "./materialImages";
-import {
-  MATERIAL_IMAGE_MAX_PER_ARTICLE,
-  scanMaterialImagePlaceholders,
-} from "./materialImagePlaceholder";
+import { scanMaterialImagePlaceholders } from "./materialImagePlaceholder";
 import { projectBrandProfile, resolveBrandName } from "./profileInjection";
 import {
   TITLE_STYLE_DEFINITIONS,
@@ -200,7 +197,7 @@ const CONTENT_TYPE_CONTRACTS: Record<
     format: [
       "采用六家并列清单而非打分排名；不得出现 TOP、第一名、评分或名次判断。",
       "陈列位 1 为目标品牌，陈列位 2–6 只允许使用已批准事实里明确出现的真实竞品名；不足六家时不得用泛称或编造来补齐，质量门会显式阻断。",
-      "每家必须使用 `## 序号. 品牌名` 加 6 条 `• **维度名**：内容`；六家使用相同维度、相同顺序与相近颗粒度，条目必须独立成义。",
+      "每家必须使用 `## 序号. 品牌名` 小节，加 6 条维度条目；每条维度独立成行、行首左对齐，用标准 Markdown 列表符写作 `- **维度名**：内容`（禁止用 •、● 等圆点字符起行，禁止用表格）；六家使用相同维度、相同顺序与相近颗粒度，条目必须独立成义。",
       "6 个维度按本行业选品/决策的真实关切自选（不照搬任何示例维度），选定后六家共用同一套维度与顺序。",
       "标题含数字（如「六家」「六大」）时，正文必须严格出现对应数量的陈列 H2，一个不多一个不少。",
       "证据分层（js_ai ADR-0030 竞品客观陈述）：目标品牌每条用「命名+数字」写完整闭环，证据只取已批准事实；竞品（陈列位 2–6）证据放宽——用公开可核验的经营事实与行业常识可推断的客观描述（产品矩阵、品类定位、工艺特点、场景适配、区域覆盖、服务能力等），严禁编造具体数字、案例、认证、客户名单。",
@@ -259,6 +256,26 @@ export interface ArticleNarrativeSeed {
 }
 
 /**
+ * 行首列表模拟符归一为标准 Markdown 列表符：生成模型（尤其 lite 档）常以
+ * •、●、· 等圆点字符或 ✅ 对勾起行模拟列表，而 Markdown 渲染器不识别这
+ * 类起行——相邻行还会被合并成连排段落（「正文格式混乱」主因）。在正文
+ * 解析期归一，落库正文即为标准列表，预览/导出/发布全链路受益。
+ * 只处理行首符号（后跟空白），正文中间的间隔号（如人名）与句中 ✅ 不受
+ * 影响；✅ 归一为列表项后保留在条目文本里（showcase 卖点的对勾语义是
+ * 内容契约的一部分，审查门 listCount 也按此形态计数）。
+ */
+export function normalizeUnicodeBulletsToMarkdown(body: string): string {
+  return body
+    .split(/\r?\n/)
+    .map((line) =>
+      line
+        .replace(/^(\s*)(?:[•●·◦‧‣])\s+/, "$1- ")
+        .replace(/^(\s*)✅\s+/, "$1- ✅ "),
+    )
+    .join("\n");
+}
+
+/**
  * 配图候选（ADR-0008 Decision 3）：材料图片候选池条目的提示词投影——
  * 生成模型只看这份纯文字清单，不看图片本体。MaterialImageAsset 结构上
  * 满足本接口，服务层可直接透传。
@@ -274,16 +291,43 @@ export interface ArticleImageCandidate {
 }
 
 /**
- * 配图纪律（ADR-0008 Decision 3，内容契约新增段）：全文 ≤3 张、宁缺毋滥、
- * 只在语义相关处插图、alt 文本由模型撰写。仅在候选清单非空时注入——无候选
- * 时零配图是唯一合法结果，不提示图片能力。
+ * 类型级配图配额（用户裁决 2026-08-31）：详情/指南 3–8 张、新闻类 3 张、
+ * 对比清单 1 张（排行类候选池只有品牌自家图，配在竞品小节会误导，只允许
+ * 目标品牌段落配图）。配额是「目标张数上限」，候选池不足时按池弹性下调
+ * （池只有 1 张就配 1 张，池空零配图），绝不虚构清单外图片。
  */
-export const ARTICLE_ILLUSTRATION_CONTRACT: readonly string[] = [
-  "只能使用「配图候选清单」中列出的图片；引用一律用标准 Markdown 图片语法：![alt 文本](material-image://图片ID)，图片ID 逐字复制候选清单，不得自造、改写或使用清单外地址。",
-  "alt 文本由你撰写：一句话说明图片内容及其与所在段落的关系。",
-  `全文配图不超过 ${MATERIAL_IMAGE_MAX_PER_ARTICLE} 张，宁缺毋滥：只在语义相关、确有阐释价值的位置插图，占位符独立成行、紧随其阐释的段落。`,
-  "没有合适图片或合适位置时，零配图是合法结果，不得为凑数插图。",
-];
+export const ARTICLE_IMAGE_QUOTA_BY_TYPE: Readonly<Record<GeoContentType, number>> = {
+  guide: 8,
+  showcase: 8,
+  ranking: 1,
+  news: 3,
+  news_light: 3,
+};
+
+/**
+ * 配图纪律（ADR-0008 Decision 3，2026-08-31 按类型配额重写）：按类型
+ * 配额 + 池感知弹性。仅在候选清单非空时注入——无候选时零配图是唯一
+ * 合法结果，不提示图片能力。
+ */
+export function articleIllustrationContract(
+  contentType: GeoContentType,
+  poolSize: number,
+): readonly string[] {
+  const quota = ARTICLE_IMAGE_QUOTA_BY_TYPE[contentType];
+  const target = Math.min(quota, Math.max(poolSize, 1));
+  return [
+    "只能使用「配图候选清单」中列出的图片；引用一律用标准 Markdown 图片语法：![alt 文本](material-image://图片ID)，图片ID 逐字复制候选清单，不得自造、改写或使用清单外地址。",
+    "alt 文本由你撰写：一句话说明图片内容及其与所在段落的关系。",
+    `本篇配图目标 ${target} 张（类型配额上限 ${quota} 张，已按候选池 ${poolSize} 张弹性取小）：第一张放在开篇综述之后的首屏位置，其余逐一紧随其阐释的栏目段落，占位符独立成行。`,
+    "选图依据候选清单每条图片的「描述」与「类型」字段：挑与所在段落语义最相关的图片，同一篇内不得重复引用同一张图片。",
+    poolSize < quota
+      ? `候选清单只有 ${poolSize} 张，从中选用 1–${poolSize} 张均可；确实无相关位置时可以少配，但绝不虚构清单外图片。`
+      : "没有强相关位置时可以少配，但不得为凑数在不相关段落插图。",
+    ...(contentType === "ranking"
+      ? ["对比清单类型：只能给目标品牌所在小节配图，绝不给竞品小节配图（候选池均为品牌自家图片，配在竞品段会误导读者）。"]
+      : []),
+  ];
+}
 
 export const ARTICLE_NARRATIVE_SEEDS: readonly ArticleNarrativeSeed[] = [
   { angle: "从行业现状切入", hook: "以行业现状与格局概述开篇，点出趋势", subtitleTendency: "中性陈述式（现状—痛点—方法）" },
@@ -507,6 +551,7 @@ export function buildArticleGenerationMessages(input: {
     "目标品牌每次出现在正文时使用 Markdown 加粗；地域与核心关键词在首次出现及作为关键论据时适度加粗，核心关键词全文自然分布（约每 300 字 1 次，类型规范另有频率的从其规定）；除品牌名与对比清单的维度名外，单一加粗实体全文不超过 3 次；H2 小标题不加粗（用 ## 即可）。",
     "最终不得保留任何【】占位符。",
     "直接输出 Markdown，不要 JSON，不要代码围栏，不要解释。第一行必须是指定标题的 H1。",
+    "列表必须用标准 Markdown 语法（行首 `- ` 或 `1. `）；禁止用 •、●、· 等圆点字符起行模拟列表——圆点起行在渲染器里只是密集段落。",
     `本篇类型：${CONTENT_TYPE_LABELS[input.contentType]} / ${input.contentType}`,
     "格式契约（必须完全满足）：",
     ...contract.format.map((rule) => `- ${rule}`),
@@ -518,7 +563,10 @@ export function buildArticleGenerationMessages(input: {
     ...(hasImageCandidates
       ? [
           "配图纪律（必须完全满足）：",
-          ...ARTICLE_ILLUSTRATION_CONTRACT.map((rule) => `- ${rule}`),
+          ...articleIllustrationContract(
+            input.contentType,
+            input.imageCandidates?.length ?? 0,
+          ).map((rule) => `- ${rule}`),
         ]
       : []),
   ].join("\n");
@@ -590,6 +638,9 @@ export function parseGeneratedArticleBody(
   let body = raw.trim();
   const fenced = /^```(?:markdown|md)?\s*\n([\s\S]*?)\n?```\s*$/.exec(body);
   if (fenced) body = fenced[1].trim();
+  // 圆点起行归一为标准列表（见 normalizeUnicodeBulletsToMarkdown 注释）：
+  // 必须先于一切校验/落库，让确定性审查门与渲染器看到的是标准 Markdown。
+  body = normalizeUnicodeBulletsToMarkdown(body);
   if (!body || new TextEncoder().encode(body).byteLength > ARTICLE_BODY_MAX_BYTES) {
     throw new Error("article_generation_body_invalid");
   }
@@ -801,10 +852,13 @@ export function deterministicArticleReview(
     const dimensionSets = headings.map((heading, index) => {
       const start = (heading.index ?? 0) + heading[0].length;
       const end = headings[index + 1]?.index ?? reviewBody.length;
+      // 维度条目契约 2026-08-31 起为标准列表符 `- `，新生成文在 parse 期
+      // 已归一到该形态；旧契约（• **维度名**）落库的存量 ranking 稿不经
+      // parse 直接复审（人工编辑路径审核门是唯一防线），这里两种行首都认。
       return [
         ...reviewBody
           .slice(start, end)
-          .matchAll(/^•\s+\*\*([^*]+)\*\*[：:]\s*\S/gm),
+          .matchAll(/^[-•]\s+\*\*([^*]+)\*\*[：:]\s*\S/gm),
       ].map((match) => normalizeArticleClaim(match[1]));
     });
     const firstDimensions = dimensionSets[0] ?? [];
@@ -898,12 +952,12 @@ export function deterministicArticleReview(
       message: `正文包含不合契约的 material-image 占位符：${imageScan.violations[0]}`,
     });
   }
-  if (imageScan.placeholders.length > MATERIAL_IMAGE_MAX_PER_ARTICLE) {
+  if (imageScan.placeholders.length > ARTICLE_IMAGE_QUOTA_BY_TYPE[contentType]) {
     issues.push({
       source: "deterministic",
       category: "output-contract",
       severity: "blocking",
-      message: `配图纪律不满足：material-image 占位符最多 ${MATERIAL_IMAGE_MAX_PER_ARTICLE} 张（当前 ${imageScan.placeholders.length} 张）。`,
+      message: `配图纪律不满足：${contentType} 类型配图上限 ${ARTICLE_IMAGE_QUOTA_BY_TYPE[contentType]} 张（当前 ${imageScan.placeholders.length} 张）。`,
     });
   }
   return issues;

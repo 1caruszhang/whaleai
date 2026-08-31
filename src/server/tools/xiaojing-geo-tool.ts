@@ -19,6 +19,7 @@ import {
   QuestionPoolService,
 } from '../geo/question-pool';
 import { createTopicPlanPort, TopicPlanService } from '../geo/topic-plan';
+import { toTopicPlanCardProjection } from '../../shared/geo/topicPlan';
 import type { TopicPlanProjection } from '../../shared/geo/topicPlan';
 import {
   createArticlePort,
@@ -46,6 +47,7 @@ import {
   type GeoProbeSamplesReport,
 } from '../geo/probe-samples';
 import {
+  ARTICLE_IMAGE_CANDIDATE_INJECTION_LIMIT,
   filterValidRankingCompetitors,
   type ArticleOperationProjection,
   type ArticleOperationSource,
@@ -454,6 +456,13 @@ function articleService(): ArticleGenerationService {
     capabilities.generation,
     capabilities.reflection,
     getXiaojingGeoBillingPermitChannelForRequest(context.requestAccountToken),
+    // 配图候选池（ADR-0008 T4）：与 xiaojing-shared 的 HTTP 路由同一取数。
+    // 2026-08-31 线上事故：本构造点漏传池，Agent 经 MCP 的批量生成与
+    // 重生成全部静默零配图（HTTP 重试路径有池、有图——两路径行为分裂）。
+    async () =>
+      createBrandMaterialPort(identity).listImageAssets({
+        limit: ARTICLE_IMAGE_CANDIDATE_INJECTION_LIMIT,
+      }),
   );
   articleRuntime = { key, service };
   return service;
@@ -1523,8 +1532,12 @@ export async function createXiaojingGeoServer() {
             ...(input.questionPoolId ? { questionPoolId: input.questionPoolId } : {}),
           });
           await recordGeoOperationMilestone(identity, 'topic-plan-generated');
+          // 信封必须走卡片瘦身投影：完整投影曾达 ~81KB，超过 MCP 工具结果
+          // 上限被 MCP 宿主客户端持久化成文件，tool.result 变存根、确认卡
+          // 随之不渲染。瘦身后同级计划 ~29KB；plannedFacts 全量值以 SQLite
+          // 为权威（saveItems 合并时服务端回填）。
           return {
-            content: [{ type: 'text' as const, text: JSON.stringify({ kind: 'topic-plan', plan }) }],
+            content: [{ type: 'text' as const, text: JSON.stringify({ kind: 'topic-plan', plan: toTopicPlanCardProjection(plan) }) }],
           };
         },
         { alwaysLoad: true },

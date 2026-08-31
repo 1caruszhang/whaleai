@@ -2,7 +2,8 @@ import { basename, resolve } from 'node:path';
 
 import type { ArticleOperationSource } from '../../shared/geo/articleGeneration';
 import type { DistributionPlanEditInput, DistributionPlanStartInput } from '../../shared/geo/distributionPlan';
-import type { TopicPlanItem } from '../../shared/geo/topicPlan';
+import type { TopicPlanWireItem } from '../../shared/geo/topicPlan';
+import { toTopicPlanCardProjection } from '../../shared/geo/topicPlan';
 import { buildArticleApprovalDecisionReminder, buildDistributionPlanDecisionReminder, buildTopicPlanDecisionReminder } from '../../shared/systemReminder';
 import { recordGeoOperationMilestone } from '../geo/operation-progress';
 import { jsonResponse } from '../utils/http';
@@ -12,6 +13,7 @@ import {
   getXiaojingArticleService,
   getXiaojingDistributionPlanService,
   getXiaojingTopicPlanService,
+  requestAccountAccessToken,
   type XiaojingRouteContext,
 } from './xiaojing-shared';
 
@@ -50,7 +52,12 @@ export async function handleXiaojingContentPipelineRoute(
         workspaceId,
         sessionId: runtimeSessionId,
       }).latest({ ...payload, workspaceId, sessionId: runtimeSessionId });
-      return jsonResponse({ success: true, plan });
+      // 轮询响应走卡片瘦身投影：完整投影 ~84KB × 每 3s 一次太浪费；
+      // 两个消费方（确认卡轮询、工作台面板）都只读瘦身字段。
+      return jsonResponse({
+        success: true,
+        plan: plan ? toTopicPlanCardProjection(plan) : null,
+      });
     } catch (error) {
       return jsonResponse(
         {
@@ -109,7 +116,7 @@ export async function handleXiaojingContentPipelineRoute(
         sessionId: string;
         planId: string;
         expectedRevision: number;
-        items: TopicPlanItem[];
+        items: TopicPlanWireItem[];
       };
       const runtimeSessionId = getRuntimeSessionIdForRequest();
       const workspaceId = basename(resolve(workspacePath));
@@ -209,7 +216,8 @@ export async function handleXiaojingContentPipelineRoute(
         ...payload,
         ...identity,
       });
-      const notification = await sendXiaojingMessage(buildTopicPlanDecisionReminder({
+      const notification = await sendXiaojingMessage({
+        text: buildTopicPlanDecisionReminder({
           planId: confirmation.planId,
           decisionId: confirmation.decisionId,
           revision: confirmation.revision,
@@ -217,7 +225,9 @@ export async function handleXiaojingContentPipelineRoute(
           questionPoolId: confirmation.questionPoolId,
           questionPoolRevision: confirmation.questionPoolRevision,
           knowledgeVersion: confirmation.knowledgeVersion,
-        }), undefined, workspacePath);
+        }),
+        requestAccountToken: requestAccountAccessToken(request),
+      });
       await recordGeoOperationMilestone(identity, 'topic-plan-confirmed');
       return jsonResponse({
         success: true,
@@ -379,7 +389,9 @@ export async function handleXiaojingContentPipelineRoute(
         );
       }
       const identity = { workspaceId, sessionId: runtimeSessionId };
-      const article = await getXiaojingArticleService(identity).retry({
+      // fire-and-forget：单篇重生成可达 1–2 分钟，同步等待会撞 Rust 代理
+      // ~100s 超时；卡片每 3s 轮询 /articles/latest 自行追上状态。
+      const article = await getXiaojingArticleService(identity).retryStart({
         ...payload,
         ...identity,
       });
@@ -507,14 +519,17 @@ export async function handleXiaojingContentPipelineRoute(
       // The review decision is durably committed. Wake the Agent with a
       // hidden receipt so it continues into distribution planning; delivery
       // is best-effort and cannot roll back or obscure the decision.
-      const notification = await sendXiaojingMessage(buildArticleApprovalDecisionReminder({
+      const notification = await sendXiaojingMessage({
+        text: buildArticleApprovalDecisionReminder({
           operationId: article.operationId,
           articleId: article.id,
           status: article.status,
           revision: article.revision,
           approvedRevision: article.approvedRevision,
           knowledgeVersion: article.knowledgeVersion,
-        }), undefined, workspacePath);
+        }),
+        requestAccountToken: requestAccountAccessToken(request),
+      });
       await recordGeoOperationMilestone(identity, 'articles-approved');
       return jsonResponse({
         success: true,
@@ -725,14 +740,17 @@ export async function handleXiaojingContentPipelineRoute(
       // The confirmation is durably committed. Wake the Agent with a hidden
       // receipt so it continues into publish preparation; delivery is
       // best-effort and cannot roll back or obscure the decision.
-      const notification = await sendXiaojingMessage(buildDistributionPlanDecisionReminder({
+      const notification = await sendXiaojingMessage({
+        text: buildDistributionPlanDecisionReminder({
           planId: plan.id,
           operationId: plan.operationId,
           articleOperationId: plan.articleOperationId,
           status: plan.status,
           revision: plan.revision,
           assignmentCount: plan.assignments.length,
-        }), undefined, workspacePath);
+        }),
+        requestAccountToken: requestAccountAccessToken(request),
+      });
       await recordGeoOperationMilestone(identity, 'distribution-confirmed');
       return jsonResponse({
         success: true,

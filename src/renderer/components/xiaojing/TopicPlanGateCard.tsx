@@ -9,6 +9,7 @@ import {
 import { useTabApi, useTabState } from "@/context/TabContext";
 import { isPendingSessionId } from "../../../shared/constants";
 import type {
+  TopicPlanCardProjection,
   TopicPlanItem,
   TopicPlanProjection,
 } from "../../../shared/geo/topicPlan";
@@ -28,7 +29,10 @@ import { useGateCardRefresh } from "./useGateCardRefresh";
  */
 export interface TopicPlanGateCardData {
   kind: "topic-plan";
-  plan: TopicPlanProjection;
+  /** plan_topics 信封携带瘦身投影（审计字段与事实详情已剔除，防超限
+   * 被 MCP 宿主客户端持久化成文件导致卡片不渲染）；/latest 轮询返回的
+   * 完整投影结构兼容（字段只多不少）。 */
+  plan: TopicPlanCardProjection;
 }
 
 function isPlan(value: unknown): value is TopicPlanProjection {
@@ -94,7 +98,7 @@ export default function TopicPlanGateCard({
 }) {
   const { apiPost } = useTabApi();
   const { sessionId } = useTabState();
-  const [plan, setPlan] = useState<TopicPlanProjection>(data.plan);
+  const [plan, setPlan] = useState<TopicPlanCardProjection>(data.plan);
   const topicNames = useMemo(
     () => new Map(plan.topics.map((topic) => [topic.id, topic.name])),
     [plan.topics],
@@ -125,7 +129,7 @@ export default function TopicPlanGateCard({
     [data.plan.items],
   );
   const mergeRefreshed = useCallback(
-    (latest: TopicPlanProjection) => {
+    (latest: TopicPlanCardProjection) => {
       setPlan(latest);
       if (latest.status === "confirmed") setConfirmed(true);
       setApprovedIds((current) => {
@@ -143,7 +147,7 @@ export default function TopicPlanGateCard({
     },
     [initialFingerprints],
   );
-  useGateCardRefresh<TopicPlanProjection>({
+  useGateCardRefresh<TopicPlanCardProjection>({
     enabled: !confirmed && hasRealSession,
     projectionId: data.plan.id,
     initialFingerprint: String(data.plan.revision),

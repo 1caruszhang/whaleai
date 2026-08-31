@@ -25,11 +25,9 @@ describe('sendXiaojingMessage — reminder delivery never throws (GD-8④)', () 
 
   it('maps an enqueue throw to a structured failure result', async () => {
     enqueueUserMessage.mockRejectedValueOnce(new Error('transient enqueue crash'));
-    const result: XiaojingMessageSendResult = await sendXiaojingMessage(
-      'XIAOJING_KNOWLEDGE_DECISION …',
-      undefined,
-      '/tmp/workspace',
-    );
+    const result: XiaojingMessageSendResult = await sendXiaojingMessage({
+      text: 'XIAOJING_KNOWLEDGE_DECISION …',
+    });
     expect(result.success).toBe(false);
     expect(result.error).toContain('transient enqueue crash');
     expect(result.status).toBe(500);
@@ -40,7 +38,7 @@ describe('sendXiaojingMessage — reminder delivery never throws (GD-8④)', () 
       accepted: false,
       error: 'agent busy',
     } as Awaited<ReturnType<typeof enqueueUserMessage>>);
-    const result = await sendXiaojingMessage('reminder', undefined, '/tmp/workspace');
+    const result = await sendXiaojingMessage({ text: 'reminder' });
     expect(result.success).toBe(false);
     expect(result.error).toBe('agent busy');
     expect(result.status).toBe(429);
@@ -50,9 +48,10 @@ describe('sendXiaojingMessage — reminder delivery never throws (GD-8④)', () 
     enqueueUserMessage.mockResolvedValueOnce({
       accepted: true,
     } as Awaited<ReturnType<typeof enqueueUserMessage>>);
-    const result = await sendXiaojingMessage('reminder', undefined, '/tmp/workspace', [
-      'xiaojing_files/s/a.md',
-    ]);
+    const result = await sendXiaojingMessage({
+      text: 'reminder',
+      sessionFiles: ['xiaojing_files/s/a.md'],
+    });
     expect(result).toEqual({ success: true });
     expect(enqueueUserMessage).toHaveBeenCalledWith('reminder', undefined, [
       'xiaojing_files/s/a.md',
@@ -63,13 +62,10 @@ describe('sendXiaojingMessage — reminder delivery never throws (GD-8④)', () 
     enqueueUserMessage.mockResolvedValueOnce({
       accepted: true,
     } as Awaited<ReturnType<typeof enqueueUserMessage>>);
-    const result = await sendXiaojingMessage(
-      'reminder',
-      undefined,
-      '/tmp/workspace',
-      undefined,
-      'jwt-fresh-2',
-    );
+    const result = await sendXiaojingMessage({
+      text: 'reminder',
+      requestAccountToken: 'jwt-fresh-2',
+    });
     expect(result).toEqual({ success: true });
     expect(enqueueUserMessage).toHaveBeenCalledWith(
       'reminder',

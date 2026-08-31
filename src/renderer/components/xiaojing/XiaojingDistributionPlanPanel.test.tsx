@@ -545,16 +545,18 @@ describe("XiaojingDistributionPlanPanel read-only projection", () => {
     // 同家族折叠：同路径的两枚候选合并为一枚 ×2 chip。
     const folded = within(panel).getAllByText(/汽车产业观察 ×2/);
     expect(folded.length).toBeGreaterThanOrEqual(1);
-    // 被动对齐行：同名变体与价格区间随行。
+    // 被动对齐行：同名变体与点数区间随行（¥4-9 → 64-144 点，复盘区不出现 ¥）。
     expect(within(panel).getByText(/同名变体 ×2/)).toBeInTheDocument();
-    expect(within(panel).getAllByText(/¥4-9/).length).toBeGreaterThanOrEqual(1);
-    // 偏好命中清单（配额前）：命中行带代表名+价格（未进推荐 → 无 ✓），
+    expect(
+      within(panel).getAllByText(/64-144 点/).length,
+    ).toBeGreaterThanOrEqual(1);
+    // 偏好命中清单（配额前）：命中行带代表名+点数（¥4 → 64 点；未进推荐 → 无 ✓），
     // 未命中行如实显示「价内资源池未见同名渠道」。
     expect(
       within(panel).getAllByText(/列举网（AI包收录）/).length,
     ).toBeGreaterThanOrEqual(1);
     expect(
-      within(panel).getAllByText(/¥4/).length,
+      within(panel).getAllByText(/64 点/).length,
     ).toBeGreaterThanOrEqual(1);
     // 未命中行的说明在 chip title（价内资源池未见同名渠道），行本体灰显。
     expect(

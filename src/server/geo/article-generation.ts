@@ -328,16 +328,28 @@ export class ArticleGenerationService {
 
   /**
    * 候选清单加载（ADR-0008）：池不可用降级为空清单（零配图路径），并按
-   * 注入上限截断保护正文 token 预算。
+   * 注入上限截断保护正文 token 预算。降级必须留痕（console.log 经
+   * initLogger 进统一日志）——2026-08-31 线上零配图排查发现静默降级
+   * 让池子故障与模型不选图不可区分。
    */
   private async loadImageCandidates(): Promise<readonly ArticleImageCandidate[]> {
-    if (!this.imageCandidates) return [];
+    if (!this.imageCandidates) {
+      console.log("[article-images] pool loader absent (service built without imageCandidates)");
+      return [];
+    }
     try {
-      return (await this.imageCandidates()).slice(
+      const candidates = (await this.imageCandidates()).slice(
         0,
         ARTICLE_IMAGE_CANDIDATE_INJECTION_LIMIT,
       );
-    } catch {
+      console.log(`[article-images] pool loaded: ${candidates.length} candidate(s)`);
+      return candidates;
+    } catch (error) {
+      console.log(
+        `[article-images] pool failed, degrading to zero-image: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
       return [];
     }
   }
@@ -638,6 +650,48 @@ export class ArticleGenerationService {
     // 重试也发一颗种子（重洗单张），保持批次内表达多样性。
     const [retrySeed] = dealNarrativeSeeds(1);
     return this.generateOne(article, "regenerate", retrySeed);
+  }
+
+  /** 单篇重试在途守卫：articleId → 进行中的重生成 promise。 */
+  private readonly retryInFlight = new Map<string, Promise<ArticleProjection>>();
+
+  /**
+   * HTTP retry 路由入口：校验后异步踢出重生成并立即返回当前投影。
+   * 路由曾同步 await generateOne（单篇 LLM 全程可达 1–2 分钟），先撞
+   * Rust 代理 ~100s 超时（用户看到 "error sending request for url"），
+   * 等待期重复点击又会撞网关计费并发上限。卡片本就每 3s 轮询
+   * /articles/latest，drafting → draft_ready/generation_failed 状态由
+   * 轮询自行追上，路由无需同步等完成。
+   */
+  async retryStart(input: {
+    workspaceId: string;
+    sessionId: string;
+    operationId: string;
+    articleId: string;
+    expectedRevision: number;
+  }): Promise<ArticleProjection> {
+    this.assertIdentity(input);
+    const article = await this.persistence.get(
+      input.operationId,
+      input.articleId,
+    );
+    if (article.revision !== input.expectedRevision) {
+      throw new Error("article_generation_revision_conflict");
+    }
+    if (this.retryInFlight.has(article.id)) {
+      throw new Error("article_retry_in_progress");
+    }
+    const [retrySeed] = dealNarrativeSeeds(1);
+    // generateOne 自身把失败持久化为 generation_failed；这里的兜底 catch
+    // 只防 claim 前的意外异常逃逸成 unhandled rejection。
+    const completion = this.generateOne(article, "regenerate", retrySeed)
+      .catch(() => article);
+    this.retryInFlight.set(article.id, completion);
+    completion.then(
+      () => this.retryInFlight.delete(article.id),
+      () => this.retryInFlight.delete(article.id),
+    );
+    return article;
   }
 
   body(input: {

@@ -6,6 +6,7 @@ import { jsonResponse } from '../utils/http';
 import {
   getRuntimeSessionIdForRequest,
   notifyGeoOperationWorkbenchEvent,
+  requestAccountAccessToken,
   type XiaojingRouteContext,
 } from './xiaojing-shared';
 
@@ -101,10 +102,10 @@ export async function handleXiaojingGeoOperationsRoute(
         action: payload.action,
       });
       const notification = await notifyGeoOperationWorkbenchEvent(
-        workspacePath,
         runtimeSessionId,
         operation,
         payload.action,
+        requestAccountAccessToken(request),
       );
       return jsonResponse({
         success: true,
@@ -156,10 +157,10 @@ export async function handleXiaojingGeoOperationsRoute(
         ? 'next-round-update-knowledge'
         : 'next-round-keep-knowledge';
       const notification = await notifyGeoOperationWorkbenchEvent(
-        workspacePath,
         runtimeSessionId,
         operation,
         action,
+        requestAccountAccessToken(request),
       );
       return jsonResponse({
         success: true,
@@ -204,10 +205,10 @@ export async function handleXiaojingGeoOperationsRoute(
         artifactRefs: payload.artifactRefs,
       });
       const notification = await notifyGeoOperationWorkbenchEvent(
-        workspacePath,
         runtimeSessionId,
         operation,
         `confirm-step:${payload.stepId}`,
+        requestAccountAccessToken(request),
       );
       return jsonResponse({
         success: true,

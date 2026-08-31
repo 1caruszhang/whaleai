@@ -169,13 +169,12 @@ async function main(): Promise<void> {
       if (payload?.sessionId && payload.sessionId !== getSessionId()) {
         return jsonResponse({ success: false, error: 'session_identity_mismatch' }, 409);
       }
-      const result = await sendXiaojingMessage(
+      const result = await sendXiaojingMessage({
         text,
         images,
-        workspacePath,
         sessionFiles,
-        requestAccountAccessToken(request),
-      );
+        requestAccountToken: requestAccountAccessToken(request),
+      });
       return jsonResponse(result, result.success ? 200 : (result.status ?? 500));
     }
 

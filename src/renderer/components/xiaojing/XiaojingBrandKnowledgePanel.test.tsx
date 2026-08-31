@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import XiaojingBrandKnowledgePanel from './XiaojingBrandKnowledgePanel';
@@ -69,7 +69,9 @@ describe('XiaojingBrandKnowledgePanel', () => {
     expect(mocks.load).toHaveBeenCalledWith('brand-17');
     expect(await screen.findByText('鲸跃科技 / 品牌全称')).toBeInTheDocument();
     expect(screen.getByText('鲸跃科技有限公司')).toBeInTheDocument();
-    expect(screen.getByText('技术领先、交付快')).toBeInTheDocument();
+    // 数组值逐项渲染成徽章，不再顿号连排。
+    expect(screen.getByText('技术领先')).toBeInTheDocument();
+    expect(screen.getByText('交付快')).toBeInTheDocument();
     expect(screen.getByText(/知识版本 v6/)).toBeInTheDocument();
     // 旧版本 v3 的事实不出现在当前权威面板。
     expect(screen.queryByText('旧名称')).not.toBeInTheDocument();
@@ -139,8 +141,38 @@ describe('XiaojingBrandKnowledgePanel', () => {
 
     render(<XiaojingBrandKnowledgePanel workspaceId="brand-17" />);
 
-    expect(await screen.findByText('成实外教育｜成都｜民办中学教育、为明教育｜成都｜民办中学教育')).toBeInTheDocument();
+    expect(await screen.findByText('成实外教育｜成都｜民办中学教育')).toBeInTheDocument();
+    expect(screen.getByText('为明教育｜成都｜民办中学教育')).toBeInTheDocument();
     expect(screen.queryByText(/xiaojing-competitor-details/)).not.toBeInTheDocument();
+  });
+
+  it('长数组折叠为 8 个徽章，「+N 更多」展开全量', async () => {
+    const keywords = Array.from({ length: 11 }, (_, index) => `关键词${index + 1}`);
+    mocks.load.mockResolvedValue({
+      workspaceId: 'brand-17',
+      knowledgeVersions: [{
+        version: 1,
+        actorSessionId: 'session-b',
+        createdAt: '2026-08-16T00:00:00Z',
+        facts: [{
+          factKey: factKey('鲸跃科技', 'enterprise-profile.derivedkeywords'),
+          factVersion: 1,
+          normalizedValueJson: JSON.stringify(keywords),
+          sources: [],
+        }],
+        usedBy: [],
+      }],
+      artifacts: [],
+    });
+
+    render(<XiaojingBrandKnowledgePanel workspaceId="brand-17" />);
+
+    expect(await screen.findByText('关键词8')).toBeInTheDocument();
+    expect(screen.getByText('+3 更多')).toBeInTheDocument();
+    expect(screen.queryByText('关键词9')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByText('+3 更多'));
+    expect(screen.getByText('关键词9')).toBeInTheDocument();
+    expect(screen.getByText('关键词11')).toBeInTheDocument();
   });
 
   it('refreshes when a confirmation card commits decisions', async () => {

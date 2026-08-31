@@ -10,6 +10,7 @@ import { sendXiaojingMessage } from '../xiaojing-reminder-send';
 import {
   getRuntimeSessionIdForRequest,
   getXiaojingQuestionPoolService,
+  requestAccountAccessToken,
   type XiaojingRouteContext,
 } from './xiaojing-shared';
 
@@ -93,13 +94,16 @@ export async function handleXiaojingQuestionPoolsRoute(
               expectedRevision: pool.revision,
               questions: recommended.map((question) => ({ ...question, selected: true })),
             });
-            await sendXiaojingMessage(buildQuestionPoolDecisionReminder({
-              poolId: decision.poolId,
-              decisionId: decision.decisionId,
-              revision: decision.revision,
-              selectedCount: decision.selectedQuestionIds.length,
-              knowledgeVersion: decision.knowledgeVersion,
-            }), undefined, workspacePath);
+            await sendXiaojingMessage({
+              text: buildQuestionPoolDecisionReminder({
+                poolId: decision.poolId,
+                decisionId: decision.decisionId,
+                revision: decision.revision,
+                selectedCount: decision.selectedQuestionIds.length,
+                knowledgeVersion: decision.knowledgeVersion,
+              }),
+              requestAccountToken: requestAccountAccessToken(request),
+            });
             await recordGeoOperationMilestone(identity, 'question-pool-confirmed');
             autoConfirmed = {
               decisionId: decision.decisionId,
@@ -168,13 +172,16 @@ export async function handleXiaojingQuestionPoolsRoute(
         ...payload,
         ...identity,
       });
-      const notification = await sendXiaojingMessage(buildQuestionPoolDecisionReminder({
+      const notification = await sendXiaojingMessage({
+        text: buildQuestionPoolDecisionReminder({
           poolId: decision.poolId,
           decisionId: decision.decisionId,
           revision: decision.revision,
           selectedCount: decision.selectedQuestionIds.length,
           knowledgeVersion: decision.knowledgeVersion,
-        }), undefined, workspacePath);
+        }),
+        requestAccountToken: requestAccountAccessToken(request),
+      });
       await recordGeoOperationMilestone(identity, 'question-pool-confirmed');
       return jsonResponse({
         success: true,

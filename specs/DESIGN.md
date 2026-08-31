@@ -43,7 +43,8 @@
 
 ## 视觉与可访问性
 
-- 延续现有 CSS token 和字号层级，避免为单个页面建立第二套主题系统。唯一例外（2026-08-19 拍板）：品牌级「效果」整页采用 js_ai GeoDemoDashboard 风格的 scoped 深色看板主题（`index.css` 的 `.geo-dash-scope`，`--geo-dash-*` 变量只挂在该子树，不进入全局 Theme token、不响应全局 light/dark 切换）；在聊天/工作台内复用的基线与监测面板用同名变量的回退值保持既有浅色外观。新增看板变量（如疑似负面专用的 `--geo-dash-amber`）同样只加在 `.geo-dash-scope` 作用域内，不得把深色值内联进组件；报告视图的打印浅色化只在 `@media print` 内重定义同一组变量，组件零改动。
+- 延续现有 CSS token 和字号层级，避免为单个页面建立第二套主题系统。例外一（2026-08-19 拍板）：品牌级「效果」整页采用 js_ai GeoDemoDashboard 风格的 scoped 深色看板主题（`index.css` 的 `.geo-dash-scope`，`--geo-dash-*` 变量只挂在该子树，不进入全局 Theme token、不响应全局 light/dark 切换）；在聊天/工作台内复用的基线与监测面板用同名变量的回退值保持既有浅色外观。新增看板变量（如疑似负面专用的 `--geo-dash-amber`）同样只加在 `.geo-dash-scope` 作用域内，不得把深色值内联进组件；报告视图的打印浅色化只在 `@media print` 内重定义同一组变量，组件零改动。
+- 例外二（2026-08-31 裁决 C，ADR-0008）：全屏文章预览与导出用的独立 HTML 文档（`src/renderer/components/xiaojing/articlePreviewDocument.ts` 的 `ARTICLE_PREVIEW_CSS`）自带一套固定浅色排版——该文档以 iframe srcDoc / 下载文件形态脱离应用打开，无法继承全局 Theme token，与发布模板内嵌 CSS（ADR-0008 §5）同哲学；配色只内嵌在该文档字符串内，不进入应用 UI、不新增全局或 scoped 变量。
 - 交互控件保留可见 focus 状态和键盘路径；图标按钮提供可访问名称。
 - 颜色不作为状态的唯一载体；错误、阻断和版本失效同时给出文字。
 - 窗口窄化时优先保持主任务可操作，次要详情折叠，不产生横向页面滚动。

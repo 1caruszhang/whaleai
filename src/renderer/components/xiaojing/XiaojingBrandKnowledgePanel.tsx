@@ -42,29 +42,38 @@ function parseFactKey(factKey: string): FactLabel {
   return { subject: factKey.slice(0, 80), predicate: "" };
 }
 
-function displayFactValue(fact: BrandKnowledgeHistoryFact, predicate: string): string {
+/**
+ * 数组值逐项展示（竞品经明细格式化，普通数组按项拆分）；非数组与解析
+ * 失败回落为单串。逐项徽章替代顿号长串：关键词/竞品列表动辄十几项，
+ * 连排一行既难扫读也撑破卡片。
+ */
+function factValueEntries(
+  fact: BrandKnowledgeHistoryFact,
+  predicate: string,
+): string[] | string {
   const { normalizedValueJson: raw, unit } = fact;
   try {
     const value: unknown = JSON.parse(raw);
     if (
-      canonicalEnterpriseProfileField(
+      Array.isArray(value)
+      && value.every((item): item is string => typeof item === "string")
+    ) {
+      const isCompetitors = canonicalEnterpriseProfileField(
         predicate.startsWith(PROFILE_PREDICATE_PREFIX)
           ? predicate.slice(PROFILE_PREDICATE_PREFIX.length)
           : predicate,
-      ) === 'competitors'
-      && Array.isArray(value)
-      && value.every((item): item is string => typeof item === 'string')
-    ) {
-      return formatCompetitorFactValue(
-        value,
-        fact.sources.map((source) => source.excerpt),
-      ).join('、');
+      ) === "competitors";
+      const items = isCompetitors
+        ? formatCompetitorFactValue(
+          value,
+          fact.sources.map((source) => source.excerpt),
+        )
+        : value;
+      return unit ? items.map((item) => `${item} ${unit}`) : items;
     }
     const rendered = typeof value === "string"
       ? value
-      : Array.isArray(value)
-        ? value.join("、")
-        : JSON.stringify(value);
+      : JSON.stringify(value);
     return unit ? `${rendered} ${unit}` : rendered;
   } catch {
     return unit ? `${raw} ${unit}` : raw;
@@ -82,21 +91,52 @@ function factPredicateLabel(predicate: string, t: TFunction): string {
   return predicate;
 }
 
+/** 徽章折叠阈值：超出部分收进「+N 更多」，展开查看全量。 */
+const CHIP_PREVIEW_LIMIT = 8;
+
 function FactItem({ fact }: { fact: BrandKnowledgeHistoryFact }) {
   const { t } = useTranslation('chat');
   const label = parseFactKey(fact.factKey);
+  const [expanded, setExpanded] = useState(false);
+  const value = factValueEntries(fact, label.predicate);
+  const entries = Array.isArray(value) ? value : null;
+  const hiddenCount = entries && !expanded
+    ? Math.max(0, entries.length - CHIP_PREVIEW_LIMIT)
+    : 0;
   return (
-    <li className="rounded-md bg-[var(--paper-inset)] p-2">
-      <p className="break-words font-medium text-[var(--ink)]">
-        {label.subject}
-        {label.predicate ? ` / ${factPredicateLabel(label.predicate, t)}` : ""}
-      </p>
-      <p className="mt-1 break-words text-[var(--ink-muted)]">
-        {displayFactValue(fact, label.predicate)}
-      </p>
-      <p className="mt-1 text-[var(--ink-subtle)]">
-        fact v{fact.factVersion} · {fact.sources.length} 份依据
-      </p>
+    <li className="rounded-lg border border-[var(--line-subtle)] bg-[var(--paper)] p-2.5">
+      <div className="flex items-start justify-between gap-2">
+        <p className="min-w-0 break-words font-medium text-[var(--ink)]">
+          {label.subject}
+          {label.predicate ? ` / ${factPredicateLabel(label.predicate, t)}` : ""}
+        </p>
+        <span className="shrink-0 pt-0.5 text-xs text-[var(--ink-subtle)]">
+          v{fact.factVersion} · {fact.sources.length} 份依据
+        </span>
+      </div>
+      {entries === null ? (
+        <p className="mt-1.5 break-words leading-5 text-[var(--ink-muted)]">{value}</p>
+      ) : (
+        <div className="mt-1.5 flex flex-wrap gap-1">
+          {(expanded ? entries : entries.slice(0, CHIP_PREVIEW_LIMIT)).map((entry, index) => (
+            <span
+              key={`${index}:${entry}`}
+              className="max-w-full break-words rounded-lg bg-[var(--paper-inset)] px-2 py-1 text-xs leading-4 text-[var(--ink)]"
+            >
+              {entry}
+            </span>
+          ))}
+          {hiddenCount > 0 && (
+            <button
+              type="button"
+              onClick={() => setExpanded(true)}
+              className="rounded-lg border border-dashed border-[var(--line)] px-2 py-1 text-xs leading-4 text-[var(--ink-muted)] hover:bg-[var(--paper-inset)]"
+            >
+              +{hiddenCount} 更多
+            </button>
+          )}
+        </div>
+      )}
     </li>
   );
 }

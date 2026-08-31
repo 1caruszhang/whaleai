@@ -33,6 +33,44 @@ export interface TopicPlanKnowledgeFact {
   normalizedValueJson: string;
 }
 
+/**
+ * 卡片/工具结果信封里的瘦身事实：只保留卡片展示与 saveItems 校验真正
+ * 消费的 predicate。factKey 是「JSON 字符串当主键」（~130 字节/条且在
+ * 嵌套 JSON 里层层转义），曾是信封体积与日志可读性的最大污染源——
+ * 服务端按 predicate 回解到库内 factKey，完整值以 SQLite 为权威。
+ */
+export interface TopicPlanCardFact {
+  predicate: string;
+}
+
+export type TopicPlanWireFact = TopicPlanKnowledgeFact | TopicPlanCardFact;
+
+/**
+ * 信封/回传层计划项：审计字段（titleRationale/titleCandidates）与事实
+ * 详情可缺省。完整 TopicPlanItem 结构上满足本类型；服务端合并时缺失字
+ * 段一律以库内当前值为准。
+ */
+export type TopicPlanWireItem = Omit<
+  TopicPlanItem,
+  "plannedFacts" | "titleRationale" | "titleCandidates"
+> & {
+  plannedFacts: readonly TopicPlanWireFact[];
+  titleRationale?: TopicPlanTitleRationale;
+  titleCandidates?: string[];
+};
+
+/**
+ * plan_topics 工具结果信封专用投影项：完整信封曾达 ~81KB，超过 MCP
+ * 工具结果上限被 MCP 宿主客户端持久化成文件，确认卡随 tool.result
+ * 存根一起消失（卡片不渲染）。瘦身后同级计划 ~29KB。
+ */
+export type TopicPlanCardItem = Omit<
+  TopicPlanItem,
+  "plannedFacts" | "titleRationale" | "titleCandidates"
+> & {
+  plannedFacts: readonly TopicPlanCardFact[];
+};
+
 export interface TopicPlanTopic {
   id: string;
   name: string;
@@ -134,6 +172,27 @@ export interface TopicPlanModelAttempt {
   status: "success";
   itemId?: string;
   inputCount?: number;
+}
+
+/** plan_topics 工具结果信封的卡片投影（items 为瘦身项）。 */
+export interface TopicPlanCardProjection extends Omit<TopicPlanProjection, "items"> {
+  items: TopicPlanCardItem[];
+}
+
+/** 完整投影 → 信封瘦身投影：剔除每项的 titleRationale、titleCandidates
+ * 与事实的全部载体字段（factKey/normalizedValueJson/scopeJson/subject），
+ * 事实只剩 predicate。卡片与 saveItems 校验消费的字段全部保留；被剔除
+ * 字段的权威值在 SQLite，合并时服务端回填/按 predicate 回解。 */
+export function toTopicPlanCardProjection(plan: TopicPlanProjection): TopicPlanCardProjection {
+  return {
+    ...plan,
+    items: plan.items.map(({ titleRationale: _r, titleCandidates: _c, ...item }) => ({
+      ...item,
+      plannedFacts: item.plannedFacts.map((fact) => ({
+        predicate: fact.predicate,
+      })),
+    })),
+  };
 }
 
 export interface TopicPlanMutationResult {
@@ -732,6 +791,28 @@ export function titleBusinessAnchors(input: {
   return [...anchors];
 }
 
+/**
+ * 标题候选不足（validateTitleCandidates）：拒因计数以结构化字段透出，
+ * 调用方（服务端纠正重试）直接读 rejectionCounts，不再从 message 反解。
+ * message 保持 `错误码:reason=count,...` 形态供统一日志现场定位。
+ */
+export class TopicPlanTitleCandidatesError extends Error {
+  readonly rejectionCounts: ReadonlyMap<string, number>;
+
+  constructor(rejectionCounts: ReadonlyMap<string, number>) {
+    const breakdown = [...rejectionCounts.entries()]
+      .map(([reason, count]) => `${reason}=${count}`)
+      .join(",");
+    super(
+      breakdown
+        ? `topic_plan_title_candidates_insufficient:${breakdown}`
+        : "topic_plan_title_candidates_insufficient",
+    );
+    this.name = "TopicPlanTitleCandidatesError";
+    this.rejectionCounts = rejectionCounts;
+  }
+}
+
 export function validateTitleCandidates(input: {
   candidates: readonly string[];
   contentType: GeoContentType;
@@ -806,15 +887,8 @@ export function validateTitleCandidates(input: {
     return true;
   });
   if (valid.length < GEO_PORT_CONTRACT.promptStructures.titleGeneration.candidates[0]) {
-    // 拒因计数（不含标题内容）随错误码透出，现场即可定位是哪条规则杀的。
-    const breakdown = [...rejected.entries()]
-      .map(([reason, count]) => `${reason}=${count}`)
-      .join(",");
-    throw new Error(
-      breakdown
-        ? `topic_plan_title_candidates_insufficient:${breakdown}`
-        : "topic_plan_title_candidates_insufficient",
-    );
+    // 拒因计数（不含标题内容）随错误透出，现场即可定位是哪条规则杀的。
+    throw new TopicPlanTitleCandidatesError(rejected);
   }
   return valid.slice(0, GEO_PORT_CONTRACT.promptStructures.titleGeneration.candidates[1]);
 }

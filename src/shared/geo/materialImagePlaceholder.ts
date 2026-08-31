@@ -17,8 +17,13 @@
 /** 受控 uri scheme；与 Rust 替换侧共用（契约 JSON 顶部同值钉死）。 */
 export const MATERIAL_IMAGE_URI_SCHEME = "material-image://";
 
-/** 配图纪律密度上限：全文最多 3 张（宁缺毋滥，ADR-0008 Decision 3）。 */
-export const MATERIAL_IMAGE_MAX_PER_ARTICLE = 3;
+/**
+ * 配图纪律密度上限（跨进程硬顶）：单篇 material-image 占位符数量的绝对
+ * 上限，与 Rust 发布侧常量逐值同步。类型级配额见 articleGeneration.ts
+ * 的 ARTICLE_IMAGE_QUOTA_BY_TYPE（用户裁决 2026-08-31：详情/指南 3–8 张、
+ * 新闻类 3 张、对比清单 1 张），本常量取各类型配额的最大值。
+ */
+export const MATERIAL_IMAGE_MAX_PER_ARTICLE = 8;
 
 export interface MaterialImagePlaceholder {
   alt: string;

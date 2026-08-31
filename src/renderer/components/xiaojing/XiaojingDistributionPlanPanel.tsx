@@ -294,13 +294,14 @@ export function buildRecallPathViews(
     passiveView.matchedChannels = passiveAligned.map((channel) => {
       const variantNote =
         channel.variantCount > 1 ? ` · 同名变体 ×${channel.variantCount}` : "";
-      const priceNote =
+      // 复盘区不出现 ¥：媒介价区间按 cnyToPoints 折算为点数口径（票 29 同款约定）。
+      const pointsNote =
         channel.priceMinCny !== null && channel.priceMaxCny !== null
-          ? ` · ¥${channel.priceMinCny}${
+          ? ` · ${cnyToPoints(channel.priceMinCny)}${
               channel.priceMaxCny !== channel.priceMinCny
-                ? `-${channel.priceMaxCny}`
+                ? `-${cnyToPoints(channel.priceMaxCny)}`
                 : ""
-            }`
+            } 点`
           : "";
       return {
         key: `${channel.kind}:${channel.resourceId}`,
@@ -310,7 +311,7 @@ export function buildRecallPathViews(
           ? `${channel.citations} 条引用 · 覆盖 ${channel.questions} 个问题 · 账号 ${channel.accounts.join("、")}`
           : `${channel.citations} 条引用 · 覆盖 ${channel.questions} 个问题`,
         accounts: channel.accounts,
-        stats: `${channel.citations} 条引用 · 覆盖 ${channel.questions} 个问题${variantNote}${priceNote}`,
+        stats: `${channel.citations} 条引用 · 覆盖 ${channel.questions} 个问题${variantNote}${pointsNote}`,
         recommended: channel.recommended,
         variantCount: channel.variantCount,
       };
@@ -352,7 +353,7 @@ export function buildRecallPathViews(
       })),
     ),
   ];
-  // 偏好命中清单（Q12，2026-08-28）：配额前逐名单项一行（代表+价格+✓=进入
+  // 偏好命中清单（Q12，2026-08-28）：配额前逐名单项一行（代表+点数+✓=进入
   // 推荐；matched=false = 价内池未见同名，如实展示）。旧计划无该字段时回落
   // 到从推荐集反推的 matchedPreferenceNames 口径。
   const preferenceRows = plan.preferenceMatchedChannels ?? [];
@@ -382,8 +383,8 @@ export function buildRecallPathViews(
       stats: row.matched
         ? `${
             row.representativePriceCny !== null
-              ? `¥${row.representativePriceCny}`
-              : "价格未知"
+              ? `${cnyToPoints(row.representativePriceCny)} 点`
+              : "点数待定"
           }${row.variantCount > 1 ? ` · 变体 ×${row.variantCount}` : ""}`
         : undefined,
       recommended: row.matched ? row.recommended : false,

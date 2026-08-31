@@ -1099,4 +1099,51 @@ describe("ArticleGenerationService billing permits (ticket 07)", () => {
       { kind: "report", permitId: "art-rw:operation-1:a1:1", unit: 0, outcome: "success" },
     ]);
   });
+
+  it("retryStart returns immediately and guards same-article re-entry", async () => {
+    const rows = [article("a1")];
+    const { port, generation } = billedPort(rows);
+    const service = new ArticleGenerationService(
+      { workspaceId: "workspace-1", sessionId: "session-1" },
+      port,
+      generation,
+      { slot: "reflection", complete: vi.fn() } satisfies GeoTextCapability,
+    );
+
+    // 路由不等待重生成完成：返回的是发起前的当前投影。
+    const started = await service.retryStart({
+      workspaceId: "workspace-1",
+      sessionId: "session-1",
+      operationId: "operation-1",
+      articleId: "a1",
+      expectedRevision: 0,
+    });
+    expect(started.id).toBe("a1");
+
+    // 在途期间同篇再点重试：防重入守卫（不再撞网关计费并发上限）。
+    await expect(
+      service.retryStart({
+        workspaceId: "workspace-1",
+        sessionId: "session-1",
+        operationId: "operation-1",
+        articleId: "a1",
+        expectedRevision: started.revision,
+      }),
+    ).rejects.toThrow("article_retry_in_progress");
+
+    // 完成后守卫释放：同篇可再次发起。completion 不在返回值里暴露
+    // （路由不消费，测试也只经公开 API 观察守卫状态），轮询到守卫
+    // 放行即证明首次重生成已落定。
+    await vi.waitFor(() =>
+      expect(
+        service.retryStart({
+          workspaceId: "workspace-1",
+          sessionId: "session-1",
+          operationId: "operation-1",
+          articleId: "a1",
+          expectedRevision: started.revision,
+        }),
+      ).resolves.toBeDefined(),
+    );
+  });
 });

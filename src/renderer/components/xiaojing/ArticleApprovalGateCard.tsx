@@ -255,8 +255,9 @@ function ArticleRow({
     setBusy(true);
     setError(null);
     try {
-      // 同步执行到新版本落盘：成功回到 draft_ready（卡内可展开/编辑/批准），
-      // 仍失败则返回 generation_failed 与新的 failure_reason。
+      // fire-and-forget：路由校验后立即返回（重生成全程 1–2 分钟，同步
+      // 等待会撞代理超时）；drafting → draft_ready/generation_failed 由
+      // /articles/latest 轮询（3s）自动追上。
       const updated = await retryArticle(
         apiPost,
         { workspaceId: operation.workspaceId, sessionId: sessionId ?? "" },
@@ -268,7 +269,12 @@ function ArticleRow({
       );
       onArticleChange(updated);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      const message = cause instanceof Error ? cause.message : String(cause);
+      setError(
+        message === "article_retry_in_progress"
+          ? "重试已在进行中，完成后卡片会自动更新"
+          : message,
+      );
     } finally {
       setBusy(false);
     }

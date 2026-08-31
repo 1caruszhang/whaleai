@@ -126,19 +126,22 @@ function getXiaojingDistributionPlanService(identity: Identity): DistributionPla
 }
 
 async function notifyGeoOperationWorkbenchEvent(
-  workspacePath: string,
   sessionId: string,
   operation: GeoOperationProjection,
   action: string,
+  requestAccountToken?: string,
 ): Promise<{ success: boolean; error?: string }> {
-  return sendXiaojingMessage(buildGeoOperationEventReminder({
-    workspaceId: operation.workspaceId,
-    sessionId,
-    operationId: operation.id,
-    revision: operation.revision,
-    action,
-    status: operation.status,
-  }), undefined, workspacePath);
+  return sendXiaojingMessage({
+    text: buildGeoOperationEventReminder({
+      workspaceId: operation.workspaceId,
+      sessionId,
+      operationId: operation.id,
+      revision: operation.revision,
+      action,
+      status: operation.status,
+    }),
+    requestAccountToken,
+  });
 }
 
 /** Baseline probes run synchronously inside start/retry: confirm the probe

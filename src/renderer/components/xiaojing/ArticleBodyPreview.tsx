@@ -1,10 +1,13 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useMemo, useState } from "react";
+import { Maximize2 } from "lucide-react";
 
-import { fetchMaterialImageContent } from "@/api/brandMaterialClient";
-import { useTabApi, useTabState } from "@/context/TabContext";
-import { isPendingSessionId } from "../../../shared/constants";
-import { scanMaterialImagePlaceholders } from "../../../shared/geo/materialImagePlaceholder";
-import Markdown, { type MaterialImageResolution } from "../Markdown";
+import Markdown from "../Markdown";
+import { normalizeUnicodeBulletsToMarkdown } from "../../../shared/geo/articleGeneration";
+import ArticleFullscreenPreview from "./ArticleFullscreenPreview";
+import {
+  useMaterialImageResolver,
+  useMaterialImages,
+} from "./useMaterialImages";
 
 /**
  * 文章正文渲染预览（ADR-0008 Decision 6）：批准卡与工作台批准稿共用的
@@ -12,147 +15,59 @@ import Markdown, { type MaterialImageResolution } from "../Markdown";
  * 接口换本地 blob 显示——预览不依赖 OSS 发布，占位符是否入图在批准前
  * 即可验收。
  *
- * 生命周期纪律：object URL 只在本组件登记（urlsRef），占位符随修订消失
- * 或组件卸载时 revoke，不泄漏 Blob。取回失败按图降级为可读失败占位，
- * 不阻塞正文其余部分渲染（与发布链路 fail-closed 不同：预览是本地投影）。
+ * 版式（2026-08-31 用户裁决）：内容栏居中（最大约 42em）+ 两侧留白，
+ * 正文左对齐；右上角提供全屏 HTML 预览入口（独立内嵌 CSS 的完整 HTML
+ * 文档，所见即所得并支持导出）。
  */
-type MaterialImageEntry =
-  | { status: "loading" }
-  | { status: "ready"; url: string }
-  | { status: "failed"; reason?: string };
-
 export default function ArticleBodyPreview({
   body,
   workspaceId,
+  title,
   className,
 }: {
   body: string;
   workspaceId: string;
+  /** 全屏预览标题栏展示用；缺省取正文 H1。 */
+  title?: string;
   className?: string;
 }) {
-  const { apiPost } = useTabApi();
-  const { sessionId } = useTabState();
-  const hasRealSession = Boolean(sessionId && !isPendingSessionId(sessionId));
-
-  const imageIds = useMemo(
-    () =>
-      Array.from(
-        new Set(
-          scanMaterialImagePlaceholders(body).placeholders.map(
-            (placeholder) => placeholder.imageId,
-          ),
-        ),
-      ),
+  const [fullscreen, setFullscreen] = useState(false);
+  // 展示层归一（幂等）：存量正文的行首圆点/✅ 未经过生成期归一，这里
+  // 补一次，保证逐行列表渲染；新生成的正文已是标准列表，不受影响。
+  const normalizedBody = useMemo(
+    () => normalizeUnicodeBulletsToMarkdown(body),
     [body],
   );
-  const idsKey = imageIds.join(",");
-
-  const [entries, setEntries] = useState<Map<string, MaterialImageEntry>>(
-    () => new Map(),
-  );
-  const apiPostRef = useRef(apiPost);
-  const sessionIdRef = useRef(sessionId);
-  const entriesRef = useRef(entries);
-  const urlsRef = useRef(new Map<string, string>());
-  // react_stability_rules：apiPost/sessionId/取回结果经 ref 读取，不进取数
-  // effect 依赖；镜像写放在 effect 里（useGateCardRefresh 同款），声明先于
-  // 取数 effect，同轮 commit 内先刷新再消费。
-  useEffect(() => {
-    apiPostRef.current = apiPost;
-    sessionIdRef.current = sessionId;
-    entriesRef.current = entries;
-  });
-
-  useEffect(() => {
-    const wanted = new Set(idsKey === "" ? [] : idsKey.split(","));
-    let cancelled = false;
-
-    // 清掉不再被正文引用的条目（编辑删占位符/聊天修订后）：blob 即刻回收。
-    setEntries((current) => {
-      let next: Map<string, MaterialImageEntry> | null = null;
-      for (const [imageId, entry] of current) {
-        if (wanted.has(imageId)) continue;
-        if (!next) next = new Map(current);
-        if (entry.status === "ready") {
-          const url = urlsRef.current.get(imageId);
-          if (url) {
-            URL.revokeObjectURL(url);
-            urlsRef.current.delete(imageId);
-          }
-        }
-        next.delete(imageId);
-      }
-      return next ?? current;
-    });
-
-    for (const imageId of wanted) {
-      if (entriesRef.current.has(imageId)) continue;
-      if (!hasRealSession) {
-        const reason = "暂无会话，无法取回材料图片";
-        setEntries((current) =>
-          current.has(imageId)
-            ? current
-            : new Map(current).set(imageId, { status: "failed", reason }),
-        );
-        continue;
-      }
-      setEntries((current) =>
-        current.has(imageId)
-          ? current
-          : new Map(current).set(imageId, { status: "loading" }),
-      );
-      void (async () => {
-        try {
-          const { bytes, mediaType } = await fetchMaterialImageContent(
-            apiPostRef.current,
-            { workspaceId, sessionId: sessionIdRef.current ?? "" },
-            imageId,
-          );
-          if (cancelled) return;
-          const url = URL.createObjectURL(new Blob([bytes], { type: mediaType }));
-          urlsRef.current.set(imageId, url);
-          setEntries((current) => new Map(current).set(imageId, { status: "ready", url }));
-        } catch (cause) {
-          if (cancelled) return;
-          const reason = cause instanceof Error ? cause.message : String(cause);
-          setEntries((current) =>
-            new Map(current).set(imageId, { status: "failed", reason }),
-          );
-        }
-      })();
-    }
-
-    return () => {
-      cancelled = true;
-    };
-  }, [hasRealSession, idsKey, workspaceId]);
-
-  // 卸载时统一回收本组件创建的全部 object URL。
-  useEffect(
-    () => () => {
-      for (const url of urlsRef.current.values()) URL.revokeObjectURL(url);
-      urlsRef.current.clear();
-    },
-    [],
-  );
-
-  // 解析器身份随取回结果变化，驱动 Markdown（memo）重渲染出图片。
-  const resolveMaterialImage = useCallback(
-    (imageId: string): MaterialImageResolution => {
-      const entry = entries.get(imageId);
-      if (!entry) return { kind: "failed", reason: "占位符不受控，未入候选池" };
-      if (entry.status === "ready") return { kind: "ready", url: entry.url };
-      if (entry.status === "failed") return { kind: "failed", reason: entry.reason };
-      return { kind: "loading" };
-    },
-    [entries],
-  );
+  const entries = useMaterialImages(body, workspaceId);
+  const resolveMaterialImage = useMaterialImageResolver(entries);
 
   return (
     <div className={className} data-article-body-preview>
-      <Markdown raw resolveMaterialImage={resolveMaterialImage}>
-        {body}
-      </Markdown>
+      <div className="relative">
+        <button
+          type="button"
+          aria-label="全屏预览文章"
+          title="全屏 HTML 预览"
+          onClick={() => setFullscreen(true)}
+          className="absolute -top-1 right-0 z-10 flex h-7 w-7 items-center justify-center rounded-lg text-[var(--ink-muted)] hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
+        >
+          <Maximize2 className="h-3.5 w-3.5" />
+        </button>
+        {/* 阅读容器：内容栏居中 + 两侧留白，正文左对齐。 */}
+        <div className="mx-auto w-full max-w-[42em] px-1">
+          <Markdown raw resolveMaterialImage={resolveMaterialImage}>
+            {normalizedBody}
+          </Markdown>
+        </div>
+      </div>
+      {fullscreen && (
+        <ArticleFullscreenPreview
+          body={body}
+          title={title}
+          entries={entries}
+          onClose={() => setFullscreen(false)}
+        />
+      )}
     </div>
   );
 }

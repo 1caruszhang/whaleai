@@ -31,6 +31,8 @@ vi.mock('../agent-session', () => ({
 
 vi.mock('../routes/xiaojing-shared', () => ({
   getRuntimeSessionIdForRequest: () => 'session-1',
+  // 测试请求不带账号 token 头，与真实现对缺头请求的返回一致（undefined）。
+  requestAccountAccessToken: () => undefined,
   getXiaojingTopicPlanService: () => ({ confirm: gateMocks.confirmTopicPlan }),
   getXiaojingArticleService: () => ({ approve: gateMocks.approveArticle }),
   getXiaojingDistributionPlanService: () => ({ confirm: gateMocks.confirmDistribution }),

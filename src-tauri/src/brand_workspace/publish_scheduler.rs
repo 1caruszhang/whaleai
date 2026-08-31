@@ -2892,7 +2892,10 @@ const MATERIAL_IMAGE_URI_SCHEME: &str = "material-image://";
 
 /// 配图密度上限（契约 JSON 顶部 `maxImagesPerArticle`；生成门在审核期
 /// 拦截，发布侧再核一次——超限说明批准稿绕过了门，fail-closed）。
-const MATERIAL_IMAGE_MAX_PER_ARTICLE: usize = 3;
+/// 类型级配额在 TS 侧（ARTICLE_IMAGE_QUOTA_BY_TYPE：详情/指南 8、新闻 3、
+/// 对比清单 1，用户裁决 2026-08-31）；本常量是与 TS
+/// MATERIAL_IMAGE_MAX_PER_ARTICLE 逐值同步的跨进程硬顶（各类型最大值）。
+const MATERIAL_IMAGE_MAX_PER_ARTICLE: usize = 8;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct MaterialImagePlaceholderScan {
