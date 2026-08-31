@@ -16,7 +16,6 @@ import {
 } from "@/utils/columnLayout";
 import type { GeoNavigationTarget } from "../../../shared/geo/notification";
 import ColumnResizer from "./ColumnResizer";
-import XiaojingBrandKnowledgePanel from "./XiaojingBrandKnowledgePanel";
 import XiaojingGeoOperationPanel from "./XiaojingGeoOperationPanel";
 
 interface XiaojingGeoWorkbenchProps {
@@ -71,25 +70,21 @@ export default memo(function XiaojingGeoWorkbench({
     });
   }, []);
 
-  // 面板子树按元素记忆：拖拽逐帧更新宽度时，六阶段面板与知识面板的
-  // 元素引用不变，React 直接跳过其重渲染。注意保持在折叠早退分支之前，
+  // 面板子树按元素记忆：拖拽逐帧更新宽度时，六阶段面板的元素引用
+  // 不变，React 直接跳过其重渲染。注意保持在折叠早退分支之前，
   // 钩子顺序不可随折叠状态变化。
   const panelContent = useMemo(() => (
     currentWorkspace ? (
-      /* 票 28/票 31：工作台收为单一操作视图，只保留多操作切换器、当前
-          已确认品牌知识与六阶段骨架三段结构；品牌信息卡由左侧栏表达，
-          过程块在聊天进度卡；历史面板与效果三面板分别由左侧栏
-          「品牌档案」（票 30）与「效果」（票 31）一级入口整页呈现。 */
+      /* 票 28/票 31：工作台收为单一操作视图，只保留多操作切换器与六阶段
+          骨架；当前已确认品牌知识在骨架「品牌知识」阶段展开体中呈现，
+          品牌信息卡由左侧栏表达，过程块在聊天进度卡；历史面板与效果三
+          面板分别由左侧栏「品牌档案」（票 30）与「效果」（票 31）一级
+          入口整页呈现。 */
       <XiaojingGeoOperationPanel
         key={`${currentWorkspace.id}:geo-operation-workbench`}
         workspace={currentWorkspace}
         navigationTarget={navigationTarget}
-      >
-        <XiaojingBrandKnowledgePanel
-          key={`${currentWorkspace.id}:brand-knowledge`}
-          workspaceId={currentWorkspace.id}
-        />
-      </XiaojingGeoOperationPanel>
+      />
     ) : (
       <p className="mt-4 rounded-xl border border-dashed border-[var(--line)] p-4 text-xs leading-5 text-[var(--ink-muted)]">
         {"先在左侧选择品牌，再在聊天中发起 GEO 目标。在聊天中发起 GEO 目标后，小鲸会先确认事实与目标，再创建受控的 GEO 操作。"}

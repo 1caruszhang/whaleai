@@ -26,6 +26,7 @@ import type {
 } from "../../../shared/geo/operation";
 import type { GeoNavigationTarget } from "../../../shared/geo/notification";
 import XiaojingArticleGenerationPanel from "./XiaojingArticleGenerationPanel";
+import XiaojingBrandKnowledgePanel from "./XiaojingBrandKnowledgePanel";
 import XiaojingDistributionPlanPanel from "./XiaojingDistributionPlanPanel";
 import XiaojingGeoBaselinePanel from "./XiaojingGeoBaselinePanel";
 import XiaojingPostPublishMonitoringPanel from "./XiaojingPostPublishMonitoringPanel";
@@ -37,11 +38,6 @@ import XiaojingTopicPlanPanel from "./XiaojingTopicPlanPanel";
 interface Props {
   workspace: BrandWorkspace;
   navigationTarget?: GeoNavigationTarget | null;
-  /**
-   * 夹在多操作切换器与阶段骨架之间的品牌级面板（工作台注入当前已确认
-   * 品牌知识），保持「切换器 → 知识 → 骨架」的三段结构。
-   */
-  children?: ReactNode;
 }
 
 const STATUS_LABEL: Record<GeoOperationStatus, string> = {
@@ -143,7 +139,6 @@ function phaseRowStatus(
 export default memo(function XiaojingGeoOperationPanel({
   workspace,
   navigationTarget = null,
-  children,
 }: Props) {
   const { apiPost } = useTabApi();
   const { sessionId, toolCompleteCount = 0 } = useTabState();
@@ -382,12 +377,13 @@ export default memo(function XiaojingGeoOperationPanel({
       }
       switch (phaseId) {
         case "knowledge":
-          // 票 27：材料导入与知识确认在聊天卡片上完成；工作台不挂面板，
-          // 已确认事实由上方品牌知识面板承载。
+          // 票 27：材料导入与知识确认在聊天卡片上完成，工作台不挂材料
+          // 面板；当前已确认品牌知识（权威投影）直接在本阶段展开体呈现。
           return (
-            <p className="rounded-lg bg-[var(--paper-inset)] px-3 py-2 text-xs leading-5 text-[var(--ink-muted)]">
-              材料导入与知识确认在聊天中的卡片上完成；已确认的品牌事实见上方品牌知识面板。
-            </p>
+            <XiaojingBrandKnowledgePanel
+              workspaceId={workspace.id}
+              refreshKey={refreshKey}
+            />
           );
         case "questions":
           return (
@@ -554,9 +550,6 @@ export default memo(function XiaojingGeoOperationPanel({
           </p>
         </section>
       )}
-
-      {/* 品牌级面板（当前已确认品牌知识）常驻于切换器与阶段骨架之间。 */}
-      {children}
 
       {focused && (
         <section

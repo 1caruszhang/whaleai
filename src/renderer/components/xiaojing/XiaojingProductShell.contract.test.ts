@@ -194,7 +194,10 @@ describe("Xiaojing product shell contract", () => {
     );
     expect(workbench).toContain("WORKBENCH_COLLAPSED_STORAGE_KEY");
     expect(workbench).toContain("<XiaojingGeoOperationPanel");
-    expect(workbench).toContain("<XiaojingBrandKnowledgePanel");
+    // 品牌知识不再于工作台单独成卡（与骨架「品牌知识」阶段标题重复）；
+    // 当前权威投影数据直接落在该阶段的展开体里。
+    expect(workbench).not.toContain("<XiaojingBrandKnowledgePanel");
+    expect(operationPanel).toContain("<XiaojingBrandKnowledgePanel");
     // 票 30：历史面板移出工作台，知识版本史与产物血缘整页迁往「品牌档案」。
     expect(workbench).not.toContain("<XiaojingBrandHistoryPanel");
     expect(operationPanel).toContain("<XiaojingQuestionPoolPanel");

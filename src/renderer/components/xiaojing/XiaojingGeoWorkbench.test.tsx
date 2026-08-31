@@ -10,12 +10,7 @@ import {
 import XiaojingGeoWorkbench from "./XiaojingGeoWorkbench";
 
 vi.mock("./XiaojingGeoOperationPanel", () => ({
-  default: ({ children }: { children?: React.ReactNode }) => (
-    <section aria-label="操作面板桩">{children}</section>
-  ),
-}));
-vi.mock("./XiaojingBrandKnowledgePanel", () => ({
-  default: () => <section aria-label="品牌知识桩" />,
+  default: () => <section aria-label="操作面板桩" />,
 }));
 
 const workspace: BrandWorkspace = {
@@ -63,19 +58,16 @@ describe("XiaojingGeoWorkbench", () => {
     expect(screen.queryByText(/基线探测按需执行/)).not.toBeInTheDocument();
   });
 
-  // 票 28：工作台只保留多操作切换器、当前已确认品牌知识与六阶段骨架；
-  // 「当前品牌」卡由左侧栏表达，从工作台删除。
-  it("drops the current-brand card and hosts brand knowledge inside the operation panel", () => {
+  // 票 28：工作台只保留多操作切换器与六阶段骨架；「当前品牌」卡由
+  // 左侧栏表达，当前已确认品牌知识由骨架「品牌知识」阶段展开体承载
+  // （不再在切换器与骨架之间挂独立的品牌知识面板）。
+  it("drops the current-brand card and no standalone brand-knowledge panel", () => {
     render(<XiaojingGeoWorkbench currentWorkspace={workspace} />);
 
     expect(screen.queryByText("当前品牌")).not.toBeInTheDocument();
-    const operationPanel = screen.getByRole("region", { name: "操作面板桩" });
     expect(
-      screen.getByRole("region", { name: "品牌知识桩" }),
+      screen.getByRole("region", { name: "操作面板桩" }),
     ).toBeInTheDocument();
-    expect(operationPanel).toContainElement(
-      screen.getByRole("region", { name: "品牌知识桩" }),
-    );
     // 票 30：历史面板移出工作台，知识版本史与产物血缘由左侧栏
     // 「品牌档案」一级入口整页呈现。
     expect(
@@ -106,9 +98,6 @@ describe("XiaojingGeoWorkbench", () => {
     ).toBeInTheDocument();
     expect(
       screen.queryByRole("region", { name: "操作面板桩" }),
-    ).not.toBeInTheDocument();
-    expect(
-      screen.queryByRole("region", { name: "品牌知识桩" }),
     ).not.toBeInTheDocument();
   });
 

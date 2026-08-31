@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import XiaojingBrandKnowledgePanel from './XiaojingBrandKnowledgePanel';
@@ -23,7 +23,7 @@ function factKey(subject: string, predicate: string): string {
 describe('XiaojingBrandKnowledgePanel', () => {
   beforeEach(() => mocks.load.mockReset());
 
-  it('expands lazily and shows only the latest authoritative knowledge version', async () => {
+  it('loads on mount and shows only the latest authoritative knowledge version', async () => {
     mocks.load.mockResolvedValue({
       workspaceId: 'brand-17',
       knowledgeVersions: [
@@ -66,9 +66,7 @@ describe('XiaojingBrandKnowledgePanel', () => {
     });
 
     render(<XiaojingBrandKnowledgePanel workspaceId="brand-17" />);
-    expect(mocks.load).not.toHaveBeenCalled();
-
-    fireEvent.click(screen.getByRole('button', { name: /品牌知识/ }));
+    expect(mocks.load).toHaveBeenCalledWith('brand-17');
     expect(await screen.findByText('鲸跃科技 / 品牌全称')).toBeInTheDocument();
     expect(screen.getByText('鲸跃科技有限公司')).toBeInTheDocument();
     expect(screen.getByText('技术领先、交付快')).toBeInTheDocument();
@@ -110,7 +108,6 @@ describe('XiaojingBrandKnowledgePanel', () => {
     });
 
     render(<XiaojingBrandKnowledgePanel workspaceId="brand-17" />);
-    fireEvent.click(screen.getByRole('button', { name: /品牌知识/ }));
     expect(await screen.findByText('鲸跃科技 / 服务区域')).toBeInTheDocument();
     // 非 Profile 字段保持 predicate 原文。
     expect(screen.getByText('鲸跃科技 / crm.seatCount')).toBeInTheDocument();
@@ -141,7 +138,6 @@ describe('XiaojingBrandKnowledgePanel', () => {
     });
 
     render(<XiaojingBrandKnowledgePanel workspaceId="brand-17" />);
-    fireEvent.click(screen.getByRole('button', { name: /品牌知识/ }));
 
     expect(await screen.findByText('成实外教育｜成都｜民办中学教育、为明教育｜成都｜民办中学教育')).toBeInTheDocument();
     expect(screen.queryByText(/xiaojing-competitor-details/)).not.toBeInTheDocument();
@@ -154,8 +150,8 @@ describe('XiaojingBrandKnowledgePanel', () => {
       artifacts: [],
     });
     render(<XiaojingBrandKnowledgePanel workspaceId="brand-17" />);
-    fireEvent.click(screen.getByRole('button', { name: /品牌知识/ }));
     await screen.findByText(/暂无已确认知识/);
+    expect(mocks.load).toHaveBeenCalledTimes(1);
 
     window.dispatchEvent(new CustomEvent(KNOWLEDGE_DECIDED_EVENT, {
       detail: { workspaceId: 'brand-17' },
@@ -163,10 +159,27 @@ describe('XiaojingBrandKnowledgePanel', () => {
     await waitFor(() => expect(mocks.load.mock.calls.length).toBeGreaterThanOrEqual(2));
   });
 
+  it('reloads when the phase refresh key advances', async () => {
+    mocks.load.mockResolvedValue({
+      workspaceId: 'brand-17',
+      knowledgeVersions: [],
+      artifacts: [],
+    });
+    const view = render(
+      <XiaojingBrandKnowledgePanel workspaceId="brand-17" refreshKey={3} />,
+    );
+    await screen.findByText(/暂无已确认知识/);
+    expect(mocks.load).toHaveBeenCalledTimes(1);
+
+    view.rerender(
+      <XiaojingBrandKnowledgePanel workspaceId="brand-17" refreshKey={4} />,
+    );
+    await waitFor(() => expect(mocks.load).toHaveBeenCalledTimes(2));
+  });
+
   it('keeps load failures recoverable', async () => {
     mocks.load.mockRejectedValueOnce(new Error('knowledge unavailable'));
     render(<XiaojingBrandKnowledgePanel workspaceId="brand-17" />);
-    fireEvent.click(screen.getByRole('button', { name: /品牌知识/ }));
     const alert = await screen.findByRole('alert');
     expect(alert).toHaveTextContent('knowledge unavailable');
   });

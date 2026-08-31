@@ -14,6 +14,7 @@ const mocks = vi.hoisted(() => ({
   articleProps: vi.fn(),
   publishProps: vi.fn(),
   monitorProps: vi.fn(),
+  knowledgeProps: vi.fn(),
 }));
 
 vi.mock("@/context/TabContext", () => ({
@@ -24,6 +25,13 @@ vi.mock("@/context/TabContext", () => ({
 vi.mock("@/api/geoOperationClient", () => ({
   loadGeoOperations: mocks.load,
   loadGeoOperation: mocks.loadOne,
+}));
+
+vi.mock("./XiaojingBrandKnowledgePanel", () => ({
+  default: (props: { workspaceId?: string; refreshKey?: number }) => {
+    mocks.knowledgeProps(props);
+    return <section aria-label="品牌知识卡片" />;
+  },
 }));
 
 vi.mock("./XiaojingQuestionPoolPanel", () => ({
@@ -186,6 +194,7 @@ describe("XiaojingGeoOperationPanel", () => {
     mocks.articleProps.mockReset();
     mocks.publishProps.mockReset();
     mocks.monitorProps.mockReset();
+    mocks.knowledgeProps.mockReset();
   });
 
   it("expands only the phase the focused operation is in and collapses the rest", async () => {
@@ -626,26 +635,31 @@ describe("XiaojingGeoOperationPanel", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("keeps brand-level panels between the operation switcher and the phase skeleton", async () => {
-    mocks.load.mockResolvedValue([operation()]);
-    render(
-      <XiaojingGeoOperationPanel workspace={workspace}>
-        <section aria-label="品牌知识桩" />
-      </XiaojingGeoOperationPanel>,
-    );
+  it("renders the confirmed brand knowledge inside the knowledge phase body", async () => {
+    mocks.load.mockResolvedValue([
+      operation({
+        goal: "收集品牌材料",
+        steps: [
+          step({
+            id: "collect-materials",
+            title: "收集品牌材料",
+            capability: "brand-material-import",
+            status: "awaiting-confirmation",
+          }),
+        ],
+      }),
+    ]);
+    render(<XiaojingGeoOperationPanel workspace={workspace} />);
 
     await screen.findByRole("region", { name: "当前 GEO 操作" });
-    const header = screen.getByRole("region", { name: "当前 GEO 操作" });
-    const knowledge = screen.getByRole("region", { name: "品牌知识桩" });
-    const skeleton = screen.getByRole("region", { name: "GEO 阶段骨架" });
-    expect(
-      header.compareDocumentPosition(knowledge) &
-        Node.DOCUMENT_POSITION_FOLLOWING,
-    ).toBeTruthy();
-    expect(
-      knowledge.compareDocumentPosition(skeleton) &
-        Node.DOCUMENT_POSITION_FOLLOWING,
-    ).toBeTruthy();
+    // 品牌知识数据直接落在骨架「品牌知识」阶段展开体里（不再于切换器
+    // 与骨架之间挂独立面板），并拿到刷新信号。
+    const body = screen.getByRole("region", { name: "品牌知识产物" });
+    const knowledgeCard = screen.getByRole("region", { name: "品牌知识卡片" });
+    expect(body).toContainElement(knowledgeCard);
+    expect(mocks.knowledgeProps).toHaveBeenCalledWith(
+      expect.objectContaining({ workspaceId: "brand-17", refreshKey: 3 }),
+    );
   });
 
   it("keeps background work alive across workbench unmount and reloads persisted state", async () => {
