@@ -125,7 +125,11 @@ const COMPETITOR_ROUND_QUERY_FORMS = [
  * 单页失败静默跳过，不拖垮主流程。
  */
 const COMPETITOR_PAGE_FETCH_LIMIT = 8;
-const COMPETITOR_PAGE_TEXT_CHARS = 1_500;
+// 上限覆盖全文而非截尾（用户裁决 2026-08-31）：盘点文把品牌排在正文后段
+// （第六写实跑：6 家文的第 5/6 家在第 1658/1990 字，1500 字截断整段切掉），
+// 剥标签后实测列表文 2000～5400 字——6000 字按最长观测留余量，同时天然
+// 封顶单次抽取语料总量（8 篇 × 6000 + 30 条摘要）。
+const COMPETITOR_PAGE_TEXT_CHARS = 6_000;
 const COMPETITOR_PAGE_TIMEOUT_MS = 8_000;
 
 /** 检索源（正文抓取后）：summary 为引擎摘要，pageText 为抓取正文（已截断）。 */

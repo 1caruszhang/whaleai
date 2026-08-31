@@ -1311,6 +1311,58 @@ describe("competitor enrichment (ADR-0007 source-grounded extraction)", () => {
     expect(snapshotPrompt).toContain('蒸简单原盅蒸饭');
   });
 
+  it('keeps list brands sitting past 1500 chars of page body (第六写实跑回归 2026-08-31)', async () => {
+    // 头条列表文 6 家品牌排在正文后段（实跑第 5 家在第 1658 字、第 6 家在
+    // 第 1990 字），1500 字/篇的正文截断把最密集的尾部整段切掉——模型与
+    // 存在闸都看不见，卡上只剩截断线以上的 3 家（<5 家）。正文上限须覆盖
+    // 全文（实测列表文剥标签后 2000～5400 字），截断线以下的品牌照常进名单。
+    const provinceResponse = JSON.stringify({ facts: [
+      { field: 'industry', value: '餐饮/干蒸菜', provenance: 'extracted', sourceExcerpt: '行业' },
+      { field: 'serviceArea', value: '广东省', provenance: 'extracted', sourceExcerpt: '区域' },
+    ] });
+    const filler = '技术服务覆盖与团餐场景适配能力说明。'.repeat(120);
+    const listHtml = '<html><body><script>track()</script><h1>2026广州干蒸排骨相关服务商信息汇总</h1>'
+      + '<p>1. 蒸宫主现蒸排骨饭：现蒸排骨饭全系列产品技术输出。</p>'
+      + `<p>${filler}</p>`
+      + '<p>5. 御见味来干蒸排骨饭：创新口味干蒸排骨与藤椒蒸鸡技术输出。</p>'
+      + '<p>6. 余美娟生焗排骨饭：生焗排骨焗制类产品技术输出。</p></body></html>';
+    const fetch = vi.fn(async () => new Response(listHtml, {
+      status: 200,
+      headers: { 'content-type': 'text/html' },
+    }));
+    const port = new FakeMaterialPort();
+    const current = service(port, {
+      completeResponses: [provinceResponse, noTopUp, JSON.stringify({
+        direct: [
+          { name: '蒸宫主现蒸排骨饭', region: '广州' },
+          { name: '御见味来干蒸排骨饭', region: '广州' },
+          { name: '余美娟生焗排骨饭', region: '广州' },
+        ],
+        potential: [],
+      })],
+      searchSources: async () => [{
+        title: '2026广州干蒸排骨相关服务商信息汇总',
+        url: 'https://mill.example/list',
+        summary: '本文整理多家广州本地从事干蒸排骨相关业务的服务商信息。1. 蒸宫主现蒸排骨饭：现蒸排骨饭技术',
+      }],
+      fetch: fetch as unknown as typeof globalThis.fetch,
+    });
+    const result = await current.value.importPastedText('公司资料');
+
+    expect(result.ok).toBe(true);
+    // 垫层 2040 字把第 5、6 家推到 1500 字截断线以下：正文全文进语料后，
+    // 模型可见、存在闸放行，三家全部上卡。
+    expect(competitorsCallOf(current)?.[0].value).toEqual([
+      '蒸宫主现蒸排骨饭',
+      '御见味来干蒸排骨饭',
+      '余美娟生焗排骨饭',
+    ]);
+    const snapshotPrompt = (current.complete.mock.calls[2] as unknown as [
+      readonly { role: string; content: string }[],
+    ])[0][1].content;
+    expect(snapshotPrompt).toContain('余美娟生焗排骨饭');
+  });
+
   it('injects the customer-profile fields into the snapshot prompt and gates by customer voice', async () => {
     const port = new FakeMaterialPort();
     const current = service(port, {
