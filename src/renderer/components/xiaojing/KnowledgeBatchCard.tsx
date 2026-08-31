@@ -889,7 +889,7 @@ function FieldRow({ row, stateOf, busy, onConfirmRow, onChoose, onStageEdits, on
                       target="_blank"
                       rel="noreferrer"
                       data-competitor-source-link={text}
-                      className="text-[10px] leading-none text-[var(--ink-subtle)] underline hover:text-[var(--ink)]"
+                      className="text-xs leading-none text-[var(--ink-subtle)] underline hover:text-[var(--ink)]"
                       onClick={(event) => event.stopPropagation()}
                     >
                       {t('knowledgeCard.sourceLink')}
