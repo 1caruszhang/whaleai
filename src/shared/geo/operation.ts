@@ -191,6 +191,20 @@ export interface GeoOperationProjection {
   createdAt: string;
   updatedAt: string;
   terminalAt: string | null;
+  /** 接管留痕（ADR-0010）：上一次所有权转移的原所有者与时间；
+   * 从未被接管时为 null。sessionId 即当前所有者。 */
+  takenOverFromSessionId?: string | null;
+  takenOverAt?: string | null;
+}
+
+/** 接管回执（ADR-0010）：转移后的操作投影 + 留痕 + 随 operation 整体
+ * 转移的工作集计数（未批准文章操作、awaiting-selection 池）。 */
+export interface GeoOperationTakeoverReceipt {
+  operation: GeoOperationProjection;
+  previousOwnerSessionId: string;
+  takenOverAt: string;
+  transferredArticleOperations: number;
+  transferredQuestionPools: number;
 }
 
 export interface GeoOperationPlan {
@@ -213,9 +227,10 @@ export interface GeoOperationUnfinishedStuckStep {
 
 /**
  * 跨会话未完成轮次的只读元信息（ADR-0010 Decision 3；Rust store 投影）：
- * 五要素——类型、卡住步骤、待审数量、所属会话、创建/更新时间。不含草稿
- * 正文与任何会话聊天记录（正文隔离保留在各领域 approved-only 投影）；
- * 待审数量 = 创建会话名下 draft_ready 未批准文章篇数。
+ * 五要素——类型、卡住步骤、待审数量、所属会话（= 当前所有者，接管后随之
+ * 变化）、创建/更新时间。不含草稿正文与任何会话聊天记录（正文隔离保留在
+ * 各领域 owned-or-approved 投影）；待审数量 = 当前所有者会话名下
+ * draft_ready 未批准文章篇数。
  */
 export interface GeoOperationUnfinishedSummary {
   id: string;

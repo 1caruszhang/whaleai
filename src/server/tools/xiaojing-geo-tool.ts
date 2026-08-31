@@ -399,7 +399,9 @@ export function geoOperationControlFailure(error: unknown): {
   hint: string;
 } {
   const message = error instanceof Error ? error.message : String(error);
-  const hint = message.includes("geo_operation_transition_invalid")
+  const hint = message.includes("geo_operation_session_mismatch:taken_over_by")
+    ? "本会话已不再拥有该操作：它已被另一个会话接管（错误中 taken_over_by 标明接管会话）。请如实告诉用户，并停止对该操作的一切控制。"
+    : message.includes("geo_operation_transition_invalid")
     ? "当前操作状态不允许该动作；错误信息中列出了此状态下合法的控制动作。改用其中的动作并携带 inspect_geo_operations 返回的最新 revision，或先查看操作状态。"
     : message.includes("geo_operation_already_terminal")
       ? "操作已处于终态（succeeded/failed/cancelled），不能再控制。如需继续同一目标，请用 start_geo_operation 创建新操作。"
@@ -417,6 +419,40 @@ export async function controlGeoOperation(input: {
   action: 'pause' | 'resume' | 'retry' | 'cancel';
 }) {
   return geoOperationService().control(input);
+}
+
+/** 接管一个未完成轮次（ADR-0010）：CAS 所有权转移到当前 Session。 */
+export async function takeoverGeoOperation(input: {
+  operationId: string;
+  expectedRevision: number;
+}) {
+  return geoOperationService().takeover(input);
+}
+
+/**
+ * takeover_geo_operation 的失败投影（与 geoOperationControlFailure 同构）：
+ * 运行中守卫、终态、已被抢（CAS 单赢家）、已是所有者、revision 过期各自
+ * 映射为可转述的中文恢复指引——裸 throw 的 isError 单行文本无法转述。
+ */
+export function geoOperationTakeoverFailure(error: unknown): {
+  kind: "geo-operation-takeover";
+  ok: false;
+  error: string;
+  hint: string;
+} {
+  const message = error instanceof Error ? error.message : String(error);
+  const hint = message.includes("geo_operation_takeover_running")
+    ? "该轮次正在原会话中执行，不能接管。请如实告诉用户：等原会话的这轮工作暂停或结束（关闭原窗口会自动暂停）后，再重新读取品牌状态并接管。"
+    : message.includes("geo_operation_takeover_conflict")
+      ? "该轮次已被另一个会话抢先接管（错误中 taken_over_by 标明接管会话）。请如实告诉用户接管未成功，并用 inspect_geo_operations 查看本会话自己的操作。"
+      : message.includes("geo_operation_takeover_already_owner")
+        ? "本会话已经是该轮次的所有者，无需再接管。直接用 inspect_geo_operations 查看进度，从中断的那一步继续。"
+        : message.includes("geo_operation_takeover_terminal")
+          ? "该轮次已结束（succeeded/failed/cancelled），没有可接管的工作。如需继续同一目标，请与用户确认后用 start_geo_operation 创建新操作。"
+          : message.includes("revision_conflict")
+            ? "expectedRevision 已过期：操作状态已被推进（或已被其他会话接管）。先调用 inspect_geo_operations 获取最新状态与 revision，再重试接管。"
+            : "接管请求被拒绝。先调用 inspect_geo_operations 查看该轮次的最新状态，再决定重试或放弃。";
+  return { kind: "geo-operation-takeover", ok: false, error: message, hint };
 }
 
 export async function chooseNextRoundKnowledge(input: {
@@ -1155,6 +1191,42 @@ export async function createXiaojingGeoServer() {
             return {
               content: [
                 { type: 'text' as const, text: JSON.stringify(geoOperationControlFailure(error)) },
+              ],
+            };
+          }
+        },
+        { alwaysLoad: true },
+      ),
+      tool(
+        'takeover_geo_operation',
+        "Take over an unfinished GEO round owned by another session (ADR-0010): one CAS mutation transfers its ownership — plus the owning session's unapproved article drafts and awaiting-selection question pools, which move with the round as a whole — to the current session, which can then continue from the stuck step exactly where the round stopped. Gate discipline: the takeover confirmation is exactly ONE whole-card confirmation on the chat gate card — after inspect_brand_context lists the unfinished round, present its goal, stuck stage, pending review count and owning session with your recommendation, let the user confirm once on the card, then call this tool a single time; never call it speculatively, never re-ask after the user already confirmed, and never create a second confirmation entry. Rejections return structured relayable results: a running round must pause or finish first (closing the old window auto-pauses); a round already taken over names the winning session; a terminal round means there is nothing to continue. On success report what transferred (drafts and pending pools follow the round) and continue the round with inspect_geo_operations.",
+        {
+          operationId: z
+            .string()
+            .min(1)
+            .max(200)
+            .regex(/^[A-Za-z0-9_.-]+$/),
+          expectedRevision: z.number().int().min(1),
+        },
+        async (input) => {
+          try {
+            const takeover = await takeoverGeoOperation(input);
+            return {
+              content: [
+                {
+                  type: 'text' as const,
+                  text: JSON.stringify({
+                    kind: 'geo-operation-takeover',
+                    ok: true,
+                    takeover,
+                  }),
+                },
+              ],
+            };
+          } catch (error) {
+            return {
+              content: [
+                { type: 'text' as const, text: JSON.stringify(geoOperationTakeoverFailure(error)) },
               ],
             };
           }

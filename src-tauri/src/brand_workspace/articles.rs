@@ -299,11 +299,55 @@ pub(super) fn ensure_schema(connection: &Connection) -> Result<(), String> {
         )
         .map_err(|error| format!("initialize article schema: {error}"))?;
     // 存量库迁移：ranking 维度骨架列（ADR-0009 Decision 2 随文落库）。
-    super::ensure_column(connection, "geo_articles", "ranking_dimensions_json", "TEXT")?;
+    super::ensure_column(
+        connection,
+        "geo_articles",
+        "ranking_dimensions_json",
+        "TEXT",
+    )?;
+    // 接管所有权覆盖（ADR-0010）：NULL = 所有者即创建会话；接管后写入
+    // 接管会话，未批准草稿随之对当前所有者可见（owned-or-approved 改键）。
+    // created_by_session_id 保持审计原义，不改写。
+    super::ensure_column(
+        connection,
+        "geo_article_operations",
+        "owner_session_id",
+        "TEXT",
+    )?;
     super::drop_brand_sessions_foreign_keys(
         connection,
         &["geo_article_operations", "geo_article_versions"],
     )
+}
+
+/// 所有权判定键（ADR-0010 改键）：文章操作/文章草稿的当前所有者 =
+/// `COALESCE(owner_session_id, created_by_session_id)`——接管只写覆盖列，
+/// 创建审计不动。所有可见性 SQL 与属主比较统一使用该键。
+pub(super) const ARTICLE_OPERATION_OWNER_KEY: &str =
+    "COALESCE(owner_session_id, created_by_session_id)";
+
+/// 接管的同一事务内，把原所有者名下仍有未批准文章的操作整体转移给
+/// 接管会话（只写覆盖列）：草稿随 operation 走、不拆分；全批准操作是
+/// 跨会话可见的品牌产物，不转移；其他会话的工作集不动。
+/// 返回转移的操作数。
+pub(super) fn transfer_unapproved_article_work(
+    transaction: &rusqlite::Transaction<'_>,
+    previous_owner: &str,
+    new_owner: &str,
+) -> Result<i64, String> {
+    transaction
+        .execute(
+            "UPDATE geo_article_operations SET owner_session_id=?1
+             WHERE COALESCE(owner_session_id, created_by_session_id)=?2
+               AND EXISTS(
+                    SELECT 1 FROM geo_articles article
+                    WHERE article.operation_id=geo_article_operations.operation_id
+                      AND article.approved_revision IS NULL
+               )",
+            params![new_owner, previous_owner],
+        )
+        .map(|changed| changed as i64)
+        .map_err(|error| format!("transfer unapproved article work: {error}"))
 }
 
 impl BrandWorkspaceStore {
@@ -318,9 +362,11 @@ impl BrandWorkspaceStore {
         require_article_session(&connection, session_id)?;
         let id = connection
             .query_row(
-                "SELECT operation_id FROM geo_article_operations
-                 WHERE created_by_session_id=?1
-                 ORDER BY updated_at DESC, operation_id DESC LIMIT 1",
+                &format!(
+                    "SELECT operation_id FROM geo_article_operations
+                     WHERE {ARTICLE_OPERATION_OWNER_KEY}=?1
+                     ORDER BY updated_at DESC, operation_id DESC LIMIT 1"
+                ),
                 [session_id],
                 |row| row.get::<_, String>(0),
             )
@@ -1713,17 +1759,20 @@ fn validate_snapshot_facts(
     Ok(())
 }
 
-/// 文章操作所有权的单一判定点（票 #26 prefactor）：可见性与控制检查
-/// 一律经这里解析「当前所有者会话」。接管（ADR-0010）落地后，所有者从
-/// 「创建会话」改键为 `COALESCE(owner_session_id, created_by_session_id)`，
-/// 散落的比较收敛于此，改键只动这一处。
+/// 文章操作所有权的单一判定点（票 #26 prefactor + 改键）：可见性与控制
+/// 检查一律经这里解析「当前所有者会话」。ADR-0010 落地后，所有者从
+/// 「创建会话」改键为 `COALESCE(owner_session_id, created_by_session_id)`
+/// （接管写覆盖列、审计列不动），散落的比较收敛于此。
 fn article_operation_owner(
     connection: &Connection,
     operation_id: &str,
 ) -> Result<String, String> {
     connection
         .query_row(
-            "SELECT created_by_session_id FROM geo_article_operations WHERE operation_id=?1",
+            &format!(
+                "SELECT {ARTICLE_OPERATION_OWNER_KEY} FROM geo_article_operations
+                 WHERE operation_id=?1"
+            ),
             [operation_id],
             |row| row.get::<_, String>(0),
         )

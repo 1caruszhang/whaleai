@@ -298,6 +298,9 @@ pub(super) fn ensure_schema(connection: &Connection) -> Result<(), String> {
                 ON brand_keyword_library(workspace_id, created_at);",
         )
         .map_err(|error| format!("initialize question pool schema: {error}"))?;
+    // 接管所有权覆盖（ADR-0010）：NULL = 所有者即创建会话；接管后写入
+    // 接管会话，awaiting-selection 池随之对当前所有者可裁决。创建审计不动。
+    super::ensure_column(connection, "geo_question_pools", "owner_session_id", "TEXT")?;
     super::drop_brand_sessions_foreign_keys(
         connection,
         &[
@@ -307,6 +310,31 @@ pub(super) fn ensure_schema(connection: &Connection) -> Result<(), String> {
             "geo_question_pool_revisions",
         ],
     )
+}
+
+/// 所有权判定键（ADR-0010 改键）：问题池的当前所有者 =
+/// `COALESCE(owner_session_id, created_by_session_id)`——接管只写覆盖列，
+/// 创建审计不动。confirmed 池是跨会话品牌产物，判定与所有者无关。
+pub(super) const QUESTION_POOL_OWNER_KEY: &str =
+    "COALESCE(owner_session_id, created_by_session_id)";
+
+/// 接管的同一事务内，把原所有者名下的 awaiting-selection 池整体转移给
+/// 接管会话（只写覆盖列）：待决池随 operation 走、不拆分；confirmed 池
+/// 是品牌产物，不转移。返回转移的池数。
+pub(super) fn transfer_awaiting_selection_pools(
+    transaction: &rusqlite::Transaction<'_>,
+    previous_owner: &str,
+    new_owner: &str,
+) -> Result<i64, String> {
+    transaction
+        .execute(
+            "UPDATE geo_question_pools SET owner_session_id=?1
+             WHERE COALESCE(owner_session_id, created_by_session_id)=?2
+               AND status='awaiting-selection'",
+            params![new_owner, previous_owner],
+        )
+        .map(|changed| changed as i64)
+        .map_err(|error| format!("transfer awaiting-selection pools: {error}"))
 }
 
 impl BrandWorkspaceStore {
@@ -345,12 +373,14 @@ impl BrandWorkspaceStore {
         let pool_id: Option<String> = if request.pending_only {
             connection
                 .query_row(
-                    "SELECT id FROM geo_question_pools
-                     WHERE knowledge_version=?1 AND status='awaiting-selection'
-                       AND created_by_session_id=?3
-                       AND (?2 IS NULL OR product_line=?2)
-                     ORDER BY updated_at DESC, id DESC
-                     LIMIT 1",
+                    &format!(
+                        "SELECT id FROM geo_question_pools
+                         WHERE knowledge_version=?1 AND status='awaiting-selection'
+                           AND {QUESTION_POOL_OWNER_KEY}=?3
+                           AND (?2 IS NULL OR product_line=?2)
+                         ORDER BY updated_at DESC, id DESC
+                         LIMIT 1"
+                    ),
                     params![knowledge_version, product_line, session_id],
                     |row| row.get(0),
                 )
@@ -359,12 +389,14 @@ impl BrandWorkspaceStore {
         } else {
             connection
                 .query_row(
-                    "SELECT id FROM geo_question_pools
-                     WHERE knowledge_version=?1 AND status IN ('awaiting-selection','confirmed')
-                       AND (?2 IS NULL OR product_line=?2)
-                       AND (status='confirmed' OR created_by_session_id=?3)
-                     ORDER BY CASE status WHEN 'confirmed' THEN 0 ELSE 1 END, updated_at DESC, id DESC
-                     LIMIT 1",
+                    &format!(
+                        "SELECT id FROM geo_question_pools
+                         WHERE knowledge_version=?1 AND status IN ('awaiting-selection','confirmed')
+                           AND (?2 IS NULL OR product_line=?2)
+                           AND (status='confirmed' OR {QUESTION_POOL_OWNER_KEY}=?3)
+                         ORDER BY CASE status WHEN 'confirmed' THEN 0 ELSE 1 END, updated_at DESC, id DESC
+                         LIMIT 1"
+                    ),
                     params![knowledge_version, product_line, session_id],
                     |row| row.get(0),
                 )
@@ -436,13 +468,15 @@ impl BrandWorkspaceStore {
         if request.reuse_existing {
             if let Some(pool_id) = connection
                 .query_row(
-                    "SELECT id FROM geo_question_pools
-                     WHERE knowledge_version=?1 AND product_line=?2 AND target_region=?3
-                       AND generation_parameters_json=?4
-                       AND status IN ('awaiting-selection','confirmed')
-                       AND (status='confirmed' OR created_by_session_id=?5)
-                     ORDER BY CASE status WHEN 'confirmed' THEN 0 ELSE 1 END, updated_at DESC, id DESC
-                     LIMIT 1",
+                    &format!(
+                        "SELECT id FROM geo_question_pools
+                         WHERE knowledge_version=?1 AND product_line=?2 AND target_region=?3
+                           AND generation_parameters_json=?4
+                           AND status IN ('awaiting-selection','confirmed')
+                           AND (status='confirmed' OR {QUESTION_POOL_OWNER_KEY}=?5)
+                         ORDER BY CASE status WHEN 'confirmed' THEN 0 ELSE 1 END, updated_at DESC, id DESC
+                         LIMIT 1"
+                    ),
                     params![
                         context.knowledge_version,
                         request.product_line.trim(),
@@ -901,7 +935,7 @@ impl BrandWorkspaceStore {
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|error| format!("start question pool decision: {error}"))?;
-        let (revision, status, operation_id, knowledge_version, created_by_session_id, keywords_json): (
+        let (revision, status, operation_id, knowledge_version, owner_session_id, keywords_json): (
             i64,
             String,
             String,
@@ -910,8 +944,11 @@ impl BrandWorkspaceStore {
             String,
         ) = transaction
             .query_row(
-                "SELECT revision, status, operation_id, knowledge_version, created_by_session_id, keywords_json
-                 FROM geo_question_pools WHERE id=?1",
+                &format!(
+                    "SELECT revision, status, operation_id, knowledge_version,
+                            {QUESTION_POOL_OWNER_KEY}, keywords_json
+                     FROM geo_question_pools WHERE id=?1"
+                ),
                 [&request.pool_id],
                 |row| {
                     Ok((
@@ -927,7 +964,7 @@ impl BrandWorkspaceStore {
             .optional()
             .map_err(|error| format!("read question pool: {error}"))?
             .ok_or_else(|| "question_pool_not_found".to_string())?;
-        if created_by_session_id != request.session_id {
+        if owner_session_id != request.session_id {
             return Err("question_pool_identity_mismatch".to_string());
         }
         if !matches!(status.as_str(), "awaiting-selection" | "confirmed") {
@@ -1042,7 +1079,7 @@ impl BrandWorkspaceStore {
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|error| format!("start question pool revision: {error}"))?;
-        let (revision, status, keywords_json, questions_json, created_by_session_id): (
+        let (revision, status, keywords_json, questions_json, owner_session_id): (
             i64,
             String,
             String,
@@ -1050,8 +1087,11 @@ impl BrandWorkspaceStore {
             String,
         ) = transaction
             .query_row(
-                "SELECT revision, status, keywords_json, questions_json, created_by_session_id
-                 FROM geo_question_pools WHERE id=?1",
+                &format!(
+                    "SELECT revision, status, keywords_json, questions_json,
+                            {QUESTION_POOL_OWNER_KEY}
+                     FROM geo_question_pools WHERE id=?1"
+                ),
                 [&request.pool_id],
                 |row| {
                     Ok((
@@ -1066,7 +1106,7 @@ impl BrandWorkspaceStore {
             .optional()
             .map_err(|error| format!("read question pool for revision: {error}"))?
             .ok_or_else(|| "question_pool_not_found".to_string())?;
-        if created_by_session_id != request.session_id {
+        if owner_session_id != request.session_id {
             return Err("question_pool_identity_mismatch".to_string());
         }
         let has_decision: i64 = transaction

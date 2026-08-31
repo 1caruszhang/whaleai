@@ -8,6 +8,7 @@ import {
   type GeoOperationReference,
   type GeoOperationStep,
   type GeoOperationStepProgress,
+  type GeoOperationTakeoverReceipt,
   type GeoOperationUnfinishedSummary,
 } from "../../shared/geo/operation";
 import { managementApi } from "../utils/management-api-client";
@@ -77,6 +78,11 @@ export interface GeoOperationPersistencePort {
   mutate(request: GeoOperationMutationRequest): Promise<GeoOperationProjection>;
   /** 跨会话只读元信息（ADR-0010）：品牌内非终态轮次，不含正文/聊天记录。 */
   listUnfinished(): Promise<GeoOperationUnfinishedSummary[]>;
+  /** 接管 mutation（ADR-0010）：CAS 所有权转移到当前 Session。 */
+  takeover(input: {
+    operationId: string;
+    expectedRevision: number;
+  }): Promise<GeoOperationTakeoverReceipt>;
 }
 
 function persistenceError(result: Record<string, unknown>): Error {
@@ -141,6 +147,17 @@ export class RustGeoOperationPort implements GeoOperationPersistencePort {
     );
   }
 
+  takeover(input: {
+    operationId: string;
+    expectedRevision: number;
+  }): Promise<GeoOperationTakeoverReceipt> {
+    return this.post(
+      "/api/brand-geo-operations/takeover",
+      input as unknown as Record<string, unknown>,
+      "takeover",
+    );
+  }
+
   mutate(
     request: GeoOperationMutationRequest,
   ): Promise<GeoOperationProjection> {
@@ -191,6 +208,19 @@ export class GeoOperationService {
    */
   listUnfinished(): Promise<GeoOperationUnfinishedSummary[]> {
     return this.persistence.listUnfinished();
+  }
+
+  /**
+   * 接管一个未完成轮次（ADR-0010）：经信息闸门卡片整卡一次确认后调用，
+   * CAS 把所有权（含 awaiting-selection 池与未批准草稿）转移到当前
+   * Session。运行中/终态/已被抢的拒绝由 Rust 返回可转述错误，调用方
+   * （MCP 工具层）翻译为恢复指引。
+   */
+  takeover(input: {
+    operationId: string;
+    expectedRevision: number;
+  }): Promise<GeoOperationTakeoverReceipt> {
+    return this.persistence.takeover(input);
   }
 
   control(input: {

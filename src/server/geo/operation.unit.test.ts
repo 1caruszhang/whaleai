@@ -43,6 +43,7 @@ function persistence(current = projection()): GeoOperationPersistencePort & {
   get: ReturnType<typeof vi.fn>;
   list: ReturnType<typeof vi.fn>;
   mutate: ReturnType<typeof vi.fn>;
+  takeover: ReturnType<typeof vi.fn>;
 } {
   return {
     create: vi.fn(async (request) =>
@@ -59,6 +60,13 @@ function persistence(current = projection()): GeoOperationPersistencePort & {
     get: vi.fn(async () => current),
     list: vi.fn(async () => [current]),
     listUnfinished: vi.fn(async () => []),
+    takeover: vi.fn(async () => ({
+      operation: projection({ ...current, revision: current.revision + 1 }),
+      previousOwnerSessionId: "session-16-previous",
+      takenOverAt: "2026-09-01T09:00:00Z",
+      transferredArticleOperations: 1,
+      transferredQuestionPools: 0,
+    })),
     mutate: vi.fn(async (request) =>
       projection({
         ...current,
@@ -255,5 +263,25 @@ describe("GeoOperationService", () => {
         queuePosition: 3,
       }),
     );
+  });
+
+  it("delegates takeover to the persistence port with revision CAS", async () => {
+    const port = persistence();
+    const service = new GeoOperationService(
+      { workspaceId: "brand-16", sessionId: "session-16" },
+      port,
+    );
+
+    const receipt = await service.takeover({
+      operationId: "operation-16",
+      expectedRevision: 3,
+    });
+
+    expect(port.takeover).toHaveBeenCalledWith({
+      operationId: "operation-16",
+      expectedRevision: 3,
+    });
+    expect(receipt.previousOwnerSessionId).toBe("session-16-previous");
+    expect(receipt.operation.revision).toBe(2);
   });
 });

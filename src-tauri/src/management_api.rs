@@ -118,6 +118,10 @@ pub async fn start_management_api() -> Result<u16, String> {
             post(brand_geo_operation_unfinished_handler),
         )
         .route(
+            "/api/brand-geo-operations/takeover",
+            post(brand_geo_operation_takeover_handler),
+        )
+        .route(
             "/api/brand-geo-operations/mutate",
             post(brand_geo_operation_mutate_handler),
         )
@@ -914,6 +918,38 @@ async fn brand_geo_operation_unfinished_handler(
     };
     match store.list_unfinished_geo_operations(&request.workspace_id) {
         Ok(operations) => Json(serde_json::json!({ "ok": true, "operations": operations })),
+        Err(error) => Json(serde_json::json!({ "ok": false, "error": error })),
+    }
+}
+
+/// 接管 mutation（ADR-0010）：经信息闸门卡片整卡一次确认后，由 MCP 工具
+/// `takeover_geo_operation` 提交。信封鉴权与 mutate 同级（Sidecar
+/// generation + Session + 工作区），CAS 单赢家由 store 保证；运行中/终态/
+/// 已被抢的拒绝以可转述错误文本返回，由 Node 工具层翻译为恢复指引。
+async fn brand_geo_operation_takeover_handler(
+    headers: HeaderMap,
+    Json(request): Json<
+        BrandKnowledgeEnvelope<crate::brand_workspace::GeoOperationTakeoverRequest>,
+    >,
+) -> Json<serde_json::Value> {
+    let store = match validate_brand_knowledge_request(&headers, &request) {
+        Ok(store) => store,
+        Err(error) => return Json(error),
+    };
+    if request.payload.workspace_id != request.workspace_id
+        || request.payload.session_id != request.session_id
+    {
+        return Json(serde_json::json!({
+            "ok": false,
+            "code": "identity_mismatch",
+            "error": "GeoOperation takeover identity must match its authenticated envelope",
+        }));
+    }
+    match store.takeover_geo_operation(request.payload) {
+        Ok(receipt) => {
+            crate::notification::submit_geo_operation_projection(&receipt.operation);
+            Json(serde_json::json!({ "ok": true, "takeover": receipt }))
+        }
         Err(error) => Json(serde_json::json!({ "ok": false, "error": error })),
     }
 }
