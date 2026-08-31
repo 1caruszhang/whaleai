@@ -8,7 +8,10 @@ import {
   ARTICLE_GENERATION_POLICY_VERSION,
   ARTICLE_NARRATIVE_SEEDS,
   ARTICLE_IMAGE_CANDIDATE_INJECTION_LIMIT,
+  autoBoldBrandMentions,
   buildArticleGenerationMessages,
+  buildArticleRepairMessages,
+  buildRankingDimensionMessages,
   combineArticleReview,
   dealNarrativeSeeds,
   deterministicArticleReview,
@@ -16,6 +19,7 @@ import {
   mergeRankingCompetitorTiers,
   parseArticleReflection,
   parseGeneratedArticleBody,
+  parseRankingDimensions,
   normalizeUnicodeBulletsToMarkdown,
   resolveRankingRoster,
   shuffledNarrativeSeeds,
@@ -25,6 +29,7 @@ import {
   MATERIAL_IMAGE_MAX_PER_ARTICLE,
   MATERIAL_IMAGE_URI_SCHEME,
   scanMaterialImagePlaceholders,
+  trimMaterialImagePlaceholders,
 } from "./materialImagePlaceholder";
 
 describe("ranking competitor cross-process contract", () => {
@@ -125,6 +130,19 @@ describe("direct article generation contract", () => {
                 },
               ]
             : facts,
+        // ADR-0009 Decision 2：ranking 必须携带维度骨架（缺省抛错）。
+        ...(contentType === "ranking"
+          ? {
+              rankingDimensions: [
+                "服务范围",
+                "核心项目",
+                "适用人群",
+                "服务方式",
+                "区域覆盖",
+                "选择要点",
+              ],
+            }
+          : {}),
       });
     for (const contentType of ["guide", "showcase", "news", "news_light"] as const) {
       expect(build(contentType).system).toContain("1800–2100 字");
@@ -133,8 +151,11 @@ describe("direct article generation contract", () => {
     expect(ranking).toContain("2500 字以内");
     expect(ranking).toContain("单条不短于 45 字");
     expect(ranking).toContain("选型应重点考察的维度");
-    expect(ranking).toContain("自选（不照搬任何示例维度）");
+    // ADR-0009 骨架注入：契约从「模型自选」改为「逐字使用注入清单」。
+    expect(ranking).toContain("逐字使用输入「本篇维度清单」给出的名称");
     expect(ranking).toContain("标题含数字（如「六家」「六大」）时，正文必须严格出现对应数量");
+    expect(build("ranking").user).toContain("## 本篇维度清单（六家逐字共用的固定骨架，顺序保持如下）");
+    expect(build("ranking").user).toContain("1. 服务范围");
     const guide = build("guide").system;
     expect(guide).toContain("不少于 100 字的行业报告");
     expect(guide).toContain("每 500 字自然出现 1 次");
@@ -178,10 +199,30 @@ describe("direct article generation contract", () => {
       requestedTitle: "本地服务六家对比",
       constraints: "",
       plannedFacts: rankingFacts,
+      rankingDimensions: [
+        "服务范围",
+        "核心项目",
+        "适用人群",
+        "服务方式",
+        "区域覆盖",
+        "选择要点",
+      ],
     });
     expect(messages.user).toContain("目标品牌固定为陈列位 1");
     expect(messages.user).toContain("竞品甲、竞品乙、竞品丙、竞品丁、竞品戊");
     expect(messages.user).toContain("五家竞品在陈列位 2–6 的顺序可自由调整");
+    expect(() =>
+      buildArticleGenerationMessages({
+        brandName: "目标品牌",
+        productLine: "本地服务",
+        targetRegion: "成都",
+        contentType: "ranking",
+        topic: "本地服务怎么选",
+        requestedTitle: "本地服务六家对比",
+        constraints: "",
+        plannedFacts: rankingFacts,
+      }),
+    ).toThrow("article_generation_ranking_dimensions_missing");
 
     expect(() =>
       resolveRankingRoster(
@@ -416,6 +457,340 @@ describe("illustration contract injection (ADR-0008 T4)", () => {
   it("exposes the injection cap as a named constant for the pool wiring", () => {
     expect(ARTICLE_IMAGE_CANDIDATE_INJECTION_LIMIT).toBeGreaterThan(0);
     expect(ARTICLE_IMAGE_CANDIDATE_INJECTION_LIMIT).toBeLessThanOrEqual(100);
+  });
+});
+
+describe("brand mention auto-bolding (ADR-0009)", () => {
+  const brandFacts = [
+    {
+      factKey: "brand-fullname",
+      predicate: "enterprise-profile.fullname",
+      normalizedValueJson: '"成都鲸鱼家居有限公司"',
+    },
+    {
+      factKey: "brand-shortnames",
+      predicate: "enterprise-profile.shortnames",
+      normalizedValueJson: '["鲸鱼家居"]',
+    },
+  ];
+
+  it("bolds verbatim full-name and short-name occurrences, longest name first", () => {
+    // 「鲸鱼家居」是全称子串：长名优先保证全称整体包粗后再独立包简称，
+    // 不会把「成都鲸鱼家居有限公司」拦腰截成两段加粗。
+    expect(
+      autoBoldBrandMentions(
+        "成都鲸鱼家居有限公司是行业老兵，鲸鱼家居口碑不错。",
+        brandFacts,
+      ),
+    ).toBe("**成都鲸鱼家居有限公司**是行业老兵，**鲸鱼家居**口碑不错。");
+  });
+
+  it("skips heading lines, existing bold spans and fenced code blocks", () => {
+    const body = [
+      "# 标题",
+      "",
+      "## 鲸鱼家居怎么样",
+      "",
+      "**鲸鱼家居**已有加粗不双重包裹。",
+      "",
+      "```",
+      "鲸鱼家居在代码块里不动。",
+      "```",
+    ].join("\n");
+    expect(autoBoldBrandMentions(body, brandFacts)).toBe(body);
+  });
+
+  it("skips image syntax and link URLs but bolds link text", () => {
+    expect(
+      autoBoldBrandMentions(
+        "![鲸鱼家居门头](material-image://abc123) 见[鲸鱼家居官网](https://example.com/鲸鱼家居)。",
+        brandFacts,
+      ),
+    ).toBe(
+      "![鲸鱼家居门头](material-image://abc123) 见[**鲸鱼家居**官网](https://example.com/鲸鱼家居)。",
+    );
+  });
+
+  it("returns the body unchanged when the profile has no brand names", () => {
+    expect(autoBoldBrandMentions("正文", [])).toBe("正文");
+  });
+
+  it("satisfies the deterministic gate's bold assertion after auto-bolding", () => {
+    const body = autoBoldBrandMentions(
+      [
+        "# 标题",
+        "",
+        "## 门槛",
+        "成都鲸鱼家居有限公司行业深耕。",
+        "",
+        "## 清单",
+        "- 鲸鱼家居服务到位",
+      ].join("\n"),
+      brandFacts,
+    );
+    expect(
+      deterministicArticleReview(body, brandFacts, "guide").filter(
+        (issue) => issue.category === "output-contract",
+      ),
+    ).toEqual([]);
+  });
+
+  it("treats image alt text and fenced code as blind spots in the gate scan", () => {
+    // 盲区对齐（ADR-0009）：alt/代码块里的品牌字样不是正文指称，加粗门
+    // 不再误报——此前 alt 含品牌名会被判「未加粗」整篇拒掉。
+    const body = [
+      "# 标题",
+      "",
+      "## 门店",
+      "![鲸鱼家居门头](material-image://abc123)",
+      "",
+      "## 说明",
+      "- 图片说明见上",
+    ].join("\n");
+    expect(
+      deterministicArticleReview(body, brandFacts, "guide").filter(
+        (issue) => issue.category === "output-contract",
+      ),
+    ).toEqual([]);
+  });
+});
+
+describe("image placeholder quota trimming (ADR-0009)", () => {
+  const body = [
+    "# 标题",
+    "",
+    "![首图](material-image://img-1)",
+    "",
+    "![第二张](material-image://img-2)",
+    "",
+    "![第三张](material-image://img-3)",
+  ].join("\n");
+
+  it("keeps the first N placeholders and drops the rest in order", () => {
+    const trimmed = trimMaterialImagePlaceholders(body, 1);
+    expect(trimmed).toContain("![首图](material-image://img-1)");
+    expect(trimmed).not.toContain("img-2");
+    expect(trimmed).not.toContain("img-3");
+    expect(scanMaterialImagePlaceholders(trimmed).placeholders).toHaveLength(1);
+  });
+
+  it("returns the body unchanged when within quota", () => {
+    expect(trimMaterialImagePlaceholders(body, 3)).toBe(body);
+    expect(trimMaterialImagePlaceholders(body, 8)).toBe(body);
+  });
+});
+
+describe("article repair prompt (ADR-0009 Decision 3)", () => {
+  it("injects the blocking issue list verbatim with title, body and optional roster note", () => {
+    const messages = buildArticleRepairMessages({
+      contentType: "guide",
+      requestedTitle: "修复演示标题",
+      body: "# 修复演示标题\n\n## 定义\n正文。",
+      issues: [
+        { message: "格式契约不满足：guide 类型至少需要 3 个 H2（当前 1）。" },
+      ],
+      rosterNote: "陈列位 1 必须是目标品牌：甲。",
+    });
+    expect(messages.system).toContain("文章格式修复器");
+    expect(messages.system).toContain("plain Markdown");
+    expect(messages.user).toContain("# 修复演示标题");
+    expect(messages.user).toContain(
+      "- 格式契约不满足：guide 类型至少需要 3 个 H2（当前 1）。",
+    );
+    expect(messages.user).toContain("## 正文草稿");
+    expect(messages.user).toContain("陈列位 1 必须是目标品牌：甲。");
+  });
+
+  it("omits the roster section when no note is given and rejects empty issue lists", () => {
+    const messages = buildArticleRepairMessages({
+      contentType: "news",
+      requestedTitle: "标题",
+      body: "# 标题\n正文",
+      issues: [{ message: "格式契约不满足：news 类型至少需要 2 个 H2（当前 0）。" }],
+    });
+    expect(messages.user).not.toContain("## 名单硬约束");
+    expect(() =>
+      buildArticleRepairMessages({
+        contentType: "news",
+        requestedTitle: "标题",
+        body: "# 标题\n正文",
+        issues: [],
+      }),
+    ).toThrow("article_repair_issues_empty");
+  });
+});
+
+describe("ranking dimension skeleton (ADR-0009 Decision 2)", () => {
+  const DIMENSIONS = [
+    "服务范围",
+    "核心项目",
+    "适用人群",
+    "服务方式",
+    "区域覆盖",
+    "选择要点",
+  ];
+
+  it("parses a fenced or bare JSON array of six unique dimension names", () => {
+    expect(parseRankingDimensions(JSON.stringify(DIMENSIONS))).toEqual(
+      DIMENSIONS,
+    );
+    expect(
+      parseRankingDimensions("```json\n" + JSON.stringify(DIMENSIONS) + "\n```"),
+    ).toEqual(DIMENSIONS);
+  });
+
+  it("rejects bad json, wrong shape, duplicate or malformed names", () => {
+    expect(() => parseRankingDimensions("不是 JSON")).toThrow(
+      "article_generation_ranking_dimensions_invalid_json",
+    );
+    expect(() => parseRankingDimensions('["服务范围","核心项目"]')).toThrow(
+      "article_generation_ranking_dimensions_invalid_shape",
+    );
+    expect(() =>
+      parseRankingDimensions(JSON.stringify([...DIMENSIONS.slice(0, 5), "服务范围"])),
+    ).toThrow("article_generation_ranking_dimensions_invalid_value");
+    expect(() =>
+      parseRankingDimensions(JSON.stringify([...DIMENSIONS.slice(0, 5), "这个名字肯定超过十个字"])),
+    ).toThrow("article_generation_ranking_dimensions_invalid_value");
+    expect(() =>
+      parseRankingDimensions(JSON.stringify([...DIMENSIONS.slice(0, 5), "带*号的名字"])),
+    ).toThrow("article_generation_ranking_dimensions_invalid_value");
+  });
+
+  it("builds the dimension planning prompt with the full brand exclusion list", () => {
+    const messages = buildRankingDimensionMessages({
+      brandNames: ["目标品牌", "竞品甲", "竞品乙"],
+      productLine: "本地服务",
+      targetRegion: "成都",
+      topic: "本地服务怎么选",
+    });
+    expect(messages.system).toContain("6 个对比维度名");
+    expect(messages.system).toContain("不得包含输入里列出的任何品牌名");
+    // 排除集含目标品牌与竞品（ADR-0009：维度调用输入含品牌事实）。
+    expect(messages.user).toContain(
+      "以下品牌名仅作行业语境参考，一律禁止用作维度：目标品牌、竞品甲、竞品乙",
+    );
+  });
+
+  it("accepts per-brand dimension order drift under the set-equality gate", () => {
+    const rankingFacts = [
+      {
+        factKey: "brand-name",
+        predicate: "enterprise-profile.fullname",
+        normalizedValueJson: '"目标品牌"',
+      },
+      {
+        factKey: "competitors",
+        predicate: "enterprise-profile.competitors",
+        normalizedValueJson:
+          '["竞品甲","竞品乙","竞品丙","竞品丁","竞品戊"]',
+      },
+    ];
+    const roster = [
+      "目标品牌",
+      "竞品甲",
+      "竞品乙",
+      "竞品丙",
+      "竞品丁",
+      "竞品戊",
+    ];
+    const section = (name: string, dimensions: readonly string[]) => [
+      name,
+      ...dimensions.map((dimension) => `- **${dimension}**：信息`),
+    ];
+    // 各家维度顺序不同（第 2 家倒序）：集合相等即过——用户裁定「等长非
+    // 严格等长，相似即可」。
+    const orderDriftBody = [
+      "# 本地服务六家对比",
+      "",
+      ...roster.flatMap((name, index) =>
+        section(
+          `## ${index + 1}. ${name}`,
+          index === 1 ? [...DIMENSIONS].reverse() : DIMENSIONS,
+        ),
+      ),
+    ].join("\n");
+    expect(
+      deterministicArticleReview(
+        orderDriftBody,
+        rankingFacts,
+        "ranking",
+        "目标品牌",
+        DIMENSIONS,
+      ).filter((issue) => issue.severity === "blocking"),
+    ).toEqual([]);
+
+    // 一家把「选择要点」换成了清单外维度：集合不等，拦截。
+    const swappedBody = [
+      "# 本地服务六家对比",
+      "",
+      ...roster.flatMap((name, index) =>
+        section(
+          `## ${index + 1}. ${name}`,
+          index === 2
+            ? [...DIMENSIONS.slice(0, 5), "售后服务"]
+            : DIMENSIONS,
+        ),
+      ),
+    ].join("\n");
+    expect(
+      deterministicArticleReview(
+        swappedBody,
+        rankingFacts,
+        "ranking",
+        "目标品牌",
+        DIMENSIONS,
+      ),
+    ).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          category: "geo-citability",
+          severity: "blocking",
+        }),
+      ]),
+    );
+
+    // 注入清单是权威对照：六家集合一致但整组偏离清单（存量自选稿），
+    // 生成路径仍拦——清单与正文不同说明模型没有照抄骨架。
+    const offSkeletonBody = [
+      "# 本地服务六家对比",
+      "",
+      ...roster.flatMap((name, index) =>
+        section(`## ${index + 1}. ${name}`, [
+          "售后保障",
+          "价格区间",
+          "门店分布",
+          "师傅资历",
+          "响应速度",
+          "口碑评价",
+        ]),
+      ),
+    ].join("\n");
+    expect(
+      deterministicArticleReview(
+        offSkeletonBody,
+        rankingFacts,
+        "ranking",
+        "目标品牌",
+        DIMENSIONS,
+      ),
+    ).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          category: "geo-citability",
+          severity: "blocking",
+        }),
+      ]),
+    );
+    // 同一偏离清单的存量稿无注入清单时回退与第一家比对：六家一致即过。
+    expect(
+      deterministicArticleReview(
+        offSkeletonBody,
+        rankingFacts,
+        "ranking",
+        "目标品牌",
+      ).filter((issue) => issue.severity === "blocking"),
+    ).toEqual([]);
   });
 });
 

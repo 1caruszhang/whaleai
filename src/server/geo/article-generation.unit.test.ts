@@ -33,7 +33,7 @@ function directGenerationComplete(
   if (options?.purpose === "title-planning") {
     return JSON.stringify({ candidates: TITLE_CANDIDATES });
   }
-  return `# ${TITLE_CANDIDATES[0]}\n\n## 定义\n品牌成立10年。\n\n## 清单\n- 核对事实\n- 固定版本`;
+  return `# ${TITLE_CANDIDATES[0]}\n\n## 定义\n品牌成立10年。\n\n## 清单\n- 核对事实\n- 固定版本\n\n## 场景\n- 团队协作`;
 }
 
 function article(id: string): ArticleProjection {
@@ -75,7 +75,7 @@ function operation(articles: ArticleProjection[]): ArticleOperationProjection {
     topicPlanId: null,
     topicPlanRevision: null,
     knowledgeVersion: 7,
-    policyVersion: "xiaojing-content-prompt-v6",
+    policyVersion: "xiaojing-content-prompt-v7",
     status: "running",
     articles,
     createdAt: "2026-01-01T00:00:00Z",
@@ -158,7 +158,22 @@ describe("ArticleGenerationService", () => {
     } as unknown as ArticlePersistencePort;
     const generation = {
       slot: "generation",
-      complete: vi.fn(async () => rankingBody),
+      complete: vi.fn(async (messages: readonly GeoTextMessage[]) => {
+        // ADR-0009 骨架注入：维度选定小调用先于正文，返回合法 6 维 JSON；
+        // 正文与修复腿都返回这份名单外品牌的坏稿，复检不过整篇失败。
+        const prompt = messages.map((message) => message.content).join("\n");
+        if (prompt.includes("行业选型顾问")) {
+          return JSON.stringify([
+            "服务范围",
+            "核心项目",
+            "适用人群",
+            "服务方式",
+            "区域覆盖",
+            "选择要点",
+          ]);
+        }
+        return rankingBody;
+      }),
     } satisfies GeoTextCapability;
     const service = new ArticleGenerationService(
       { workspaceId: "workspace-1", sessionId: "session-1" },
@@ -185,6 +200,333 @@ describe("ArticleGenerationService", () => {
       expect.objectContaining({
         failureReason: expect.stringContaining(
           "article_generation_ranking_output_invalid",
+        ),
+      }),
+    );
+  });
+
+  it("injects the dimension skeleton into the ranking prompt and persists it with the draft (ADR-0009)", async () => {
+    const row: ArticleProjection = {
+      ...article("rank-ok"),
+      sourcePlanItemId: "plan-rank-ok",
+      contentType: "ranking",
+      requestedTitle: "2026 年本地服务六家对比",
+      plannedFacts: [
+        {
+          factKey: "brand-name",
+          predicate: "enterprise-profile.fullname",
+          normalizedValueJson: '"目标品牌"',
+        },
+        {
+          factKey: "competitors",
+          predicate: "enterprise-profile.competitors",
+          normalizedValueJson: '["竞品甲","竞品乙","竞品丙","竞品丁","竞品戊"]',
+        },
+      ],
+    };
+    const roster = [
+      "目标品牌",
+      "竞品甲",
+      "竞品乙",
+      "竞品丙",
+      "竞品丁",
+      "竞品戊",
+    ];
+    const dimensions = [
+      "服务范围",
+      "核心项目",
+      "适用人群",
+      "服务方式",
+      "区域覆盖",
+      "选择要点",
+    ];
+    const rankingBody = [
+      `# ${row.requestedTitle}`,
+      "",
+      ...roster.flatMap((name, index) => [
+        `## ${index + 1}. ${name}`,
+        ...dimensions.map(
+          (dimension) =>
+            `- **${dimension}**：这一条是不少于四十五个字的维度说明文字，写足具体经营信息并保证独立成义。`,
+        ),
+      ]),
+    ].join("\n");
+    const bodyPrompts: string[] = [];
+    let persistedDimensions: readonly string[] | undefined;
+    let persistedBody = "";
+    const port = {
+      start: vi.fn(async () => operation([row])),
+      getOperation: vi.fn(async () => operation([row])),
+      claimGeneration: vi.fn(async () => ({
+        article: row,
+        brandName: "目标品牌",
+        productLine: "本地服务",
+        targetRegion: "成都",
+        claimToken: "claim-rank-ok",
+      })),
+      finishGeneration: vi.fn(
+        async (input: {
+          body: string;
+          rankingDimensions?: readonly string[];
+        }) =>
+          ((persistedBody = input.body),
+          (persistedDimensions = input.rankingDimensions),
+          { ...row, status: "draft_ready" as const, revision: 1 }) as ArticleProjection,
+      ),
+      failGeneration: vi.fn(
+        async () =>
+          ({ ...row, status: "generation_failed" as const }) as ArticleProjection,
+      ),
+    } as unknown as ArticlePersistencePort;
+    const generation = {
+      slot: "generation",
+      complete: vi.fn(async (messages: readonly GeoTextMessage[]) => {
+        const prompt = messages.map((message) => message.content).join("\n");
+        if (prompt.includes("行业选型顾问")) {
+          return JSON.stringify(dimensions);
+        }
+        bodyPrompts.push(prompt);
+        return rankingBody;
+      }),
+    } satisfies GeoTextCapability;
+    const service = new ArticleGenerationService(
+      { workspaceId: "workspace-1", sessionId: "session-1" },
+      port,
+      generation,
+      { slot: "reflection", complete: vi.fn() },
+    );
+    await service.start({
+      workspaceId: "workspace-1",
+      sessionId: "session-1",
+      source: { kind: "confirmed-topic-plan", planId: "plan-1" },
+    });
+
+    // 维度清单字面注入正文 prompt；清单随稿落库供批准门复检对照。
+    expect(port.failGeneration).not.toHaveBeenCalled();
+    expect(port.finishGeneration).toHaveBeenCalledTimes(1);
+    expect(bodyPrompts[0]).toContain("## 本篇维度清单（六家逐字共用的固定骨架，顺序保持如下）");
+    expect(bodyPrompts[0]).toContain("1. 服务范围");
+    expect(persistedDimensions).toEqual(dimensions);
+    expect(persistedBody).toContain("## 1. 目标品牌");
+    // 契合骨架的正文一次过门：修复腿不应触发。
+    expect(
+      generation.complete.mock.calls.filter(
+        (call) =>
+          !(
+            call[0] as readonly GeoTextMessage[]
+          )
+            .map((message) => message.content)
+            .join("\n")
+            .includes("行业选型顾问"),
+      ),
+    ).toHaveLength(1);
+  });
+
+  it("auto-bolds brand mentions and trims over-quota images before persisting (ADR-0009)", async () => {
+    const row: ArticleProjection = {
+      ...article("bold-1"),
+      plannedFacts: [
+        {
+          factKey: "brand-fullname",
+          predicate: "enterprise-profile.fullname",
+          normalizedValueJson: '"成都鲸鱼家居有限公司"',
+        },
+        {
+          factKey: "brand-shortnames",
+          predicate: "enterprise-profile.shortnames",
+          normalizedValueJson: '["鲸鱼家居"]',
+        },
+      ],
+    };
+    // guide 配额 8：模型超发 9 张，落库前裁到 8；品牌名不加粗由管线补齐。
+    const images = Array.from(
+      { length: 9 },
+      (_, index) => `![配图${index + 1}](material-image://img-${index + 1})`,
+    );
+    const rawBody = [
+      `# ${TITLE_CANDIDATES[0]}`,
+      "",
+      "## 定义",
+      "成都鲸鱼家居有限公司行业深耕，鲸鱼家居口碑不错。",
+      "",
+      "## 清单",
+      "- 核对事实",
+      ...images,
+      "",
+      "## 场景",
+      "- 家庭用户",
+    ].join("\n");
+    let persistedBody = "";
+    const port = {
+      start: vi.fn(async () => operation([row])),
+      getOperation: vi.fn(async () => operation([row])),
+      claimGeneration: vi.fn(async () => ({
+        article: row,
+        brandName: "成都鲸鱼家居有限公司",
+        productLine: "知识服务",
+        targetRegion: "中国",
+        claimToken: "claim-bold",
+      })),
+      finishGeneration: vi.fn(
+        async (input: { body: string }) =>
+          ((persistedBody = input.body),
+          { ...row, status: "draft_ready" as const, revision: 1 }) as ArticleProjection,
+      ),
+      failGeneration: vi.fn(
+        async () =>
+          ({ ...row, status: "generation_failed" as const }) as ArticleProjection,
+      ),
+    } as unknown as ArticlePersistencePort;
+    const generation = {
+      slot: "generation",
+      complete: vi.fn(
+        async (
+          messages: readonly GeoTextMessage[],
+          options?: CompleteOptions,
+        ) => {
+          if (options?.purpose === "title-planning") {
+            return JSON.stringify({ candidates: TITLE_CANDIDATES });
+          }
+          return rawBody;
+        },
+      ),
+    } satisfies GeoTextCapability;
+    const service = new ArticleGenerationService(
+      { workspaceId: "workspace-1", sessionId: "session-1" },
+      port,
+      generation,
+      { slot: "reflection", complete: vi.fn() },
+    );
+    await service.start({
+      workspaceId: "workspace-1",
+      sessionId: "session-1",
+      source: {
+        kind: "direct",
+        count: 1,
+        themes: ["主题 bold-1"],
+        contentType: "guide",
+        constraints: "",
+      },
+    });
+
+    expect(port.finishGeneration).toHaveBeenCalled();
+    expect(persistedBody).toContain(
+      "**成都鲸鱼家居有限公司**行业深耕，**鲸鱼家居**口碑不错。",
+    );
+    expect((persistedBody.match(/material-image:\/\//g) ?? []).length).toBe(8);
+    expect(persistedBody).toContain("img-8");
+    expect(persistedBody).not.toContain("img-9");
+  });
+
+  it("runs one bounded repair pass when blocking issues survive deterministic fixes (ADR-0009)", async () => {
+    const row: ArticleProjection = {
+      ...article("repair-1"),
+      sourcePlanItemId: "plan-repair-1",
+      requestedTitle: "修复演示标题",
+    };
+    const deficientBody = "# 修复演示标题\n\n## 定义\n品牌成立10年。\n\n## 清单\n- 核对事实";
+    const repairedBody =
+      "# 修复演示标题\n\n## 定义\n品牌成立10年。\n\n## 清单\n- 核对事实\n\n## 场景\n- 团队协作";
+    let persistedAudit: Record<string, unknown> | undefined;
+    let persistedBody = "";
+    const port = {
+      start: vi.fn(async () => operation([row])),
+      getOperation: vi.fn(async () => operation([row])),
+      claimGeneration: vi.fn(async () => ({
+        article: row,
+        brandName: "测试品牌",
+        productLine: "知识服务",
+        targetRegion: "中国",
+        claimToken: "claim-repair",
+      })),
+      finishGeneration: vi.fn(
+        async (input: {
+          body: string;
+          modelAudit: Record<string, unknown>;
+        }) =>
+          ((persistedBody = input.body),
+          (persistedAudit = input.modelAudit),
+          { ...row, status: "draft_ready" as const, revision: 1 }) as ArticleProjection,
+      ),
+      failGeneration: vi.fn(
+        async () =>
+          ({ ...row, status: "generation_failed" as const }) as ArticleProjection,
+      ),
+    } as unknown as ArticlePersistencePort;
+    const generation = {
+      slot: "generation",
+      complete: vi.fn(async (messages: readonly GeoTextMessage[]) => {
+        const prompt = messages.map((message) => message.content).join("\n");
+        if (prompt.includes("文章格式修复器")) return repairedBody;
+        return deficientBody;
+      }),
+    } satisfies GeoTextCapability;
+    const service = new ArticleGenerationService(
+      { workspaceId: "workspace-1", sessionId: "session-1" },
+      port,
+      generation,
+      { slot: "reflection", complete: vi.fn() },
+    );
+    await service.start({
+      workspaceId: "workspace-1",
+      sessionId: "session-1",
+      source: { kind: "confirmed-topic-plan", planId: "plan-1" },
+    });
+
+    // 初稿缺第 3 个 H2 → 触发一次修复调用 → 修复稿落库。
+    expect(generation.complete).toHaveBeenCalledTimes(2);
+    expect(port.failGeneration).not.toHaveBeenCalled();
+    expect(port.finishGeneration).toHaveBeenCalledTimes(1);
+    expect(persistedBody).toContain("## 场景");
+    expect(persistedAudit).toMatchObject({ repairUsed: true });
+  });
+
+  it("fails with the deterministic issue list when the repair pass does not clear blocking", async () => {
+    const row: ArticleProjection = {
+      ...article("repair-2"),
+      sourcePlanItemId: "plan-repair-2",
+      requestedTitle: "修复失败标题",
+    };
+    const deficientBody = "# 修复失败标题\n\n## 定义\n品牌成立10年。\n\n## 清单\n- 核对事实";
+    const port = {
+      start: vi.fn(async () => operation([row])),
+      getOperation: vi.fn(async () => operation([row])),
+      claimGeneration: vi.fn(async () => ({
+        article: row,
+        brandName: "测试品牌",
+        productLine: "知识服务",
+        targetRegion: "中国",
+        claimToken: "claim-repair-2",
+      })),
+      finishGeneration: vi.fn(),
+      failGeneration: vi.fn(
+        async ({ failureReason }: { failureReason: string }) =>
+          ({ ...row, status: "generation_failed" as const, failureReason }) as ArticleProjection,
+      ),
+    } as unknown as ArticlePersistencePort;
+    const generation = {
+      slot: "generation",
+      // 修复腿返回同样的缺陷稿：一次为限，复检不过即失败。
+      complete: vi.fn(async () => deficientBody),
+    } satisfies GeoTextCapability;
+    const service = new ArticleGenerationService(
+      { workspaceId: "workspace-1", sessionId: "session-1" },
+      port,
+      generation,
+      { slot: "reflection", complete: vi.fn() },
+    );
+    await service.start({
+      workspaceId: "workspace-1",
+      sessionId: "session-1",
+      source: { kind: "confirmed-topic-plan", planId: "plan-1" },
+    });
+
+    expect(port.finishGeneration).not.toHaveBeenCalled();
+    expect(generation.complete).toHaveBeenCalledTimes(2);
+    expect(port.failGeneration).toHaveBeenCalledWith(
+      expect.objectContaining({
+        failureReason: expect.stringContaining(
+          "article_generation_output_invalid",
         ),
       }),
     );
@@ -676,6 +1018,9 @@ describe("ArticleGenerationService material-image candidates (ADR-0008 T4)", () 
       "## 清单",
       "- 核对事实",
       "- 固定版本",
+      "",
+      "## 场景",
+      "- 家庭用户",
     ].join("\n");
   }
 
@@ -782,7 +1127,7 @@ describe("ArticleGenerationService material-image candidates (ADR-0008 T4)", () 
       complete: vi.fn(async (messages: readonly GeoTextMessage[]) => {
         const prompt = messages.map((message) => message.content).join("\n");
         bodyPrompts.push(prompt);
-        return "# 配图演示标题\n\n## 定义\n说明。\n\n## 清单\n- 项";
+        return "# 配图演示标题\n\n## 定义\n说明。\n\n## 清单\n- 项\n\n## 场景\n- 家庭用户";
       }),
     } satisfies GeoTextCapability;
     const service = new ArticleGenerationService(
@@ -818,7 +1163,7 @@ describe("ArticleGenerationService material-image candidates (ADR-0008 T4)", () 
       complete: vi.fn(async (messages: readonly GeoTextMessage[]) => {
         const prompt = messages.map((message) => message.content).join("\n");
         bodyPrompts.push(prompt);
-        return "# 配图演示标题\n\n## 定义\n说明。\n\n## 清单\n- 项";
+        return "# 配图演示标题\n\n## 定义\n说明。\n\n## 清单\n- 项\n\n## 场景\n- 家庭用户";
       }),
     } satisfies GeoTextCapability;
     const service = new ArticleGenerationService(
@@ -864,7 +1209,7 @@ describe("ArticleGenerationService material-image candidates (ADR-0008 T4)", () 
       complete: vi.fn(async (messages: readonly GeoTextMessage[]) => {
         const prompt = messages.map((message) => message.content).join("\n");
         bodyPrompts.push(prompt);
-        return "# 配图演示标题\n\n## 定义\n说明。\n\n## 清单\n- 项";
+        return "# 配图演示标题\n\n## 定义\n说明。\n\n## 清单\n- 项\n\n## 场景\n- 家庭用户";
       }),
     } satisfies GeoTextCapability;
     const service = new ArticleGenerationService(

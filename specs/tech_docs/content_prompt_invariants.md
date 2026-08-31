@@ -39,15 +39,15 @@
 ### 正文生成（generation 槽，pro）
 
 1. 事实纪律：只使用已批准事实；未知即省略；具体数字、日期、奖项/认证/机构名称必须可溯源（确定性 claim 门）。
-2. 事实三层纪律：实体层（名称/地址/联系方式/行业/竞品）原样使用不得转述（品牌名保真 + 每次出现加粗）；事实层表达完全自由（泛化修辞、模糊化、资质修辞放行），语义不得加码；种子层（衍生关键词）不得成句断言。
-3. 格式契约（确定性可校验，正文 policyVersion v3）：per-type H2 下限（guide/showcase 3、ranking 6、news 两类 2）、品牌名加粗全覆盖、段落 ≤3 句；ranking 六家等长平行结构，第 1 家必须是目标品牌，第 2–6 家必须恰为五家已确认有效竞品，竞品内部顺序不限，workspace 自名、已确认别名和 relatedBrands 均不计入有效竞品；news 两类导语 5W1H、news 主体 3–4 递进小标题（≤8 字）。
+2. 事实三层纪律：实体层（名称/地址/联系方式/行业/竞品）原样使用不得转述（品牌名保真；加粗由管线自动补全，ADR-0009）；事实层表达完全自由（泛化修辞、模糊化、资质修辞放行），语义不得加码；种子层（衍生关键词）不得成句断言。
+3. 格式契约（确定性可校验，正文 policyVersion v3）：per-type H2 下限（guide/showcase 3、ranking 6、news 两类 2）、品牌名加粗全覆盖（2026-09-01 起为管线自动加粗 + 门断言；段落长度等表达层要求 2026-08-18 起不机械拦截）；ranking 六家等长平行结构改为集合相等门（ADR-0009：逐家覆盖同一套 6 维、顺序不敏感、对照随文落库的注入清单，存量稿回退与第一家比对），第 1 家必须是目标品牌，第 2–6 家必须恰为五家已确认有效竞品，竞品内部顺序不限，workspace 自名、已确认别名和 relatedBrands 均不计入有效竞品；news 两类导语 5W1H、news 主体 3–4 递进小标题（≤8 字）。
 4. 表达层：叙事视角种子（12 组 {切入角度, 开篇写法, 小标题措辞倾向}，操作内洗牌发牌、发尽重洗）只影响开篇与表达；「骨架非填空」指令（模板=参考骨架，重组结构、换叙述顺序、调小标题措辞）。
 5. 输出控制：plain Markdown、首行 H1=指定标题逐字、无【】占位符；maxTokens 8192 / temperature 0.85 / top_p 0.9。
-6. 正文恒注入品牌身份块（`renderBrandIdentityBlock`，实体层子集 + 加粗规则）；素材边界仍由 plannedFacts 圈定。`品牌：` 行与 direct 标题的品牌名取值与选题同口径（`resolveBrandName`：知识库身份事实优先，workspace 名仅兜底），不与已确认身份事实冲突。
+6. 正文恒注入品牌身份块（`renderBrandIdentityBlock`，实体层子集 + 简称白名单纪律；加粗纪律已移除，改管线自动加粗——ADR-0009）；素材边界仍由 plannedFacts 圈定。`品牌：` 行与 direct 标题的品牌名取值与选题同口径（`resolveBrandName`：知识库身份事实优先，workspace 名仅兜底），不与已确认身份事实冲突。
 7. 篇幅与节奏（js_ai 模板已裁决语义回迁，v2）：四类总字数 1800–2100（guide/showcase/news/news_light）、ranking 全文 ≤2500（引言 ≥100、每家约 320、每条 50–55 且单条 ≥45）；news 分段导语 ≤200/主体 ≈1400/结尾 ≤250；可读节奏每约 200 字变换角度。
 8. 关键词融入（js_ai 已裁决语义回迁，v2）：全局基线约每 300 字 1 次；guide 每 500 字 1 次、news 每 300 字 1 次、news_light 每 200 字 1 次且密度 2%–5%；guide/ranking 首段嵌入 1–2 个关键词；地域/核心关键词首次出现及关键论据处加粗，单一加粗实体（品牌名与 ranking 维度名除外）≤3 次，H2 不加粗。
-9. ranking 编排细则（js_ai 已裁决语义回迁，v2）：维度按行业真实决策关切自选；标题数字=正文陈列项数；全文倒数第三段选型建议（隐性条件式点首位，数字与陈列位 1 对账）；目标品牌最强维度置首、竞品两三条专精优势加一两条客观局限。
-10. 配图契约（ADR-0008 T4，v6）：候选池非空时正文 prompt 注入材料图片候选清单（图片 id + 描述 + 类型标签 + 来源材料名的纯文字清单，模型不看图片本体，注入上限 50）与配图纪律（全文不超过 3 张、宁缺毋滥、只在语义相关处插图、alt 文本由模型撰写、占位符独立成行）；正文以标准 Markdown 图片语法输出 `![alt](material-image://<图片id>)` 占位符。`parseGeneratedArticleBody` 放行该受控 scheme 的图片语法，scheme 逃逸用法（裸文本/普通链接/坏 id）拒绝（`article_generation_image_placeholder_invalid`），【】禁令不变；确定性审核门对占位符语法与密度 >3 阻断（覆盖人工编辑路径）。候选池空或读取失败降级为零配图继续生成。
+9. ranking 编排细则（js_ai 已裁决语义回迁，v2；维度来源 2026-09-01 改骨架注入）：维度由生成前维度选定小调用现选（lite 路由 `purpose: "dimension-planning"`，每篇现选、重试重发，解析校验 fail-loud）并字面注入正文 prompt，六家逐字共用；标题数字=正文陈列项数；全文倒数第三段选型建议（隐性条件式点首位，数字与陈列位 1 对账）；目标品牌最强维度置首、竞品两三条专精优势加一两条客观局限。
+10. 配图契约（ADR-0008 T4，v6；配额 2026-08-31 按类型修订，裁剪 2026-09-01 ADR-0009）：候选池非空时正文 prompt 注入材料图片候选清单（图片 id + 描述 + 类型标签 + 来源材料名的纯文字清单，模型不看图片本体，注入上限 50）与配图纪律（类型配额 `ARTICLE_IMAGE_QUOTA_BY_TYPE`：guide/showcase 8、news/news_light 3、ranking 1，按候选池弹性取小、宁缺毋滥、只在语义相关处插图、alt 文本由模型撰写）；正文以标准 Markdown 图片语法输出 `![alt](material-image://<图片id>)` 占位符。`parseGeneratedArticleBody` 放行该受控 scheme 的图片语法，scheme 逃逸用法（裸文本/普通链接/坏 id）拒绝（`article_generation_image_placeholder_invalid`），【】禁令不变；生成路径超配额按序裁掉多余占位符（宁裁不拒），确定性审核门对占位符语法违例与超类型配额阻断（覆盖人工编辑路径）。候选池空或读取失败降级为零配图继续生成。
 
 ## 合法偏离登记表（相对 js_ai）
 
@@ -58,7 +58,7 @@
 | D3 | 成就类硬主张判定 | 无确定性 claim 门 | 具体命名/数字才须溯源；泛化修辞放行 | ADR-0006 §4 执行面 |
 | D4 | 地域锚定 | `serviceArea \|\| '本地'` 单锚 | 单锚语义 + 声明优先：`deriveServiceScope` 以声明的服务范围为主锚与白名单上限（粒度保留），地址仅兜底；全国/线上类声明=无地缘模式；上限 enforcement 仅提示词层 | ADR-0006 修正四 |
 | D5 | 叙事视角种子 | 6 组纯随机、仅开篇维度 | 12 组、批内洗牌不重复、两维（开篇+小标题措辞倾向） | ADR-0006 §3 |
-| D6 | 格式确定性校验 | ranking 专属，其余纯 prompt | 全类型：per-type H2 下限、品牌加粗全覆盖、段落 ≤3 句 | ADR-0006 §3 |
+| D6 | 格式确定性校验 | ranking 专属，其余纯 prompt | 全类型：per-type H2 下限、品牌加粗（ADR-0009 起为管线自动加粗 + 门断言） | ADR-0006 §3；ADR-0009 |
 | D7 | direct 路径标题 | 无 direct 路径 | 每 theme 一次标题调用（3–5 候选→校验→取首），fail-loud，无模板兜底 | ADR-0006 §2 |
 | D8 | 标题模型档位 | pro（article_generation 槽） | lite（paygo 未开通 mini；titlePlanningModel） | 移植现状，延后裁决 |
 | D9 | policyVersion | js-ai-dev-* 各段异名 | xiaojing-content-prompt 统一命名；正文段 v2（回迁 js_ai 篇幅/关键词/ranking 编排纪律）、选题段 v2（行业核心词子串 + corrective 重试，2026-08-19），挖词/问题段 v1 | ADR-0006 §6；本文档 v2 修订 |
@@ -73,7 +73,9 @@
 | D13 | 产量纪律 | 挖词无数量指引、下游硬截断 | 挖词数量指引（4–6/8–12/12–18）+ 问题生成配额策略（高热度与意图多样优先） | ADR-0006 修正三（F2/F6 缺陷修补） |
 | D14 | 正文事实来源 | 生成模型离线，只吃已批准事实 | ranking 类型整篇联网（enable_search）：竞品条目联网取材消除结构性编造；目标品牌段落仍受「只使用已批准事实」提示词纪律约束，网络素材渗入风险由用户明示接受；非排行类型保持离线。正文段 policyVersion v3→v4 | ADR-0007 Decision 4（用户裁决） |
 | D15 | ranking 名单构成 | 五家陈列位全部来自已确认 competitors（直接层） | 两层名单（ADR-0007 Decision 6）：直接层（三同全中）优先，不足 5 家时用 potentialCompetitors（潜在层：相近场景/替代品类）按序补足到 5；跨层归一名嵌套互斥，身份/关联主体排除两层共用（TS `mergeRankingCompetitorTiers` 与 Rust `valid_ranking_competitors` 同构，契约用例共享 rankingCompetitorContractCases.json）；标题红线名单同步含两层。正文段 policyVersion v4→v5 | ADR-0007 Decision 6（用户裁决 2026-08-30） |
-| D16 | 正文配图 | 纯文字正文，无配图约定 | 材料图片候选清单注入正文 prompt（纯文字清单，模型不看图本体）+ 配图纪律（≤3 张、宁缺毋滥、语义相关处插图、alt 由模型撰写）；正文输出 `material-image://` markdown 图片占位符，发布期由 Rust 替换为真实 URL（#15）；占位符语法/校验用例共享 materialImagePlaceholderContractCases.json（TS/Rust 同构，先例 rankingCompetitorContractCases.json）。正文段 policyVersion v5→v6 | ADR-0008 Decision 3（2026-08-31） |
+| D16 | 正文配图 | 纯文字正文，无配图约定 | 材料图片候选清单注入正文 prompt（纯文字清单，模型不看图本体）+ 配图纪律（类型配额：guide/showcase 8、news 两类 3、ranking 1，按池弹性取小、宁缺毋滥、语义相关处插图、alt 由模型撰写）；正文输出 `material-image://` markdown 图片占位符，发布期由 Rust 替换为真实 URL（#15）；占位符语法/校验用例共享 materialImagePlaceholderContractCases.json（TS/Rust 同构，先例 rankingCompetitorContractCases.json）。正文段 policyVersion v5→v6 | ADR-0008 Decision 3（2026-08-31） |
+| D17 | 品牌加粗执行方式 | 无对应机制（prompt 纪律 + 门拦截） | 加粗从模型纪律降格为管线保证：parse 后 `autoBoldBrandMentions` 自动补粗（盲区：标题行、围栏代码块、图片语法、链接 URL），身份块 prompt 删加粗纪律（简称白名单保留）；配图超配额按序裁剪（宁裁不拒）；生成期全类型确定性预检 + 一次有界修复 pass（`buildArticleRepairMessages`，修复稿过同一 parse/审核门，modelAudit 记 `repairUsed`）；审核门加粗检查保留为断言并对人工编辑路径仍 blocking；批准卡 blocking/advisory 分区；新增审核失败遥测 `/api/brand-articles/review/stats`。正文段 policyVersion v6→v7 | ADR-0009 Decision 1/3/4/5/6/7（2026-09-01） |
+| D18 | ranking 六维来源 | prompt 要求模型自选并保持六家同序，门逐字符同序验收 | 维度骨架注入：生成前维度选定小调用（lite 路由 `purpose: "dimension-planning"`）现选 6 维字面注入 prompt，六家逐字共用；清单随稿落库（`geo_articles.ranking_dimensions_json`）；门改集合相等（顺序不敏感，对照注入清单，存量稿回退第一家比对）。契约措辞从「自选」改为「逐字使用注入清单」。v7 覆盖 | ADR-0009 Decision 2（2026-09-01） |
 
 ## 显式延后（下一批裁决）
 

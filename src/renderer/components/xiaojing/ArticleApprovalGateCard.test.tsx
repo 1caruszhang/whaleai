@@ -197,6 +197,90 @@ describe("ArticleApprovalGateCard", () => {
     expect(mocks.loadBody).toHaveBeenCalledTimes(1);
   });
 
+  it("splits blocking and advisory review issues into separate sections (ADR-0009)", () => {
+    const article = makeArticle({
+      currentVersion: {
+        revision: 3,
+        title: "成都车载音响选购指南",
+        bodyPath: "operations/operation-17/articles/article-1/v3.md",
+        bodySha256: "hash",
+        origin: "generated",
+        basedOnRevision: 2,
+        review: {
+          policyVersion: "xiaojing-content-prompt-v7",
+          passed: false,
+          issues: [
+            {
+              source: "deterministic",
+              category: "geo-citability",
+              severity: "blocking",
+              message: "格式契约不满足：guide 类型至少需要 3 个 H2（当前 2）。",
+            },
+            {
+              source: "deterministic",
+              category: "advertising-law",
+              severity: "advisory",
+              message: "检测到广告法或模板禁用表达：最好、领先",
+            },
+          ],
+        },
+        createdAt: "2026-08-18T00:00:00Z",
+        approvedAt: null,
+      },
+    });
+    render(
+      <ArticleApprovalGateCard
+        data={{ kind: "article-operation", operation: makeOperation([article]) }}
+      />,
+    );
+    const card = screen.getByRole("region", { name: "文章审核批准" });
+    expect(
+      within(card).getByText(/guide 类型至少需要 3 个 H2/),
+    ).toBeInTheDocument();
+    expect(
+      within(card).getByText(/发布前建议人工处理（不影响批准）/),
+    ).toBeInTheDocument();
+    expect(
+      within(card).getByText(/检测到广告法或模板禁用表达/),
+    ).toBeInTheDocument();
+  });
+
+  it("keeps advisory warnings visible even when the review passed", () => {
+    const article = makeArticle({
+      currentVersion: {
+        revision: 3,
+        title: "成都车载音响选购指南",
+        bodyPath: "operations/operation-17/articles/article-1/v3.md",
+        bodySha256: "hash",
+        origin: "generated",
+        basedOnRevision: 2,
+        review: {
+          policyVersion: "xiaojing-content-prompt-v7",
+          passed: true,
+          issues: [
+            {
+              source: "deterministic",
+              category: "fact-consistency",
+              severity: "advisory",
+              message: "正文硬主张没有已批准事实依据：成立10年",
+            },
+          ],
+        },
+        createdAt: "2026-08-18T00:00:00Z",
+        approvedAt: null,
+      },
+    });
+    render(
+      <ArticleApprovalGateCard
+        data={{ kind: "article-operation", operation: makeOperation([article]) }}
+      />,
+    );
+    const card = screen.getByRole("region", { name: "文章审核批准" });
+    expect(
+      within(card).getByText(/正文硬主张没有已批准事实依据/),
+    ).toBeInTheDocument();
+  });
+
   it("edits the body into a user-edited revision and approves that revision", async () => {
     const article = makeArticle();
     mocks.loadBody.mockResolvedValue({

@@ -318,6 +318,9 @@ export function renderBrandIdentityBlock(profile: BrandProfile): string {
   return [
     "## 品牌身份（实体信息，必须原样使用，不得转述或改写）",
     ...lines,
-    "品牌指称规则：正文中品牌每次出现都使用 Markdown 加粗；简称只能取上表已列出的，未列出的一律用全称，不得自造简称。",
+    // ADR-0009 Decision 1：加粗从模型纪律降格为管线保证（autoBoldBrandMentions
+    // 在 parse 后统一补粗），prompt 不再要求手动加粗；实体纪律（简称白名单、
+    // 逐字使用）保留——管线只包已确认名字，自造简称不会被自动加粗。
+    "品牌指称规则：简称只能取上表已列出的，未列出的一律用全称，不得自造简称；加粗无需手动处理，发布管线会自动补全。",
   ].join("\n");
 }

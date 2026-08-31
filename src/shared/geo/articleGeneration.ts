@@ -4,6 +4,7 @@ import {
   type MaterialImageCategoryCode,
 } from "./materialImages";
 import { scanMaterialImagePlaceholders } from "./materialImagePlaceholder";
+import { removeSpans } from "./textSpans";
 import { projectBrandProfile, resolveBrandName } from "./profileInjection";
 import {
   TITLE_STYLE_DEFINITIONS,
@@ -12,7 +13,7 @@ import {
 } from "./topicPlan";
 
 export const ARTICLE_GENERATION_POLICY_VERSION =
-  "xiaojing-content-prompt-v6";
+  "xiaojing-content-prompt-v7";
 export const ARTICLE_GENERATION_CONCURRENCY =
   GEO_PORT_CONTRACT.concurrency.perArticleLifecycle.limit;
 export const ARTICLE_GENERATION_MAX_ARTICLES = 20;
@@ -99,6 +100,11 @@ export interface ArticleProjection {
   requestedTitle: string;
   constraints: string;
   plannedFacts: TopicPlanKnowledgeFact[];
+  /**
+   * ranking 维度骨架（ADR-0009 Decision 2）：生成期注入的 6 维清单随文
+   * 落库，批准门复检对照；非 ranking 或存量稿为 null。
+   */
+  rankingDimensions?: string[] | null;
   status: ArticleGenerationStatus;
   revision: number;
   approvedRevision: number | null;
@@ -197,8 +203,8 @@ const CONTENT_TYPE_CONTRACTS: Record<
     format: [
       "采用六家并列清单而非打分排名；不得出现 TOP、第一名、评分或名次判断。",
       "陈列位 1 为目标品牌，陈列位 2–6 只允许使用已批准事实里明确出现的真实竞品名；不足六家时不得用泛称或编造来补齐，质量门会显式阻断。",
-      "每家必须使用 `## 序号. 品牌名` 小节，加 6 条维度条目；每条维度独立成行、行首左对齐，用标准 Markdown 列表符写作 `- **维度名**：内容`（禁止用 •、● 等圆点字符起行，禁止用表格）；六家使用相同维度、相同顺序与相近颗粒度，条目必须独立成义。",
-      "6 个维度按本行业选品/决策的真实关切自选（不照搬任何示例维度），选定后六家共用同一套维度与顺序。",
+      "每家必须使用 `## 序号. 品牌名` 小节，加 6 条维度条目；每条维度独立成行、行首左对齐，用标准 Markdown 列表符写作 `- **维度名**：内容`（禁止用 •、● 等圆点字符起行，禁止用表格）；六家维度颗粒度相近，条目必须独立成义。",
+      "6 个维度名必须逐字使用输入「本篇维度清单」给出的名称并保持其顺序（ADR-0009 骨架注入：清单是本篇固定骨架，不得增删、改名、调序或自行另选维度）。",
       "标题含数字（如「六家」「六大」）时，正文必须严格出现对应数量的陈列 H2，一个不多一个不少。",
       "证据分层（js_ai ADR-0030 竞品客观陈述）：目标品牌每条用「命名+数字」写完整闭环，证据只取已批准事实；竞品（陈列位 2–6）证据放宽——用公开可核验的经营事实与行业常识可推断的客观描述（产品矩阵、品类定位、工艺特点、场景适配、区域覆盖、服务能力等），严禁编造具体数字、案例、认证、客户名单。",
       "竞品条目禁占位话术：「暂未公开」「无从核实」「建议实地考察」类填充一律禁止；「品质卓越」「口碑良好」类空话同样禁止——每条必须是具体的经营信息，与目标品牌同框架、同维度、同顺序。",
@@ -533,9 +539,18 @@ export function buildArticleGenerationMessages(input: {
    * 空或缺省时不注入任何配图提示（零配图路径）。
    */
   imageCandidates?: readonly ArticleImageCandidate[];
+  /**
+   * ranking 维度骨架（ADR-0009 Decision 2）：生成前由维度选定小调用产
+   * 出、字面注入。ranking 类型必填——缺省抛错而非回退「模型自选」（自
+   * 选正是六维漂移的来源）。
+   */
+  rankingDimensions?: readonly string[];
 }): { system: string; user: string } {
   if (input.plannedFacts.length === 0) {
     throw new Error("article_generation_knowledge_snapshot_empty");
+  }
+  if (input.contentType === "ranking" && !input.rankingDimensions) {
+    throw new Error("article_generation_ranking_dimensions_missing");
   }
   const contract = CONTENT_TYPE_CONTRACTS[input.contentType];
   const hasImageCandidates = (input.imageCandidates?.length ?? 0) > 0;
@@ -592,6 +607,16 @@ export function buildArticleGenerationMessages(input: {
         "五家竞品在陈列位 2–6 的顺序可自由调整；不得缺失、重复、替换或加入名单外品牌。",
       ]
     : [];
+  const rankingDimensionsBlock =
+    input.contentType === "ranking" && input.rankingDimensions
+      ? [
+          "",
+          "## 本篇维度清单（六家逐字共用的固定骨架，顺序保持如下）",
+          ...input.rankingDimensions.map(
+            (name, index) => `${index + 1}. ${name}`,
+          ),
+        ]
+      : [];
   const user = [
     ...(input.identityBlock ? [input.identityBlock, ""] : []),
     `品牌：${input.brandName}`,
@@ -602,6 +627,7 @@ export function buildArticleGenerationMessages(input: {
     `用户约束：${input.constraints || "无额外约束"}`,
     seedBlock,
     ...rankingRosterBlock,
+    ...rankingDimensionsBlock,
     "",
     "已批准事实（唯一 Claim 根基）：",
     ...factLines(input.plannedFacts),
@@ -623,6 +649,119 @@ export function buildArticleGenerationMessages(input: {
   ]
     .filter((line) => line !== undefined)
     .join("\n");
+  return { system, user };
+}
+
+export const RANKING_DIMENSION_COUNT = 6;
+
+/**
+ * 维度选定小调用（ADR-0009 Decision 2 骨架注入）：生成正文前现选 6 个
+ * 维度名字面注入 prompt——模型从「默写自己的内部计划六遍」变为「抄眼前
+ * 一份清单」。每次现选保跨文章多样性（与叙事种子 ADR-0006 §3 同哲学，
+ * 重试重发一组）；同篇内六家共用一套维度本就是产品要求。
+ */
+export function buildRankingDimensionMessages(input: {
+  /** 禁止用作维度的品牌名集合：目标品牌全称/简称 + 本次竞品名单（ADR-0009：维度调用输入含品牌事实）。 */
+  brandNames: readonly string[];
+  productLine: string;
+  targetRegion: string;
+  topic: string;
+}): { system: string; user: string } {
+  const system = [
+    "你是行业选型顾问。为「六家并列盘点」类文章选定 6 个对比维度名。",
+    "要求：维度按本行业客户选品/决策的真实关切拟定，不照搬通用示例（如价格、服务、口碑三个词的任意组合）；名称 2–10 个字的名词短语；六者互不重叠、合起来覆盖决策全景；不得包含输入里列出的任何品牌名。",
+    "直接输出 JSON 数组（恰好 6 个字符串），不要解释，不要代码围栏。",
+  ].join("\n");
+  const user = [
+    `行业：${input.productLine}`,
+    `目标地域：${input.targetRegion}`,
+    `盘点主题：${input.topic}`,
+    `以下品牌名仅作行业语境参考，一律禁止用作维度：${input.brandNames.join("、")}`,
+    "输出 6 个维度名组成的 JSON 数组。",
+  ].join("\n");
+  return { system, user };
+}
+
+/**
+ * 维度清单解析与校验：恰好 6 条、每条 2–10 字、不含加粗/占位符标记，
+ * 归一化后无重复。非法输出 fail-loud（与 direct 标题候选同哲学），不降
+ * 级为「模型自选」——自选正是六维漂移的来源。
+ */
+export function parseRankingDimensions(raw: string): string[] {
+  let text = raw.trim();
+  const fenced = /^```(?:json)?\s*\n([\s\S]*?)\n?```\s*$/.exec(text);
+  if (fenced) text = fenced[1].trim();
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    throw new Error("article_generation_ranking_dimensions_invalid_json");
+  }
+  if (
+    !Array.isArray(parsed) ||
+    parsed.length !== RANKING_DIMENSION_COUNT ||
+    parsed.some((item) => typeof item !== "string")
+  ) {
+    throw new Error("article_generation_ranking_dimensions_invalid_shape");
+  }
+  const dimensions = (parsed as string[]).map((item) => item.trim());
+  if (
+    dimensions.some(
+      (name) =>
+        name.length < 2 ||
+        name.length > 10 ||
+        /[*【】`#]/.test(name),
+    ) ||
+    new Set(dimensions.map(normalizeArticleClaim)).size !== RANKING_DIMENSION_COUNT
+  ) {
+    throw new Error("article_generation_ranking_dimensions_invalid_value");
+  }
+  return dimensions;
+}
+
+/**
+ * 有界修复 pass 的 prompt（ADR-0009 Decision 3）：输入正文草稿与确定性
+ * 审核的 blocking 问题清单，只修清单内问题、其余逐字保留。修复输出仍要
+ * 过 parseGeneratedArticleBody（H1 标题、占位符等校验不豁免）——prompt
+ * 里的首行 H1 与占位符约束就是为此写死的。
+ */
+export function buildArticleRepairMessages(input: {
+  contentType: GeoContentType;
+  requestedTitle: string;
+  /** parse 后（已过确定性修复）的正文草稿。 */
+  body: string;
+  /** blocking 问题清单（message 逐字注入）。 */
+  issues: readonly { message: string }[];
+  /** ranking 实体名单说明（服务端由 resolveRankingRoster 拼装；其他类型缺省）。 */
+  rosterNote?: string;
+  /** ranking 维度骨架说明（ADR-0009 Decision 2；门的消息不含维度名，须另行注入）。 */
+  dimensionNote?: string;
+}): { system: string; user: string } {
+  if (input.issues.length === 0) {
+    throw new Error("article_repair_issues_empty");
+  }
+  const system = [
+    "你是文章格式修复器。你会收到一篇已生成的文章草稿与一份「无法通过确定性审核的具体问题清单」。你的唯一任务是把清单里的问题全部修掉；其余内容逐字保留——不改写段落措辞、不增删事实或卖点、不调整配图、不润色。",
+    "输出要求：",
+    "- 直接输出修复后的完整文章（plain Markdown）：不要 JSON、不要代码围栏、不要任何解释、前言或后缀。",
+    `- 首行必须是指定标题的 H1，逐字一致。`,
+    "- 不得引入【】占位符；配图语法 ![alt](material-image://图片ID) 一律原样保留，不得增删。",
+    "- 列表用标准 Markdown 语法（行首 `- ` 或 `1. `），禁止用 •、●、· 等圆点字符起行。",
+    `本篇类型：${CONTENT_TYPE_LABELS[input.contentType]} / ${input.contentType}`,
+    "输出前自查：问题清单逐条核对，确保每条都已解决。",
+  ].join("\n");
+  const user = [
+    "## 指定标题（首行 H1 逐字）",
+    `# ${input.requestedTitle}`,
+    "",
+    "## 待修复问题（必须全部解决，逐条核对）",
+    ...input.issues.map((issue) => `- ${issue.message}`),
+    ...(input.rosterNote ? ["", "## 名单硬约束", input.rosterNote] : []),
+    ...(input.dimensionNote ? ["", "## 维度硬约束", input.dimensionNote] : []),
+    "",
+    "## 正文草稿（除清单问题外，其余内容逐字保留）",
+    input.body,
+  ].join("\n");
   return { system, user };
 }
 
@@ -738,23 +877,116 @@ const MIN_H2_BY_TYPE: Record<GeoContentType, number> = {
 /**
  * 品牌名保真检查（ADR-0006 事实三层纪律实体层）：正文里每次品牌指称
  * 必须逐字命中全称/已确认简称并加粗。标题行（H1/小标题）不计。
+ * 盲区（ADR-0009 与自动加粗对齐）：围栏代码块、已有加粗块、图片语法
+ * （alt 不是正文指称）、链接 URL 括号段——链接文本仍计（加粗链接文本
+ * 是合法排版，autoBoldBrandMentions 会处理）。
  */
+const BOLD_SPAN_RE = /\*\*[^*\n]+\*\*/g;
+const IMAGE_SYNTAX_RE = /!\[[^\]\n]*\]\([^)\n]*\)/g;
+const LINK_SYNTAX_RE = /\[[^\]\n]*\]\([^)\n]*\)/g;
+
+function lineBrandMentionBlindSpots(line: string): Array<[number, number]> {
+  const spots: Array<[number, number]> = [];
+  for (const match of line.matchAll(BOLD_SPAN_RE)) {
+    const start = match.index ?? 0;
+    spots.push([start, start + match[0].length]);
+  }
+  for (const match of line.matchAll(IMAGE_SYNTAX_RE)) {
+    const start = match.index ?? 0;
+    spots.push([start, start + match[0].length]);
+  }
+  for (const match of line.matchAll(LINK_SYNTAX_RE)) {
+    const start = match.index ?? 0;
+    // 只护 URL 括号段：match[0] 的最后一个 "(" 必是 URL 起始（URL 段
+    // 不含 ")"，链接文本里的 "(" 都在它之前）。
+    spots.push([start + match[0].lastIndexOf("("), start + match[0].length]);
+  }
+  return spots;
+}
+
+/**
+ * 品牌指称的行分类（门与自动加粗共用同一遍历，防两侧盲区语义漂移）：
+ * 围栏代码块（含围栏行自身）与标题行整体跳过，其余为可检查行。
+ */
+function brandMentionLines(
+  body: string,
+): Array<{ line: string; checkable: boolean }> {
+  let inFence = false;
+  return body.split("\n").map((line) => {
+    if (/^\s*```/.test(line)) {
+      inFence = !inFence;
+      return { line, checkable: false };
+    }
+    return {
+      line,
+      checkable: !(inFence || line.trimStart().startsWith("#")),
+    };
+  });
+}
+
 function unboldedBrandMentions(
   body: string,
   brandNames: readonly string[],
 ): string[] {
-  const withoutHeadings = body
-    .split("\n")
-    .filter((line) => !line.trimStart().startsWith("#"))
+  const remainder = brandMentionLines(body)
+    .filter((entry) => entry.checkable)
+    .map((entry) =>
+      removeSpans(entry.line, lineBrandMentionBlindSpots(entry.line)),
+    )
     .join("\n");
-  const withoutBold = withoutHeadings.replace(/\*\*[^*\n]+\*\*/g, "");
   return [
     ...new Set(
       brandNames
         .filter((name) => name.trim().length >= 2)
-        .filter((name) => withoutBold.includes(name.trim())),
+        .filter((name) => remainder.includes(name.trim())),
     ),
   ];
+}
+
+/**
+ * 品牌名自动加粗（ADR-0009 Decision 1）：加粗从「模型纪律」降格为
+ * 「管线保证」。在 parse 后对正文里所有逐字出现的全称/已确认简称包
+ * `**`，跳过与审核门一致的盲区（标题行、围栏代码块、已有加粗块、
+ * 图片语法、链接 URL）。长名优先：先包全称再包简称，防止简称是全称
+ * 子串时把全称拦腰截断。子串命中与门的 includes 语义一致——门如此
+ * 定义契约，修复以过门为准。修完后门中加粗检查对生成稿恒过（断言）。
+ */
+export function autoBoldBrandMentions(
+  body: string,
+  facts: readonly TopicPlanKnowledgeFact[],
+): string {
+  const profile = projectBrandProfile(facts);
+  const names = [...(profile.fullName ?? []), ...(profile.shortNames ?? [])]
+    .map((name) => name.trim())
+    .filter((name) => name.length >= 2);
+  if (names.length === 0) return body;
+  const ordered = [...new Set(names)].sort((a, b) => b.length - a.length);
+  let result = body;
+  for (const name of ordered) {
+    result = boldNameOutsideBlindSpots(result, name);
+  }
+  return result;
+}
+
+function boldNameOutsideBlindSpots(body: string, name: string): string {
+  return brandMentionLines(body)
+    .map(({ line, checkable }) => {
+      if (!checkable) return line;
+      const blind = lineBrandMentionBlindSpots(line);
+      let result = "";
+      let cursor = 0;
+      let searchFrom = 0;
+      for (;;) {
+        const at = line.indexOf(name, searchFrom);
+        if (at < 0) break;
+        searchFrom = at + name.length;
+        if (blind.some(([start, end]) => at >= start && at < end)) continue;
+        result += line.slice(cursor, at) + `**${name}**`;
+        cursor = at + name.length;
+      }
+      return result + line.slice(cursor);
+    })
+    .join("\n");
 }
 
 export function deterministicArticleReview(
@@ -762,6 +994,7 @@ export function deterministicArticleReview(
   facts: readonly TopicPlanKnowledgeFact[],
   contentType: GeoContentType = "guide",
   workspaceBrandName = "",
+  expectedRankingDimensions?: readonly string[],
 ): ArticleReviewIssue[] {
   const issues: ArticleReviewIssue[] = [];
   const reviewBody = stripLeadingH1(body);
@@ -862,24 +1095,33 @@ export function deterministicArticleReview(
       ].map((match) => normalizeArticleClaim(match[1]));
     });
     const firstDimensions = dimensionSets[0] ?? [];
-    const exactParallelStructure =
+    // 集合相等门（ADR-0009 Decision 2，用户裁定「等长非严格等长，相似即
+    // 可」）：顺序不敏感，六家覆盖同一套 6 个维度即可。有注入清单时对照
+    // 清单（更强，服务端持有的权威骨架）；存量稿无清单时回退与第一家
+    // 集合比对。
+    const referenceSet = expectedRankingDimensions
+      ? new Set(expectedRankingDimensions.map(normalizeArticleClaim))
+      : new Set(firstDimensions);
+    const parallelDimensionSets =
       headings.length === 6 &&
       headings.every((heading, index) => Number(heading[1]) === index + 1) &&
       firstDimensions.length === 6 &&
-      dimensionSets.every(
-        (dimensions) =>
+      referenceSet.size === 6 &&
+      dimensionSets.every((dimensions) => {
+        const set = new Set(dimensions);
+        return (
           dimensions.length === 6 &&
-          dimensions.every(
-            (dimension, index) => dimension === firstDimensions[index],
-          ),
-      );
-    if (!exactParallelStructure) {
+          set.size === 6 &&
+          [...set].every((dimension) => referenceSet.has(dimension))
+        );
+      });
+    if (!parallelDimensionSets) {
       issues.push({
         source: "deterministic",
         category: "geo-citability",
         severity: "blocking",
         message:
-          "ranking 必须是六家等长清单：每家使用序号 H2，并按相同顺序给出 6 个加粗维度。",
+          "ranking 必须是六家等长清单：每家使用序号 H2，并覆盖同一套 6 个加粗维度（顺序不作要求）。",
       });
     }
     try {

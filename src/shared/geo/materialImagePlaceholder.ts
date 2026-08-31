@@ -14,6 +14,8 @@
  * - 密度上限是配图纪律（内容契约），由确定性审核门执行，不在扫描内。
  */
 
+import { removeSpans } from "./textSpans";
+
 /** 受控 uri scheme；与 Rust 替换侧共用（契约 JSON 顶部同值钉死）。 */
 export const MATERIAL_IMAGE_URI_SCHEME = "material-image://";
 
@@ -49,6 +51,26 @@ const PLACEHOLDER_PATTERN = new RegExp(
 );
 
 const SCHEME_OCCURRENCE_PATTERN = new RegExp(MATERIAL_IMAGE_URI_SCHEME, "g");
+
+/**
+ * 配额裁剪（ADR-0009 Decision 4）：保留按出现顺序的前 keep 个合法占位符，
+ * 删除其后的整段图片语法。删除留下的空行由 Markdown 渲染吸收，不额外清理。
+ */
+export function trimMaterialImagePlaceholders(
+  body: string,
+  keep: number,
+): string {
+  const drops: Array<[number, number]> = [];
+  let index = 0;
+  for (const match of body.matchAll(PLACEHOLDER_PATTERN)) {
+    if (index >= keep) {
+      const start = match.index ?? 0;
+      drops.push([start, start + match[0].length]);
+    }
+    index += 1;
+  }
+  return removeSpans(body, drops);
+}
 
 export function scanMaterialImagePlaceholders(
   body: string,

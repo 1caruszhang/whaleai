@@ -296,12 +296,37 @@ function ArticleRow({
           {article.failureReason}
         </p>
       )}
-      {review && !review.passed && (
-        <ul className="mt-1 list-disc pl-4 text-xs text-[var(--error)]">
-          {review.issues.map((issue, index) => (
-            <li key={`${issue.category}-${index}`}>{issue.message}</li>
-          ))}
-        </ul>
+      {review && (
+        // ADR-0009 Decision 6：blocking 与 advisory 分区。blocking 是
+        // 「为何不能通过」；advisory（硬主张无依据、广告法禁词）不阻断
+        // 批准，单独列出供发布前人工处理——即使审核已通过也照常展示。
+        <>
+          {review.issues.some((issue) => issue.severity === "blocking") && (
+            <ul className="mt-1 list-disc pl-4 text-xs text-[var(--error)]">
+              {review.issues
+                .filter((issue) => issue.severity === "blocking")
+                .map((issue, index) => (
+                  <li key={`blocking-${issue.category}-${index}`}>
+                    {issue.message}
+                  </li>
+                ))}
+            </ul>
+          )}
+          {review.issues.some((issue) => issue.severity !== "blocking") && (
+            <ul className="mt-1 list-disc pl-4 text-xs text-[var(--warning, orange)]">
+              <li className="list-none text-[var(--ink-muted)]">
+                发布前建议人工处理（不影响批准）：
+              </li>
+              {review.issues
+                .filter((issue) => issue.severity !== "blocking")
+                .map((issue, index) => (
+                  <li key={`advisory-${issue.category}-${index}`}>
+                    {issue.message}
+                  </li>
+                ))}
+            </ul>
+          )}
+        </>
       )}
       <div className="mt-2 flex flex-wrap gap-2">
         {hasVersion && (

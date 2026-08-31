@@ -2,11 +2,11 @@ use super::*;
 use rusqlite::TransactionBehavior;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::OpenOptions;
 use std::io::Write;
 
-const POLICY_VERSION: &str = "xiaojing-content-prompt-v6";
+const POLICY_VERSION: &str = "xiaojing-content-prompt-v7";
 const MAX_ARTICLES: usize = 20;
 const MAX_BODY_BYTES: usize = 256 * 1024;
 
@@ -63,6 +63,10 @@ pub struct ArticleGenerationFinishRequest {
     pub claim_token: String,
     pub title: String,
     pub body: String,
+    /// ranking 维度骨架（ADR-0009 Decision 2）：随生成稿落库，批准门复检
+    /// 对照；非 ranking 或未提供为 None。
+    #[serde(default)]
+    pub ranking_dimensions: Option<Vec<String>>,
     pub model_audit: Value,
 }
 
@@ -128,6 +132,13 @@ pub struct ArticleReviewFinishRequest {
     pub passed: bool,
 }
 
+/// 审核遥测查询（ADR-0009 Decision 7）：按 content_type 与 outcome 聚合
+/// 历次审核，并按 severity × category 聚合 review.issues——规则分层调整
+/// （何种问题降 advisory、修复预算是否放宽）从此有数据支撑。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ArticleReviewStatsRequest {}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ArticleVersionProjection {
@@ -155,6 +166,8 @@ pub struct ArticleProjection {
     pub requested_title: String,
     pub constraints: String,
     pub planned_facts: Value,
+    /// ranking 维度骨架（ADR-0009 Decision 2）；非 ranking / 存量稿为 None。
+    pub ranking_dimensions: Option<Vec<String>>,
     pub status: String,
     pub revision: i64,
     pub approved_revision: Option<i64>,
@@ -233,6 +246,7 @@ pub(super) fn ensure_schema(connection: &Connection) -> Result<(), String> {
                 requested_title TEXT NOT NULL,
                 constraints TEXT NOT NULL,
                 planned_facts_json TEXT NOT NULL,
+                ranking_dimensions_json TEXT,
                 status TEXT NOT NULL CHECK(status IN ('planned','drafting','draft_ready','reviewing','approved','generation_failed','rejected')),
                 revision INTEGER NOT NULL DEFAULT 0,
                 approved_revision INTEGER,
@@ -284,6 +298,8 @@ pub(super) fn ensure_schema(connection: &Connection) -> Result<(), String> {
              );",
         )
         .map_err(|error| format!("initialize article schema: {error}"))?;
+    // 存量库迁移：ranking 维度骨架列（ADR-0009 Decision 2 随文落库）。
+    super::ensure_column(connection, "geo_articles", "ranking_dimensions_json", "TEXT")?;
     super::drop_brand_sessions_foreign_keys(
         connection,
         &["geo_article_operations", "geo_article_versions"],
@@ -587,6 +603,17 @@ impl BrandWorkspaceStore {
         if !request.model_audit.is_object() {
             return Err("article_generation_model_audit_invalid".to_string());
         }
+        if let Some(dimensions) = request.ranking_dimensions.as_ref() {
+            // 与 TS parseRankingDimensions 同构的防御面：恰好 6 条非空短名
+            // （归一化去重由 TS 权威侧保证，这里拦明显坏值）。
+            if dimensions.len() != 6
+                || dimensions
+                    .iter()
+                    .any(|name| name.trim().is_empty() || name.chars().count() > 10)
+            {
+                return Err("article_generation_ranking_dimensions_invalid".to_string());
+            }
+        }
         let workspace = self.workspace(workspace_id)?;
         let mut connection = open_database(&workspace)?;
         require_article_session(&connection, session_id)?;
@@ -670,6 +697,19 @@ impl BrandWorkspaceStore {
             .map_err(|error| format!("finish article generation: {error}"))?;
         if changed != 1 {
             return Err("article_generation_claim_conflict".to_string());
+        }
+        if let Some(dimensions) = request.ranking_dimensions.as_ref() {
+            transaction
+                .execute(
+                    "UPDATE geo_articles SET ranking_dimensions_json=?2, updated_at=?3
+                     WHERE id=?1",
+                    params![
+                        request.article_id,
+                        canonical_article_json(dimensions)?,
+                        now
+                    ],
+                )
+                .map_err(|error| format!("persist article ranking dimensions: {error}"))?;
         }
         transaction
             .execute(
@@ -1132,6 +1172,120 @@ impl BrandWorkspaceStore {
             .commit()
             .map_err(|error| format!("commit article review: {error}"))?;
         read_article(&connection, workspace_id, &request.article_id)
+    }
+
+    /// 聚合本工作区全部已完结审核（geo_article_review_attempts）：
+    /// 总量/通过/失败、按内容类型的通过率、按 policyVersion 的分布、
+    /// 按 severity × category 的问题计数。只读，不动任何写入路径。
+    pub fn article_review_stats(
+        &self,
+        workspace_id: &str,
+        session_id: &str,
+        _request: ArticleReviewStatsRequest,
+    ) -> Result<Value, String> {
+        let workspace = self.workspace(workspace_id)?;
+        let connection = open_database(&workspace)?;
+        require_article_session(&connection, session_id)?;
+        let mut statement = connection
+            .prepare(
+                "SELECT a.content_type, r.outcome, r.review_json
+                 FROM geo_article_review_attempts r
+                 JOIN geo_articles a ON a.id = r.article_id
+                 WHERE r.review_json IS NOT NULL",
+            )
+            .map_err(|error| format!("prepare article review stats: {error}"))?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .map_err(|error| format!("read article review stats: {error}"))?;
+        let mut policy_versions: BTreeMap<String, u64> = BTreeMap::new();
+        // [attempts, passed, failed] 按内容类型唯一计数源：总量由各行汇总。
+        let mut by_content_type: BTreeMap<String, [u64; 3]> = BTreeMap::new();
+        // (policyVersion, severity, category) 交叉——ADR-0009 Decision 7 的
+        // category × policyVersion 聚合：政策版本更迭后仍能回答「哪个版本
+        // 下哪条规则在杀人」。
+        let mut issue_counts: BTreeMap<(String, String, String), u64> = BTreeMap::new();
+        for row in rows {
+            let (content_type, outcome, review_json) = row
+                .map_err(|error| format!("read article review stats row: {error}"))?;
+            let counters = by_content_type
+                .entry(content_type)
+                .or_insert([0, 0, 0]);
+            counters[0] += 1;
+            match outcome.as_str() {
+                "passed" => counters[1] += 1,
+                "failed" => counters[2] += 1,
+                _ => {}
+            }
+            let Ok(review) = serde_json::from_str::<Value>(&review_json) else {
+                continue;
+            };
+            let policy_version = review
+                .get("policyVersion")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown")
+                .to_string();
+            *policy_versions.entry(policy_version.clone()).or_default() += 1;
+            if let Some(issues) = review.get("issues").and_then(Value::as_array) {
+                for issue in issues {
+                    let severity = issue
+                        .get("severity")
+                        .and_then(Value::as_str)
+                        .unwrap_or("unknown");
+                    let category = issue
+                        .get("category")
+                        .and_then(Value::as_str)
+                        .unwrap_or("unknown");
+                    *issue_counts
+                        .entry((
+                            policy_version.clone(),
+                            severity.to_string(),
+                            category.to_string(),
+                        ))
+                        .or_default() += 1;
+                }
+            }
+        }
+        let attempts: u64 = by_content_type.values().map(|c| c[0]).sum();
+        let passed: u64 = by_content_type.values().map(|c| c[1]).sum();
+        let failed: u64 = by_content_type.values().map(|c| c[2]).sum();
+        let by_content_type: serde_json::Map<String, Value> = by_content_type
+            .into_iter()
+            .map(|(content_type, counters)| {
+                (
+                    content_type,
+                    json!({
+                        "attempts": counters[0],
+                        "passed": counters[1],
+                        "failed": counters[2],
+                    }),
+                )
+            })
+            .collect();
+        let issues: Vec<Value> = issue_counts
+            .into_iter()
+            .map(|((policy_version, severity, category), count)| {
+                json!({
+                    "policyVersion": policy_version,
+                    "severity": severity,
+                    "category": category,
+                    "count": count,
+                })
+            })
+            .collect();
+        Ok(json!({
+            "attempts": attempts,
+            "passed": passed,
+            "failed": failed,
+            "policyVersions": policy_versions,
+            "byContentType": by_content_type,
+            "issues": issues,
+        }))
     }
 }
 
@@ -1695,12 +1849,14 @@ fn read_article(
         .query_row(
             "SELECT id, operation_id, source_plan_item_id, knowledge_version,
                     content_type, topic, requested_title, constraints, planned_facts_json,
+                    ranking_dimensions_json,
                     status, revision, approved_revision, failure_reason, generation_attempt,
                     created_at, updated_at
              FROM geo_articles WHERE id=?1",
             [article_id],
             |row| {
                 let facts: String = row.get(8)?;
+                let dimensions: Option<String> = row.get(9)?;
                 Ok(ArticleProjection {
                     id: row.get(0)?,
                     operation_id: row.get(1)?,
@@ -1712,15 +1868,17 @@ fn read_article(
                     requested_title: row.get(6)?,
                     constraints: row.get(7)?,
                     planned_facts: serde_json::from_str(&facts).unwrap_or(Value::Array(vec![])),
-                    status: row.get(9)?,
-                    revision: row.get(10)?,
-                    approved_revision: row.get(11)?,
-                    failure_reason: row.get(12)?,
-                    generation_attempt: row.get(13)?,
+                    ranking_dimensions: dimensions
+                        .and_then(|value| serde_json::from_str(&value).ok()),
+                    status: row.get(10)?,
+                    revision: row.get(11)?,
+                    approved_revision: row.get(12)?,
+                    failure_reason: row.get(13)?,
+                    generation_attempt: row.get(14)?,
                     current_version: None,
                     approved_version: None,
-                    created_at: row.get(14)?,
-                    updated_at: row.get(15)?,
+                    created_at: row.get(15)?,
+                    updated_at: row.get(16)?,
                 })
             },
         )
@@ -2317,6 +2475,7 @@ mod tests {
                     claim_token: claim.claim_token,
                     title: "知识库指南".to_string(),
                     body: generated_body,
+                    ranking_dimensions: None,
                     model_audit: json!({"model":"mock-generation"}),
                 },
             )
@@ -2436,6 +2595,7 @@ mod tests {
                     claim_token: regeneration.claim_token,
                     title: "知识库指南".to_string(),
                     body: format!("{}\n\n新版表达。", body("知识库指南")),
+                    ranking_dimensions: None,
                     model_audit: json!({"model":"mock-generation"}),
                 },
             )
@@ -2783,6 +2943,219 @@ mod tests {
                 "planRevision": 7,
                 "selectedItemIds": ["selected-item"]
             })
+        );
+    }
+
+    #[test]
+    fn ranking_dimensions_persist_with_shape_guard() {
+        // ADR-0009 Decision 2：维度清单随生成稿落库、投影透出（批准门复检
+        // 对照）；坏形状（条数/空名/超长）fail-loud 拒绝。
+        let (_root, store, workspace) = seeded_store();
+        let operation = store
+            .start_article_operation(
+                &workspace.id,
+                "session-article",
+                ArticleOperationStartRequest {
+                    source_kind: "direct".to_string(),
+                    topic_plan_id: None,
+                    direct_spec: Some(ArticleDirectSpec {
+                        count: 2,
+                        themes: vec!["知识库指南".to_string()],
+                        content_type: "guide".to_string(),
+                        constraints: String::new(),
+                    }),
+                },
+            )
+            .expect("operation");
+        let finish = |article_id: &str, claim_token: String, dimensions: Option<Vec<String>>| {
+            store.finish_article_generation(
+                &workspace.id,
+                "session-article",
+                ArticleGenerationFinishRequest {
+                    operation_id: operation.id.clone(),
+                    article_id: article_id.to_string(),
+                    expected_revision: 0,
+                    claim_token,
+                    title: "知识库指南".to_string(),
+                    body: body("知识库指南"),
+                    ranking_dimensions: dimensions,
+                    model_audit: json!({"model":"mock-generation"}),
+                },
+            )
+        };
+        let first = &operation.articles[0];
+        let claim = store
+            .claim_article_generation(
+                &workspace.id,
+                "session-article",
+                ArticleGenerationClaimRequest {
+                    operation_id: operation.id.clone(),
+                    article_id: first.id.clone(),
+                    expected_revision: 0,
+                    mode: "initial".to_string(),
+                },
+            )
+            .expect("claim");
+        let dimensions = vec![
+            "服务范围".to_string(),
+            "核心项目".to_string(),
+            "适用人群".to_string(),
+            "服务方式".to_string(),
+            "区域覆盖".to_string(),
+            "选择要点".to_string(),
+        ];
+        finish(&first.id, claim.claim_token, Some(dimensions.clone())).expect("draft");
+        let projection = store
+            .get_article(
+                &workspace.id,
+                "session-article",
+                ArticleGetRequest {
+                    operation_id: operation.id.clone(),
+                    article_id: first.id.clone(),
+                },
+            )
+            .expect("read back");
+        assert_eq!(projection.ranking_dimensions, Some(dimensions));
+
+        let second = &operation.articles[1];
+        let second_claim = store
+            .claim_article_generation(
+                &workspace.id,
+                "session-article",
+                ArticleGenerationClaimRequest {
+                    operation_id: operation.id.clone(),
+                    article_id: second.id.clone(),
+                    expected_revision: 0,
+                    mode: "initial".to_string(),
+                },
+            )
+            .expect("second claim");
+        let error = finish(
+            &second.id,
+            second_claim.claim_token,
+            Some(vec!["服务范围".to_string()]),
+        )
+        .expect_err("five dimensions rejected");
+        assert_eq!(error, "article_generation_ranking_dimensions_invalid");
+    }
+
+    #[test]
+    fn review_stats_aggregate_outcomes_and_issue_counts() {
+        // ADR-0009 Decision 7：两篇直连稿，一篇过审、一篇带 blocking 问题被拒，
+        // 遥测按 outcome/content_type/policyVersion/severity×category 聚合。
+        let (_root, store, workspace) = seeded_store();
+        let operation = store
+            .start_article_operation(
+                &workspace.id,
+                "session-article",
+                ArticleOperationStartRequest {
+                    source_kind: "direct".to_string(),
+                    topic_plan_id: None,
+                    direct_spec: Some(ArticleDirectSpec {
+                        count: 2,
+                        themes: vec!["知识库指南".to_string()],
+                        content_type: "guide".to_string(),
+                        constraints: String::new(),
+                    }),
+                },
+            )
+            .expect("operation");
+        for (index, article) in operation.articles.iter().enumerate() {
+            let claim = store
+                .claim_article_generation(
+                    &workspace.id,
+                    "session-article",
+                    ArticleGenerationClaimRequest {
+                        operation_id: operation.id.clone(),
+                        article_id: article.id.clone(),
+                        expected_revision: 0,
+                        mode: "initial".to_string(),
+                    },
+                )
+                .expect("claim");
+            store
+                .finish_article_generation(
+                    &workspace.id,
+                    "session-article",
+                    ArticleGenerationFinishRequest {
+                        operation_id: operation.id.clone(),
+                        article_id: article.id.clone(),
+                        expected_revision: 0,
+                        claim_token: claim.claim_token,
+                        title: "知识库指南".to_string(),
+                        body: body("知识库指南"),
+                        ranking_dimensions: None,
+                        model_audit: json!({"model":"mock-generation"}),
+                    },
+                )
+                .expect("draft");
+            let review = store
+                .claim_article_review(
+                    &workspace.id,
+                    "session-article",
+                    ArticleReviewClaimRequest {
+                        operation_id: operation.id.clone(),
+                        article_id: article.id.clone(),
+                        expected_revision: 1,
+                    },
+                )
+                .expect("review claim");
+            let passed = index == 0;
+            store
+                .finish_article_review(
+                    &workspace.id,
+                    "session-article",
+                    ArticleReviewFinishRequest {
+                        operation_id: operation.id.clone(),
+                        article_id: article.id.clone(),
+                        expected_revision: 1,
+                        claim_token: review.0.claim_token,
+                        review: if passed {
+                            json!({"passed":true,"issues":[]})
+                        } else {
+                            json!({
+                                "passed": false,
+                                "policyVersion": "xiaojing-content-prompt-v7",
+                                "issues": [{
+                                    "source": "deterministic",
+                                    "category": "geo-citability",
+                                    "severity": "blocking",
+                                    "message": "格式契约不满足"
+                                }]
+                            })
+                        },
+                        passed,
+                    },
+                )
+                .expect("review finish");
+        }
+        let stats = store
+            .article_review_stats(
+                &workspace.id,
+                "session-article",
+                ArticleReviewStatsRequest {},
+            )
+            .expect("stats");
+        assert_eq!(stats["attempts"], json!(2));
+        assert_eq!(stats["passed"], json!(1));
+        assert_eq!(stats["failed"], json!(1));
+        assert_eq!(
+            stats["byContentType"]["guide"],
+            json!({"attempts": 2, "passed": 1, "failed": 1})
+        );
+        assert_eq!(
+            stats["policyVersions"],
+            json!({"unknown": 1, "xiaojing-content-prompt-v7": 1})
+        );
+        // ADR-0009 Decision 7：问题计数带 policyVersion 交叉维度。
+        assert_eq!(
+            stats["issues"],
+            json!([{
+                "policyVersion": "xiaojing-content-prompt-v7",
+                "severity": "blocking",
+                "category": "geo-citability",
+                "count": 1
+            }])
         );
     }
 }

@@ -52,14 +52,24 @@ export interface GeoTextMessage {
   content: string;
 }
 
+/** 走 titlePlanningModel lite 路由的小型规划调用 purpose 集合（正文腿之外的轻量 JSON 任务）。 */
+const LITE_PLANNING_PURPOSES: ReadonlySet<string> = new Set([
+  "title-planning",
+  "dimension-planning",
+]);
+
 export interface GeoTextCapability {
   readonly slot: "extraction" | "generation" | "reflection";
   complete(
     messages: readonly GeoTextMessage[],
     options?: {
       signal?: AbortSignal;
-      /** Title planning keeps the js_ai dev pinned mini route without adding a ninth slot. */
-      purpose?: "title-planning";
+      /**
+       * Title planning keeps the js_ai dev pinned mini route without adding a
+       * ninth slot. Dimension planning (ADR-0009 Decision 2) rides the same
+       * lite route: both are small JSON-list planning calls off the body leg.
+       */
+      purpose?: "title-planning" | "dimension-planning";
       maxTokens?: number;
       temperature?: number;
       topP?: number;
@@ -768,7 +778,9 @@ export function createGeoProviderCapabilities(
           slot,
           endpoint,
           apiKey(),
-          slot === "generation" && options?.purpose === "title-planning"
+          slot === "generation" &&
+          options?.purpose &&
+          LITE_PLANNING_PURPOSES.has(options.purpose)
             ? XIAOJING_GEO_PROVIDER_DEFAULTS.titlePlanningModel
             : model,
           messages,

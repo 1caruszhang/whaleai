@@ -282,6 +282,10 @@ pub async fn start_management_api() -> Result<u16, String> {
             post(brand_article_review_finish_handler),
         )
         .route(
+            "/api/brand-articles/review/stats",
+            post(brand_article_review_stats_handler),
+        )
+        .route(
             "/api/brand-distribution-plans/context",
             post(brand_distribution_plan_context_handler),
         )
@@ -1775,6 +1779,22 @@ async fn brand_article_review_finish_handler(
             );
             Json(serde_json::json!({ "ok": true, "article": article }))
         }
+        Err(error) => Json(serde_json::json!({ "ok": false, "error": error })),
+    }
+}
+
+/// 审核失败遥测（ADR-0009 Decision 7）：聚合本工作区历次审核的
+/// 通过率与按规则的问题计数，供规则调优决策取数。
+async fn brand_article_review_stats_handler(
+    headers: HeaderMap,
+    Json(request): Json<BrandKnowledgeEnvelope<crate::brand_workspace::ArticleReviewStatsRequest>>,
+) -> Json<serde_json::Value> {
+    let store = match validate_brand_knowledge_request(&headers, &request) {
+        Ok(store) => store,
+        Err(error) => return Json(error),
+    };
+    match store.article_review_stats(&request.workspace_id, &request.session_id, request.payload) {
+        Ok(stats) => Json(serde_json::json!({ "ok": true, "stats": stats })),
         Err(error) => Json(serde_json::json!({ "ok": false, "error": error })),
     }
 }

@@ -236,7 +236,7 @@ class DeterministicGeneration implements GeoTextCapability {
   readonly slot = "generation" as const;
   readonly calls: Array<{
     prompt: string;
-    purpose?: "title-planning";
+    purpose?: NonNullable<Parameters<GeoTextCapability["complete"]>[1]>["purpose"];
   }> = [];
 
   async complete(

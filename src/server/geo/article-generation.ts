@@ -2,16 +2,22 @@ import {
   ARTICLE_GENERATION_CONCURRENCY,
   ARTICLE_GENERATION_POLICY_VERSION,
   ARTICLE_IMAGE_CANDIDATE_INJECTION_LIMIT,
+  ARTICLE_IMAGE_QUOTA_BY_TYPE,
+  autoBoldBrandMentions,
   buildArticleGenerationMessages,
   buildArticleReflectionMessages,
+  buildArticleRepairMessages,
   buildDirectTitleMessages,
+  buildRankingDimensionMessages,
   combineArticleReview,
   dealNarrativeSeeds,
   deterministicArticleReview,
   parseArticleReflection,
   parseDirectTitleCandidates,
   parseGeneratedArticleBody,
+  parseRankingDimensions,
   normalizeTitleIdentity,
+  resolveRankingRoster,
   validateDirectArticleSource,
   type ArticleBodyProjection,
   type ArticleGenerationContext,
@@ -22,6 +28,7 @@ import {
   type ArticleProjection,
   type ArticleReviewResult,
 } from "../../shared/geo/articleGeneration";
+import { trimMaterialImagePlaceholders } from "../../shared/geo/materialImagePlaceholder";
 import {
   deriveServiceScope,
   firstProfileValue,
@@ -57,6 +64,8 @@ export interface ArticlePersistencePort {
     claimToken: string;
     title: string;
     body: string;
+    /** ranking 维度骨架（ADR-0009 Decision 2），非 ranking 缺省。 */
+    rankingDimensions?: readonly string[];
     modelAudit: Record<string, unknown>;
   }): Promise<ArticleProjection>;
   failGeneration(input: {
@@ -238,6 +247,11 @@ export class RustArticlePort implements ArticlePersistencePort {
       input,
       "article",
     );
+  }
+
+  /** 审核失败遥测（ADR-0009 Decision 7）：工作区历次审核的聚合统计。 */
+  async reviewStats(): Promise<Record<string, unknown>> {
+    return this.post("/api/brand-articles/review/stats", {}, "stats");
   }
 }
 
@@ -552,6 +566,49 @@ export class ArticleGenerationService {
           : context.article.requestedTitle;
       const articleProfile = projectBrandProfile(context.article.plannedFacts);
       const identityBlock = renderBrandIdentityBlock(articleProfile);
+      // ADR-0009 Decision 2 骨架注入：ranking 正文生成前先小调用现选 6 个
+      // 维度名（lite 路由、每次现选保跨文章多样性、重试重发一组），字面
+      // 注入正文 prompt——六维同序由构造保证，门退化为集合断言。失败
+      // fail-loud（与 direct 标题同哲学）：不回退「模型自选」，自选正是
+      // 六维漂移的来源。
+      let rankingDimensions: readonly string[] | undefined;
+      if (context.article.contentType === "ranking") {
+        // 名单先于此处解析（原在 buildArticleGenerationMessages 内抛）：
+        // 竞品不足时省掉一次维度调用直接 fail-loud；竞品名同时进维度
+        // 排除集——维度不得撞目标品牌与五家竞品的任何名字。
+        const roster = resolveRankingRoster(
+          context.article.plannedFacts,
+          context.brandName,
+        );
+        const excludedBrandNames = [
+          resolveBrandName(articleProfile, context.brandName),
+          ...(articleProfile.fullName ?? []),
+          ...(articleProfile.shortNames ?? []),
+          ...roster.competitors,
+        ]
+          .map((name) => name.trim())
+          .filter(Boolean);
+        const dimensionMessages = buildRankingDimensionMessages({
+          brandNames: [...new Set(excludedBrandNames)],
+          productLine: context.productLine,
+          targetRegion: context.targetRegion,
+          topic: context.article.topic,
+        });
+        rankingDimensions = parseRankingDimensions(
+          await this.generation.complete(
+            [
+              { role: "system", content: dimensionMessages.system },
+              { role: "user", content: dimensionMessages.user },
+            ],
+            {
+              purpose: "dimension-planning",
+              maxTokens: 1_024,
+              temperature: 0.9,
+              topP: 0.9,
+            },
+          ),
+        );
+      }
       const imageCandidates = await this.loadImageCandidates();
       const messages = buildArticleGenerationMessages({
         // 品牌名裁决：知识库身份事实优先，workspace 名仅无身份事实时兜底。
@@ -566,6 +623,7 @@ export class ArticleGenerationService {
         ...(identityBlock ? { identityBlock } : {}),
         ...(narrativeSeed ? { narrativeSeed } : {}),
         ...(imageCandidates.length > 0 ? { imageCandidates } : {}),
+        ...(rankingDimensions ? { rankingDimensions } : {}),
       });
       // ADR-0007 Decision 4：ranking 类型整篇联网（竞品条目由模型联网取材，
       // 消除名单外的结构性编造）；非排行类型保持离线。目标品牌段落的
@@ -581,22 +639,91 @@ export class ArticleGenerationService {
         topP: 0.9,
         webSearch,
       });
-      const body = parseGeneratedArticleBody(
+      const parsed = parseGeneratedArticleBody(
         raw,
         requestedTitle,
       );
-      if (context.article.contentType === "ranking") {
-        const rankingIssues = deterministicArticleReview(
-          body,
+      // ADR-0009 生成期管线：parse → 确定性修复 → 确定性审核 →（blocking
+      // 时）一次有界修复 → 复检 → 落库/失败。确定性修复（品牌自动加粗、
+      // 配图超限裁剪）对初稿与修复稿各跑一遍；预检从 ranking 扩展到全部
+      // 类型（§5），格式违约在生成期就地消解，不再漏到批准门爆出。人工
+      // 编辑路径（claimReview）不走本管线——审核门仍是人工编辑唯一防线。
+      const imageQuota =
+        ARTICLE_IMAGE_QUOTA_BY_TYPE[context.article.contentType];
+      const deterministicallyRepaired = (candidate: string) =>
+        trimMaterialImagePlaceholders(
+          autoBoldBrandMentions(candidate, context.article.plannedFacts),
+          imageQuota,
+        );
+      const blockingIssuesOf = (candidate: string) =>
+        deterministicArticleReview(
+          candidate,
           context.article.plannedFacts,
-          "ranking",
+          context.article.contentType,
           context.brandName,
+          rankingDimensions ?? context.article.rankingDimensions ?? undefined,
         ).filter((issue) => issue.severity === "blocking");
-        if (rankingIssues.length > 0) {
-          throw new Error(
-            `article_generation_ranking_output_invalid:${rankingIssues.map((issue) => issue.message).join("；")}`,
+      let body = deterministicallyRepaired(parsed);
+      let blocking = blockingIssuesOf(body);
+      let repairUsed = false;
+      if (blocking.length > 0) {
+        // 有界修复（Decision 3）：条件触发、一次为限；修复输出同样过
+        // parse 门与确定性修复，修不好才判失败。修复是精确改写不是创作：
+        // 低温稳态、离线（ranking 联网取材已在首调完成）。
+        repairUsed = true;
+        try {
+          let rosterNote: string | undefined;
+          if (context.article.contentType === "ranking") {
+            try {
+              const roster = resolveRankingRoster(
+                context.article.plannedFacts,
+                context.brandName,
+              );
+              rosterNote = `陈列位 1 必须是目标品牌：${roster.targetBrand}；陈列位 2–6 必须恰为这五家已确认竞品（顺序不限）：${roster.competitors.join("、")}。`;
+            } catch {
+              // 名单本身不成立（竞品不足五家）时数据侧待补，修复无从修起。
+            }
+          }
+          // 维度骨架说明：门的消息不含维度名，注入清单须另行给修复模型。
+          const repairDimensions =
+            rankingDimensions ?? context.article.rankingDimensions;
+          const dimensionNote =
+            context.article.contentType === "ranking" && repairDimensions
+              ? `六家必须逐字覆盖以下 6 个维度（顺序不作要求，每条维度名加粗）：${repairDimensions.join("、")}。`
+              : undefined;
+          const repairMessages = buildArticleRepairMessages({
+            contentType: context.article.contentType,
+            requestedTitle,
+            body,
+            issues: blocking,
+            rosterNote,
+            dimensionNote,
+          });
+          const repairedRaw = await this.generation.complete(
+            [
+              { role: "system", content: repairMessages.system },
+              { role: "user", content: repairMessages.user },
+            ],
+            { maxTokens: 8_192, temperature: 0.3, topP: 0.9 },
           );
+          const repaired = deterministicallyRepaired(
+            parseGeneratedArticleBody(repairedRaw, requestedTitle),
+          );
+          blocking = blockingIssuesOf(repaired);
+          if (blocking.length === 0) body = repaired;
+        } catch {
+          // 修复调用失败（provider/parse 抛错）不掩盖原始违规：仍按
+          // blocking 判失败，让 failReason 直指真实问题。
         }
+      }
+      if (blocking.length > 0) {
+        const code =
+          context.article.contentType === "ranking"
+            ? "article_generation_ranking_output_invalid"
+            : "article_generation_output_invalid";
+        throw new Error(
+          `${code}:${blocking.map((issue) => issue.message).join("；")}`,
+        );
       }
       const finished = await this.persistence.finishGeneration({
         operationId: context.article.operationId,
@@ -605,6 +732,7 @@ export class ArticleGenerationService {
         claimToken: context.claimToken,
         title: requestedTitle,
         body,
+        ...(rankingDimensions ? { rankingDimensions } : {}),
         modelAudit: {
           policyVersion: ARTICLE_GENERATION_POLICY_VERSION,
           provider: "volcengine",
@@ -615,6 +743,7 @@ export class ArticleGenerationService {
           temperature: 0.85,
           topP: 0.9,
           ...(webSearch ? { webSearch: true } : {}),
+          repairUsed,
         },
       });
       await reportOutcome("success");
@@ -742,6 +871,9 @@ export class ArticleGenerationService {
       context.article.plannedFacts,
       context.article.contentType,
       context.brandName,
+      // 注入清单随文落库（ADR-0009 Decision 2）：批准门对照清单复检；
+      // 存量稿无清单时门内回退与第一家集合比对。
+      context.article.rankingDimensions ?? undefined,
     );
     // 用户裁定（2026-08-18）：审核先只做格式确定性检查，反思 LLM 审核暂停
     // （省一次 LLM 调用与等待；恢复时改回 REFLECTION_REVIEW_ENABLED=true）。

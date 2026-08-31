@@ -126,7 +126,7 @@ function upstreamMock(options: { failThemes?: string[] } = {}) {
       }
       // 文章正文（direct 路径标题腿已在上方 lite 分支返回候选）。
       return new Response(
-        chatContent(`# 测试品牌知识服务怎么选\n\n## 定义\n品牌成立10年。\n\n## 清单\n- 核对事实\n- 固定版本`),
+        chatContent(`# 测试品牌知识服务怎么选\n\n## 定义\n品牌成立10年。\n\n## 清单\n- 核对事实\n- 固定版本\n\n## 场景\n- 团队协作`),
         { status: 200 },
       );
     }
@@ -442,7 +442,7 @@ function articlePersistence(count: number) {
     topicPlanId: null,
     topicPlanRevision: null,
     knowledgeVersion: 1,
-    policyVersion: "xiaojing-content-prompt-v6",
+    policyVersion: "xiaojing-content-prompt-v7",
     status: "running" as const,
     articles,
     createdAt: "2026-08-15T00:00:00Z",
