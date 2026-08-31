@@ -55,7 +55,9 @@ src-tauri/resources/nodejs/*
 src-tauri/resources/nodejs-cache/
 src-tauri/resources/vcruntime140.dll
 src-tauri/resources/vcruntime140_1.dll
-artifacts/windows-x64/
+# 构建驱动日志、竞品调试转储（含材料衍生检索语料，按纪律不入库）、
+# spec 草稿等机器/草稿产物——整目录不入库，安装包子目录原先单独挡亦涵盖
+artifacts/
 .windows-x64-cache/
 src-tauri/resources/windows-x64-staging.json
 
