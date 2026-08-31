@@ -75,3 +75,17 @@ Owner 必须针对具体事实、scope 与 lifecycle phase 定义。`BrandWorksp
 - 工作区可能有其他 Session 的未提交改动。开始和交付前检查 `git status`，只修改任务需要的文件，不回滚、覆盖或清理别人的改动。
 - 不使用 `git add -A`、`git add .` 或 `git add -f`。不在 `main` 直接提交；合并、发布或打 tag 需要用户明确授权。
 - Rust 工具链版本以 `rust-toolchain.toml` 为准，避免浮动工具链产生无关 diff。
+
+## Agent skills
+
+### Issue tracker
+
+Issue 跟踪在 GitHub Issues（1caruszhang/whaleai），用 `gh` CLI 操作。见 `docs/agents/issue-tracker.md`。
+
+### Triage labels
+
+五个默认 triage 标签：needs-triage / needs-info / ready-for-agent / ready-for-human / wontfix。见 `docs/agents/triage-labels.md`。
+
+### Domain docs
+
+单上下文：根 `CONTEXT.md` 词汇表 + `docs/adr/`。见 `docs/agents/domain.md`。
