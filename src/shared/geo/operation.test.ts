@@ -271,6 +271,60 @@ describe("GeoOperation intent policy", () => {
       expect(plan.steps[0]?.capability).not.toBe("geo-dashboard");
     }
   });
+
+  // 票 #27（ADR-0010 Decision 5）：起点推导理由只进入计划认可门的
+  // summary（用户在计划门上确认的是「从哪开始」），步骤序列与确认门
+  // 位置零改动。
+  it("carries the starting-point derivation reason on the plan-ack gate without touching the step sequence", () => {
+    const reason = "知识 3 天前刚确认，直接从问题机会继续";
+    const withReason = planGeoOperation({
+      intent: "full-optimization",
+      goal: "一轮完整的 GEO 优化",
+      startingPointReason: reason,
+    });
+    const withoutReason = planGeoOperation({
+      intent: "full-optimization",
+      goal: "一轮完整的 GEO 优化",
+    });
+
+    // 18+1 步序列与确认门位置不变：id 与 confirmation kind 全等。
+    expect(withReason.steps.map((step) => [step.id, step.confirmation?.kind])).toEqual(
+      withoutReason.steps.map((step) => [step.id, step.confirmation?.kind]),
+    );
+    expect(withReason.steps).toHaveLength(19);
+
+    // 推导理由出现在认可门 summary 与操作级 pendingConfirmation。
+    expect(withReason.steps[0]?.confirmation).toMatchObject({
+      kind: "plan-ack",
+      authority: "geo-operation",
+    });
+    expect(withReason.steps[0]?.confirmation?.summary).toContain("从哪里开始");
+    expect(withReason.steps[0]?.confirmation?.summary).toContain(reason);
+    expect(withReason.pendingConfirmation?.summary).toContain(reason);
+
+    // 未提供理由时认可门文案与现状完全一致（默认路径零漂移）。
+    expect(withoutReason.steps[0]?.confirmation?.summary).toBe(
+      "查看上方阶段与步骤计划后放行；各阶段的产物仍会停在各自的确认门。",
+    );
+  });
+
+  it("ignores blank derivation reasons and rejects oversized ones", () => {
+    expect(
+      planGeoOperation({
+        intent: "article-generation",
+        goal: "生成三篇文章",
+        startingPointReason: "   ",
+      }).steps[0]?.confirmation?.summary,
+    ).not.toContain("从哪里开始");
+
+    expect(() =>
+      planGeoOperation({
+        intent: "article-generation",
+        goal: "生成三篇文章",
+        startingPointReason: "长".repeat(301),
+      }),
+    ).toThrow("geo_operation_starting_point_reason_invalid");
+  });
 });
 
 describe("GeoOperation phase grouping", () => {

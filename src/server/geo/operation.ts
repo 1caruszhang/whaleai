@@ -35,6 +35,11 @@ export interface GeoOperationCreateInput {
   inputRefs?: GeoOperationReference[];
   sourceOperationId?: string;
   updateKnowledge?: boolean;
+  /**
+   * 起点推导理由（票 #27，ADR-0010 Decision 5）：经带推荐选项问得到用户
+   * 选择后由 MCP 工具层传入；只随计划进入认可门 summary，不改步骤序列。
+   */
+  startingPointReason?: string;
 }
 
 export interface GeoOperationListInput {

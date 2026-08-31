@@ -252,6 +252,13 @@ export interface PlanGeoOperationInput {
   sourceOperationId?: string;
   /** Required only for the next-round branch. Undefined means ask first. */
   updateKnowledge?: boolean;
+  /**
+   * 起点推导理由（ADR-0010 Decision 5，票 #27）：新轮次经「带推荐与理由
+   * 的选项式询问」选定起点后由 agent 写入；只进入计划认可门 confirmation
+   * 的 summary——用户在计划门上确认的是「从哪里开始、为什么」，绝不改写
+   * 步骤序列或确认门位置。可选；空白视为未提供。
+   */
+  startingPointReason?: string;
 }
 
 interface StepDefinition {
@@ -477,6 +484,22 @@ function requireGoal(goal: string): string {
   return value;
 }
 
+const STARTING_POINT_REASON_MAX_CHARS = 300;
+
+/**
+ * 起点推导理由的归一：空白视为未提供（保持认可门默认文案零漂移），
+ * 超长按与 goal 同款纪律拒绝。上限收紧到 300 字：理由是一句话，不是
+ * 计划复述。
+ */
+function startingPointReasonOf(reason: string | undefined): string | null {
+  const value = reason?.trim();
+  if (!value) return null;
+  if ([...value].length > STARTING_POINT_REASON_MAX_CHARS) {
+    throw new Error("geo_operation_starting_point_reason_invalid");
+  }
+  return value;
+}
+
 function nextRoundKnowledgeDecision(): GeoOperationConfirmation {
   return confirmation(
     "next-round-knowledge",
@@ -491,9 +514,18 @@ function nextRoundKnowledgeDecision(): GeoOperationConfirmation {
  * stage runs: the progress card broadcasts the plan, the user releases it
  * once, then each stage still stops at its own consequential gate. The step
  * borrows the first work step's capability so it groups into the opening
- * phase instead of a stray「其他」group.
+ * phase instead of a stray「其他」group. The optional starting-point
+ * derivation reason (ticket #27, ADR-0010 Decision 5) only enriches the
+ * summary text so the gate shows where the round starts and why — the step
+ * sequence and gate positions never change.
  */
-function planAckStep(capability: GeoOperationCapability): StepDefinition {
+function planAckStep(
+  capability: GeoOperationCapability,
+  startingPointReason?: string,
+): StepDefinition {
+  const reason = startingPointReasonOf(startingPointReason);
+  const releaseSummary =
+    "查看上方阶段与步骤计划后放行；各阶段的产物仍会停在各自的确认门。";
   return {
     id: "acknowledge-plan",
     title: "认可本轮计划",
@@ -502,7 +534,7 @@ function planAckStep(capability: GeoOperationCapability): StepDefinition {
       "plan-ack",
       "geo-operation",
       "认可本轮计划",
-      "查看上方阶段与步骤计划后放行；各阶段的产物仍会停在各自的确认门。",
+      reason ? `从哪里开始：${reason}。${releaseSummary}` : releaseSummary,
     ),
   };
 }
@@ -633,7 +665,7 @@ export function planGeoOperation(
   }
 
   const plannedSteps = steps([
-    planAckStep(definitions[0].capability),
+    planAckStep(definitions[0].capability, input.startingPointReason),
     ...definitions,
   ]);
   const firstConfirmation = plannedSteps[0]?.confirmation ?? null;

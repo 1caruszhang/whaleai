@@ -1078,7 +1078,7 @@ export async function createXiaojingGeoServer() {
       ),
       tool(
         'start_geo_operation',
-        "Create the one BrandWorkspace GeoOperation that matches the user's intent. Use the direct intent when the user names a specific stage; when the user states a GEO goal without naming a stage, create full-optimization instead of asking which intent to pick. Keep goal a short plain-language phrase (e.g. 一轮完整的 GEO 优化) — the chat progress card broadcasts the full stage and step plan, so never restate every step in prose; report only the stage and the confirmation gate the operation currently stops at. Every new operation first parks at the plan acknowledgement gate: after creating it, briefly state the goal and the opening stage, tell the user to review and release the plan on the progress card, then end your turn — do not start any stage before the operation event reminder tells you the plan was released. For next-round-optimization, omit updateKnowledge first so the operation stops and asks, then record the user's answer with choose_next_round_knowledge; the explicit answer releases the replaced plan, which starts directly at its first work step (still stopping at that stage's confirmation gate). When reporting to the user, use natural, professional Simplified Chinese and keep your own thinking in Simplified Chinese; never surface internal enum values, operation IDs, UUIDs, revision numbers, tool names, or endpoint names — describe the operation by its goal and stages in plain language.",
+        "Create the one BrandWorkspace GeoOperation that matches the user's intent. Use the direct intent when the user names a specific stage; when the user states a GEO goal without naming a stage, create full-optimization instead of asking which intent to pick. Keep goal a short plain-language phrase (e.g. 一轮完整的 GEO 优化) — the chat progress card broadcasts the full stage and step plan, so never restate every step in prose; report only the stage and the confirmation gate the operation currently stops at. When the starting point was derived from the brand-state summary and the user just picked it in your recommended-option question (continue last round / start a new round without a knowledge update / start over from knowledge), pass that derived starting point and its reason as startingPointReason in one plain sentence — the plan acknowledgement gate then shows where this round starts and why, so the user confirms the starting point, not just the start. Every new operation first parks at the plan acknowledgement gate: after creating it, briefly state the goal and the opening stage, tell the user to review and release the plan on the progress card, then end your turn — do not start any stage before the operation event reminder tells you the plan was released. For next-round-optimization, omit updateKnowledge first so the operation stops and asks, then record the user's answer with choose_next_round_knowledge; the explicit answer releases the replaced plan, which starts directly at its first work step (still stopping at that stage's confirmation gate); if the user already answered the knowledge branch explicitly while picking the starting point, pass that answer here instead of re-asking. When reporting to the user, use natural, professional Simplified Chinese and keep your own thinking in Simplified Chinese; never surface internal enum values, operation IDs, UUIDs, revision numbers, tool names, or endpoint names — describe the operation by its goal and stages in plain language.",
         {
           intent: z.enum(GEO_OPERATION_KINDS),
           goal: z.string().min(1).max(500),
@@ -1090,6 +1090,14 @@ export async function createXiaojingGeoServer() {
             .regex(/^[A-Za-z0-9_.-]+$/)
             .optional(),
           updateKnowledge: z.boolean().optional(),
+          startingPointReason: z
+            .string()
+            .min(1)
+            .max(300)
+            .optional()
+            .describe(
+              'One plain sentence stating the derived starting point and why (e.g. 知识 3 天前刚确认，直接从问题机会继续). Only pass it when the starting point was derived from inspect_brand_context and the user picked it; it appears on the plan acknowledgement gate so the user confirms where the round starts.',
+            ),
         },
         async (input) => ({
           content: [
@@ -1105,6 +1113,7 @@ export async function createXiaojingGeoServer() {
                     | undefined,
                   sourceOperationId: input.sourceOperationId,
                   updateKnowledge: input.updateKnowledge,
+                  startingPointReason: input.startingPointReason,
                 }),
               }),
             },

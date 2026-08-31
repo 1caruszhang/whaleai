@@ -87,6 +87,58 @@ describe('buildSystemPrompt', () => {
 });
 
 /**
+ * ADR-0010 Decision 5 / 票 #27 回归：「先读后问」细化为「带推荐与理由的
+ * 选项式询问」（起点推导）。推导只决定从哪开始，不改写 18+1 步序列与
+ * 确认门位置；接管被拒不裸报错。这里按规则 token 锁定，提示词漂移可被
+ * 捕获。
+ */
+describe('starting-point derivation asks with a recommended option (ADR-0010, ticket #27)', () => {
+  const prompt = buildSystemPrompt();
+
+  // AC1：「先读后问」细化为带推荐与理由的选项式询问。
+  it('refines read-then-ask into an option-style question with a recommendation and its reason', () => {
+    expect(prompt).toContain('起点推导');
+    expect(prompt).toContain('带推荐与理由的选项式询问');
+    expect(prompt).toContain('推荐项放第一个');
+    // 推荐必须给出理由（用户故事 5），不是裸选项。
+    expect(prompt).toContain('写明推荐理由');
+    // 全新品牌无可推导：不问，直接按意图决策表创建。
+    expect(prompt).toContain('直接按意图决策表创建');
+    // 起点询问不是范围开放式提问。
+    expect(prompt).toContain('不得把它变成对范围的开放式提问');
+  });
+
+  // AC2：推导理由写入计划，计划认可门呈现「从哪开始」而不只是「开始」。
+  it('routes the derived starting point into startingPointReason so the plan-ack gate shows where the round starts', () => {
+    expect(prompt).toContain('startingPointReason');
+    expect(prompt).toContain('从哪里开始');
+    expect(prompt).toContain('计划认可门');
+  });
+
+  // AC3：摘要含未完成轮次时，「继续上轮」选项附卡点描述（用户故事 17）。
+  it('requires the continue-last-round option to carry the stuck-point description', () => {
+    expect(prompt).toContain('未完成轮次');
+    expect(prompt).toContain('继续上轮');
+    expect(prompt).toContain('附卡点');
+    expect(prompt).toContain('待审数量');
+    expect(prompt).toContain('所属会话');
+  });
+
+  // AC4：接管被拒不裸报错，转述为用户可行动的下一步（用户故事 19）。
+  it('requires relaying takeover rejections as actionable next steps instead of raw errors', () => {
+    expect(prompt).toContain('takeover_geo_operation');
+    expect(prompt).toContain('可行动的下一步');
+    expect(prompt).toContain('裸报');
+  });
+
+  // AC5：推导不改写步骤序列与确认门位置（入口智能 + 中间确定）。
+  it('keeps derivation from rewriting the step sequence or moving any gate', () => {
+    expect(prompt).toContain('不改写步骤序列');
+    expect(prompt).toContain('不增删确认门');
+  });
+});
+
+/**
  * GD-8③ 回归：XIAOJING_SESSION_FILES 提醒（systemReminder.ts，随消息投送）
  * 与主系统提示词里的会话文件规则（system-prompt.ts）是同一契约的两份文案，
  * system_reminder_protocol.md 要求两处必须同步修改。这里按"规则 token"而非

@@ -23,6 +23,7 @@ import {
   RankingCompetitorConfirmationGate,
   rankingCompetitorRequirement,
   sessionRankingCompetitorGate,
+  startGeoOperation,
 } from "./xiaojing-geo-tool";
 
 describe("RankingCompetitorConfirmationGate", () => {
@@ -333,6 +334,57 @@ describe('geoProbeSamplesFailure', () => {
   it('stringifies non-Error rejections', () => {
     const failure = geoProbeSamplesFailure('management_unavailable');
     expect(failure).toMatchObject({ kind: 'geo-probe-samples', ok: false, error: 'management_unavailable' });
+  });
+});
+
+/**
+ * 票 #27（ADR-0010 Decision 5）：start_geo_operation 的起点推导理由
+ * 通道——agent 经「带推荐选项问」得到用户选择后传入 startingPointReason，
+ * 它只落在持久化 create 请求里认可门 confirmation 的 summary 上（既有
+ * 卡片 payload 通道，renderer 零改动），不改步骤序列。
+ */
+describe('startGeoOperation starting-point derivation reason (ticket #27)', () => {
+  const api = vi.mocked(managementApi);
+  let previousSidecarId: string | undefined;
+
+  beforeEach(() => {
+    previousSidecarId = process.env.XIAOJING_SIDECAR_ID;
+    process.env.XIAOJING_SIDECAR_ID = 'sidecar-derivation';
+  });
+
+  afterEach(() => {
+    if (previousSidecarId === undefined) {
+      delete process.env.XIAOJING_SIDECAR_ID;
+    } else {
+      process.env.XIAOJING_SIDECAR_ID = previousSidecarId;
+    }
+    vi.clearAllMocks();
+  });
+
+  it('persists the derived starting point on the plan-ack confirmation summary', async () => {
+    configureXiaojingGeo({}, {
+      sessionId: 'session-round-two',
+      workspace: 'C:/ws/brand-a',
+    });
+    api.mockResolvedValue({ ok: true, operation: operation() });
+
+    await startGeoOperation({
+      intent: 'full-optimization',
+      goal: '一轮完整的 GEO 优化',
+      startingPointReason: '知识 3 天前刚确认，直接从问题机会继续',
+    });
+
+    expect(api).toHaveBeenCalledTimes(1);
+    const [path, , body] = api.mock.calls[0] as unknown as [
+      string,
+      string,
+      { payload: { steps: Array<{ id: string; confirmation?: { kind: string; summary: string } }> } },
+    ];
+    expect(path).toBe('/api/brand-geo-operations/create');
+    const ack = body.payload.steps.find((step) => step.id === 'acknowledge-plan');
+    expect(ack?.confirmation?.kind).toBe('plan-ack');
+    expect(ack?.confirmation?.summary).toContain('从哪里开始');
+    expect(ack?.confirmation?.summary).toContain('知识 3 天前刚确认，直接从问题机会继续');
   });
 });
 

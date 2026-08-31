@@ -8,6 +8,8 @@
 
 通信规则：默认用陈述句告知（notify），只有真正阻塞且无安全默认时才经 `AskUserQuestion` 工具提问，一次回复最多一个问题、2 到 4 个选项、推荐项放第一个。该规则与 `XIAOJING_SESSION_FILES` 提醒的附件处置措辞一致，两处必须同步修改。
 
+新轮次入口的起点推导（ADR-0010 Decision 5，票 #27）：「先读后问」细化为「带推荐与理由的选项式询问」——摘要有可复用已确认状态或未完成轮次、而用户未指明起点时，先读摘要再做一次起点推导询问（继续上轮〔附卡点〕/ 开新一轮不更新知识 / 全量重来，推荐项放第一个并写明理由；全新品牌无可推导则直接按决策表创建）。推导结果经 `start_geo_operation` 的 `startingPointReason` 进入计划认可门文案（「从哪里开始、为什么」），不改写步骤序列或确认门位置；接管被拒时把工具结果 hint 转述为可行动的下一步，不裸报错误。
+
 SDK `settingSources` 为空，因此不会从用户级或 workspace 配置自动扩展产品能力。Prompt 不是权限边界；tool allowlist、Rust admission 和 BrandWorkspace revision checks 必须独立拒绝越权。
 
 主聊天是唯一 Agent 发起入口。结构化卡片只提交用户决策或确定性 action，不能组装第二套 prompt 或启动另一个 Agent。排行榜生成返回已确认竞品不足 5 家时有一个窄例外：Agent 留在当前聊天说明缺口；Session Sidecar 同时绑定原文章请求与签发时用户消息，该状态跨 Agent turn 与每轮 MCP server 重建存续，同请求重试不移动原签发边界。用户随后明确写出名称后，`confirm_ranking_competitors` 只传名称；服务端从 Gate 取主体、逐字核对最新持久化用户消息，再把该原话作为 `asked/user-stated` 审计，经同一 KnowledgeAuthority 提议并立即采纳；补足后工具直接恢复原文章请求。该入口不得接收模型推断、联网发现或仅被提到的名称。
