@@ -12,6 +12,7 @@
     "build": "node scripts/bundle.mjs",
     "verify:container": "node scripts/verify-container.mjs",
     "verify:backup": "node scripts/verify-backup.mjs",
+    "verify:oss-image": "tsx scripts/verify-oss-image.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run"
   },

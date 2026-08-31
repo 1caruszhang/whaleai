@@ -4,10 +4,21 @@
  * 不触公网。可重复执行，任一步失败退出码非 0。
  *
  * 流程：docker build → 镜像卫生抽查（docker export 全量文件表无 .env /
- * 无 sqlite 数据 / 无 node_modules）→ 起宿主机 mock DeepSeek 上游 →
- * docker compose up（SSE 上游指向 mock）→ 等 HEALTHCHECK 健康 →
+ * 无 sqlite 数据 / 无 node_modules）→ 起宿主机 mock DeepSeek 上游 +
+ * mock OSS 上游（HTTPS，自签 fixture 证书）→ docker compose up（SSE 上游
+ * 与 OSS 内网 endpoint 都指向 mock）→ 等 HEALTHCHECK 健康 →
  * /healthz + /admin 登录页 200 + 建号/登录/余额合约冒烟 + /v1/messages
- * SSE 透传形状验证（mock 逐事件对比）→ compose down -v 收尾。
+ * SSE 透传形状验证（mock 逐事件对比）+ 图片 PUT 网关冒烟（票 #15：
+ * 二进制逐字节、Content-Type/公共读 ACL 透传、ACL 计入重签串、负向 4xx
+ * 零上游调用）→ compose down -v 收尾。
+ *
+ * 图片 PUT 冒烟的 TLS 形态：网关对 OSS 上游固定拼 https://{bucket}.{host}/
+ * （ossUpstreamUrl）。本地 mock 因此必须说 TLS——用 scripts/fixtures/ 的
+ * 自签 CA + 叶证书（SAN=verify-bucket.host.docker.internal）起 HTTPS mock，
+ * compose 覆盖文件把 `verify-bucket.host.docker.internal` 追加进容器
+ * extra_hosts（host-gateway）、把 CA 经 NODE_EXTRA_CA_CERTS 挂进容器信任
+ * 库（保持 TLS 校验开启，而非全局放行）。网关签名对 Host 不敏感（票 05
+ * 前提），指向 mock 不影响验证的重签语义。
  *
  * 用法：npm run verify:container
  * 可选环境变量：
@@ -16,13 +27,16 @@
  */
 
 import { execFile } from 'node:child_process';
-import { createServer } from 'node:http';
-import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { createHash, createHmac } from 'node:crypto';
+import { createServer as createHttpServer } from 'node:http';
+import { createServer as createHttpsServer } from 'node:https';
+import { cp, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
+import { deflateSync } from 'node:zlib';
 
 const run = promisify(execFile);
 const backendDir = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -56,7 +70,16 @@ async function prepareDockerConfig(parentDir) {
   );
   for (const item of ['contexts', 'cli-plugins']) {
     const source = join(userConfigDir, item);
-    if (existsSync(source)) await symlink(source, join(dockerConfigDir, item), 'dir');
+    if (!existsSync(source)) continue;
+    // Windows 上目录符号链接需要 SeCreateSymbolicLinkPrivilege（非提升 shell
+    // 会 EPERM）；junction 等效且免特权。
+    const linkType = process.platform === 'win32' ? 'junction' : 'dir';
+    try {
+      await symlink(source, join(dockerConfigDir, item), linkType);
+    } catch {
+      // 链接仍失败（如目标卷不支持）：复制目录兜底，只读用途等价。
+      await cp(source, join(dockerConfigDir, item), { recursive: true, verbatimSymlinks: false });
+    }
   }
 }
 
@@ -69,9 +92,14 @@ const VERIFY_ENV = {
   OSS_ACCESS_KEY_ID: 'verify-oss-id',
   OSS_ACCESS_KEY_SECRET: 'verify-oss-secret',
   OSS_BUCKET: 'verify-bucket',
+  OSS_PUBLIC_BASE_URL: 'https://verify-public.test',
   DISTRIBUTION_APP_ID: 'verify-distribution-appid',
   DISTRIBUTION_SECRET: 'verify-distribution-secret',
 };
+
+// mock OSS 的 TLS 身份（scripts/fixtures/，提交内的验证专用自签证书）。
+const OSS_MOCK_HOST_ALIAS = 'verify-bucket.host.docker.internal';
+const fixturesDir = join(backendDir, 'scripts', 'fixtures');
 
 const passed = [];
 const failed = [];
@@ -93,36 +121,53 @@ async function docker(args, options = {}) {
   });
 }
 
+/** compose 覆盖文件（mock OSS 的 extra_hosts / CA 信任注入；startStack 前写入）。 */
+let composeOverrideFile = '';
+
 async function compose(args, env = {}) {
+  const files = ['-f', join(backendDir, 'docker-compose.yml')];
+  if (composeOverrideFile) files.push('-f', composeOverrideFile);
   return await docker(
-    ['compose', '-p', COMPOSE_PROJECT, '-f', join(backendDir, 'docker-compose.yml'), ...args],
+    ['compose', '-p', COMPOSE_PROJECT, ...files, ...args],
     { env: { ...process.env, ...env } },
   );
 }
 
 // ── 1. 镜像构建 ─────────────────────────────────────────────────────────
-async function buildImage() {
-  console.log('[1/6] docker build');
+async function buildImage(tmpDir) {
+  console.log('[1/7] docker build');
   const buildArgs = [];
   if (process.env.XIAOJING_NPM_REGISTRY) {
     buildArgs.push('--build-arg', `NPM_REGISTRY=${process.env.XIAOJING_NPM_REGISTRY}`);
   }
-  const { stdout } = await docker(['build', '-t', IMAGE, ...buildArgs, backendDir], {
-    maxBuffer: 32 * 1024 * 1024,
-  });
+  // 构建机无法直连 docker.io 时，Dockerfile 首行 `# syntax=docker/dockerfile:1`
+  // 的前端镜像拉不下来（本 Dockerfile 只用经典指令，内置前端构建产物等价）
+  // ——验证构建改用去掉 syntax 行的临时 Dockerfile，仓库 Dockerfile 不动。
+  const dockerfile = await readFile(join(backendDir, 'Dockerfile'), 'utf8');
+  const verifyDockerfile = join(tmpDir, 'Dockerfile.verify');
+  await writeFile(verifyDockerfile, dockerfile.replace(/^# syntax=[^\r\n]*\r?\n/, ''));
+  const { stdout } = await docker(
+    ['build', '-t', IMAGE, ...buildArgs, '-f', verifyDockerfile, backendDir],
+    {
+      maxBuffer: 32 * 1024 * 1024,
+    },
+  );
   const lastLine = stdout.trimEnd().split('\n').pop() ?? '';
   console.log(`      ${lastLine}`);
 }
 
 // ── 2. 镜像卫生：导出全量文件表，断言密钥/数据未进镜像层 ────────────────
 async function verifyImageHygiene(tmpDir) {
-  console.log('[2/6] 镜像卫生抽查（无 .env / 无 sqlite 数据 / 无 node_modules）');
+  console.log('[2/7] 镜像卫生抽查（无 .env / 无 sqlite 数据 / 无 node_modules）');
   const { stdout: created } = await docker(['create', '--entrypoint', 'sh', IMAGE, '-c', 'true']);
   const containerId = created.trim();
   try {
     const tarPath = join(tmpDir, 'image-root.tar');
     await docker(['export', '--output', tarPath, containerId]);
-    const { stdout: listing } = await run('tar', ['-tf', tarPath], { maxBuffer: 64 * 1024 * 1024 });
+    // --force-local：Windows 路径里的 `C:` 会被 GNU tar 当成远程主机语法。
+    const { stdout: listing } = await run('tar', ['--force-local', '-tf', tarPath], {
+      maxBuffer: 64 * 1024 * 1024,
+    });
     const entries = listing.split('\n');
     const offenders = entries.filter(entry => {
       const base = entry.replace(/\/$/, '');
@@ -153,7 +198,7 @@ const SSE_EVENTS = [
 function startMockUpstream() {
   /** @type {Array<{path: string, xApiKey: string | null, authorization: string | null}>} */
   const upstreamRequests = [];
-  const server = createServer((req, res) => {
+  const server = createHttpServer((req, res) => {
     let body = '';
     req.on('data', chunk => {
       body += chunk;
@@ -204,15 +249,126 @@ function startMockUpstream() {
   });
 }
 
+// ── 3b. mock OSS 上游（HTTPS + 自签 fixture 证书；按字节记录 PUT） ──────
+// 网关固定把 OSS 上游拼成 https://{bucket}.{ossInternalHost}/{key}，所以 mock
+// 必须说 TLS：叶证书 SAN 与容器 extra_hosts 别名同为
+// verify-bucket.host.docker.internal，根 CA 经 NODE_EXTRA_CA_CERTS 注入容器
+// （TLS 校验保持开启）。请求按字节捕获（base64 落内存），不经文本解码。
+/**
+ * @typedef {{method: string, path: string, headers: Record<string, string>, bodyB64: string}} OssMockCall
+ */
+function startMockOssUpstream() {
+  /** @type {OssMockCall[]} */
+  const calls = [];
+  const serverPromise = (async () => {
+    const [key, cert] = await Promise.all([
+      readFile(join(fixturesDir, 'oss-mock-server.key')),
+      readFile(join(fixturesDir, 'oss-mock-server.crt')),
+    ]);
+    const server = createHttpsServer({ key, cert }, (req, res) => {
+      const chunks = [];
+      req.on('data', chunk => chunks.push(chunk));
+      req.on('end', () => {
+        calls.push({
+          method: req.method ?? '',
+          path: req.url ?? '',
+          headers: Object.fromEntries(
+            Object.entries(req.headers).map(([name, value]) => [
+              name.toLowerCase(),
+              Array.isArray(value) ? value.join(', ') : String(value ?? ''),
+            ]),
+          ),
+          bodyB64: Buffer.concat(chunks).toString('base64'),
+        });
+        // OSS PUT 成功形状：200 空体。
+        res.writeHead(200, { 'content-length': '0' });
+        res.end();
+      });
+    });
+    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+    const address = /** @type {import('node:net').AddressInfo} */ (server.address());
+    return { server, port: address.port };
+  })();
+  return {
+    calls,
+    done: serverPromise,
+    close: async () => {
+      const { server } = await serverPromise;
+      await new Promise(done => server.close(() => done()));
+    },
+  };
+}
+
+/** 构造 8x8 纯色 PNG（真实 PNG 二进制：签名 + IHDR + IDAT + IEND，CRC 现算）。 */
+function buildTinyPng(/** @type {number} */ r, /** @type {number} */ g, /** @type {number} */ b) {
+  const crcTable = new Uint32Array(256).map((_, index) => {
+    let value = index;
+    for (let bit = 0; bit < 8; bit += 1) value = value & 1 ? 0xedb88320 ^ (value >>> 1) : value >>> 1;
+    return value >>> 0;
+  });
+  const crc32 = (bytes) => {
+    let crc = 0xffffffff;
+    for (const byte of bytes) crc = (crcTable[(crc ^ byte) & 0xff] ?? 0) ^ (crc >>> 8);
+    return (crc ^ 0xffffffff) >>> 0;
+  };
+  const chunk = (type, data) => {
+    const body = Buffer.concat([Buffer.from(type, 'ascii'), data]);
+    const length = Buffer.alloc(4);
+    length.writeUInt32BE(data.length);
+    const crc = Buffer.alloc(4);
+    crc.writeUInt32BE(crc32(body));
+    return Buffer.concat([length, body, crc]);
+  };
+  const width = Buffer.alloc(4);
+  width.writeUInt32BE(8);
+  const ihdr = chunk(
+    'IHDR',
+    Buffer.concat([width, width, Buffer.from([8, 2, 0, 0, 0])]), // 8bit truecolor
+  );
+  const pixel = Buffer.from([r, g, b]);
+  const row = Buffer.concat([Buffer.from([0]), Buffer.concat(Array.from({ length: 8 }, () => pixel))]);
+  const scanline = Buffer.concat(Array.from({ length: 8 }, () => row));
+  const idat = chunk('IDAT', deflateSync(scanline));
+  const iend = chunk('IEND', Buffer.alloc(0));
+  return Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), ihdr, idat, iend]);
+}
+
 // ── 4. compose 起容器并等健康 ──────────────────────────────────────────
-async function startStack(envFile, mockPort) {
-  console.log('[3/6] docker compose up（SSE 上游 → 宿主机 mock）');
+async function startStack(envFile, tmpDir, mockPort, ossMock) {
+  console.log('[3/7] docker compose up（SSE 上游与 OSS 内网 endpoint → 宿主机 mock）');
   await compose(['down', '-v', '--remove-orphans']).catch(() => {});
+  const { port: ossMockPort } = await ossMock.done;
   await writeFile(
     envFile,
-    `${Object.entries({ ...VERIFY_ENV, DEEPSEEK_BASE_URL: `http://host.docker.internal:${mockPort}` })
+    `${Object.entries({
+      ...VERIFY_ENV,
+      DEEPSEEK_BASE_URL: `http://host.docker.internal:${mockPort}`,
+      // 网关把 OSS 上游拼成 https://{bucket}.{ossInternalHost}/，指向 mock 的
+      // TLS 端口；容器内 DNS 由覆盖文件的 extra_hosts 别名解析。
+      OSS_INTERNAL_HOST: `host.docker.internal:${ossMockPort}`,
+    })
       .map(([key, value]) => `${key}=${value}`)
       .join('\n')}\n`,
+  );
+  // 覆盖文件：追加 mock OSS 主机别名 + 注入 CA 信任（保持 TLS 校验开启）。
+  const caPem = await readFile(join(fixturesDir, 'oss-mock-ca.crt'));
+  const caPath = join(tmpDir, 'oss-mock-ca.crt');
+  await writeFile(caPath, caPem);
+  composeOverrideFile = join(tmpDir, 'oss-mock-compose.override.yml');
+  await writeFile(
+    composeOverrideFile,
+    [
+      'services:',
+      '  api:',
+      '    extra_hosts:',
+      '      - "host.docker.internal:host-gateway"',
+      `      - "${OSS_MOCK_HOST_ALIAS}:host-gateway"`,
+      '    environment:',
+      '      NODE_EXTRA_CA_CERTS: /certs/oss-mock-ca.crt',
+      '    volumes:',
+      `      - ${caPath.replaceAll('\\', '/')}:/certs/oss-mock-ca.crt:ro`,
+      '',
+    ].join('\n'),
   );
   await compose(['up', '-d'], {
     XIAOJING_IMAGE_TAG: 'verify',
@@ -222,7 +378,7 @@ async function startStack(envFile, mockPort) {
 }
 
 async function waitForHealthy(timeoutMs = 60_000) {
-  console.log('[4/6] 等待容器 HEALTHCHECK 变为 healthy');
+  console.log('[4/7] 等待容器 HEALTHCHECK 变为 healthy');
   const startedAt = Date.now();
   for (;;) {
     const { stdout } = await docker([
@@ -251,7 +407,7 @@ async function jsonFetch(path, init = {}) {
 }
 
 async function smokeHttp(upstreamRequests) {
-  console.log('[5/6] HTTP 合约冒烟');
+  console.log('[5/7] HTTP 合约冒烟');
 
   const healthz = await fetch(`${BASE_URL}/healthz`);
   check(
@@ -368,27 +524,133 @@ async function smokeHttp(upstreamRequests) {
       messagesUpstream.authorization === null,
     JSON.stringify(messagesUpstream ?? null),
   );
+
+  return { accessToken };
+}
+
+// ── 5b. 图片 PUT 网关冒烟（票 #15：二进制安全 + ACL 进重签串） ──────────
+async function smokeOssImagePut(accessToken, ossMock) {
+  console.log('[6/7] 图片 PUT 网关冒烟（/gw/oss/images/<sha256>.png）');
+  await ossMock.done;
+
+  // 真实 PNG 二进制（含非文本字节）：经容器 HTTP 栈 → 网关 arrayBuffer →
+  // mock OSS，必须逐字节一致（text() 往返会洗掉替换字符）。
+  const imageBytes = buildTinyPng(0x2f, 0x81, 0xc4);
+  const sha256 = createHash('sha256').update(imageBytes).digest('hex');
+  const encodedKey = `images/${sha256}.png`;
+  const put = await fetch(`${BASE_URL}/gw/oss/${encodedKey}`, {
+    method: 'PUT',
+    headers: {
+      authorization: `Bearer ${accessToken}`,
+      'content-type': 'image/png',
+      'x-oss-object-acl': 'public-read',
+    },
+    body: imageBytes,
+  });
+  const putBody = await put.json().catch(() => null);
+  check(
+    `PUT /gw/oss/${encodedKey} → 200 且返回公网 URL`,
+    put.status === 200 && putBody?.url === `https://verify-public.test/${encodedKey}`,
+    `status=${put.status} body=${JSON.stringify(putBody)}`,
+  );
+
+  const callsAfterPut = ossMock.calls.length;
+  check('mock OSS 恰好收到 1 次 PUT', callsAfterPut === 1, `收到 ${callsAfterPut} 次`);
+  const call = ossMock.calls[0];
+  if (call) {
+    check(
+      '上游 PUT 路径与逐字节二进制一致',
+      call.method === 'PUT' && call.path === `/${encodedKey}` && Buffer.from(call.bodyB64, 'base64').equals(imageBytes),
+      `method=${call.method} path=${call.path} bytes=${Buffer.from(call.bodyB64, 'base64').length}/${imageBytes.length}`,
+    );
+    check(
+      '上游收到白名单 Content-Type 与公共读 ACL 头（不含账号 token）',
+      call.headers['content-type'] === 'image/png' &&
+        call.headers['x-oss-object-acl'] === 'public-read' &&
+        !(call.headers.authorization ?? '').includes(accessToken),
+      `content-type=${call.headers['content-type']} acl=${call.headers['x-oss-object-acl']}`,
+    );
+    // 重签契约（票 #15 核心）：Authorization 用服务器占位 AK/SK 对
+    // `PUT\n\n{contentType}\n{date}\nx-oss-object-acl:public-read\n/{bucket}/{key}`
+    // 做 HMAC-SHA1——ACL 必须在 CanonicalizedOSSHeaders 里，否则对不上。
+    const date = call.headers.date ?? '';
+    const stringToSign = [
+      'PUT',
+      '',
+      'image/png',
+      date,
+      'x-oss-object-acl:public-read',
+      `/${VERIFY_ENV.OSS_BUCKET}/${encodedKey}`,
+    ].join('\n');
+    const expectedAuthorization = `OSS ${VERIFY_ENV.OSS_ACCESS_KEY_ID}:${createHmac('sha1', VERIFY_ENV.OSS_ACCESS_KEY_SECRET)
+      .update(stringToSign)
+      .digest('base64')}`;
+    check(
+      '上游 Authorization 为 ACL 计入重签串的 OSS V1 签名（Date 存在且签名可复算）',
+      Boolean(date) && call.headers.authorization === expectedAuthorization,
+      `date=${JSON.stringify(date)} authorization=${JSON.stringify(call.headers.authorization)}`,
+    );
+  }
+
+  // 负向：白名单外 Content-Type / 缺公共读 ACL —— 确定性 4xx 且零上游调用。
+  const badType = await fetch(`${BASE_URL}/gw/oss/${encodedKey}`, {
+    method: 'PUT',
+    headers: {
+      authorization: `Bearer ${accessToken}`,
+      'content-type': 'image/tiff',
+      'x-oss-object-acl': 'public-read',
+    },
+    body: imageBytes,
+  });
+  const badTypeBody = await badType.json().catch(() => null);
+  check(
+    '白名单外 Content-Type → 400 oss_image_content_type_invalid',
+    badType.status === 400 && badTypeBody?.error === 'oss_image_content_type_invalid',
+    `status=${badType.status} body=${JSON.stringify(badTypeBody)}`,
+  );
+  const missingAcl = await fetch(`${BASE_URL}/gw/oss/${encodedKey}`, {
+    method: 'PUT',
+    headers: {
+      authorization: `Bearer ${accessToken}`,
+      'content-type': 'image/png',
+    },
+    body: imageBytes,
+  });
+  const missingAclBody = await missingAcl.json().catch(() => null);
+  check(
+    '缺公共读 ACL → 400 oss_image_acl_required',
+    missingAcl.status === 400 && missingAclBody?.error === 'oss_image_acl_required',
+    `status=${missingAcl.status} body=${JSON.stringify(missingAclBody)}`,
+  );
+  check(
+    '两个负向用例均零上游调用',
+    ossMock.calls.length === callsAfterPut,
+    `上游调用数 ${ossMock.calls.length}（期望保持 ${callsAfterPut}）`,
+  );
 }
 
 // ── 6. 收尾 ────────────────────────────────────────────────────────────
 async function main() {
-  console.log(`[0/6] 前置检查（docker 守护进程、回环端口 ${HOST_PORT}）`);
+  console.log(`[0/7] 前置检查（docker 守护进程、回环端口 ${HOST_PORT}）`);
   const tmpDir = await mkdtemp(join(tmpdir(), 'xiaojing-verify-'));
   await prepareDockerConfig(tmpDir);
   const envFile = join(tmpDir, 'verify.env');
   let mock;
+  const ossMock = startMockOssUpstream();
   await docker(['version', '--format', '{{.Server.Version}}']);
   try {
-    await buildImage();
+    await buildImage(tmpDir);
     await verifyImageHygiene(tmpDir);
     mock = await startMockUpstream();
-    await startStack(envFile, mock.port);
+    await startStack(envFile, tmpDir, mock.port, ossMock);
     await waitForHealthy();
-    await smokeHttp(mock.upstreamRequests);
+    const { accessToken } = await smokeHttp(mock.upstreamRequests);
+    await smokeOssImagePut(accessToken, ossMock);
   } finally {
-    console.log('[6/6] compose down -v + 清理 mock 与临时目录');
+    console.log('[7/7] compose down -v + 清理 mock 与临时目录');
     await compose(['down', '-v', '--remove-orphans']).catch(() => {});
     await mock?.close();
+    await ossMock.close().catch(() => {});
     await rm(tmpDir, { recursive: true, force: true });
   }
   console.log(`\n容器验证结果：${passed.length} 项通过，${failed.length} 项失败`);
