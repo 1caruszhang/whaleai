@@ -872,9 +872,11 @@ async fn brand_geo_operation_get_handler(
         Ok(operation) if operation.session_id == request.session_id => {
             Json(serde_json::json!({ "ok": true, "operation": operation }))
         }
-        Ok(_) => Json(serde_json::json!({
+        Ok(operation) => Json(serde_json::json!({
             "ok": false,
-            "error": "geo_operation_session_mismatch",
+            // 所有权单一判定点（票 #26 prefactor）：与 store 侧 mutate/attest
+            // 同源，接管落地后被接管会话在这里得到指明接管者的错误。
+            "error": crate::brand_workspace::geo_operation_control_mismatch_error(&operation),
         })),
         Err(error) => Json(serde_json::json!({ "ok": false, "error": error })),
     }

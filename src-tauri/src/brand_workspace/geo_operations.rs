@@ -683,7 +683,7 @@ impl BrandWorkspaceStore {
             read_operation(&transaction, &request.workspace_id, &request.operation_id)?
                 .ok_or_else(|| "geo_operation_not_found".to_string())?;
         if operation.session_id != request.session_id {
-            return Err("geo_operation_session_mismatch".to_string());
+            return Err(geo_operation_control_mismatch_error(&operation));
         }
         if operation.revision != request.expected_revision {
             return Err("geo_operation_revision_conflict".to_string());
@@ -783,7 +783,7 @@ impl BrandWorkspaceStore {
         let operation = read_operation(&connection, workspace_id, &request.operation_id)?
             .ok_or_else(|| "geo_operation_not_found".to_string())?;
         if operation.session_id != session_id {
-            return Err("geo_operation_session_mismatch".to_string());
+            return Err(geo_operation_control_mismatch_error(&operation));
         }
         if operation.revision != request.expected_revision {
             return Err("geo_operation_revision_conflict".to_string());
@@ -1288,6 +1288,14 @@ fn require_status(current: &str, allowed: &[&str]) -> Result<(), String> {
     } else {
         Err(format!("geo_operation_transition_invalid:{current}"))
     }
+}
+
+/// Session/所有权检查的单一判定点（票 #26 prefactor）：非所有者会话对
+/// operation 的控制类访问一律经这里产出错误文本。接管（ADR-0010）落地后，
+/// 「当前所有者」取代「创建会话」成为判定键，被接管的原会话在这里拿到
+/// 指明接管者的可转述错误——散落的比较收敛于此，改键只动这一处。
+pub fn geo_operation_control_mismatch_error(operation: &GeoOperationProjection) -> String {
+    "geo_operation_session_mismatch".to_string()
 }
 
 /// Agent 可用控制动作（pause/resume/retry/cancel）按状态的可用地表。
@@ -1892,7 +1900,10 @@ pub async fn cmd_geo_operation_attest_external_gate_ui(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::brand_workspace::{BrandWorkspace, SessionCommit, SessionTitleSource};
+    use crate::brand_workspace::{
+        ArticleOperationGetRequest, BrandWorkspace, QuestionPoolLatestRequest, SessionCommit,
+        SessionTitleSource,
+    };
     use tempfile::tempdir;
 
     fn fixture() -> (BrandWorkspaceStore, BrandWorkspace) {
@@ -2869,4 +2880,5 @@ mod tests {
         assert_eq!(resumed.status, "ready");
         assert_eq!(resumed.steps[0].status, "ready");
     }
+
 }

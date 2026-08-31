@@ -366,17 +366,7 @@ impl BrandWorkspaceStore {
         if article.operation_id != request.operation_id {
             return Err("article_generation_operation_mismatch".to_string());
         }
-        let owner_session_id: String = connection
-            .query_row(
-                "SELECT created_by_session_id FROM geo_article_operations
-                 WHERE operation_id=?1",
-                [&request.operation_id],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(|error| format!("read article operation owner: {error}"))?
-            .ok_or_else(|| "article_generation_operation_not_found".to_string())?;
-        let is_owner = owner_session_id == session_id;
+        let is_owner = article_operation_owner(&connection, &request.operation_id)? == session_id;
         Ok(if is_owner {
             article
         } else {
@@ -904,29 +894,22 @@ impl BrandWorkspaceStore {
         let workspace = self.workspace(workspace_id)?;
         let connection = open_database(&workspace)?;
         require_article_session(&connection, session_id)?;
-        let (operation_id, current_revision, approved_revision, owner_session_id): (
-            String,
-            i64,
-            Option<i64>,
-            String,
-        ) = connection
-            .query_row(
-                "SELECT article.operation_id, article.revision, article.approved_revision,
-                        operation.created_by_session_id
-                 FROM geo_articles article
-                 JOIN geo_article_operations operation
-                   ON operation.operation_id=article.operation_id
-                 WHERE article.id=?1",
-                [&request.article_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-            )
-            .optional()
-            .map_err(|error| format!("read article body identity: {error}"))?
-            .ok_or_else(|| "article_generation_article_not_found".to_string())?;
+        let (operation_id, current_revision, approved_revision): (String, i64, Option<i64>) =
+            connection
+                .query_row(
+                    "SELECT article.operation_id, article.revision, article.approved_revision
+                     FROM geo_articles article
+                     WHERE article.id=?1",
+                    [&request.article_id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .optional()
+                .map_err(|error| format!("read article body identity: {error}"))?
+                .ok_or_else(|| "article_generation_article_not_found".to_string())?;
         if operation_id != request.operation_id {
             return Err("article_generation_operation_mismatch".to_string());
         }
-        let is_owner = owner_session_id == session_id;
+        let is_owner = article_operation_owner(&connection, &operation_id)? == session_id;
         if !is_owner && !request.approved {
             return Err("article_draft_session_mismatch".to_string());
         }
@@ -1730,13 +1713,15 @@ fn validate_snapshot_facts(
     Ok(())
 }
 
-fn require_article_operation_visibility(
+/// 文章操作所有权的单一判定点（票 #26 prefactor）：可见性与控制检查
+/// 一律经这里解析「当前所有者会话」。接管（ADR-0010）落地后，所有者从
+/// 「创建会话」改键为 `COALESCE(owner_session_id, created_by_session_id)`，
+/// 散落的比较收敛于此，改键只动这一处。
+fn article_operation_owner(
     connection: &Connection,
     operation_id: &str,
-    session_id: &str,
-    allow_approved_cross_session: bool,
-) -> Result<bool, String> {
-    let owner = connection
+) -> Result<String, String> {
+    connection
         .query_row(
             "SELECT created_by_session_id FROM geo_article_operations WHERE operation_id=?1",
             [operation_id],
@@ -1744,7 +1729,16 @@ fn require_article_operation_visibility(
         )
         .optional()
         .map_err(|error| format!("read article operation owner: {error}"))?
-        .ok_or_else(|| "article_generation_operation_not_found".to_string())?;
+        .ok_or_else(|| "article_generation_operation_not_found".to_string())
+}
+
+fn require_article_operation_visibility(
+    connection: &Connection,
+    operation_id: &str,
+    session_id: &str,
+    allow_approved_cross_session: bool,
+) -> Result<bool, String> {
+    let owner = article_operation_owner(connection, operation_id)?;
     if owner == session_id {
         return Ok(true);
     }
