@@ -110,7 +110,13 @@ describe("备份脚本 backup-sqlite.mjs（票 15）", () => {
       );
       expect(created).toHaveLength(1);
       const target = join(outDir, created[0]!);
-      expect(statSync(target).mode & 0o777).toBe(0o600);
+      // Windows 平台门控：Node 在 win32 上 fs.chmod 只映射只读位，0o600 不落
+      // POSIX 权限位，statSync 恒报 0o666，本断言必假。0o600 的真实语义只在
+      // 有权限位语义的平台（Linux CI / 生产 Docker）上验证；Windows 跳过位
+      // 断言，快照可用性仍由下方 readOnly 独立打开覆盖。脚本生产行为不改。
+      if (process.platform !== "win32") {
+        expect(statSync(target).mode & 0o777).toBe(0o600);
+      }
 
       const snapshot = new DatabaseSync(target, { readOnly: true });
       try {
