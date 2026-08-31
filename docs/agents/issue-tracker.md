@@ -1,6 +1,6 @@
 # Issue tracker: GitHub
 
-Issues and specs for this repo live as GitHub issues (`1caruszhang/whaleai`). Use the `gh` CLI for all operations.
+Issues and specs for this repo live as GitHub issues in the repository's own remote (infer it from `git remote -v`, see below). Use the `gh` CLI for all operations.
 
 ## Conventions
 

@@ -80,7 +80,7 @@ Owner 必须针对具体事实、scope 与 lifecycle phase 定义。`BrandWorksp
 
 ### Issue tracker
 
-Issue 跟踪在 GitHub Issues（1caruszhang/whaleai），用 `gh` CLI 操作。见 `docs/agents/issue-tracker.md`。
+Issue 跟踪在 GitHub Issues（以 git remote 为准），用 `gh` CLI 操作。见 `docs/agents/issue-tracker.md`。
 
 ### Triage labels
 

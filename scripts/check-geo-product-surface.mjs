@@ -227,6 +227,9 @@ function isExcluded(relativePath, name, isDirectory) {
   if (name === 'package-lock.json') return true;
   if (excludedGeneratedFiles.has(relativePath)) return true;
   if (excludedRelativeRoots.some((root) => relativePath === root.slice(0, -1) || relativePath.startsWith(root))) return true;
+  // 私有环境文件不属产品表面：.env* 由 gitignore 忽略；.reset_env 是本机
+  // 一键环境恢复脚本（含密钥路径与 git 身份设置），同样 gitignored、不入库。
+  if (relativePath === '.reset_env') return true;
   if (relativePath === '.env' || (relativePath.startsWith('.env.') && relativePath !== '.env.example')) return true;
   return false;
 }
