@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import {
+  fetchMaterialImageAssets,
   fetchMaterialImageContent,
   importBrandMaterialFiles,
   importBrandMaterialText,
@@ -68,5 +69,55 @@ describe('Brand material structured client', () => {
         'image-gone',
       ),
     ).rejects.toThrow('material_not_found');
+  });
+
+  it('fetches the read-only illustration candidate list over the session control plane', async () => {
+    const image = {
+      id: 'image-19',
+      workspaceId: 'brand-07',
+      sha256: 'sha-19',
+      fileExt: 'png',
+      mediaType: 'image/png',
+      byteSize: 2048,
+      width: 1024,
+      height: 768,
+      description: '门店前台的产品陈列',
+      category: 'product-photo' as const,
+      sourceMaterialId: 'material-19',
+      sourceMaterialName: '品牌介绍.docx',
+      relativePath: 'images/image-19.png',
+      createdAt: '2026-08-31T00:00:00Z',
+      updatedAt: '2026-08-31T00:00:00Z',
+    };
+    const apiPostMock = vi.fn(async () => ({
+      success: true,
+      images: [image],
+    }));
+    const identity = { workspaceId: 'brand-07', sessionId: 'session-07' };
+
+    const images = await fetchMaterialImageAssets(
+      apiPostMock as unknown as TabApiPost,
+      identity,
+    );
+
+    expect(apiPostMock).toHaveBeenCalledTimes(1);
+    expect(apiPostMock).toHaveBeenCalledWith(
+      '/api/xiaojing/material-images/list',
+      { ...identity, limit: 100 },
+    );
+    expect(images).toEqual([image]);
+  });
+
+  it('surfaces the stable error code when the candidate list retrieval fails', async () => {
+    const apiPostMock = vi.fn(async () => ({
+      success: false,
+      error: 'material_image_limit_invalid',
+    }));
+    await expect(
+      fetchMaterialImageAssets(
+        apiPostMock as unknown as TabApiPost,
+        { workspaceId: 'brand-07', sessionId: 'session-07' },
+      ),
+    ).rejects.toThrow('material_image_limit_invalid');
   });
 });

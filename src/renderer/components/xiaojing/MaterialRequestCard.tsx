@@ -31,6 +31,7 @@ import { isMaterialImageExtension, MATERIAL_IMAGE_EXTENSIONS } from '../../../sh
 import type { MaterialRescanResult } from '../../../shared/geo/materials';
 import { parseMaterialRequestCard, type MaterialRequestCardData } from '../../../shared/geo/materialRequestCard';
 import KnowledgeBatchCard from './KnowledgeBatchCard';
+import MaterialImageCandidatesBar from './MaterialImageCandidatesBar';
 
 export { parseMaterialRequestCard };
 
@@ -161,6 +162,14 @@ export default memo(function MaterialRequestCard({ data }: MaterialRequestCardPr
     }
   }, [upsertCard]);
 
+  // 配图候选池刷新信号（驱动预览条取数）：挂载基线由预览条自理，这里只
+  // 在既有轮询 tick 与重扫完成时递增——入池变化（图片上传/文档导入/存量
+  // 重扫）全部经同一条 3s 轮询自动反映，零手动刷新。
+  const [imagePoolRefresh, setImagePoolRefresh] = useState(0);
+  const bumpImagePoolRefresh = useCallback(() => {
+    setImagePoolRefresh((tick) => tick + 1);
+  }, []);
+
   // 状态轮询：处理中的行按 materialId 查询；传输层失败静默，等下个周期。
   const rowsRef = useRef(rows);
   rowsRef.current = rows;
@@ -177,10 +186,13 @@ export default memo(function MaterialRequestCard({ data }: MaterialRequestCardPr
         processingIds,
       );
       applyStatusEntries(entries);
+      // 本 tick 已发生取数：池可能刚入新图（后台抽取先入池再落终态），
+      // 同 tick 内顺带刷新候选池快照，终态翻转的那次轮询不会漏拍。
+      bumpImagePoolRefresh();
     } catch {
       // 下个周期重试；行保持 processing。
     }
-  }, [apiPost, applyStatusEntries, identity]);
+  }, [apiPost, applyStatusEntries, identity, bumpImagePoolRefresh]);
 
   useEffect(() => {
     if (!identity) return;
@@ -364,6 +376,9 @@ export default memo(function MaterialRequestCard({ data }: MaterialRequestCardPr
     try {
       const summary = await rescanBrandMaterialImages(apiPost, identity);
       setRescan({ status: 'done', summary });
+      // 重扫同步一次通过后池已变化：立即刷新候选池快照（无处理中行可挂
+      // 靠轮询 tick，这里补上同等的自动刷新语义）。
+      bumpImagePoolRefresh();
     } catch (error) {
       // 与移除/重试同款：服务端固定码原样展示，传输层失败收敛为固定码。
       const message = error instanceof Error ? error.message : '';
@@ -372,7 +387,7 @@ export default memo(function MaterialRequestCard({ data }: MaterialRequestCardPr
         errorCode: message.startsWith('material_') ? message : 'material_request_failed',
       });
     }
-  }, [apiPost, identity, rescan.status]);
+  }, [apiPost, identity, rescan.status, bumpImagePoolRefresh]);
 
   const rescanSummaryLine = useMemo(() => {
     if (rescan.status !== 'done') return null;
@@ -392,6 +407,19 @@ export default memo(function MaterialRequestCard({ data }: MaterialRequestCardPr
     ];
     const suffix = rescan.summary.budgetExhausted ? '；时间预算用完，再次点击可继续' : '';
     return `存量重扫完成：${parts.join('；')}。${suffix}`;
+  }, [rescan]);
+
+  // 未入池图的一行汇总留痕（预览条消费）：现有 outcome 口径里唯一带降级
+  // 计数的投影是 T7 重扫摘要（每文档 degraded）；导入路径的逐类别跳过计数
+  // 只在服务端日志，不为预览新建服务端投影——无重扫数据时预览条退固定口径。
+  const imagePoolUnpooledNote = useMemo(() => {
+    if (rescan.status !== 'done') return null;
+    const degraded = rescan.summary.documents.reduce(
+      (total, doc) => total + doc.degraded,
+      0,
+    );
+    if (degraded <= 0) return null;
+    return `最近一次存量重扫另有 ${degraded} 张图片未入池（打标降级/过滤/格式跳过），不逐张展示。`;
   }, [rescan]);
 
   return (
@@ -444,6 +472,12 @@ export default memo(function MaterialRequestCard({ data }: MaterialRequestCardPr
           {rescan.status === 'failed' && `重扫失败：${rescan.errorCode}`}
         </p>
       )}
+
+      <MaterialImageCandidatesBar
+        identity={identity}
+        refreshKey={imagePoolRefresh}
+        unpooledNote={imagePoolUnpooledNote}
+      />
 
       {!currentWorkspace && (
         <p className="mt-2 rounded-lg bg-[var(--paper-inset)] px-3 py-2 text-xs leading-5 text-[var(--ink-muted)]">

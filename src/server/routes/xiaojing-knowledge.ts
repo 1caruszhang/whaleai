@@ -589,6 +589,45 @@ export async function handleXiaojingKnowledgeRoute(
     }
   }
 
+  // 材料图片候选清单（配图候选只读预览条的唯一清单源）：renderer 经本
+  // Session 控制面请求，Sidecar 走 T2 的 management images/list 端点
+  // （workspace 作用域、created_at 倒序、limit clamp 1..200）。只读投影，
+  // 无写操作；纯清单不含图片字节（字节按需走下方 content 路由）。
+  if (pathname === '/api/xiaojing/material-images/list' && request.method === 'POST') {
+    try {
+      const payload = await request.json() as {
+        workspaceId: string;
+        sessionId: string;
+        limit?: number;
+      };
+      const runtimeSessionId = getRuntimeSessionIdForRequest();
+      const workspaceId = basename(resolve(workspacePath));
+      if (payload.workspaceId !== workspaceId
+        || payload.sessionId !== runtimeSessionId) {
+        return jsonResponse({ success: false, error: 'material_identity_mismatch' }, 403);
+      }
+      // 与 Rust images/list 的 clamp 对齐：未提供用存储缺省，提供必须是有界整数。
+      if (payload.limit !== undefined
+        && (!Number.isInteger(payload.limit) || payload.limit < 1 || payload.limit > 200)) {
+        return jsonResponse({ success: false, error: 'material_image_limit_invalid' }, 400);
+      }
+      const identity = { workspaceId, sessionId: runtimeSessionId };
+      const images = await createBrandMaterialPort(identity)
+        .listImageAssets(payload.limit !== undefined ? { limit: payload.limit } : {});
+      return jsonResponse({ success: true, images });
+    } catch (error) {
+      logMaterial({
+        operation: 'image-list', workspaceId: basename(resolve(workspacePath)),
+        sessionId: getRuntimeSessionIdForRequest(), status: 'failed', error,
+      });
+      // Rust/management 固定码原样透传，其余收敛为本路由固定码。
+      const message = error instanceof Error ? error.message : '';
+      const code = MATERIAL_ERROR_CODES.find((candidate) => message.includes(candidate))
+        ?? 'material_image_list_failed';
+      return jsonResponse({ success: false, error: code }, 400);
+    }
+  }
+
   // 材料图片内容取回（ADR-0008 批准预览换 blob 的唯一字节源）：renderer 经
   // 本 Session 控制面请求，Sidecar 走 T2 的 management images/content 端点
   // （Rust 侧 sha256 校验 + committed-session 闸）。字节以 base64 过控制面

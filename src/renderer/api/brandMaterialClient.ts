@@ -5,6 +5,10 @@ import type {
   MaterialRescanResult,
   MaterialStatusEntry,
 } from '../../shared/geo/materials';
+import {
+  MATERIAL_IMAGE_POOL_PREVIEW_LIMIT,
+  type MaterialImageAsset,
+} from '../../shared/geo/materialImages';
 
 export type BrandMaterialProcessResult = MaterialImportEntry<BrandMaterialProjection>;
 export type BrandMaterialImportStarted = MaterialImportStarted<BrandMaterialProjection>;
@@ -111,6 +115,26 @@ export interface MaterialImageContent {
   mediaType: string;
   /** 新建 Uint8Array（ArrayBuffer 支撑），可直接作为 BlobPart 建 object URL。 */
   bytes: Uint8Array<ArrayBuffer>;
+}
+
+/**
+ * 材料图片候选清单（配图候选只读预览条的唯一清单源）：经 Session 控制面
+ * 由 Sidecar 转 T2 的 management images/list 端点。纯投影——入池时间倒序，
+ * 上限对齐 Rust clamp 内的预览档；不含图片字节（字节按需走 content 取回）。
+ */
+export function fetchMaterialImageAssets(
+  apiPost: TabApiPost,
+  identity: { workspaceId: string; sessionId: string },
+): Promise<MaterialImageAsset[]> {
+  return apiPost<{ success: boolean; images?: MaterialImageAsset[]; error?: string }>(
+    '/api/xiaojing/material-images/list',
+    { ...identity, limit: MATERIAL_IMAGE_POOL_PREVIEW_LIMIT },
+  ).then((response) => {
+    if (!response.success || !Array.isArray(response.images)) {
+      throw new Error(response.error ?? 'material_image_list_failed');
+    }
+    return response.images;
+  });
 }
 
 /**

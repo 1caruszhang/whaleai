@@ -22,6 +22,13 @@ export function isMaterialImageExtension(extension: string): boolean {
 }
 
 /**
+ * 候选池预览（材料请求卡配图候选条）的清单取数上限：在 Rust images/list
+ * 的 clamp(1..200) 内取一档——头部计数覆盖常规池规模，缩略图网格按入池
+ * 时间倒序全部渲染（默认视口约见最新 12 张，其余卡内限高内滚）。
+ */
+export const MATERIAL_IMAGE_POOL_PREVIEW_LIMIT = 100;
+
+/**
  * 视觉打标的类型分类（ADR-0008 Decision 2）。存储与跨端传输用稳定 code；
  * `label` 是打标提示词与界面展示用的中文口径。图标装饰不入池（代码层过滤），
  * 因此不会出现在资产表里，但词表保留它以覆盖打标输出的全集。

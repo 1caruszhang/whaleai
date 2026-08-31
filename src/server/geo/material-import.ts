@@ -1514,7 +1514,7 @@ function failureDiagnostic(error: unknown): Record<string, unknown> {
 }
 
 export function materialLogProjection(input: {
-  operation: 'import-file' | 'import-text' | 'fetch-website' | 'parse' | 'extract' | 'propose-candidates' | 'retry' | 'delete' | 'image-content' | 'rescan-images';
+  operation: 'import-file' | 'import-text' | 'fetch-website' | 'parse' | 'extract' | 'propose-candidates' | 'retry' | 'delete' | 'image-content' | 'image-list' | 'rescan-images';
   workspaceId: string;
   sessionId: string;
   materialId?: string;

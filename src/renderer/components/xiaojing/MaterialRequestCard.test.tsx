@@ -17,6 +17,7 @@ const mocks = vi.hoisted(() => ({
   deleteMaterial: vi.fn(),
   rescanImages: vi.fn(),
   fetchStatuses: vi.fn(),
+  fetchImageAssets: vi.fn(),
 }));
 
 vi.mock('@/context/TabContext', () => ({
@@ -51,6 +52,7 @@ vi.mock('@/api/brandMaterialClient', async (importOriginal) => {
     deleteBrandMaterial: mocks.deleteMaterial,
     rescanBrandMaterialImages: mocks.rescanImages,
     fetchBrandMaterialStatuses: mocks.fetchStatuses,
+    fetchMaterialImageAssets: mocks.fetchImageAssets,
   };
 });
 
@@ -146,9 +148,12 @@ describe('MaterialRequestCard', () => {
       mocks.deleteMaterial,
       mocks.rescanImages,
       mocks.fetchStatuses,
+      mocks.fetchImageAssets,
     ]) mock.mockReset();
     // 默认恢复查询返回空；个别用例按需覆盖。
     mocks.fetchStatuses.mockResolvedValue([]);
+    // 默认候选池为空（预览条不渲染）；个别用例按需覆盖。
+    mocks.fetchImageAssets.mockResolvedValue([]);
   });
 
   afterEach(() => {
@@ -549,5 +554,97 @@ describe('MaterialRequestCard', () => {
 
     expect(screen.getByRole('button', { name: '重扫存量材料图片' })).toBeDisabled();
     expect(mocks.rescanImages).not.toHaveBeenCalled();
+  });
+
+  it('renders the read-only illustration candidates strip when the pool is non-empty', async () => {
+    mocks.fetchImageAssets.mockResolvedValue([{
+      id: 'image-19',
+      workspaceId: 'brand-07',
+      sha256: 'sha-19',
+      fileExt: 'png',
+      mediaType: 'image/png',
+      byteSize: 4096,
+      width: 1024,
+      height: 768,
+      description: '门店前台的产品陈列',
+      category: 'product-photo' as const,
+      sourceMaterialId: 'material-legacy-doc',
+      sourceMaterialName: '品牌介绍.docx',
+      relativePath: 'images/image-19.png',
+      createdAt: '2026-08-31T00:00:00Z',
+      updatedAt: '2026-08-31T00:00:00Z',
+    }]);
+    renderRequestCard();
+
+    // 品牌级折叠条默认收起；纯只读——除展开/收起外没有任何操作按钮。
+    expect(await screen.findByRole('button', { name: '展开配图候选' })).toBeInTheDocument();
+    expect(screen.getByText('配图候选 1 张')).toBeInTheDocument();
+    expect(
+      screen.queryByRole('button', { name: /移除|勾选|刷新/ }),
+    ).not.toBeInTheDocument();
+  });
+
+  it('refreshes the illustration pool snapshot through the existing status poll', async () => {
+    vi.useFakeTimers();
+    mocks.open.mockResolvedValue(['C:\\selected\\展拍.png']);
+    mocks.importFiles.mockResolvedValue([
+      {
+        ok: true,
+        material: {
+          id: 'material-image',
+          workspaceId: 'brand-07',
+          inputKind: 'file',
+          displayName: '展拍.png',
+          fileExt: 'png',
+          status: 'stored',
+          attemptCount: 0,
+        },
+      },
+    ] satisfies BrandMaterialProcessResult[]);
+    renderRequestCard();
+
+    fireEvent.click(screen.getByRole('button', { name: '选择文件' }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    // 挂载取过一次基线；处理中行驱动的轮询 tick 会再刷新候选池快照。
+    expect(mocks.fetchImageAssets).toHaveBeenCalledTimes(1);
+
+    mocks.fetchStatuses.mockResolvedValue([
+      statusEntry({ id: 'material-image', displayName: '展拍.png', status: 'processed', fileExt: 'png' }),
+    ]);
+    await act(async () => { await vi.advanceTimersByTimeAsync(3000); });
+    // 会话恢复查过一次（无 materialIds）+ 轮询 tick 查过一次（带 materialIds）。
+    expect(mocks.fetchStatuses).toHaveBeenCalledTimes(2);
+    expect(mocks.fetchStatuses).toHaveBeenLastCalledWith(
+      mocks.apiPost,
+      { workspaceId: 'brand-07', sessionId: 'session-07' },
+      ['material-image'],
+    );
+    expect(mocks.fetchImageAssets).toHaveBeenCalledTimes(2);
+
+    // 行已终态：轮询停止，不再产生新的池快照请求。
+    await act(async () => { await vi.advanceTimersByTimeAsync(6000); });
+    expect(mocks.fetchImageAssets).toHaveBeenCalledTimes(2);
+  });
+
+  it('refreshes the illustration pool snapshot right after a legacy rescan completes', async () => {
+    mocks.rescanImages.mockResolvedValue({
+      documents: [{
+        materialId: 'material-legacy-doc',
+        displayName: '旧品牌介绍.docx',
+        pooled: 2,
+        deduplicated: 0,
+        degraded: 1,
+        budgetExhausted: false,
+      }],
+      budgetExhausted: false,
+    } satisfies MaterialRescanResult);
+    renderRequestCard();
+
+    expect(mocks.fetchImageAssets).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByRole('button', { name: '重扫存量材料图片' }));
+    await waitFor(() =>
+      expect(screen.getByText(/存量重扫完成：入池 2 张/)).toBeInTheDocument());
+    // 重扫同步一次通过后池已变化：无处理中行可挂靠轮询，这里直接补一次刷新。
+    await waitFor(() => expect(mocks.fetchImageAssets).toHaveBeenCalledTimes(2));
   });
 });

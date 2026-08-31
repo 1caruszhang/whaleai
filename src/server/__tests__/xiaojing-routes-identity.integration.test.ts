@@ -42,6 +42,7 @@ const XIAOJING_POST_ROUTES = [
   '/api/xiaojing/materials/retry',
   '/api/xiaojing/materials/delete',
   '/api/xiaojing/materials/rescan-images',
+  '/api/xiaojing/material-images/list',
   '/api/xiaojing/material-images/content',
   '/api/xiaojing/question-pools/latest',
   '/api/xiaojing/question-pools/generate',
