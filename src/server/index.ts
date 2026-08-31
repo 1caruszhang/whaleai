@@ -22,6 +22,7 @@ import {
   setDeferredInitPhase,
 } from './readiness-state';
 import { handleChatStreamRoute } from './routes/chat-stream';
+import { handleProxyRefRoute } from './routes/proxy-refs';
 import { handleSessionReadRoute } from './routes/session-read';
 import { handleXiaojingRoute } from './routes/xiaojing';
 import { requestAccountAccessToken } from './routes/xiaojing-shared';
@@ -126,6 +127,11 @@ async function main(): Promise<void> {
         },
       }) ?? new Response('Not Found', { status: 404 });
     }
+
+    // Rust 代理 spill 的 ref 数据面（issue #22）：renderer 收到 ref_url 后
+    // 跨源原生 fetch 取回 >1MB 响应体；CORS 头是跨源可读的前提。
+    const proxyRef = await handleProxyRefRoute(pathname, request);
+    if (proxyRef) return proxyRef;
 
     const sessionRead = await handleSessionReadRoute(pathname, request, url);
     if (sessionRead) return sessionRead;

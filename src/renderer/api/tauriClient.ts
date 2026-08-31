@@ -68,7 +68,9 @@ async function invokeProxyFetch(
       for (const [name, value] of Object.entries(result.headers)) {
         if (!merged.has(name)) merged.set(name, value);
       }
-      return new Response(ref.body, { status: result.status, headers: merged });
+      // 透传 ref 自身的状态码：ref 404（如 TTL 过期）不能被原始响应的
+      // 200 静默包装成成功。
+      return new Response(ref.body, { status: ref.status, headers: merged });
     }
     const body = result.is_base64
       ? Uint8Array.from(atob(result.body), character => character.charCodeAt(0))

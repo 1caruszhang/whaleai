@@ -25,6 +25,27 @@ pub(crate) fn normalize_external_path(path: PathBuf) -> PathBuf {
     path
 }
 
+/// Env name carrying the proxy spill refs directory to the Session Sidecar.
+#[cfg(any(target_os = "windows", target_os = "macos", test))]
+pub(super) const SIDECAR_PROXY_REFS_DIR_ENV: &str = "XIAOJING_PROXY_REFS_DIR";
+
+/// The refs directory whose TTL-owned body/meta pairs the Session Sidecar
+/// serves back over `GET /refs/:id`. Must stay same-rooted with the
+/// `ProxySpillManager::new(data_root.join("refs"))` construction in `lib.rs`.
+#[cfg(any(target_os = "windows", target_os = "macos", test))]
+pub(super) fn proxy_refs_dir(data_root: &std::path::Path) -> PathBuf {
+    normalize_external_path(data_root.join("refs"))
+}
+
+/// Admit the proxy refs directory to a Sidecar command. A `None` data root
+/// leaves the env unset; the Node side then degrades `/refs/:id` to 404.
+#[cfg(any(target_os = "windows", target_os = "macos", test))]
+pub(super) fn apply_proxy_refs_dir(command: &mut std::process::Command, refs_dir: Option<PathBuf>) {
+    if let Some(dir) = refs_dir {
+        command.env(SIDECAR_PROXY_REFS_DIR_ENV, dir);
+    }
+}
+
 /// Runtime resources owned by one packaged Windows x64 Session Sidecar.
 ///
 /// This is deliberately a resource layout, not a new Tauri `externalBin` or a
@@ -115,6 +136,10 @@ pub(super) fn apply_windows_bundled_runtime<R: Runtime>(
     command.env("CLAUDE_CODE_GIT_BASH_PATH", layout.git_bash);
     command.env("NODE_PATH", layout.sharp_node_modules);
     command.env("PATH", joined_path);
+    apply_proxy_refs_dir(
+        command,
+        crate::app_dirs::xiaojing_data_dir().map(|root| proxy_refs_dir(&root)),
+    );
     Ok(())
 }
 
@@ -176,6 +201,10 @@ pub(super) fn apply_macos_bundled_runtime<R: Runtime>(
 
     command.env("XIAOJING_CLAUDE_CODE_EXECUTABLE", layout.claude_executable);
     command.env("NODE_PATH", layout.sharp_node_modules);
+    apply_proxy_refs_dir(
+        command,
+        crate::app_dirs::xiaojing_data_dir().map(|root| proxy_refs_dir(&root)),
+    );
     Ok(())
 }
 
@@ -434,6 +463,61 @@ pub(super) fn find_server_script_inner<R: Runtime>(_app_handle: &AppHandle<R>) -
 
     ulog_error!("[sidecar] Server script not found in any location");
     None
+}
+
+#[cfg(test)]
+mod proxy_refs_env_tests {
+    use super::{apply_proxy_refs_dir, proxy_refs_dir, SIDECAR_PROXY_REFS_DIR_ENV};
+
+    fn env_map(
+        command: &std::process::Command,
+    ) -> std::collections::HashMap<String, Option<String>> {
+        command
+            .get_envs()
+            .filter_map(|(key, value)| {
+                let key = key.to_str()?.to_string();
+                let value = value.map(|value| value.to_string_lossy().to_string());
+                Some((key, value))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn proxy_refs_dir_keeps_the_spill_root_suffix() {
+        let root = tempfile::tempdir().expect("temp data root");
+        let refs_dir = proxy_refs_dir(root.path());
+        assert_eq!(refs_dir.parent(), Some(root.path()));
+        assert_eq!(
+            refs_dir.file_name().and_then(|name| name.to_str()),
+            Some("refs")
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn proxy_refs_dir_strips_the_extended_length_prefix_for_node() {
+        assert_eq!(
+            proxy_refs_dir(std::path::Path::new(r"\\?\C:\Xiaojing")),
+            std::path::PathBuf::from(r"C:\Xiaojing\refs")
+        );
+    }
+
+    #[test]
+    fn sidecar_command_carries_the_proxy_refs_dir_env() {
+        let temp = tempfile::tempdir().expect("temp refs");
+        let refs_dir = temp.path().join("refs");
+        let mut command = crate::process_cmd::new("node");
+        apply_proxy_refs_dir(&mut command, Some(refs_dir.clone()));
+        assert_eq!(
+            env_map(&command).get(SIDECAR_PROXY_REFS_DIR_ENV),
+            Some(&Some(refs_dir.to_string_lossy().to_string()))
+        );
+
+        // 数据根未知时不得注入空值：Node 侧按 env 缺失降级 404。
+        let mut bare = crate::process_cmd::new("node");
+        apply_proxy_refs_dir(&mut bare, None);
+        assert!(!env_map(&bare).contains_key(SIDECAR_PROXY_REFS_DIR_ENV));
+    }
 }
 
 #[cfg(test)]
