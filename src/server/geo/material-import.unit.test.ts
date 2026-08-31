@@ -1350,8 +1350,8 @@ describe("competitor enrichment (ADR-0007 source-grounded extraction)", () => {
     const result = await current.value.importPastedText('公司资料');
 
     expect(result.ok).toBe(true);
-    // 垫层 2040 字把第 5、6 家推到 1500 字截断线以下：正文全文进语料后，
-    // 模型可见、存在闸放行，三家全部上卡。
+    // 垫层 2160 字（18 字 × 120）把第 5、6 家推到 1500 字截断线以下：正文
+    // 全文进语料后，模型可见、存在闸放行，三家全部上卡。
     expect(competitorsCallOf(current)?.[0].value).toEqual([
       '蒸宫主现蒸排骨饭',
       '御见味来干蒸排骨饭',
