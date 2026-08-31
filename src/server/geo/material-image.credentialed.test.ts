@@ -89,7 +89,10 @@ describe.runIf(explicitlyEnabled)(
             ? { gatewayBaseUrl, accountAccessToken }
             : { arkApiKey },
         );
-        const prompt = buildImageTaggingPrompt();
+        const prompt = buildImageTaggingPrompt({
+          sourceMaterialName: "品牌介绍.docx",
+          brandName: "蒸简单",
+        });
         const raw = await capabilities.keywordSearch.describeImage!({
           system: prompt.system,
           prompt: prompt.prompt,

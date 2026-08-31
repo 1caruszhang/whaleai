@@ -138,9 +138,12 @@ describe("materialImageMediaType", () => {
 });
 
 describe("buildImageTaggingPrompt", () => {
+  const materialOnly = { sourceMaterialName: "品牌介绍.docx" };
+
   it("pins the JSON contract and the full category taxonomy", () => {
-    const { system, prompt } = buildImageTaggingPrompt();
+    const { system } = buildImageTaggingPrompt(materialOnly);
     expect(system).toContain("JSON");
+    expect(system).toContain('{"description":"一句中文","category":"分类"}');
     for (const label of [
       "产品实拍",
       "环境",
@@ -151,7 +154,53 @@ describe("buildImageTaggingPrompt", () => {
     ]) {
       expect(system).toContain(label);
     }
-    expect(prompt.trim().length).toBeGreaterThan(0);
+  });
+
+  it("injects the source material name and brand name into both turns (票 #21)", () => {
+    const { system, prompt } = buildImageTaggingPrompt({
+      sourceMaterialName: "品牌介绍.docx",
+      brandName: "蒸简单",
+    });
+    expect(system).toContain("品牌材料来源：《品牌介绍.docx》，品牌：蒸简单");
+    // user prompt 不再是光杆一句：带上材料名与品牌名的语境。
+    expect(prompt).toContain("《品牌介绍.docx》");
+    expect(prompt).toContain("蒸简单");
+    expect(prompt).not.toBe("请对这张图片打标。");
+  });
+
+  it("omits the brand segment entirely when no brand name is available", () => {
+    const { system, prompt } = buildImageTaggingPrompt(materialOnly);
+    expect(system).toContain("品牌材料来源：《品牌介绍.docx》");
+    // 「品牌：」段与 user prompt 的品牌实名引用都不得出现（泛词「品牌材料」不算）。
+    expect(system).not.toContain("，品牌：");
+    expect(prompt).toContain("《品牌介绍.docx》");
+    expect(prompt).not.toContain("品牌「");
+  });
+
+  it("tells the model the reader is the article generator and the description must carry a usage position", () => {
+    const { system } = buildImageTaggingPrompt(materialOnly);
+    expect(system).toContain("文章生成模型");
+    expect(system).toContain("语义相关性");
+    expect(system).toContain("用途定位");
+    expect(system).toContain("适合菜品介绍段落配图");
+  });
+
+  it("classifies storefront/stall/dining-area shots as 环境 and drops the old storefront-as-product wording", () => {
+    const { system } = buildImageTaggingPrompt(materialOnly);
+    // 口径修正（票 #21）：门店外观/档口/店面/用餐区 → 环境。
+    expect(system).toContain("门店外观");
+    expect(system).toContain("归环境");
+    // 旧口径「产品/菜品/设备/门店实物」会把门店外观带偏成产品实拍——不得残留。
+    expect(system).not.toContain("门店实物");
+    expect(system).toContain("本体特写");
+  });
+
+  it("falls back to a generic material label when the display name is blank", () => {
+    const { system, prompt } = buildImageTaggingPrompt({
+      sourceMaterialName: "  ",
+    });
+    expect(system).not.toContain("《》");
+    expect(prompt).not.toContain("《》");
   });
 });
 

@@ -187,19 +187,47 @@ export function isPoolableDimensions(
 }
 
 /**
+ * 打标提示词的上下文注入（票 #21）：来源材料名恒有（调用点 material
+ * 对象自带 displayName）；品牌名是材料 port context 既有能力的廉价
+ * 衍生，取到才注入、取不到整段省略——不为此新建 Rust 端点。
+ */
+export interface ImageTaggingPromptContext {
+  /** 来源材料名（material.displayName）：描述与用途定位的语境锚。 */
+  sourceMaterialName: string;
+  /** 品牌名：经 BrandMaterialPort.context() 既有端点取到才注入。 */
+  brandName?: string;
+}
+
+/**
  * 打标提示词（ark lite 视觉调用契约）：只返回 JSON，描述一句中文，类型
  * 用六分类中文口径——图标装饰由调用方过滤，词表仍覆盖全集供模型选择。
+ *
+ * 票 #21：注入品牌材料来源语境（材料名 + 品牌名若可得）；描述升级为
+ * 「主体与场景 + 用途定位」并写明读者是文章生成模型（它只看这段描述
+ * 判断配图位置与语义相关性）；口径修正——产品实拍只收菜品/产品/设备
+ * 本体特写，门店外观/档口/店面/用餐区等经营场所归环境。六分类集合与
+ * JSON 契约零变化（ADR-0008 Decision 2 词表是权威）。
  */
-export function buildImageTaggingPrompt(): { system: string; prompt: string } {
+export function buildImageTaggingPrompt(
+  context: ImageTaggingPromptContext,
+): { system: string; prompt: string } {
+  const materialName = context.sourceMaterialName.trim() || "未命名材料";
+  const brandName = context.brandName?.trim();
   return {
     system: [
       "你是品牌配图候选池的图片打标引擎。看图后只返回 JSON，不要 markdown，不要解释。",
-      '格式：{"description":"一句中文描述图片主体与场景","category":"分类"}',
+      '格式：{"description":"一句中文","category":"分类"}',
+      "description 的读者是文章生成模型：它只看这句描述判断图片与正文段落的语义相关性并决定配图位置。",
+      "一句中文 = 主体与场景 + 用途定位，点明这张图适合配哪类段落。",
+      "示例：「品牌菜品『干蒸沙姜鸡』的成品示例图，适合菜品介绍段落配图」「门店档口实景，适合品牌介绍或到店场景段落」。",
       "category 只能取以下之一：产品实拍、环境、人物、图表、截图、图标装饰。",
-      "分类口径：产品实拍=产品/菜品/设备/门店实物；环境=场景空间与活动现场；人物=以人为主体；",
-      "图表=数据图表/示意图/流程图；截图=软件界面/网页/聊天记录；图标装饰=logo、二维码、图标、纹理、纯装饰元素。",
+      "分类口径：产品实拍=菜品/产品/设备本体特写；门店外观、档口、店面、用餐区等经营场所归环境；环境=场景空间与活动现场；",
+      "人物=以人为主体；图表=数据图表/示意图/流程图；截图=软件界面/网页/聊天记录；图标装饰=logo、二维码、图标、纹理、纯装饰元素。",
+      `品牌材料来源：《${materialName}》${brandName ? `，品牌：${brandName}` : ""}`,
     ].join("\n"),
-    prompt: "请对这张图片打标。",
+    prompt: brandName
+      ? `这是从品牌「${brandName}」的材料《${materialName}》中提取的图片，请对这张图片打标。`
+      : `这是从品牌材料《${materialName}》中提取的图片，请对这张图片打标。`,
   };
 }
 

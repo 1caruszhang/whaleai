@@ -2463,6 +2463,7 @@ export class MaterialImportService {
     attempt: MaterialProcessingAttempt,
     material: BrandMaterial,
     bytes: Uint8Array,
+    brandName?: string,
   ): Promise<MaterialProcessResult> {
     let outcome: MaterialImagePoolOutcome = 'pooled';
     try {
@@ -2471,7 +2472,7 @@ export class MaterialImportService {
       outcome = await this.poolImageAsset(material, bytes, {
         sha256: material.sha256,
         fileExt: material.fileExt,
-      });
+      }, brandName);
     } catch (error) {
       // 打标调用/入库的异常统一按降级收尾；固定码投影与文本抽取诊断同款。
       outcome = 'degraded';
@@ -2502,6 +2503,7 @@ export class MaterialImportService {
     material: BrandMaterial,
     bytes: Uint8Array,
     identity: { sha256: string; fileExt: string; imageBytes?: Uint8Array },
+    brandName?: string,
   ): Promise<MaterialImagePoolOutcome> {
     const describeImage = this.keywordSearch?.describeImage;
     if (!describeImage) return 'tagging-unavailable';
@@ -2509,7 +2511,12 @@ export class MaterialImportService {
     const dimensions = probeImageDimensions(bytes, identity.fileExt);
     if (!dimensions) return 'dimensions-unreadable';
     if (!isPoolableDimensions(dimensions)) return 'below-min-dimension';
-    const prompt = buildImageTaggingPrompt();
+    // 票 #21：打标提示词注入来源材料名（恒有）与品牌名（port context
+    // 既有能力廉价取到才带）——描述要求用途定位、口径把门店外观归环境。
+    const prompt = buildImageTaggingPrompt({
+      sourceMaterialName: material.displayName,
+      ...(brandName ? { brandName } : {}),
+    });
     // 与文本抽取同款硬上限：打标挂起到期即降级，材料不停在 processing。
     const raw = await describeImage(
       {
@@ -2552,7 +2559,7 @@ export class MaterialImportService {
   private async poolEmbeddedImages(
     material: BrandMaterial,
     bytes: Uint8Array,
-    options: { alreadyPooled?: ReadonlySet<string> } = {},
+    options: { alreadyPooled?: ReadonlySet<string>; brandName?: string } = {},
   ): Promise<MaterialImagePoolTally> {
     const logOutcome = (outcome: string, counts?: Record<string, number>): void => {
       this.logImageEvent({
@@ -2600,7 +2607,7 @@ export class MaterialImportService {
           sha256: image.sha256,
           fileExt: image.fileExt,
           imageBytes: image.bytes,
-        }));
+        }, options.brandName));
       } catch (error) {
         // 打标调用/入库异常统一按降级收尾；固定码投影与独立图片诊断同款。
         this.logImageEvent({ operation: 'image-diagnostic', materialId: material.id, status: 'failed', error });
@@ -2622,6 +2629,7 @@ export class MaterialImportService {
     material: BrandMaterial,
     bytes: Uint8Array,
     alreadyPooled: ReadonlySet<string>,
+    brandName?: string,
   ): Promise<MaterialImagePoolTally> {
     if (material.fileExt !== 'docx' && material.fileExt !== 'pptx') {
       throw new Error('material_type_unsupported');
@@ -2629,7 +2637,7 @@ export class MaterialImportService {
     if (material.workspaceId !== this.identity.workspaceId) {
       throw new Error('material_identity_mismatch');
     }
-    return this.poolEmbeddedImages(material, bytes, { alreadyPooled });
+    return this.poolEmbeddedImages(material, bytes, { alreadyPooled, ...(brandName ? { brandName } : {}) });
   }
 
   /**
@@ -2643,6 +2651,11 @@ export class MaterialImportService {
     totalBudgetMs: number;
     poolPrescanLimit?: number;
   }): Promise<MaterialRescanResult> {
+    // 票 #21：重扫腿同样注入品牌名（打标提示词语境）。context 端点取不到
+    // 时降级为只用材料名——重扫本身绝不该因品牌名缺席而失败。
+    const brandName = await this.materialPort.context()
+      .then((fetched) => fetched.brandName?.trim() || undefined)
+      .catch(() => undefined);
     const documents = await this.materialPort.listDocumentMaterials();
     let alreadyPooled = new Set<string>();
     try {
@@ -2663,7 +2676,7 @@ export class MaterialImportService {
       }
       try {
         const bytes = await this.materialPort.content(material.id);
-        const tally = await this.rescanMaterialImages(material, bytes, alreadyPooled);
+        const tally = await this.rescanMaterialImages(material, bytes, alreadyPooled, brandName);
         summaries.push({
           materialId: material.id,
           displayName: material.displayName,
@@ -2733,7 +2746,7 @@ export class MaterialImportService {
       // 独立图片材料（ADR-0008 T2）：跳过文本/画像抽取，直接走视觉打标
       // 入池；打标与入池的一切失败都是降级（不入池、不阻塞导入）。
       if (isMaterialImageExtension(material.fileExt)) {
-        const result = await this.importImageMaterial(attempt, material, bytes);
+        const result = await this.importImageMaterial(attempt, material, bytes, context.brandName);
         await settlePermit('success');
         return result;
       }
@@ -2741,7 +2754,7 @@ export class MaterialImportService {
       // 直取图片进候选池（复用独立图片的打标与持久化）；提取、打标、入库
       // 的任何失败都只降级单张图，绝不阻塞文档导入。
       if (material.fileExt === 'docx' || material.fileExt === 'pptx') {
-        await this.poolEmbeddedImages(material, bytes);
+        await this.poolEmbeddedImages(material, bytes, { brandName: context.brandName });
       }
       const text = await parseBrandMaterial(material, bytes).catch((error) => {
         if (error instanceof Error && ['material_type_unsupported', 'material_empty'].includes(error.message)) throw error;

@@ -2481,6 +2481,32 @@ describe('MaterialImportService standalone image materials (ADR-0008 T2)', () =>
     expect(port.finishes.at(-1)).toMatchObject({ status: 'processed', candidateIds: [] });
   });
 
+  // 票 #21：打标提示词带品牌上下文与用途定位口径。调用点必须把材料
+  // displayName 与 workspace 品牌名（context().brandName，既有端点零新增）
+  // 传进 describeImage 的 system/prompt，user prompt 不再是光杆一句。
+  it('builds the tagging prompt with the material display name and the workspace brand name', async () => {
+    const port = new FakeMaterialPort();
+    const current = service(port, { describeImage: async () => taggingResponse() });
+
+    await current.value.importFiles(['C:/pics/展拍.png']);
+
+    expect(current.describeImage).toHaveBeenCalledTimes(1);
+    const input = current.describeImage!.mock.calls[0]?.[0] as {
+      system: string;
+      prompt: string;
+    };
+    // FakeMaterialPort：图片材料 displayName=实拍.png，context().brandName=鲸跃科技。
+    expect(input.system).toContain('品牌材料来源：《实拍.png》，品牌：鲸跃科技');
+    // 口径修正随提示词下发：门店外观/档口归环境，旧「门店实物」口径不残留。
+    expect(input.system).toContain('门店外观');
+    expect(input.system).toContain('归环境');
+    expect(input.system).not.toContain('门店实物');
+    expect(input.system).toContain('文章生成模型');
+    expect(input.prompt).toContain('《实拍.png》');
+    expect(input.prompt).toContain('鲸跃科技');
+    expect(input.prompt).not.toBe('请对这张图片打标。');
+  });
+
   it('filters small images before tagging while keeping the import successful', async () => {
     const port = new FakeMaterialPort();
     const item = await storedImage(port, pngFixtureBytes(120, 80));
@@ -2657,6 +2683,26 @@ describe('MaterialImportService embedded document images (ADR-0008 T3)', () => {
     // 文档正文照常走文本抽取与知识裁决，配图提取不改变导入终态。
     expect(current.complete).toHaveBeenCalled();
     expect(port.finishes.at(-1)).toMatchObject({ status: 'awaiting-confirmation' });
+  });
+
+  // 票 #21：内嵌图打标与独立图片同款上下文注入——来源材料名取文档材料
+  // 的 displayName（品牌介绍.docx），品牌名取 process() 已取回的 context。
+  it('injects the document display name and brand name into every embedded tagging call', async () => {
+    const port = new FakeMaterialPort();
+    const document = await storedDocument(port, 'docx', ooxmlZip('docx', {
+      'image1.png': pngFixtureBytes(800, 600),
+      'image2.png': pngFixtureBytes(640, 480),
+    }));
+    const current = service(port, { describeImage: async () => taggingResponse() });
+
+    await current.value.process(document.id);
+
+    expect(current.describeImage).toHaveBeenCalledTimes(2);
+    for (const call of current.describeImage!.mock.calls) {
+      const input = call[0] as { system: string; prompt: string };
+      expect(input.system).toContain('品牌材料来源：《品牌介绍.docx》，品牌：鲸跃科技');
+      expect(input.prompt).toContain('《品牌介绍.docx》');
+    }
   });
 
   it('extracts pptx embedded media into the pool', async () => {
@@ -2943,6 +2989,22 @@ describe('MaterialImportService 存量材料手动重扫（ADR-0008 T7）', () =
     expect(port.trace).not.toContain(`begin:${document.id}`);
     expect(current.propose).not.toHaveBeenCalled();
     expect(current.complete).not.toHaveBeenCalled();
+  });
+
+  // 票 #21：重扫腿与导入腿同款提示词语境——workspace 级重扫一次通过时
+  // 取一次 context().brandName 逐份下发，图片照旧按材料名+品牌名打标。
+  it('injects the workspace brand name into rescan tagging prompts', async () => {
+    const port = new FakeMaterialPort();
+    const document = await legacyDocument(port, { 'image1.png': pngFixtureBytes(800, 600) });
+    port.workspaceDocuments.push(document);
+    const current = service(port, { describeImage: async () => taggingResponse() });
+
+    const result = await current.value.rescanWorkspaceDocumentImages({ totalBudgetMs: 60_000 });
+
+    expect(result.documents[0]).toMatchObject({ pooled: 1 });
+    const input = current.describeImage!.mock.calls[0]?.[0] as { system: string; prompt: string };
+    expect(input.system).toContain('品牌材料来源：《品牌介绍.docx》，品牌：鲸跃科技');
+    expect(input.prompt).toContain('鲸跃科技');
   });
 
   it('is idempotent: a repeated rescan skips already-pooled images without new pool entries', async () => {
