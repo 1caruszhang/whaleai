@@ -73,6 +73,22 @@ export default memo(function MaterialImageCandidatesBar({
 
   const workspaceId = identity?.workspaceId ?? null;
   const sessionId = identity?.sessionId ?? null;
+  const identityKey =
+    workspaceId && sessionId ? `${workspaceId}::${sessionId}` : null;
+
+  // 身份变化（换 Session/品牌）即重建投影，避免跨品牌串池。重置走 React 官方
+  // 「prop 变化时调整 state」模式：渲染期条件守卫 + setState，不放 effect
+  // （react-hooks/set-state-in-effect：effect 体内同步 setState 造成级联渲染）。
+  // 守卫保证仅身份真正变化的那次渲染执行重置，其余渲染零开销。
+  const [prevIdentityKey, setPrevIdentityKey] = useState<string | null>(
+    identityKey,
+  );
+  if (identityKey !== prevIdentityKey) {
+    setPrevIdentityKey(identityKey);
+    setAssets(null);
+    setNewCount(0);
+    setEntries(new Map());
+  }
 
   // 清单取数：挂载（refreshKey=0）与卡片侧刷新信号各取一次。传输/业务失败
   // 静默保留上一份投影（下个信号再试）；首次失败时整条不渲染。
@@ -103,12 +119,11 @@ export default memo(function MaterialImageCandidatesBar({
     return () => { cancelled = true; };
   }, [workspaceId, sessionId, refreshKey]);
 
-  // 身份变化（换 Session/品牌）即重建基线与投影，避免跨品牌串池。
+  // 身份变化的清尾——对外部系统的回收是 effect 本分（无 setState）：基线 ref
+  // 重建 + 旧投影 blob 全量回收。entries 已在渲染期重置，回收后不存在指向已
+  // revoke URL 的存活条目；声明先于缩略图 effect，同轮 flush 内先清再取。
   useEffect(() => {
     baselineIdsRef.current = null;
-    setAssets(null);
-    setNewCount(0);
-    setEntries(new Map());
     for (const url of urlsRef.current.values()) URL.revokeObjectURL(url);
     urlsRef.current.clear();
   }, [workspaceId, sessionId]);
@@ -258,7 +273,7 @@ export default memo(function MaterialImageCandidatesBar({
                   >
                     {asset.description}
                   </figcaption>
-                  <span className="mt-0.5 inline-block rounded bg-[var(--paper-inset)] px-1 py-0.5 text-[10px] leading-3 text-[var(--ink-muted)]">
+                  <span className="mt-0.5 inline-block rounded bg-[var(--paper-inset)] px-1 py-0.5 text-xs leading-none text-[var(--ink-muted)]">
                     {materialImageCategoryLabel(asset.category)}
                   </span>
                 </figure>
