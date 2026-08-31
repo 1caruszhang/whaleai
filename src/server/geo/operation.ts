@@ -8,6 +8,7 @@ import {
   type GeoOperationReference,
   type GeoOperationStep,
   type GeoOperationStepProgress,
+  type GeoOperationUnfinishedSummary,
 } from "../../shared/geo/operation";
 import { managementApi } from "../utils/management-api-client";
 
@@ -74,6 +75,8 @@ export interface GeoOperationPersistencePort {
   get(operationId: string): Promise<GeoOperationProjection>;
   list(input: GeoOperationListInput): Promise<GeoOperationProjection[]>;
   mutate(request: GeoOperationMutationRequest): Promise<GeoOperationProjection>;
+  /** 跨会话只读元信息（ADR-0010）：品牌内非终态轮次，不含正文/聊天记录。 */
+  listUnfinished(): Promise<GeoOperationUnfinishedSummary[]>;
 }
 
 function persistenceError(result: Record<string, unknown>): Error {
@@ -130,6 +133,14 @@ export class RustGeoOperationPort implements GeoOperationPersistencePort {
     );
   }
 
+  listUnfinished(): Promise<GeoOperationUnfinishedSummary[]> {
+    return this.post(
+      "/api/brand-geo-operations/unfinished",
+      {},
+      "operations",
+    );
+  }
+
   mutate(
     request: GeoOperationMutationRequest,
   ): Promise<GeoOperationProjection> {
@@ -171,6 +182,15 @@ export class GeoOperationService {
 
   list(input: GeoOperationListInput = {}): Promise<GeoOperationProjection[]> {
     return this.persistence.list(input);
+  }
+
+  /**
+   * 跨会话只读 tracer（ADR-0010 Decision 3）：本品牌所有会话的非终态
+   * 轮次元信息——类型、卡住步骤、待审数量、所属会话、时间。供品牌状态
+   * 摘要在新会话一次读取；不含草稿正文与聊天记录。
+   */
+  listUnfinished(): Promise<GeoOperationUnfinishedSummary[]> {
+    return this.persistence.listUnfinished();
   }
 
   control(input: {

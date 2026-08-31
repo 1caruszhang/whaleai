@@ -203,6 +203,33 @@ export interface GeoOperationPlan {
   sourceOperationId?: string;
 }
 
+/** 跨会话未完成轮次「卡住步骤」的元信息：计划序上首个仍活跃的步骤。 */
+export interface GeoOperationUnfinishedStuckStep {
+  id: string;
+  title: string;
+  capability: GeoOperationCapability;
+  status: GeoOperationStepStatus;
+}
+
+/**
+ * 跨会话未完成轮次的只读元信息（ADR-0010 Decision 3；Rust store 投影）：
+ * 五要素——类型、卡住步骤、待审数量、所属会话、创建/更新时间。不含草稿
+ * 正文与任何会话聊天记录（正文隔离保留在各领域 approved-only 投影）；
+ * 待审数量 = 创建会话名下 draft_ready 未批准文章篇数。
+ */
+export interface GeoOperationUnfinishedSummary {
+  id: string;
+  sessionId: string;
+  kind: GeoOperationKind;
+  goal: string;
+  status: GeoOperationStatus;
+  stuckStep: GeoOperationUnfinishedStuckStep | null;
+  pendingConfirmation: GeoOperationConfirmation | null;
+  pendingReviewCount: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface PlanGeoOperationInput {
   intent: GeoOperationKind;
   goal: string;

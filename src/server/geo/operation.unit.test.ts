@@ -58,6 +58,7 @@ function persistence(current = projection()): GeoOperationPersistencePort & {
     ),
     get: vi.fn(async () => current),
     list: vi.fn(async () => [current]),
+    listUnfinished: vi.fn(async () => []),
     mutate: vi.fn(async (request) =>
       projection({
         ...current,

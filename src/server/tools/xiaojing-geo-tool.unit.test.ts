@@ -616,4 +616,74 @@ describe('brandWorkspaceStateSummary', () => {
       confirmedCompetitors: null,
     });
   });
+
+  it('surfaces cross-session unfinished operation metadata and degrades read failures to absent', async () => {
+    configureXiaojingGeo({}, {
+      sessionId: 'summary-session',
+      workspace: 'C:/ws/brand-a',
+    });
+    routeBrandWorkspace({
+      '/api/brand-geo-operations/unfinished': {
+        ok: true,
+        operations: [
+          {
+            id: 'op-prior-round',
+            sessionId: 'session-prior',
+            kind: 'full-optimization',
+            goal: '上一轮优化',
+            status: 'awaiting-confirmation',
+            stuckStep: {
+              id: 'confirm-articles',
+              title: '批准文章',
+              capability: 'content-production',
+              status: 'awaiting-confirmation',
+            },
+            pendingConfirmation: {
+              kind: 'article-approval',
+              authority: 'brand-workspace',
+              title: '批准文章',
+              summary: 'confirm article-approval',
+            },
+            pendingReviewCount: 2,
+            createdAt: '2026-08-29T09:00:00Z',
+            updatedAt: '2026-08-30T18:00:00Z',
+          },
+        ],
+      },
+    });
+
+    const summary = await brandWorkspaceStateSummary();
+
+    // 元信息五要素 + 展示阶段；无正文字段进入摘要。
+    expect(summary?.unfinishedOperations).toEqual({
+      present: true,
+      state: {
+        operations: [
+          {
+            operationId: 'op-prior-round',
+            sessionId: 'session-prior',
+            kind: 'full-optimization',
+            goal: '上一轮优化',
+            status: 'awaiting-confirmation',
+            stuckStep: {
+              id: 'confirm-articles',
+              title: '批准文章',
+              capability: 'content-production',
+              status: 'awaiting-confirmation',
+              phase: { id: 'content', title: '内容生产' },
+            },
+            pendingConfirmation: { kind: 'article-approval', title: '批准文章' },
+            pendingReviewCount: 2,
+            createdAt: '2026-08-29T09:00:00Z',
+            updatedAt: '2026-08-30T18:00:00Z',
+          },
+        ],
+      },
+    });
+
+    // 读取失败（未路由）按 absent 降级，不阻断摘要。
+    routeBrandWorkspace({});
+    const degraded = await brandWorkspaceStateSummary();
+    expect(degraded?.unfinishedOperations).toEqual({ present: false });
+  });
 });

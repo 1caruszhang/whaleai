@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use chrono::Utc;
 use rusqlite::{params, OptionalExtension, TransactionBehavior};
@@ -231,6 +231,38 @@ pub struct GeoOperationListRequest {
     pub include_all_sessions: bool,
     pub limit: Option<i64>,
 }
+
+/// 跨会话未完成轮次的「卡住步骤」元信息：计划序上首个仍活跃的步骤
+/// （awaiting-confirmation / running / ready）。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GeoOperationUnfinishedStuckStep {
+    pub id: String,
+    pub title: String,
+    pub capability: String,
+    pub status: String,
+}
+
+/// 跨会话未完成轮次的只读元信息（ADR-0010 Decision 3）：品牌状态摘要经
+/// 新会话的 `inspect_brand_context` 一次读取。五要素——类型、卡住步骤、
+/// 待审数量、所属会话、创建/更新时间。绝不包含草稿正文、正文路径或任何
+/// 会话聊天记录（正文隔离保留在各领域 approved-only 投影）；待审数量 =
+/// 该操作创建会话名下处于 draft_ready 且未批准的文章篇数。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GeoOperationUnfinishedSummary {
+    pub id: String,
+    pub session_id: String,
+    pub kind: String,
+    pub goal: String,
+    pub status: String,
+    pub stuck_step: Option<GeoOperationUnfinishedStuckStep>,
+    pub pending_confirmation: Option<GeoOperationConfirmation>,
+    pub pending_review_count: i64,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -483,6 +515,107 @@ impl BrandWorkspaceStore {
                     .ok_or_else(|| "geo_operation_not_found".to_string())
             })
             .collect()
+    }
+
+    /// Cross-session read-only tracer for the brand state summary
+    /// (ADR-0010 Decision 3): every non-terminal operation of this one
+    /// brand, as metadata only — never draft bodies or chat transcripts.
+    /// It does not widen any read/write path for unapproved content: the
+    /// session-private visibility rules elsewhere stay untouched. Rows
+    /// whose owning session was deleted (`ON DELETE SET NULL`) are
+    /// skipped — the owning session is part of the metadata contract.
+    pub fn list_unfinished_geo_operations(
+        &self,
+        workspace_id: &str,
+    ) -> Result<Vec<GeoOperationUnfinishedSummary>, String> {
+        let workspace = self.workspace(workspace_id)?;
+        let connection = open_database(&workspace)?;
+        ensure_schema(&connection)?;
+        let mut statement = connection
+            .prepare(
+                "SELECT id,session_id,kind,goal,status,steps_json,
+                    pending_confirmation_json,created_at,COALESCE(updated_at,created_at)
+                 FROM geo_operations
+                 WHERE kind!='artifact-lineage'
+                   AND session_id IS NOT NULL
+                   AND status NOT IN ('succeeded','failed','cancelled')
+                 ORDER BY COALESCE(updated_at,created_at) DESC,id DESC",
+            )
+            .map_err(|error| format!("prepare unfinished GEO operation list: {error}"))?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, Option<String>>(6)?,
+                    row.get::<_, String>(7)?,
+                    row.get::<_, String>(8)?,
+                ))
+            })
+            .map_err(|error| format!("query unfinished GEO operation list: {error}"))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| format!("read unfinished GEO operation list: {error}"))?;
+        drop(statement);
+        let mut pending_review_by_session: HashMap<String, i64> = HashMap::new();
+        let mut summaries = Vec::with_capacity(rows.len());
+        for (
+            id,
+            session_id,
+            kind,
+            goal,
+            status,
+            steps_json,
+            confirmation_json,
+            created_at,
+            updated_at,
+        ) in rows
+        {
+            let steps: Vec<GeoOperationStep> =
+                parse_json(&steps_json, "geo_operation_steps_corrupt")?;
+            let stuck_step = steps
+                .iter()
+                .find(|step| {
+                    matches!(
+                        step.status.as_str(),
+                        "awaiting-confirmation" | "running" | "ready"
+                    )
+                })
+                .map(|step| GeoOperationUnfinishedStuckStep {
+                    id: step.id.clone(),
+                    title: step.title.clone(),
+                    capability: step.capability.clone(),
+                    status: step.status.clone(),
+                });
+            let pending_review_count = match pending_review_by_session.get(&session_id) {
+                Some(count) => *count,
+                None => {
+                    let count =
+                        count_session_draft_ready_articles(&connection, &session_id)?;
+                    pending_review_by_session.insert(session_id.clone(), count);
+                    count
+                }
+            };
+            summaries.push(GeoOperationUnfinishedSummary {
+                id,
+                session_id,
+                kind,
+                goal,
+                status,
+                stuck_step,
+                pending_confirmation: parse_optional_json(
+                    confirmation_json,
+                    "geo_operation_confirmation_corrupt",
+                )?,
+                pending_review_count,
+                created_at,
+                updated_at,
+            });
+        }
+        Ok(summaries)
     }
 
     /// Disk-first app shutdown boundary. Only locally executing states are
@@ -1293,8 +1426,28 @@ fn read_operation(
         .transpose()
 }
 
-pub(super) fn mark_artifacts_affected_by_knowledge_change(
-    transaction: &rusqlite::Transaction<'_>,
+/// 待审数量：该会话名下处于 draft_ready 且尚未批准的文章篇数——同一
+/// 会话的进行中文档工作即该轮工作（草稿审到一半的「一半」）。只统计
+/// COUNT，不读取任何正文、标题或正文路径。
+fn count_session_draft_ready_articles(
+    connection: &rusqlite::Connection,
+    session_id: &str,
+) -> Result<i64, String> {
+    connection
+        .query_row(
+            "SELECT COUNT(*) FROM geo_articles article
+             JOIN geo_article_operations article_operation
+               ON article_operation.operation_id=article.operation_id
+             WHERE article_operation.created_by_session_id=?1
+               AND article.status='draft_ready'
+               AND article.approved_revision IS NULL",
+            [session_id],
+            |row| row.get(0),
+        )
+        .map_err(|error| format!("count pending article reviews: {error}"))
+}
+
+pub(super) fn mark_artifacts_affected_by_knowledge_change(    transaction: &rusqlite::Transaction<'_>,
     knowledge_version: i64,
     fact_key: &str,
     now: &str,
@@ -1896,6 +2049,164 @@ mod tests {
             .mutate_geo_operation(mutation(&workspace, &first, "pause", None))
             .unwrap_err()
             .contains("revision_conflict"));
+    }
+
+    #[test]
+    fn cross_session_unfinished_metadata_is_read_only_brand_scoped_and_body_free() {
+        let (store, workspace) = fixture();
+        let other_workspace = store.create_workspace("另一个品牌", vec![]).unwrap();
+
+        // session-operation 的一轮完整优化：文章生成完成后停在文章批准门。
+        let article_confirmation = confirmation("article-approval", "brand-workspace");
+        let operation = store
+            .create_geo_operation(GeoOperationCreateRequest {
+                workspace_id: workspace.id.clone(),
+                session_id: "session-operation".into(),
+                kind: "full-optimization".into(),
+                goal: "一轮完整 GEO 优化".into(),
+                status: "ready".into(),
+                steps: vec![
+                    step("generate-articles", "content-production", "ready", None),
+                    step(
+                        "confirm-articles",
+                        "content-production",
+                        "pending",
+                        Some(article_confirmation),
+                    ),
+                ],
+                input_refs: vec![],
+                pending_confirmation: None,
+                source_operation_id: None,
+            })
+            .unwrap();
+        let running = store
+            .mutate_geo_operation(mutation(
+                &workspace,
+                &operation,
+                "start-step",
+                Some("generate-articles"),
+            ))
+            .unwrap();
+        let waiting = store
+            .mutate_geo_operation(mutation(
+                &workspace,
+                &running,
+                "complete-step",
+                Some("generate-articles"),
+            ))
+            .unwrap();
+        assert_eq!(waiting.status, "awaiting-confirmation");
+
+        // session-operation-other 的终态操作：不得进入未完成列表。
+        let finished = store
+            .create_geo_operation(GeoOperationCreateRequest {
+                workspace_id: workspace.id.clone(),
+                session_id: "session-operation-other".into(),
+                kind: "knowledge-update".into(),
+                goal: "更新知识".into(),
+                status: "ready".into(),
+                steps: vec![step(
+                    "collect-materials",
+                    "brand-material-import",
+                    "ready",
+                    None,
+                )],
+                input_refs: vec![],
+                pending_confirmation: None,
+                source_operation_id: None,
+            })
+            .unwrap();
+        let mut finished = store
+            .get_geo_operation(&workspace.id, &finished.id)
+            .unwrap();
+        for action in ["start-step", "complete-step"] {
+            let mut request = mutation(&workspace, &finished, action, Some("collect-materials"));
+            request.session_id = "session-operation-other".into();
+            finished = store.mutate_geo_operation(request).unwrap();
+        }
+        assert_eq!(finished.status, "succeeded");
+
+        // session-operation 名下的文章工作：5 篇 draft_ready，其中 2 篇已批准，
+        // 待审 3 篇。标题只写敏感标记，证明元信息列表不携带标题/正文。
+        let connection = open_database(&workspace).unwrap();
+        connection
+            .pragma_update(None, "foreign_keys", "OFF")
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO geo_article_operations(
+                    operation_id,created_by_session_id,source_kind,topic_plan_id,
+                    topic_plan_revision,knowledge_version,product_line,target_region,
+                    policy_version,operation_spec_json,status,created_at,updated_at)
+                 VALUES ('article-op-cross-session','session-operation','direct',NULL,
+                    NULL,1,'汽车音响改装','成都','test','{}','completed',
+                    '2026-08-30T09:00:00Z','2026-08-31T18:00:00Z')",
+                [],
+            )
+            .unwrap();
+        for index in 0..5 {
+            let approved = index < 2;
+            connection
+                .execute(
+                    "INSERT INTO geo_articles(
+                        id,operation_id,source_plan_item_id,knowledge_version,
+                        content_type,topic,requested_title,constraints,
+                        planned_facts_json,status,revision,approved_revision,
+                        generation_attempt,created_at,updated_at)
+                     VALUES (?1,'article-op-cross-session',NULL,1,'guide',
+                        'SECRET-DRAFT-主题','SECRET-DRAFT-标题-不得跨会话可见','要求','{}',
+                        ?2,1,?3,0,'2026-08-30T09:00:00Z','2026-08-31T18:00:00Z')",
+                    params![
+                        format!("article-{index}"),
+                        if approved { "approved" } else { "draft_ready" },
+                        if approved { Some(1) } else { None },
+                    ],
+                )
+                .unwrap();
+        }
+        drop(connection);
+
+        let before = store
+            .get_geo_operation(&workspace.id, &waiting.id)
+            .unwrap();
+        let summaries = store.list_unfinished_geo_operations(&workspace.id).unwrap();
+        let after = store
+            .get_geo_operation(&workspace.id, &waiting.id)
+            .unwrap();
+
+        // 只读 tracer：列表调用不推进任何 revision，也不改状态。
+        assert_eq!(before, after);
+        assert_eq!(summaries.len(), 1);
+        let summary = &summaries[0];
+        assert_eq!(summary.id, waiting.id);
+        assert_eq!(summary.session_id, "session-operation");
+        assert_eq!(summary.kind, "full-optimization");
+        assert_eq!(summary.goal, "一轮完整 GEO 优化");
+        assert_eq!(summary.status, "awaiting-confirmation");
+        let stuck = summary.stuck_step.as_ref().unwrap();
+        assert_eq!(stuck.id, "confirm-articles");
+        assert_eq!(stuck.capability, "content-production");
+        assert_eq!(stuck.status, "awaiting-confirmation");
+        assert_eq!(
+            summary.pending_confirmation.as_ref().unwrap().kind,
+            "article-approval"
+        );
+        assert_eq!(summary.pending_review_count, 3);
+        assert!(!summary.created_at.is_empty());
+        assert!(!summary.updated_at.is_empty());
+
+        // 不含正文与聊天记录：序列化投影不含草稿标题标记，也没有任何
+        // 正文字段或转录字段。
+        let json = serde_json::to_string(&summaries).unwrap();
+        assert!(!json.contains("SECRET-DRAFT"));
+        assert!(!json.to_lowercase().contains("body"));
+        assert!(!json.to_lowercase().contains("transcript"));
+
+        // 按品牌：另一个品牌看不到本品牌的未完成轮次。
+        assert!(store
+            .list_unfinished_geo_operations(&other_workspace.id)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]

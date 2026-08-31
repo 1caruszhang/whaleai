@@ -83,8 +83,10 @@ import {
 } from '../../shared/sessionFileReference';
 import {
   GEO_OPERATION_KINDS,
+  GEO_OPERATION_PHASES,
   GEO_OPERATION_REFERENCE_KINDS,
   type GeoOperationReference,
+  type GeoOperationUnfinishedSummary,
 } from '../../shared/geo/operation';
 
 interface XiaojingGeoContext {
@@ -184,6 +186,75 @@ export interface BrandWorkspaceStateSummary {
   articles: BrandWorkspaceStageState;
   distributionPlan: BrandWorkspaceStageState;
   publish: BrandWorkspaceStageState;
+  /** 跨会话未完成轮次的元信息（ADR-0010 Decision 3，只读 tracer）：
+   * state = { operations: BrandWorkspaceUnfinishedOperationEntry[] }；
+   * 读取失败降级为 absent。不含草稿正文与任何会话聊天记录。 */
+  unfinishedOperations: BrandWorkspaceStageState;
+}
+
+/** 摘要中一条未完成轮目的元信息条目（五要素 + 展示阶段）。 */
+export interface BrandWorkspaceUnfinishedOperationEntry {
+  operationId: string;
+  sessionId: string;
+  kind: string;
+  goal: string;
+  status: string;
+  stuckStep: {
+    id: string;
+    title: string;
+    capability: string;
+    status: string;
+    /** 展示阶段（shared policy 六阶段词汇）；未知 capability 时为 null。 */
+    phase: { id: string; title: string } | null;
+  } | null;
+  pendingConfirmation: { kind: string; title: string } | null;
+  pendingReviewCount: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** 卡住步骤的展示阶段：capability → 六阶段（与聊天进度卡/工作台同一词汇）。 */
+function unfinishedOperationPhase(
+  capability: string,
+): { id: string; title: string } | null {
+  const phase = GEO_OPERATION_PHASES.find((candidate) =>
+    candidate.capabilities.some((item) => item === capability),
+  );
+  return phase ? { id: phase.id, title: phase.title } : null;
+}
+
+/**
+ * Rust 未完成元信息 → 摘要条目：只做词汇映射（补展示阶段、瘦确认门），
+ * 不添加任何正文性字段——跨会话正文隔离不因摘要破口。
+ */
+function brandWorkspaceUnfinishedOperationEntry(
+  summary: GeoOperationUnfinishedSummary,
+): BrandWorkspaceUnfinishedOperationEntry {
+  return {
+    operationId: summary.id,
+    sessionId: summary.sessionId,
+    kind: summary.kind,
+    goal: summary.goal,
+    status: summary.status,
+    stuckStep: summary.stuckStep
+      ? {
+          id: summary.stuckStep.id,
+          title: summary.stuckStep.title,
+          capability: summary.stuckStep.capability,
+          status: summary.stuckStep.status,
+          phase: unfinishedOperationPhase(summary.stuckStep.capability),
+        }
+      : null,
+    pendingConfirmation: summary.pendingConfirmation
+      ? {
+          kind: summary.pendingConfirmation.kind,
+          title: summary.pendingConfirmation.title,
+        }
+      : null,
+    pendingReviewCount: summary.pendingReviewCount,
+    createdAt: summary.createdAt,
+    updatedAt: summary.updatedAt,
+  };
 }
 
 /**
@@ -204,7 +275,7 @@ export async function brandWorkspaceStateSummary(): Promise<BrandWorkspaceStateS
       return Promise.reject(error);
     }
   };
-  const [brandContext, pools, plans, articleOperations, distributions, publishes] =
+  const [brandContext, pools, plans, articleOperations, distributions, publishes, unfinished] =
     await Promise.allSettled([
       safe(() => brandMaterialPort().context()),
       safe(() => createQuestionPoolPort(identity).latest()),
@@ -212,6 +283,7 @@ export async function brandWorkspaceStateSummary(): Promise<BrandWorkspaceStateS
       safe(() => createArticlePort(identity).latest()),
       safe(() => createDistributionPlanPort(identity).latest()),
       safe(() => createPublishSchedulerPort(identity).latest()),
+      safe(() => geoOperationService().listUnfinished()),
     ]);
   const contextResult =
     brandContext.status === 'fulfilled' ? brandContext.value : null;
@@ -262,6 +334,9 @@ export async function brandWorkspaceStateSummary(): Promise<BrandWorkspaceStateS
       status: execution.status,
       publishStartAt: execution.publishStartAt,
       updatedAt: execution.updatedAt,
+    })),
+    unfinishedOperations: stageStateFrom(unfinished, (operations) => ({
+      operations: operations.map(brandWorkspaceUnfinishedOperationEntry),
     })),
   };
 }
@@ -955,7 +1030,7 @@ export async function createXiaojingGeoServer() {
     tools: [
       tool(
         'inspect_brand_context',
-        "Read the current Xiaojing brand/session identity, the registered GEO capability availability, and the cross-session BrandWorkspace state summary (brand name, product lines, confirmed ranking competitors, and the latest persisted artifact status per stage: question pool, topic plan, articles, distribution plan, publish execution). Call this before proposing a GEO action and before asking the user for any brand facts — prior sessions' confirmed knowledge and approved artifacts are already persisted here; only ask the user when this summary or inspect_brand_fact shows the fact is missing.",
+        "Read the current Xiaojing brand/session identity, the registered GEO capability availability, and the cross-session BrandWorkspace state summary (brand name, product lines, confirmed ranking competitors, and the latest persisted artifact status per stage: question pool, topic plan, articles, distribution plan, publish execution). The summary also lists this brand's unfinished GEO operation rounds from any prior session as read-only metadata (kind, goal, the stuck step and its display phase, pending review count, owning session, created/updated times) — use it to recognize an interrupted round and offer to continue it; draft bodies and chat transcripts are never included and stay private to their owning session. Call this before proposing a GEO action and before asking the user for any brand facts — prior sessions' confirmed knowledge and approved artifacts are already persisted here; only ask the user when this summary or inspect_brand_fact shows the fact is missing.",
         { reason: z.string().max(200).optional().describe('Why the current GEO context is needed.') },
         async () => ({
           content: [{ type: 'text' as const, text: JSON.stringify({

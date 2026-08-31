@@ -114,6 +114,10 @@ pub async fn start_management_api() -> Result<u16, String> {
             post(brand_geo_operation_list_handler),
         )
         .route(
+            "/api/brand-geo-operations/unfinished",
+            post(brand_geo_operation_unfinished_handler),
+        )
+        .route(
             "/api/brand-geo-operations/mutate",
             post(brand_geo_operation_mutate_handler),
         )
@@ -885,6 +889,28 @@ async fn brand_geo_operation_list_handler(
         Err(error) => return Json(error),
     };
     match store.list_geo_operations(&request.workspace_id, &request.session_id, request.payload) {
+        Ok(operations) => Json(serde_json::json!({ "ok": true, "operations": operations })),
+        Err(error) => Json(serde_json::json!({ "ok": false, "error": error })),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GeoOperationUnfinishedListPayload {}
+
+/// 跨会话未完成轮次的只读元信息（ADR-0010 Decision 3）：品牌状态摘要的
+/// 取数端点。按品牌列出非终态 operation 的元信息五要素，不含草稿正文与
+/// 聊天记录；信封仍按当前 Sidecar/Session/工作区鉴权，但不按 Session
+/// 过滤——跨会话可见正是本端点的用途（metadata-only 例外）。
+async fn brand_geo_operation_unfinished_handler(
+    headers: HeaderMap,
+    Json(request): Json<BrandKnowledgeEnvelope<GeoOperationUnfinishedListPayload>>,
+) -> Json<serde_json::Value> {
+    let store = match validate_brand_knowledge_request(&headers, &request) {
+        Ok(store) => store,
+        Err(error) => return Json(error),
+    };
+    match store.list_unfinished_geo_operations(&request.workspace_id) {
         Ok(operations) => Json(serde_json::json!({ "ok": true, "operations": operations })),
         Err(error) => Json(serde_json::json!({ "ok": false, "error": error })),
     }
