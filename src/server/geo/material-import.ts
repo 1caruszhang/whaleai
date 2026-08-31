@@ -91,12 +91,31 @@ const COMPETITOR_POTENTIAL_TARGET = 5;
 const COMPETITOR_SOURCE_DOMAIN_CAP = 3;
 
 /**
- * 两段式自适应触发线（ADR-0007 D7，第五写实跑裁决）：主路径两层幸存合计
- * 不足 2 家即视为语料池太薄（大概率困在自身投放软文池），触发盘点词重写
- * 换池补枪。阈值取 2 而非 5：补枪目标是「换个池子再试一次」，不是硬凑满
- * 名额——凑数仍由 fail-closed 门槛把关。
+ * 竞品主名单达标线（用户裁决 2026-08-31 票 #23）：确认卡竞品主名单
+ * （已知/已确认竞品 + 联网直接层合并去重）不足 7 家即触发续搜轮。
+ * potentialCompetitors 不计入达标口径——潜在层只做排行补位与备查，
+ * 不能拿来充主名单家数。达标续搜不是硬凑：存在闸每轮恒开，预算耗尽
+ * 仍不足时如实呈现实数。
  */
-const COMPETITOR_RETRY_MIN_SURVIVORS = 2;
+const COMPETITOR_ROSTER_TARGET = 7;
+
+/**
+ * 续搜轮硬上限（票 #23）：每轮 = 一次换词重写 + 一次检索 + 一次快照重抽，
+ * 都是真实网关调用——3 轮封顶防死循环与费用失控。轮次进 competitor-search
+ * 投影的 rounds 字段留痕（新增字段，旧消费方可缺省）。
+ */
+const COMPETITOR_CONTINUATION_ROUNDS = 3;
+
+/**
+ * 续搜轮换词的目标语料池轮换（票 #23「换词多轮」）：各轮分别逼向品类
+ * 盘点、口碑探店、行业榜单三个中立观察者语料池，避免同词重搜同源。
+ * 形态全部无行业词、无招商词；招商词过滤由 parseRetryQuery 兜底。
+ */
+const COMPETITOR_ROUND_QUERY_FORMS = [
+  '品类盘点文与多品牌列表页（「品牌有哪些/盘点/名单」）',
+  '本地探店与口碑讨论（「口碑/评价/推荐」）',
+  '行业榜单文（「排行榜/榜单/十强」）',
+] as const;
 
 /**
  * 正文抓取（用户裁决 2026-08-31「正文全部读取」）：品牌最密集的列表文
@@ -582,6 +601,40 @@ export async function parseBrandMaterial(material: BrandMaterial, bytes: Uint8Ar
  * 事实类逐字复制、判断类可推断、生成类一律 inferred；competitors 携带完整
  * 竞品纪律（层级原则、纳入信号、前东家最高优先级排除、认全展示用户裁决）。
  */
+/**
+ * 画像字段稳定补抽的对照全集（票 #23 需求 B，用户裁决 2026-08-31）：抽取
+ * 每轮独立跑，模型对同一材料的输出字段集时有时无（行业/区域/联系方式这轮
+ * 有、下轮无）。对照全集只收材料文本可支撑的画像字段——competitors/
+ * potentialCompetitors 有各自的联网腿与必审行机制（且材料腿明令禁止推断），
+ * derivedKeywords 是纯生成的 SEO 词，三者不参与补抽，防把禁推断纪律冲淡。
+ */
+const PROFILE_TOPUP_FIELDS: readonly EnterpriseProfileField[] = [
+  'fullName', 'shortNames', 'addresses', 'serviceArea', 'industry', 'products',
+  'relatedBrands', 'targetCustomers', 'coreAdvantages', 'trustEndorsements',
+  'customerPainPoints', 'customerCases', 'contactInfo',
+];
+
+/**
+ * 画像字段补抽提示（票 #23 需求 B）：复用整份抽取提示词（字段定义、逐字
+ * 证据门与禁推断纪律零漂移），在材料文本之前插入「本轮只补缺失字段、材料
+ * 不支撑即省略」的定向指令——防编造红线对称适用：补抽不得让模型硬填材料
+ * 里没有的信息。
+ */
+function profileTopUpPrompt(
+  basePrompt: string,
+  missingFields: readonly EnterpriseProfileField[],
+): string {
+  const directive = [
+    '## 本轮任务：只补抽缺失字段（字段集稳定）',
+    `首轮抽取未产出以下字段：${missingFields.join('、')}。本轮只输出这些字段的 facts，首轮已产出的字段一律不再输出。`,
+    '材料文本没有明确支撑的字段直接省略——宁可缺省，也不得为凑字段而推断、改写或编造。',
+    '',
+  ].join('\n');
+  const materialSection = basePrompt.indexOf('## 材料文本');
+  if (materialSection < 0) return `${basePrompt}\n${directive}`;
+  return basePrompt.slice(0, materialSection) + directive + basePrompt.slice(materialSection);
+}
+
 function extractionPrompt(
   context: BrandMaterialContext,
   material: BrandMaterial,
@@ -1221,9 +1274,10 @@ export function parseCompetitorSearchQueries(raw: string): string[] {
 }
 
 /**
- * 盘点词重写提示（两段式自适应第二轮）：把「第一轮召回全是自身投放」的
- * 事实喂给模型，让它重写一条去场景、去招商的纯品类盘点查询词。反馈式
- * 重写远比首写时的抽象规则可靠（第五写实跑：首写规则约束下模型仍把
+ * 续搜轮换词提示（票 #23 达标续搜，升级自两段式补枪）：把「已试查询词 +
+ * 召回语料标题 + 主名单仍不足 7 家」的事实喂给模型，让它写一条换语料池的
+ * 新查询词——本轮目标池由代码按 COMPETITOR_ROUND_QUERY_FORMS 轮换指定，
+ * 反馈式重写远比首写时的抽象规则可靠（第五写实跑：首写规则约束下模型仍把
  * 「食堂」带进盘点词，整池塌回软文）。
  */
 function inventoryRetryPrompt(input: {
@@ -1233,20 +1287,22 @@ function inventoryRetryPrompt(input: {
   anchor: string;
   queries: readonly string[];
   corpusTitles: readonly string[];
+  formHint: string;
 }): string {
   return [
-    '你是搜索查询词优化器。任务：为品牌竞品检索重写一条「品类盘点」查询词。',
+    '你是搜索查询词优化器。任务：为品牌竞品检索写一条「换语料池」的新查询词。',
     `品牌：${input.brandName}`,
     `行业：${input.industry || '未知'}；产品/项目：${input.products.join('、') || '未知'}；地域锚：${input.anchor}`,
-    '此前查询词召回的语料标题（几乎全是目标品牌自己的投放内容，几乎没有其他品牌名）：',
+    `此前所有查询词（含已试过的续搜词）：${input.queries.join('；')}`,
+    '此前查询词召回的语料标题（能认出的真实竞品品牌太少，主名单不足 7 家）：',
     ...input.corpusTitles.map((title, index) => `${index + 1}. ${title.slice(0, 60)}`),
-    `此前查询词：${input.queries.join('；')}`,
     '',
     '请写一条全新的查询词，规则：',
-    '- 形态固定：「地域 + 品类 + 品牌有哪些」（或 品牌 盘点/名单）',
+    `- 本轮目标语料池：${input.formHint}——与此前查询词已命中过的池子错开`,
+    '- 形态固定：「地域 + 品类 + 榜单/口碑/盘点词」；地域用上面的地域锚',
     '- 品类只留最核心的大众品类词：去掉经营场景词（业务发生在哪不等于品类叫什么——'
     + '食堂/档口/团餐这类场景词会把检索拉回招商软文池）、去掉招商词（加盟/招商/合作/供应商）',
-    '- 与此前查询词不得相同或近义；≤25 字；地域用上面的地域锚',
+    '- 与此前所有查询词不得相同或近义；≤25 字',
     '只返回 JSON：{"query":"查询词"}',
   ].join('\n');
 }
@@ -2082,7 +2138,8 @@ export class MaterialImportService {
         ...(pages.has(source.url) ? { pageText: pages.get(source.url) } : {}),
       }));
       const pageTexts = await fetchPageTexts(sources.slice(0, COMPETITOR_PAGE_FETCH_LIMIT));
-      const corpusSources = withPageTexts(sources, pageTexts);
+      // 续搜轮逐轮合并语料（URL 去重 + 域名封顶 + 正文快照累积），故可变。
+      let corpusSources = withPageTexts(sources, pageTexts);
       // 语料上下文与抽取/闸门闭包化：两段式自适应的第二轮换池补枪时复用
       // 同一套构造与闸门，保证两轮都满足「模型可见语料 = 存在闸语料」。
       const corpusOf = (corpusSources: readonly CompetitorCorpusSource[]) => {
@@ -2194,18 +2251,25 @@ export class MaterialImportService {
       let directSuggestions = gateTier(parsedNames.direct, deficit);
       let potentialSuggestions = gateTier(parsedNames.potential, COMPETITOR_POTENTIAL_TARGET);
 
-      // 两段式自适应（ADR-0007 D7，第五写实跑裁决）：模型写盘点词是非确定
-      // 性的——第四写实跑「广东 干蒸菜 品牌 有哪些」换来了品类池（渔文乐/
-      // 蒸简单），第五写实跑「广东食堂干蒸菜品牌有哪些」多带一个场景词整池
-      // 就塌回自身投放软文、名单只剩 1 家。提示词约束不可靠，改为结果驱动：
-      // 幸存不足时让模型看着「召回全是自身投放」的事实重写一条去场景/去招商
-      // 的盘点词，换池补一枪；合并语料重新抽取、重新过闸，重试链路任何一步
-      // 失败都保住第一轮结果。
+      // 达标续搜（票 #23 用户裁决 2026-08-31，升级自两段式补枪）：全天 18 轮
+      // 同品牌实跑名单在 1～7 家间波动，根因是「一篇盘点文列 5-6 家」的密集源
+      // 只在搜索引擎当轮返回里时有时无。改为结果驱动：主名单（已知竞品 +
+      // 直接层合并去重，potential 不计入口径）<7 即续搜——每轮让模型看着已试
+      // 查询词与召回标题重写一条换池新词（代码按 COMPETITOR_ROUND_QUERY_FORMS
+      // 轮换目标池），换池补一枪后逐轮合并语料重新抽取重新过闸、名单按
+      // sameBrandIdentity 并集；达标即停，最多 3 轮，预算耗尽如实呈现实数。
+      // 存在闸每轮恒开：名单可以不足，上卡的每一家必须真实见于某轮语料。
+      const roundQueries = [...queries];
+      const regionHints = limits.regionHints;
+      let continuationRounds = 0;
       let usedRetry = false;
-      if (
+      let mergedSources = sources;
+      while (
         searchSourcesFn
-        && directSuggestions.length + potentialSuggestions.length < COMPETITOR_RETRY_MIN_SURVIVORS
+        && continuationRounds < COMPETITOR_CONTINUATION_ROUNDS
+        && brandCompetitors.size + directSuggestions.length < COMPETITOR_ROSTER_TARGET
       ) {
+        let retryQuery: string | null = null;
         try {
           const rewrite = await this.extraction.complete([
             { role: 'system', content: '只重写一条搜索查询词；只返回 JSON。' },
@@ -2214,71 +2278,96 @@ export class MaterialImportService {
               industry,
               products: [...products],
               anchor: scope.primary,
-              queries,
-              corpusTitles: sources.slice(0, 10).map((source) => source.title),
+              queries: roundQueries,
+              corpusTitles: corpusSources.slice(0, 10).map((source) => source.title),
+              formHint: COMPETITOR_ROUND_QUERY_FORMS[
+                continuationRounds % COMPETITOR_ROUND_QUERY_FORMS.length
+              ],
             }) },
           ], { signal, maxTokens: 512 });
-          debugDumpCompetitorSearch({ event: 'retry-rewrite', response: rewrite.slice(0, 1_000) });
-          const retryQuery = parseRetryQuery(rewrite, queries);
-          if (retryQuery) {
-            const retryGroup = await searchSourcesFn(retryQuery, { signal, count: 20 })
-              .catch((error: unknown) => {
-                debugDumpCompetitorSearch({ event: 'search-source-failed', query: retryQuery, error: String(error) });
-                return [] as Array<{ title: string; url: string; summary?: string }>;
-              });
-            const retryPages = await fetchPageTexts(
-              retryGroup.slice(0, COMPETITOR_PAGE_FETCH_LIMIT),
-            );
-            const mergedRaw = capSourcesPerDomain(
-              dedupeSourcesByUrl([...sources, ...retryGroup]),
-              COMPETITOR_SOURCE_DOMAIN_CAP,
-            );
-            const merged = withPageTexts(mergedRaw, retryPages).map((source) => ({
-              ...source,
-              ...(pageTexts.has(source.url) ? { pageText: pageTexts.get(source.url) } : {}),
-            }));
-            if (merged.length > sources.length) {
-              debugDumpCompetitorSearch({ event: 'retry-corpus', query: retryQuery, kept: merged.length });
-              const retryCorpus = corpusOf(merged);
-              const retryParsed = await extractNames(retryCorpus.corpusLines);
-              if (retryParsed) {
-                usedRetry = true;
-                const retryGate = gateWith(retryCorpus, merged);
-                const retryDirect = retryGate(retryParsed.direct, deficit);
-                const retryPotential = retryGate(retryParsed.potential, COMPETITOR_POTENTIAL_TARGET);
-                const regionHints = [scope.primary, ...scope.allowed];
-                const notSeen = (
-                  row: { name: string; region: string },
-                  existing: ReadonlyArray<{ name: string; region: string }>,
-                ) => !existing.some(
-                  (keptRow) => sameBrandIdentity(keptRow.name, row.name,
-                    [keptRow.region, row.region, ...regionHints]),
-                );
-                directSuggestions = [
-                  ...retryDirect,
-                  ...directSuggestions.filter((row) => notSeen(row, retryDirect)),
-                ].slice(0, deficit);
-                potentialSuggestions = [
-                  ...retryPotential,
-                  ...potentialSuggestions.filter((row) => notSeen(row, retryPotential)),
-                ].slice(0, COMPETITOR_POTENTIAL_TARGET);
-              }
-            }
-          }
+          debugDumpCompetitorSearch({
+            event: 'retry-rewrite',
+            round: continuationRounds + 1,
+            response: rewrite.slice(0, 1_000),
+          });
+          // parseRetryQuery 拒空/过短/与已试词重复/仍带招商词——换不出合规
+          // 新词时续搜收束，不拿同词重搜同源浪费预算。
+          retryQuery = parseRetryQuery(rewrite, roundQueries);
         } catch {
-          // 重试链路任何失败（重写坏 JSON/检索异常/抽取失败）保第一轮结果。
+          // 重写调用失败（provider 异常）：保既有结果，续搜终止。
+          break;
         }
+        continuationRounds += 1;
+        if (!retryQuery) break;
+        roundQueries.push(retryQuery);
+        const retryGroup = await searchSourcesFn(retryQuery, { signal, count: 20 })
+          .catch((error: unknown) => {
+            debugDumpCompetitorSearch({ event: 'search-source-failed', query: retryQuery, error: String(error) });
+            return [] as Array<{ title: string; url: string; summary?: string }>;
+          });
+        if (retryGroup.length === 0) continue;
+        const retryPages = await fetchPageTexts(
+          retryGroup.slice(0, COMPETITOR_PAGE_FETCH_LIMIT),
+        );
+        for (const [url, text] of retryPages) pageTexts.set(url, text);
+        const previousCount = mergedSources.length;
+        mergedSources = capSourcesPerDomain(
+          dedupeSourcesByUrl([...mergedSources, ...retryGroup]),
+          COMPETITOR_SOURCE_DOMAIN_CAP,
+        );
+        if (mergedSources.length === previousCount) continue;
+        corpusSources = withPageTexts(mergedSources, pageTexts);
+        debugDumpCompetitorSearch({
+          event: 'retry-corpus',
+          query: retryQuery,
+          round: continuationRounds,
+          kept: corpusSources.length,
+        });
+        const retryCorpus = corpusOf(corpusSources);
+        const retryParsed = await extractNames(retryCorpus.corpusLines);
+        if (!retryParsed) continue; // 本轮抽取失败：保既有结果，预算内可再试一轮。
+        usedRetry = true;
+        const retryGate = gateWith(retryCorpus, corpusSources);
+        const retryDirect = retryGate(retryParsed.direct, deficit);
+        const retryPotential = retryGate(retryParsed.potential, COMPETITOR_POTENTIAL_TARGET);
+        const notSeen = (
+          row: { name: string; region: string },
+          existing: ReadonlyArray<{ name: string; region: string }>,
+        ) => !existing.some(
+          (keptRow) => sameBrandIdentity(keptRow.name, row.name,
+            [keptRow.region, row.region, ...regionHints]),
+        );
+        directSuggestions = [
+          ...retryDirect,
+          ...directSuggestions.filter((row) => notSeen(row, retryDirect)),
+        ].slice(0, deficit);
+        potentialSuggestions = [
+          ...retryPotential,
+          ...potentialSuggestions.filter((row) => notSeen(row, retryPotential)),
+        ].slice(0, COMPETITOR_POTENTIAL_TARGET);
       }
+      // 跨轮跨层互斥收口：解析层的跨层互斥只在单次响应内生效，续搜轮并入的
+      // 直接层名字可能与早轮潜在层同品牌（马甲），最终名单统一按身份去重。
+      potentialSuggestions = potentialSuggestions.filter((row) => !directSuggestions.some(
+        (keptRow) => sameBrandIdentity(keptRow.name, row.name,
+          [keptRow.region, row.region, ...regionHints]),
+      ));
       debugDumpCompetitorSearch({
         event: 'survivors',
         path: usedRetry ? 'retry' : 'main',
+        rounds: continuationRounds,
         parsedDirect: parsedNames.direct.length,
         parsedPotential: parsedNames.potential.length,
         directSurvivors: directSuggestions.map((row) => row.name),
         potentialSurvivors: potentialSuggestions.map((row) => row.name),
       });
       if (directSuggestions.length === 0 && potentialSuggestions.length === 0) {
-        logOutcome({ status: 'skipped', errorCode: 'no_qualified_suggestions', path: usedRetry ? 'retry' : 'main' });
+        logOutcome({
+          status: 'skipped',
+          errorCode: 'no_qualified_suggestions',
+          path: usedRetry ? 'retry' : 'main',
+          rounds: continuationRounds,
+        });
         return [];
       }
       logOutcome({
@@ -2286,6 +2375,7 @@ export class MaterialImportService {
         path: usedRetry ? 'retry' : 'main',
         count: directSuggestions.length,
         potentialCount: potentialSuggestions.length,
+        rounds: continuationRounds,
       });
       return [
         ...directSuggestions.length > 0 ? [buildEnrichmentFact('competitors', directSuggestions)] : [],
@@ -2399,12 +2489,15 @@ export class MaterialImportService {
     text: string,
     signal: AbortSignal,
   ): Promise<{ facts: ExtractedProfileFact[]; competitorSearchQueries: string[] }> {
+    const prompt = extractionPrompt(context, material, text, await this.confirmedIndustry(context));
+    let facts: ExtractedProfileFact[];
+    let competitorSearchQueries: string[];
     for (let attempt = 0; ; attempt += 1) {
       let response: string;
       try {
         response = await this.extraction.complete([
           { role: 'system', content: '只执行企业 Profile 结构化抽取；不要调用工具。' },
-          { role: 'user', content: extractionPrompt(context, material, text, await this.confirmedIndustry(context)) },
+          { role: 'user', content: prompt },
         ], { signal });
       } catch (cause) {
         // 保留 cause 供 process() 的故障诊断日志提取非密钥字段
@@ -2412,17 +2505,37 @@ export class MaterialImportService {
         throw new Error('model_failed', { cause });
       }
       try {
+        facts = parseProfileFacts(response, context, text);
         // 竞品检索词与 facts 同源同响应：抽取模型已读完材料，顺手产出
         // 目标客户视角的查询词（管线瞬时值）。
-        return {
-          facts: parseProfileFacts(response, context, text),
-          competitorSearchQueries: parseCompetitorSearchQueries(response),
-        };
+        competitorSearchQueries = parseCompetitorSearchQueries(response);
+        break;
       } catch (error) {
         if (attempt === 0 && error instanceof Error && error.message === 'model_response_invalid') continue;
         throw error;
       }
     }
+    // 画像字段稳定（票 #23 需求 B）：对照全集对首轮缺失字段做一次定向补抽
+    // ——只并入缺失字段的产出（同 (field, scope) 冲突走既有合并护栏）；补抽
+    // 材料不支撑的字段时模型应省略，坏 JSON/调用失败保首轮字段集，不阻断
+    // 导入。全集齐备时零补抽成本，不发起额外调用。
+    const presentFields = new Set(facts.map((fact) => fact.field));
+    const missingFields = PROFILE_TOPUP_FIELDS.filter((field) => !presentFields.has(field));
+    if (missingFields.length === 0) return { facts, competitorSearchQueries };
+    try {
+      const topUpResponse = await this.extraction.complete([
+        { role: 'system', content: '只执行企业 Profile 结构化抽取；不要调用工具。' },
+        { role: 'user', content: profileTopUpPrompt(prompt, missingFields) },
+      ], { signal });
+      const topUpFacts = parseProfileFacts(topUpResponse, context, text)
+        .filter((fact) => missingFields.includes(fact.field));
+      if (topUpFacts.length > 0) {
+        facts = mergeFactsByFieldScope([...facts, ...topUpFacts]);
+      }
+    } catch {
+      // 补抽是尽力而为的一次机会：失败保首轮字段集。
+    }
+    return { facts, competitorSearchQueries };
   }
 
   /**

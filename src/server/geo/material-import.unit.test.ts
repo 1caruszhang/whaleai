@@ -252,6 +252,11 @@ function extractionResponse() {
   });
 }
 
+/** 画像字段补抽腿（票 #23 需求 B）的空响应：无字段可补，首轮字段集原样保留。
+ * 画像补抽固定排在首轮抽取之后、竞品富化之前——存量富化用例在队首响应后
+ * 插入本值即可保持「profile 抽取 → 快照认名字」的原有调用语义。 */
+const noTopUp = JSON.stringify({ facts: [] });
+
 function candidate(predicate: string, overrides: Partial<KnowledgeCandidate> = {}): KnowledgeCandidate {
   return {
     id: `candidate-${predicate}`,
@@ -503,7 +508,9 @@ describe('MaterialImportService', () => {
     const result = await current.value.importPastedText('公司资料');
 
     expect(result.ok).toBe(true);
-    expect(current.complete).toHaveBeenCalledTimes(2);
+    // 重抽成功后的画像补抽腿（票 #23 B）再调一次：补抽响应耗尽队列回落
+    // 默认抽取响应，其字段已在首轮产出，过滤后零并入。
+    expect(current.complete).toHaveBeenCalledTimes(3);
     expect(current.propose).toHaveBeenCalled();
   });
 
@@ -608,7 +615,7 @@ describe("competitor enrichment (ADR-0007 source-grounded extraction)", () => {
   it('extracts competitor names from real search snippets and proposes a names-only inferred candidate', async () => {
     const port = new FakeMaterialPort();
     const current = service(port, {
-      completeResponses: [withAreaResponse, namesJson],
+      completeResponses: [withAreaResponse, noTopUp, namesJson],
       searchSources: async () => corpus,
     });
     const result = await current.value.importPastedText('公司资料');
@@ -619,8 +626,9 @@ describe("competitor enrichment (ADR-0007 source-grounded extraction)", () => {
     const queries = current.searchSources!.mock.calls.map(([query]) => query);
     expect(queries[0]).toContain('成都新都 智能客服 排行榜');
     expect(queries[1]).toContain('成都新都 智能客服 哪家好');
-    // 两次模型调用：主 profile 抽取 + 快照内认名字（合并式不变式翻转）。
-    expect(current.complete).toHaveBeenCalledTimes(2);
+    // 四次模型调用：主 profile 抽取 + 画像补抽（票 #23 B，noTopUp 空手而归）
+    // + 快照内认名字 + 续搜换词重写（主名单 2 <7 触发，重写不出合规新词即收束）。
+    expect(current.complete).toHaveBeenCalledTimes(4);
     expect(current.search).not.toHaveBeenCalled();
     const competitorsCall = competitorsCallOf(current);
     expect(competitorsCall).toBeTruthy();
@@ -637,7 +645,7 @@ describe("competitor enrichment (ADR-0007 source-grounded extraction)", () => {
   it('existence gate drops names that do not appear verbatim in any snippet', async () => {
     const port = new FakeMaterialPort();
     const current = service(port, {
-      completeResponses: [withAreaResponse, JSON.stringify({ direct: [
+      completeResponses: [withAreaResponse, noTopUp, JSON.stringify({ direct: [
         { name: '云帆信息', region: '成都新都' },
         { name: '凭空科技', region: '成都新都' },
       ] })],
@@ -658,7 +666,7 @@ describe("competitor enrichment (ADR-0007 source-grounded extraction)", () => {
       summary: '武汉智能客服十大品牌：武汉楚才科技排名第一',
     }];
     const current = service(port, {
-      completeResponses: [withAreaResponse, JSON.stringify({ direct: [
+      completeResponses: [withAreaResponse, noTopUp, JSON.stringify({ direct: [
         { name: '云帆信息', region: '成都新都' },
         { name: '武汉楚才科技', region: '武汉' },
       ] })],
@@ -688,7 +696,7 @@ describe("competitor enrichment (ADR-0007 source-grounded extraction)", () => {
     ];
     const port = new FakeMaterialPort();
     const current = service(port, {
-      completeResponses: [provinceResponse, JSON.stringify({ direct: [
+      completeResponses: [provinceResponse, noTopUp, JSON.stringify({ direct: [
         { name: '云帆信息', region: '深圳' },
         { name: '星河智能', region: '广州' },
       ] })],
@@ -716,7 +724,7 @@ describe("competitor enrichment (ADR-0007 source-grounded extraction)", () => {
     ] });
     const port = new FakeMaterialPort();
     const current = service(port, {
-      completeResponses: [trackResponse, JSON.stringify({ direct: [
+      completeResponses: [trackResponse, noTopUp, JSON.stringify({ direct: [
         { name: '张仔纪', region: '广州' },
       ] })],
       searchSources: async () => [{
@@ -744,7 +752,7 @@ describe("competitor enrichment (ADR-0007 source-grounded extraction)", () => {
       completeResponses: [JSON.stringify({ facts: [
         { field: 'industry', value: '智能客服', provenance: 'extracted', sourceExcerpt: '行业：智能客服' },
         { field: 'serviceArea', value: '广东省', provenance: 'extracted', sourceExcerpt: '业务区域范围：广东省' },
-      ] }), JSON.stringify({
+      ] }), noTopUp, JSON.stringify({
         direct: [
           { name: '云帆信息', region: '深圳' },
           { name: '星河智能', region: '广州' },
@@ -800,7 +808,7 @@ describe("competitor enrichment (ADR-0007 source-grounded extraction)", () => {
           { field: 'industry', value: '餐饮管理', provenance: 'extracted', sourceExcerpt: '行业' },
           { field: 'serviceArea', value: '广东省', provenance: 'extracted', sourceExcerpt: '业务区域范围：广东省' },
         ],
-      }), JSON.stringify({ direct: [
+      }), noTopUp, JSON.stringify({ direct: [
         { name: '张仔纪', region: '广州' },
       ], potential: [] })],
       searchSources: async () => [{
@@ -839,7 +847,7 @@ describe("competitor enrichment (ADR-0007 source-grounded extraction)", () => {
     }];
     const port = new FakeMaterialPort();
     const current = service(port, {
-      completeResponses: [withAreaResponse, JSON.stringify({ direct: [
+      completeResponses: [withAreaResponse, noTopUp, JSON.stringify({ direct: [
         { name: '云帆信息', region: '成都新都' },
         { name: '星河智能', region: '成都' },
         { name: '江澜数据', region: '成都' },
@@ -854,7 +862,7 @@ describe("competitor enrichment (ADR-0007 source-grounded extraction)", () => {
     // 第 4 条同域软文被挤出语料：只出现在其中的泓川软件过不了存在闸；
     // 其他域的列表页品牌（泽言网络）保留。
     expect(competitorsCallOf(current)?.[0].value).toEqual(['云帆信息', '星河智能', '江澜数据', '泽言网络']);
-    const snapshotPrompt = (current.complete.mock.calls[1] as unknown as [
+    const snapshotPrompt = (current.complete.mock.calls[2] as unknown as [
       readonly { role: string; content: string }[],
     ])[0][1].content;
     expect(snapshotPrompt).not.toContain('泓川软件');
@@ -884,7 +892,7 @@ describe("competitor enrichment (ADR-0007 source-grounded extraction)", () => {
     ];
     const port = new FakeMaterialPort();
     const current = service(port, {
-      completeResponses: [provinceResponse, JSON.stringify({
+      completeResponses: [provinceResponse, noTopUp, JSON.stringify({
         direct: [{ name: '张仔纪·老顺德干蒸菜', region: '广州' }],
         potential: [
           { name: '张仔纪干蒸菜', region: '广东' },
@@ -942,6 +950,7 @@ describe("competitor enrichment (ADR-0007 source-grounded extraction)", () => {
     const current = service(port, {
       completeResponses: [
         provinceResponse,
+        noTopUp,
         JSON.stringify({ direct: [{ name: '张仔纪', region: '广州' }], potential: [] }),
         JSON.stringify({ query: '广东 干蒸菜 品牌 有哪些' }),
         JSON.stringify({
@@ -971,6 +980,211 @@ describe("competitor enrichment (ADR-0007 source-grounded extraction)", () => {
     expect(potential?.[0].value).toEqual(['渔文乐', '蒸简单原盅蒸饭']);
   });
 
+  // —— 竞品达标续搜（票 #23，用户裁决 2026-08-31）——
+  // 升级两段式补枪腿：主名单合并去重后 <7 即续搜（potential 不计入口径），
+  // 最多 3 轮换词、逐轮合并语料与名单、达标即停、预算耗尽如实呈现实数。
+
+  it('keeps searching with fresh query forms until the main roster reaches 7 (波动回归 票 #23)', async () => {
+    // 全天 18 轮实跑证据：好源（一篇盘点文列 5-6 家）只在搜索引擎当轮返回里
+    // 时有时无——名单 1/6/2/2/2…家随轮波动。修复形态：首轮语料薄（1 家）时
+    // 续搜轮换池补枪，好源在第 2/3 轮出现即并入，最终主名单 ≥7 家。
+    const thinCorpus = [{
+      title: '本地智能客服方案推荐',
+      url: 'https://mill.example/thin',
+      summary: '张仔纪（成都新都）与鲸跃科技同城经营智能客服业务',
+    }];
+    const goodBatch1 = [
+      {
+        title: '新都智能客服品牌有哪些',
+        url: 'https://list-1.example/brands',
+        summary: '云帆信息（成都新都）入选本地智能客服品牌名录',
+      },
+      {
+        title: '新都智能客服口碑',
+        url: 'https://list-2.example/word-of-mouth',
+        summary: '星河智能（成都新都）在本地智能客服口碑榜靠前',
+      },
+    ];
+    const goodBatch2 = [
+      {
+        title: '新都智能客服十强',
+        url: 'https://rank-1.example/top10',
+        summary: '江澜数据（成都新都）位居本地智能客服十强榜单',
+      },
+      {
+        title: '新都智能客服盘点',
+        url: 'https://rank-2.example/review',
+        summary: '泽言网络（成都新都）出现在智能客服服务商盘点中',
+      },
+      {
+        title: '新都智能客服评测',
+        url: 'https://rank-3.example/eval',
+        summary: '泓川软件（成都新都）通过本地智能客服年度评测',
+      },
+      {
+        title: '新都智能客服名单',
+        url: 'https://rank-4.example/names',
+        summary: '恒启智联（成都新都）列入智能客服推荐名单',
+      },
+    ];
+    const port = new FakeMaterialPort();
+    let searchCall = 0;
+    const current = service(port, {
+      completeResponses: [
+        withAreaResponse,
+        noTopUp,
+        JSON.stringify({ direct: [{ name: '张仔纪', region: '成都新都' }], potential: [] }),
+        JSON.stringify({ query: '成都新都 智能客服 品牌 有哪些' }),
+        JSON.stringify({ direct: [
+          { name: '张仔纪', region: '成都新都' },
+          { name: '云帆信息', region: '成都新都' },
+          { name: '星河智能', region: '成都新都' },
+        ], potential: [] }),
+        JSON.stringify({ query: '成都新都 智能客服 口碑 排行' }),
+        JSON.stringify({ direct: [
+          { name: '张仔纪', region: '成都新都' },
+          { name: '云帆信息', region: '成都新都' },
+          { name: '星河智能', region: '成都新都' },
+          { name: '江澜数据', region: '成都新都' },
+          { name: '泽言网络', region: '成都新都' },
+          { name: '泓川软件', region: '成都新都' },
+          { name: '恒启智联', region: '成都新都' },
+        ], potential: [] }),
+      ],
+      searchSources: async () => {
+        searchCall += 1;
+        if (searchCall <= 2) return thinCorpus;
+        if (searchCall === 3) return goodBatch1;
+        return goodBatch2;
+      },
+    });
+    const logs: string[] = [];
+    const spy = vi.spyOn(console, 'log').mockImplementation((line) => {
+      logs.push(String(line));
+    });
+    let result: Awaited<ReturnType<typeof current.value.importPastedText>>;
+    try {
+      result = await current.value.importPastedText('公司资料');
+    } finally {
+      spy.mockRestore();
+    }
+
+    expect(result.ok).toBe(true);
+    // 续搜触发：2 条主查询 + 2 轮续搜（第 2/3 检索轮带来好源）。
+    expect(current.searchSources).toHaveBeenCalledTimes(4);
+    expect(current.searchSources!.mock.calls[2][0]).toBe('成都新都 智能客服 品牌 有哪些');
+    expect(current.searchSources!.mock.calls[3][0]).toBe('成都新都 智能客服 口碑 排行');
+    // 达标即停：第 7 家上卡后不再发起第 3 轮续搜。
+    const finalNames = competitorsCallOf(current)?.[0].value as string[];
+    expect(finalNames).toHaveLength(7);
+    expect(finalNames).toEqual([
+      '张仔纪', '云帆信息', '星河智能', '江澜数据', '泽言网络', '泓川软件', '恒启智联',
+    ]);
+    // 留痕：续搜轮次进 competitor-search 投影（新增 rounds 字段，向后兼容）。
+    expect(logs.some((line) => line.includes('"operation":"competitor-search"')
+      && line.includes('"status":"ok"') && line.includes('"rounds":2'))).toBe(true);
+  });
+
+  it('stops after the first pass when the roster already reaches 7 (达标即停 票 #23)', async () => {
+    const rosterCorpus = [
+      '云帆信息', '星河智能', '江澜数据', '泓川软件', '泽言网络', '恒启智联', '朗科智控',
+    ].map((name, index) => ({
+      title: `新都智能客服名录${index + 1}`,
+      url: `https://roster-${index + 1}.example/list`,
+      summary: `${name}（成都新都）入选本地智能客服品牌名录`,
+    }));
+    const port = new FakeMaterialPort();
+    const current = service(port, {
+      completeResponses: [withAreaResponse, noTopUp, JSON.stringify({
+        direct: [
+          '云帆信息', '星河智能', '江澜数据', '泓川软件', '泽言网络', '恒启智联', '朗科智控',
+        ].map((name) => ({ name, region: '成都新都' })),
+        potential: [],
+      })],
+      searchSources: async () => rosterCorpus,
+    });
+    const logs: string[] = [];
+    const spy = vi.spyOn(console, 'log').mockImplementation((line) => {
+      logs.push(String(line));
+    });
+    let result: Awaited<ReturnType<typeof current.value.importPastedText>>;
+    try {
+      result = await current.value.importPastedText('公司资料');
+    } finally {
+      spy.mockRestore();
+    }
+
+    expect(result.ok).toBe(true);
+    // 首轮已 ≥7：不发起任何续搜轮，检索停留在 2 条主查询。
+    expect(current.searchSources).toHaveBeenCalledTimes(2);
+    expect(current.complete).toHaveBeenCalledTimes(3);
+    expect(logs.some((line) => line.includes('"operation":"competitor-search"')
+      && line.includes('"rounds":0'))).toBe(true);
+    expect(competitorsCallOf(current)?.[0].value).toHaveLength(7);
+  });
+
+  it('exhausts the 3-round budget honestly and never loosens the existence gate to pad the roster (票 #23)', async () => {
+    // 验收 2 + 3 合流：每轮模型都试图塞进语料里不存在的「凭空科技」（存在闸
+    // 恒开），且每轮语料只新增无新品牌的源——3 轮耗尽仍 1 家时如实呈现 1 家，
+    // 不发起第 4 轮，也绝不为凑数放水。
+    const thinCorpus = [{
+      title: '本地智能客服方案推荐',
+      url: 'https://mill.example/thin',
+      summary: '张仔纪（成都新都）与鲸跃科技同城经营智能客服业务',
+    }];
+    const sameBrandCorpus = (n: number) => [{
+      title: `新都智能客服补充名录${n}`,
+      url: `https://extra-${n}.example/list`,
+      summary: `第${n}期名录：张仔纪（成都新都）持续在列，其余为品类描述`,
+    }];
+    const gatedNames = JSON.stringify({
+      direct: [
+        { name: '张仔纪', region: '成都新都' },
+        { name: '凭空科技', region: '成都新都' },
+      ],
+      potential: [],
+    });
+    const port = new FakeMaterialPort();
+    let searchCall = 0;
+    const current = service(port, {
+      completeResponses: [
+        withAreaResponse,
+        noTopUp,
+        gatedNames,
+        JSON.stringify({ query: '成都新都 智能客服 品牌 有哪些' }),
+        gatedNames,
+        JSON.stringify({ query: '成都新都 智能客服 口碑 推荐' }),
+        gatedNames,
+        JSON.stringify({ query: '成都新都 智能客服 十强 榜单' }),
+        gatedNames,
+      ],
+      searchSources: async () => {
+        searchCall += 1;
+        return searchCall <= 2 ? thinCorpus : sameBrandCorpus(searchCall);
+      },
+    });
+    const logs: string[] = [];
+    const spy = vi.spyOn(console, 'log').mockImplementation((line) => {
+      logs.push(String(line));
+    });
+    let result: Awaited<ReturnType<typeof current.value.importPastedText>>;
+    try {
+      result = await current.value.importPastedText('公司资料');
+    } finally {
+      spy.mockRestore();
+    }
+
+    expect(result.ok).toBe(true);
+    // 预算上限：2 条主查询 + 恰好 3 轮续搜，第 4 轮不存在。
+    expect(current.searchSources).toHaveBeenCalledTimes(5);
+    expect(logs.some((line) => line.includes('"operation":"competitor-search"')
+      && line.includes('"rounds":3'))).toBe(true);
+    // 如实呈现：主名单保持 1 家实数；语料中不存在的凭空科技任何一轮都不上卡。
+    expect(competitorsCallOf(current)?.[0].value).toEqual(['张仔纪']);
+    const proposedValues = JSON.stringify(current.propose.mock.calls.map(([input]) => input.value));
+    expect(proposedValues).not.toContain('凭空科技');
+  });
+
   it('upgrades http source urls to https before page fetching (scheme whitelist preserved)', async () => {
     // 搜索结果常含 http:// 明文链（toutiao m. 站），scheme 白名单只收 https
     // ——抓取前升级协议，来源身份（证据链接）保持引擎给的原 URL。
@@ -984,7 +1198,7 @@ describe("competitor enrichment (ADR-0007 source-grounded extraction)", () => {
     }));
     const port = new FakeMaterialPort();
     const current = service(port, {
-      completeResponses: [provinceResponse, JSON.stringify({
+      completeResponses: [provinceResponse, noTopUp, JSON.stringify({
         direct: [{ name: '蒸简单原盅蒸饭', region: '广东' }],
         potential: [],
       })],
@@ -1033,7 +1247,7 @@ describe("competitor enrichment (ADR-0007 source-grounded extraction)", () => {
     ];
     const port = new FakeMaterialPort();
     const current = service(port, {
-      completeResponses: [provinceResponse, JSON.stringify({
+      completeResponses: [provinceResponse, noTopUp, JSON.stringify({
         direct: [
           { name: '张仔纪（广州）餐饮管理有限公司', region: '广州' },
           { name: '张仔纪餐饮管理有限公司', region: '广州' },
@@ -1067,7 +1281,7 @@ describe("competitor enrichment (ADR-0007 source-grounded extraction)", () => {
     }));
     const port = new FakeMaterialPort();
     const current = service(port, {
-      completeResponses: [provinceResponse, JSON.stringify({
+      completeResponses: [provinceResponse, noTopUp, JSON.stringify({
         direct: [{ name: '广州张氏味好餐饮服务有限责任公司', region: '广州' }],
         potential: [{ name: '蒸简单原盅蒸饭', region: '广东' }],
       })],
@@ -1090,7 +1304,7 @@ describe("competitor enrichment (ADR-0007 source-grounded extraction)", () => {
     expect(potential?.[0].value).toEqual(['蒸简单原盅蒸饭']);
     expect(competitorsCallOf(current)?.[0].source.excerpt).toContain('（来源：https://mill.example/list）');
     // 快照行带正文段：模型看得见截断线下的品牌。
-    const snapshotPrompt = (current.complete.mock.calls[1] as unknown as [
+    const snapshotPrompt = (current.complete.mock.calls[2] as unknown as [
       readonly { role: string; content: string }[],
     ])[0][1].content;
     expect(snapshotPrompt).toContain('｜正文：');
@@ -1106,7 +1320,7 @@ describe("competitor enrichment (ADR-0007 source-grounded extraction)", () => {
         { field: 'targetCustomers', value: ['个体创业者', '夫妻档'], provenance: 'extracted', sourceExcerpt: '合作对象' },
         { field: 'customerCases', value: ['广东财经大学直营店'], provenance: 'extracted', sourceExcerpt: '案例' },
         { field: 'coreAdvantages', value: ['团餐场景定向研发'], provenance: 'extracted', sourceExcerpt: '优势' },
-      ] }), JSON.stringify({ direct: [], potential: [] })],
+      ] }), noTopUp, JSON.stringify({ direct: [], potential: [] })],
       searchSources: async () => [{
         title: '干蒸菜项目加盟口碑',
         url: 'https://example.com/jm',
@@ -1115,7 +1329,7 @@ describe("competitor enrichment (ADR-0007 source-grounded extraction)", () => {
     });
     await current.value.importPastedText('公司资料');
 
-    const snapshotPrompt = (current.complete.mock.calls[1] as unknown as [
+    const snapshotPrompt = (current.complete.mock.calls[2] as unknown as [
       readonly { role: string; content: string }[],
     ])[0][1].content;
     expect(snapshotPrompt).toContain('目标客户：个体创业者、夫妻档');
@@ -1130,7 +1344,7 @@ describe("competitor enrichment (ADR-0007 source-grounded extraction)", () => {
     ] });
     const port = new FakeMaterialPort();
     const current = service(port, {
-      completeResponses: [provinceResponse, JSON.stringify({
+      completeResponses: [provinceResponse, noTopUp, JSON.stringify({
         direct: [
           { name: '顺德杨廷记餐饮有限公司', region: '顺德' },
           { name: '顺德杨廷记', region: '顺德' },
@@ -1163,7 +1377,7 @@ describe("competitor enrichment (ADR-0007 source-grounded extraction)", () => {
     ] });
     const port = new FakeMaterialPort();
     const current = service(port, {
-      completeResponses: [provinceResponse, JSON.stringify({ direct: [
+      completeResponses: [provinceResponse, noTopUp, JSON.stringify({ direct: [
         { name: '榕邊干蒸鮮排骨', region: '深圳' },
       ], potential: [] })],
       searchSources: async () => [{
@@ -1188,7 +1402,7 @@ describe("competitor enrichment (ADR-0007 source-grounded extraction)", () => {
     ] });
     const port = new FakeMaterialPort();
     const current = service(port, {
-      completeResponses: [provinceResponse, JSON.stringify({ direct: [
+      completeResponses: [provinceResponse, noTopUp, JSON.stringify({ direct: [
         { name: '榕邊干蒸鮮排骨', region: '深圳' },
         { name: '云帆信息', region: '广州' },
       ], potential: [] })],
@@ -1211,7 +1425,7 @@ describe("competitor enrichment (ADR-0007 source-grounded extraction)", () => {
     ] });
     const port = new FakeMaterialPort();
     const current = service(port, {
-      completeResponses: [mixedResponse, JSON.stringify({ direct: [
+      completeResponses: [mixedResponse, noTopUp, JSON.stringify({ direct: [
         { name: '云帆信息', region: '南宁' },
       ] })],
       searchSources: async () => [{
@@ -1236,7 +1450,7 @@ describe("competitor enrichment (ADR-0007 source-grounded extraction)", () => {
       summary: '华创精密是鲸跃科技的供应商，为其提供芯片',
     }];
     const current = service(port, {
-      completeResponses: [withAreaResponse, JSON.stringify({ direct: [
+      completeResponses: [withAreaResponse, noTopUp, JSON.stringify({ direct: [
         { name: '云帆信息', region: '成都新都' },
         { name: '华创精密', region: '成都新都' },
       ] })],
@@ -1307,14 +1521,15 @@ describe("competitor enrichment (ADR-0007 source-grounded extraction)", () => {
       ],
     });
     const current = service(port, {
-      completeResponses: [withAreaResponse],
+      completeResponses: [withAreaResponse, noTopUp],
       search: async () => mergedJson,
     });
     const result = await current.value.importPastedText('公司资料');
 
     expect(result.ok).toBe(true);
-    // 兜底路径不再触发第二次抽取调用（检索与判别合并在 enable_search 里）。
-    expect(current.complete).toHaveBeenCalledTimes(1);
+    // 兜底路径在抽取侧只有 profile 抽取 + 画像补抽两次 complete 调用
+    //（检索与判别合并在 enable_search 里）。
+    expect(current.complete).toHaveBeenCalledTimes(2);
     expect(current.search).toHaveBeenCalledTimes(2);
     const competitorsCall = competitorsCallOf(current);
     // 存在闸在兜底路径无快照可比（明确降级）；地域闸照常执行。
@@ -1326,7 +1541,7 @@ describe("competitor enrichment (ADR-0007 source-grounded extraction)", () => {
   it('falls back when searchSources fails or returns an empty corpus', async () => {
     const port = new FakeMaterialPort();
     const current = service(port, {
-      completeResponses: [withAreaResponse],
+      completeResponses: [withAreaResponse, noTopUp],
       searchSources: async () => { throw new Error('doubao search api down'); },
       search: async () => JSON.stringify({
         competitors: [
@@ -1349,7 +1564,7 @@ describe("competitor enrichment (ADR-0007 source-grounded extraction)", () => {
       summary: '鲸悦科技位于成都新都经营智能客服',
     }];
     const current = service(port, {
-      completeResponses: [withAreaResponse, JSON.stringify({ direct: [
+      completeResponses: [withAreaResponse, noTopUp, JSON.stringify({ direct: [
         { name: '鲸悦科技', region: '成都新都' },
         { name: '云帆信息', region: '成都新都' },
       ] })],
@@ -1375,7 +1590,7 @@ describe("competitor enrichment (ADR-0007 source-grounded extraction)", () => {
       { field: 'serviceArea', value: '成都新都', provenance: 'extracted', sourceExcerpt: '服务成都新都' },
     ] });
     const current = service(port, {
-      completeResponses: [materialCompetitors, namesJson],
+      completeResponses: [materialCompetitors, noTopUp, namesJson],
       searchSources: async () => corpus,
     });
     const result = await current.value.importPastedText('材料明确的主要竞品包括：甲品牌');
@@ -1391,7 +1606,7 @@ describe("competitor enrichment (ADR-0007 source-grounded extraction)", () => {
   it('does not search when ten confirmed competitors already exist', async () => {
     const port = new FakeMaterialPort();
     const current = service(port, {
-      completeResponses: [withAreaResponse],
+      completeResponses: [withAreaResponse, noTopUp],
       inspect: async (key) => {
         if (key.predicate !== 'enterprise-profile.competitors') return null;
         return {
@@ -1413,7 +1628,7 @@ describe("competitor enrichment (ADR-0007 source-grounded extraction)", () => {
 
     expect(result).toMatchObject({ ok: true });
     expect(current.searchSources).not.toHaveBeenCalled();
-    expect(current.complete).toHaveBeenCalledTimes(1);
+    expect(current.complete).toHaveBeenCalledTimes(2);
   });
 
   it('proposes only new names; the authority array-merge keeps confirmed competitors', async () => {
@@ -1422,7 +1637,7 @@ describe("competitor enrichment (ADR-0007 source-grounded extraction)", () => {
     // 只含联网新增名，已确认名称不以「待确认」形态重复出现。
     const port = new FakeMaterialPort();
     const current = service(port, {
-      completeResponses: [withAreaResponse, namesJson],
+      completeResponses: [withAreaResponse, noTopUp, namesJson],
       inspect: async (key) => {
         if (key.predicate === 'enterprise-profile.competitors') {
           return {
@@ -1448,7 +1663,7 @@ describe("competitor enrichment (ADR-0007 source-grounded extraction)", () => {
   it('hydrates the enrichment profile from confirmed authority facts when the material lacks them', async () => {
     const port = new FakeMaterialPort();
     const current = service(port, {
-      completeResponses: [extractionResponse(), namesJson],
+      completeResponses: [extractionResponse(), noTopUp, namesJson],
       searchSources: async () => corpus,
       inspect: async (key) => {
         if (key.predicate === 'enterprise-profile.products') {
@@ -1484,18 +1699,18 @@ describe("competitor enrichment (ADR-0007 source-grounded extraction)", () => {
     const queries = current.searchSources!.mock.calls.map(([query]) => query);
     expect(queries[0]).toContain('成都新都');
     expect(queries[0]).toContain('汽车音响改装');
-    const extractionPrompt = (current.complete.mock.calls[1] as unknown as [
+    const snapshotPrompt = (current.complete.mock.calls[2] as unknown as [
       readonly { role: string; content: string }[],
     ])[0][1].content;
-    expect(extractionPrompt).toContain('核心产品/服务：汽车音响改装、隔音升级');
-    expect(extractionPrompt).toContain('服务区域：成都新都');
+    expect(snapshotPrompt).toContain('核心产品/服务：汽车音响改装、隔音升级');
+    expect(snapshotPrompt).toContain('服务区域：成都新都');
   });
 
   it('tolerates per-query retrieval failure and aggregates deduped suggestions', async () => {
     const port = new FakeMaterialPort();
     let call = 0;
     const current = service(port, {
-      completeResponses: [withAreaResponse, namesJson],
+      completeResponses: [withAreaResponse, noTopUp, namesJson],
       searchSources: async () => {
         call += 1;
         if (call === 1) throw new Error('search hiccup');
@@ -1512,7 +1727,7 @@ describe("competitor enrichment (ADR-0007 source-grounded extraction)", () => {
   it('keeps an empty competitor row visible when every search path fails', async () => {
     const port = new FakeMaterialPort();
     const current = service(port, {
-      completeResponses: [withAreaResponse],
+      completeResponses: [withAreaResponse, noTopUp],
       search: async () => { throw new Error('keyword-search unavailable'); },
     });
     const result = await current.value.importPastedText('公司资料');
@@ -1556,7 +1771,7 @@ describe("competitor enrichment (ADR-0007 source-grounded extraction)", () => {
     try {
       const port = new FakeMaterialPort();
       const current = service(port, {
-        completeResponses: [withAreaResponse],
+        completeResponses: [withAreaResponse, noTopUp],
         search: async () => { throw new Error('keyword-search unavailable'); },
       });
       await current.value.importPastedText('公司资料');
@@ -1577,7 +1792,7 @@ describe("competitor enrichment (ADR-0007 source-grounded extraction)", () => {
     try {
       const port = new FakeMaterialPort();
       const current = service(port, {
-        completeResponses: [withAreaResponse, JSON.stringify({ direct: [
+        completeResponses: [withAreaResponse, noTopUp, JSON.stringify({ direct: [
           { name: '武汉楚才科技', region: '武汉' },
         ] })],
         searchSources: async () => corpus,
@@ -1601,7 +1816,7 @@ describe("competitor enrichment (ADR-0007 source-grounded extraction)", () => {
     try {
       const port = new FakeMaterialPort();
       const current = service(port, {
-        completeResponses: [withAreaResponse, '这不是 JSON', '仍不是 JSON'],
+        completeResponses: [withAreaResponse, noTopUp, '这不是 JSON', '仍不是 JSON'],
         searchSources: async () => corpus,
       });
       const result = await current.value.importPastedText('公司资料');
@@ -1610,8 +1825,9 @@ describe("competitor enrichment (ADR-0007 source-grounded extraction)", () => {
       expect(
         logs.some((line) => line.includes('"errorCode":"model_response_invalid"')),
       ).toBe(true);
-      // 坏 JSON 重抽一次（同 extractFacts 契约）：共三次模型调用。
-      expect(current.complete).toHaveBeenCalledTimes(3);
+      // 坏 JSON 重抽一次（同 extractFacts 契约）：profile 抽取 + 画像补抽 +
+      // 快照认名字两次坏响应，共四次模型调用。
+      expect(current.complete).toHaveBeenCalledTimes(4);
     } finally {
       spy.mockRestore();
     }
@@ -1624,7 +1840,7 @@ describe("competitor enrichment (ADR-0007 source-grounded extraction)", () => {
     // 材料逐字矛盾才允许推翻。
     const port = new FakeMaterialPort();
     const current = service(port, {
-      completeResponses: [withAreaResponse, namesJson],
+      completeResponses: [withAreaResponse, noTopUp, namesJson],
       searchSources: async () => corpus,
       inspect: async (key) => key.predicate.toLowerCase() === 'enterprise-profile.industry'
         ? {
@@ -1661,7 +1877,7 @@ describe("competitor enrichment (ADR-0007 source-grounded extraction)", () => {
   it('embeds field definitions in the profile prompt and gate disciplines in the snapshot prompt', async () => {
     const port = new FakeMaterialPort();
     const current = service(port, {
-      completeResponses: [withAreaResponse, namesJson],
+      completeResponses: [withAreaResponse, noTopUp, namesJson],
       searchSources: async () => corpus,
     });
     await current.value.importPastedText('公司资料');
@@ -1675,7 +1891,7 @@ describe("competitor enrichment (ADR-0007 source-grounded extraction)", () => {
     expect(profilePrompt).toContain('同体量层级');
     expect(profilePrompt).toContain('前东家');
     expect(profilePrompt).toContain('禁止凭模型记忆推断或编造');
-    const snapshotPrompt = promptOf(1);
+    const snapshotPrompt = promptOf(2);
     expect(snapshotPrompt).toContain('检索快照');
     expect(snapshotPrompt).toContain('同体量层级');
     // 客户口径纪律（一劳永逸版，用户裁决 2026-08-30）：判别第 0 步先定客户。
@@ -1703,6 +1919,73 @@ describe("competitor enrichment (ADR-0007 source-grounded extraction)", () => {
     expect(profilePrompt).toContain('品类盘点');
     expect(profilePrompt).toContain('不得出现加盟、招商、合作、供应商');
     expect(profilePrompt).toContain('去掉材料里的经营场景限定词');
+  });
+});
+
+describe('画像字段稳定（票 #23 需求 B：缺失字段定向补抽一次）', () => {
+  it('converges repeated imports of one material on the same candidate field set', async () => {
+    // 根因：抽取每轮独立跑，模型对同一文本的输出字段集时有时无（contactInfo
+    // 这轮有、下轮无）。修复：对照画像字段全集，对首轮缺失字段定向补抽一次，
+    // 只并入缺失字段的产出（值冲突走既有 (field, scope) 合并护栏）；材料不
+    // 支撑的字段允许缺省，不得硬填。
+    const materialText = '公司行业：智能客服。服务区域：成都新都。联系电话：028-12345678。';
+    const baseFacts = [
+      { field: 'industry', value: '智能客服', provenance: 'extracted', sourceExcerpt: '行业：智能客服' },
+      { field: 'serviceArea', value: '成都新都', provenance: 'extracted', sourceExcerpt: '服务区域：成都新都' },
+    ];
+    const contactFact = {
+      field: 'contactInfo',
+      value: ['028-12345678'],
+      provenance: 'extracted',
+      sourceExcerpt: '联系电话：028-12345678',
+    };
+    // 第一轮导入：首轮抽取漏了 contactInfo，补抽腿把它补回。
+    const firstPort = new FakeMaterialPort();
+    const first = service(firstPort, {
+      completeResponses: [
+        JSON.stringify({ facts: baseFacts }),
+        JSON.stringify({ facts: [contactFact] }),
+      ],
+    });
+    await first.value.importPastedText(materialText);
+    // 第二轮导入（同一材料）：这轮模型首轮就报了 contactInfo，补抽空手而归。
+    const secondPort = new FakeMaterialPort();
+    const second = service(secondPort, {
+      completeResponses: [
+        JSON.stringify({ facts: [...baseFacts, contactFact] }),
+        noTopUp,
+      ],
+    });
+    await second.value.importPastedText(materialText);
+
+    const predicatesOf = (current: ReturnType<typeof service>) => current.propose.mock.calls
+      .map(([input]) => input.key.predicate)
+      .sort();
+    // 同一材料两轮导入的最终候选字段集一致（trustEndorsements 材料不支撑，
+    // 两轮都缺省——补抽不得硬填）。
+    expect(predicatesOf(first)).toEqual(predicatesOf(second));
+    expect(predicatesOf(first)).toContain('enterprise-profile.contactInfo');
+    expect(predicatesOf(first)).not.toContain('enterprise-profile.trustEndorsements');
+    const contactOf = (current: ReturnType<typeof service>) => current.propose.mock.calls
+      .find(([input]) => input.key.predicate === 'enterprise-profile.contactInfo')?.[0].value;
+    expect(contactOf(first)).toEqual(['028-12345678']);
+    expect(contactOf(second)).toEqual(['028-12345678']);
+    // 补抽提示词：复用整份抽取提示词（字段定义零漂移），只指向缺失字段，
+    // 并明示材料不支撑即省略。
+    const topUpPrompt = (first.complete.mock.calls[1] as unknown as [
+      readonly { role: string; content: string }[],
+    ])[0][1].content;
+    expect(topUpPrompt).toContain('只补抽缺失字段');
+    expect(topUpPrompt).toContain('contactInfo');
+    expect(topUpPrompt).toContain('宁可缺省');
+    // 补抽失败（坏 JSON）不阻断导入：首轮字段集原样保留。
+    const thirdPort = new FakeMaterialPort();
+    const third = service(thirdPort, {
+      completeResponses: [JSON.stringify({ facts: baseFacts }), '这不是 JSON'],
+    });
+    const thirdResult = await third.value.importPastedText(materialText);
+    expect(thirdResult.ok).toBe(true);
+    expect(predicatesOf(third)).not.toContain('enterprise-profile.contactInfo');
   });
 });
 

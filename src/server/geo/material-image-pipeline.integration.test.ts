@@ -286,9 +286,10 @@ describe('material image pipeline through the admission-wrapped factory (票 #20
       for (const payload of imageTagAcquires) {
         expect(payload.slot).toBe('keyword-search');
       }
-      // permit 卫生：取到的许可全部释放（23 打标 + 1 文本抽取）。
+      // permit 卫生：取到的许可全部释放（23 打标 + 2 文本抽取：profile 抽取
+      // + 画像字段补抽，票 #23 需求 B——补抽复抽同一份提示词再计一次量）。
       expect(released).toBe(acquirePayloads.length);
-      expect(acquirePayloads.length).toBe(24);
+      expect(acquirePayloads.length).toBe(25);
     } finally {
       vi.unstubAllEnvs();
     }
