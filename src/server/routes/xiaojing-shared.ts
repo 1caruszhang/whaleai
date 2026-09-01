@@ -8,7 +8,7 @@ import { ArticleGenerationService, createArticlePort } from '../geo/article-gene
 import { GeoBaselineService, createGeoBaselinePort } from '../geo/baseline';
 import { createDistributionPlanPort, DistributionPlanningService } from '../geo/distribution-plan';
 import { createBrandMaterialPort } from '../geo/material-import';
-import { recordGeoOperationMilestone } from '../geo/operation-progress';
+import { recordGeoOperationMilestone, quoteGeoNextStepForAction } from '../geo/operation-progress';
 import {
   getXiaojingGeoBillingPermitChannel,
   getXiaojingGeoProviderCapabilities,
@@ -139,6 +139,10 @@ async function notifyGeoOperationWorkbenchEvent(
       revision: operation.revision,
       action,
       status: operation.status,
+      // 操作事件信封按 action 从持久化计划引述 next-step（ADR-0011）：
+      // confirm-step 锚定刚放行的门之后，resume/retry/next-round 取首个
+      // 未完成步骤；pause/cancel 不引述。
+      nextStep: quoteGeoNextStepForAction(operation, action),
     }),
     requestAccountToken,
   });

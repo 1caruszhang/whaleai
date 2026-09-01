@@ -5,7 +5,7 @@ import type { DistributionPlanEditInput, DistributionPlanStartInput } from '../.
 import type { TopicPlanWireItem } from '../../shared/geo/topicPlan';
 import { toTopicPlanCardProjection } from '../../shared/geo/topicPlan';
 import { buildArticleApprovalDecisionReminder, buildDistributionPlanDecisionReminder, buildTopicPlanDecisionReminder } from '../../shared/systemReminder';
-import { recordGeoOperationMilestone } from '../geo/operation-progress';
+import { recordGeoOperationMilestone, quoteGeoNextStepForGateKind } from '../geo/operation-progress';
 import { jsonResponse } from '../utils/http';
 import { sendXiaojingMessage } from '../xiaojing-reminder-send';
 import {
@@ -225,6 +225,7 @@ export async function handleXiaojingContentPipelineRoute(
           questionPoolId: confirmation.questionPoolId,
           questionPoolRevision: confirmation.questionPoolRevision,
           knowledgeVersion: confirmation.knowledgeVersion,
+          nextStep: await quoteGeoNextStepForGateKind(identity, 'topic-plan'),
         }),
         requestAccountToken: requestAccountAccessToken(request),
       });
@@ -527,6 +528,10 @@ export async function handleXiaojingContentPipelineRoute(
           revision: article.revision,
           approvedRevision: article.approvedRevision,
           knowledgeVersion: article.knowledgeVersion,
+          nextStep: await quoteGeoNextStepForGateKind(
+            identity,
+            'article-approval',
+          ),
         }),
         requestAccountToken: requestAccountAccessToken(request),
       });
@@ -748,6 +753,10 @@ export async function handleXiaojingContentPipelineRoute(
           status: plan.status,
           revision: plan.revision,
           assignmentCount: plan.assignments.length,
+          nextStep: await quoteGeoNextStepForGateKind(
+            identity,
+            'distribution-plan',
+          ),
         }),
         requestAccountToken: requestAccountAccessToken(request),
       });

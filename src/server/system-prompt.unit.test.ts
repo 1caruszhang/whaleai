@@ -51,6 +51,17 @@ describe('buildSystemPrompt', () => {
     expect(prompt).toContain('两道门的裁决互不阻塞');
   });
 
+  // 闸门之间决定性推进（ADR-0011 Decision 2）：信封引述 next-step，模型
+  // 从推导者降为执行者——照单执行、先重读再执行、不现场推导；引述缺失
+  // 或过期时以重读的计划为准（保留「先重读再执行」指令）。
+  it('advances decisively by executing the envelope-quoted next-step after re-reading', () => {
+    expect(prompt).toContain('闸门之间决定性推进');
+    expect(prompt).toContain('决策回执信封会携带从持久化计划引述的 next-step');
+    expect(prompt).toContain('先重读操作状态→按信封引述的 next-step 执行');
+    expect(prompt).toContain('不现场推导下一步');
+    expect(prompt).toContain('以重读到的计划为准继续');
+  });
+
   it('rations clarification to one structured AskUserQuestion with a recommended first option', () => {
     expect(prompt).toContain('通信默认是告知');
     expect(prompt).toContain('AskUserQuestion');

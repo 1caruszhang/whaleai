@@ -22,6 +22,7 @@ const gateMocks = vi.hoisted(() => ({
   confirmDistribution: vi.fn(),
   confirmTopicPlan: vi.fn(),
   recordGeoOperationMilestone: vi.fn(),
+  quoteGeoNextStepForGateKind: vi.fn(),
 }));
 
 vi.mock('../agent-session', () => ({
@@ -40,6 +41,7 @@ vi.mock('../routes/xiaojing-shared', () => ({
 
 vi.mock('../geo/operation-progress', () => ({
   recordGeoOperationMilestone: gateMocks.recordGeoOperationMilestone,
+  quoteGeoNextStepForGateKind: gateMocks.quoteGeoNextStepForGateKind,
 }));
 
 let testHome: string;
@@ -65,6 +67,8 @@ afterAll(() => {
 beforeEach(() => {
   vi.clearAllMocks();
   gateMocks.enqueueUserMessage.mockResolvedValue({ accepted: true });
+  // 默认无可引述的 next-step（无活跃操作）：信封保持收据形态。
+  gateMocks.quoteGeoNextStepForGateKind.mockResolvedValue(null);
 });
 
 const approvedArticle = {
@@ -213,6 +217,34 @@ describe('article approval gate injects a decision receipt and continues', () =>
     expect(status).toBe(409);
     expect(body.success).toBe(false);
     expect(gateMocks.enqueueUserMessage).not.toHaveBeenCalled();
+  });
+
+  // 票 #30（ADR-0011 Decision 2）：确认门回执携带从持久化计划引述的
+  // next-step（工具名 + 一句话指引 + 计划快照 revision），agent 照单执行。
+  it('回执携带从持久化计划引述的 next-step 与计划快照 revision', async () => {
+    gateMocks.approveArticle.mockResolvedValueOnce(approvedArticle);
+    gateMocks.quoteGeoNextStepForGateKind.mockResolvedValueOnce({
+      stepId: 'plan-distribution',
+      tool: 'plan_distribution',
+      guidance: 'Plan channel distribution for the approved articles.',
+      planRevision: 12,
+    });
+    const { status } = await callRoute('/api/xiaojing/articles/approve', identityPayload({
+      operationId: 'article-op-1',
+      articleId: 'article-1',
+      expectedRevision: 6,
+    }));
+    expect(status).toBe(200);
+    expect(gateMocks.quoteGeoNextStepForGateKind).toHaveBeenCalledWith(
+      { workspaceId: basename(workspace), sessionId: 'session-1' },
+      'article-approval',
+    );
+    const [text] = gateMocks.enqueueUserMessage.mock.calls[0] as [string];
+    expect(text).toContain('<next-step>');
+    expect(text).toContain('<step-id>plan-distribution</step-id>');
+    expect(text).toContain('<tool>plan_distribution</tool>');
+    expect(text).toContain('<plan-revision>12</plan-revision>');
+    expect(text).toContain('execute the next-step quoted in this envelope');
   });
 });
 

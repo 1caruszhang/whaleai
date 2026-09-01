@@ -20,7 +20,7 @@ import {
   type BrandMaterial,
   type MaterialErrorCode,
 } from '../geo/material-import';
-import { recordGeoOperationMilestone } from '../geo/operation-progress';
+import { recordGeoOperationMilestone, quoteGeoNextStepForGateKind } from '../geo/operation-progress';
 import {
   getXiaojingGeoBillingPermitChannel,
   getXiaojingGeoProviderCapabilities,
@@ -154,7 +154,8 @@ export async function handleXiaojingKnowledgeRoute(
       // Session message + hidden reminder path so the Agent can
       // respond naturally without a fabricated visible user message.
       // Notification admission is best-effort and cannot roll back or
-      // obscure the authoritative knowledge result.
+      // obscure the authoritative knowledge result. The envelope quotes
+      // the next planned step from the persisted operation (ADR-0011).
       const notification = await sendXiaojingMessage({
         text: buildKnowledgeDecisionReminder({
           candidateId: payload.candidateId,
@@ -163,6 +164,10 @@ export async function handleXiaojingKnowledgeRoute(
           factKey: result.factKey,
           currentVersion: result.current?.version,
           brandKnowledgeVersion: result.knowledgeVersion,
+          nextStep: await quoteGeoNextStepForGateKind(
+            { workspaceId, sessionId: runtimeSessionId },
+            'knowledge-change',
+          ),
         }),
         requestAccountToken: requestAccountAccessToken(request),
       });
@@ -244,9 +249,15 @@ export async function handleXiaojingKnowledgeRoute(
       }
       const notification = reminders.length > 0
         ? await sendXiaojingMessage({
-          text: buildKnowledgeBatchDecisionReminder(reminders),
-          requestAccountToken: requestAccountAccessToken(request),
-        })
+            text: buildKnowledgeBatchDecisionReminder(
+              reminders,
+              await quoteGeoNextStepForGateKind(
+                { workspaceId, sessionId: runtimeSessionId },
+                'knowledge-change',
+              ),
+            ),
+            requestAccountToken: requestAccountAccessToken(request),
+          })
         : { success: true };
       if (reminders.some((reminder) => reminder.decision !== 'reject')) {
         await recordGeoOperationMilestone(

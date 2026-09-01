@@ -1,6 +1,34 @@
 const OPEN = '<system-reminder>';
 const CLOSE = '</system-reminder>';
 
+/**
+ * 信封引述的 next-step（ADR-0011 Decision 2）：从持久化计划引述的下一步
+ * （工具名 + 一句话指引），随计划快照 revision 防过期。引述不是第二决策
+ * 源——agent 先重读对应 owner 再照单执行，引述过期时以重读结果为准。
+ */
+export interface NextStepReminderInput {
+  /** 所引述计划步骤的 step-id（重读后定位用）。 */
+  stepId: string;
+  /** MCP 工具名（next-step 单表与工具注册表的一致性测试保证真实存在）。 */
+  tool: string;
+  /** 一句话指引。 */
+  guidance: string;
+  /** 引述所基于的计划（GeoOperation）快照 revision。 */
+  planRevision: number;
+}
+
+/** 决策回执指令的统一收尾：按引述执行，先重读再执行，不现场推导。
+ * 只在信封确有引述时附加——收据形态（无 next-step）不带执行指令。 */
+const NEXT_STEP_INSTRUCTION =
+  'After re-reading the owning artifact/operation, execute the next-step quoted in this envelope as-is — do not re-derive what comes next.';
+
+function instructionWithNextStep(
+  base: string,
+  nextStep: NextStepReminderInput | undefined,
+): string {
+  return nextStep ? `${base} ${NEXT_STEP_INSTRUCTION}` : base;
+}
+
 export interface KnowledgeDecisionReminderInput {
   candidateId: string;
   decision: string;
@@ -8,6 +36,7 @@ export interface KnowledgeDecisionReminderInput {
   factKey: string;
   currentVersion?: number | null;
   brandKnowledgeVersion?: number | null;
+  nextStep?: NextStepReminderInput;
 }
 
 export interface QuestionPoolDecisionReminderInput {
@@ -16,6 +45,7 @@ export interface QuestionPoolDecisionReminderInput {
   revision: number;
   selectedCount: number;
   knowledgeVersion: number;
+  nextStep?: NextStepReminderInput;
 }
 
 export interface TopicPlanDecisionReminderInput {
@@ -26,6 +56,7 @@ export interface TopicPlanDecisionReminderInput {
   questionPoolId: string;
   questionPoolRevision: number;
   knowledgeVersion: number;
+  nextStep?: NextStepReminderInput;
 }
 
 export interface ArticleApprovalDecisionReminderInput {
@@ -35,6 +66,7 @@ export interface ArticleApprovalDecisionReminderInput {
   revision: number;
   approvedRevision: number | null;
   knowledgeVersion: number;
+  nextStep?: NextStepReminderInput;
 }
 
 export interface DistributionPlanDecisionReminderInput {
@@ -44,6 +76,7 @@ export interface DistributionPlanDecisionReminderInput {
   status: string;
   revision: number;
   assignmentCount: number;
+  nextStep?: NextStepReminderInput;
 }
 
 export interface GeoOperationEventReminderInput {
@@ -53,6 +86,7 @@ export interface GeoOperationEventReminderInput {
   revision: number;
   action: string;
   status: string;
+  nextStep?: NextStepReminderInput;
 }
 
 function escape(value: string): string {
@@ -85,6 +119,19 @@ function reminderVersion(value: number | null | undefined): string {
   return Number.isInteger(value) && (value ?? -1) >= 0 ? String(value) : 'none';
 }
 
+/** next-step 引述块：无引述时返回空数组，信封退回收据形态。 */
+function nextStepBlock(nextStep: NextStepReminderInput | undefined): string[] {
+  if (!nextStep) return [];
+  return [
+    '<next-step>',
+    `<step-id>${escape(nextStep.stepId)}</step-id>`,
+    `<tool>${escape(nextStep.tool)}</tool>`,
+    `<guidance>${escape(nextStep.guidance)}</guidance>`,
+    `<plan-revision>${natural(nextStep.planRevision)}</plan-revision>`,
+    '</next-step>',
+  ];
+}
+
 function knowledgeDecisionItem(input: KnowledgeDecisionReminderInput): string[] {
   return [
       `<candidate-id>${escape(input.candidateId)}</candidate-id>`,
@@ -99,27 +146,45 @@ function knowledgeDecisionItem(input: KnowledgeDecisionReminderInput): string[] 
 export function buildKnowledgeDecisionReminder(input: KnowledgeDecisionReminderInput): string {
   return envelope(
     'XIAOJING_KNOWLEDGE_DECISION',
-    'A structured brand-knowledge decision committed. Continue from the authoritative result.',
-    ['<decision-result>', ...knowledgeDecisionItem(input), '</decision-result>'],
+    instructionWithNextStep(
+      'A structured brand-knowledge decision committed. Continue from the authoritative result; do not re-ask about this candidate.',
+      input.nextStep,
+    ),
+    [
+      '<decision-result>',
+      ...knowledgeDecisionItem(input),
+      '</decision-result>',
+      ...nextStepBlock(input.nextStep),
+    ],
   );
 }
 
 /** 批量确认卡的一次性提交：一条 reminder 汇总全部已裁决候选，避免逐条刷屏。 */
 export function buildKnowledgeBatchDecisionReminder(
   inputs: KnowledgeDecisionReminderInput[],
+  nextStep?: NextStepReminderInput,
 ): string {
   if (inputs.length === 0) return '';
   return envelope(
     'XIAOJING_KNOWLEDGE_DECISION',
-    'Structured brand-knowledge decisions committed in one batch confirmation. Continue the current GEO operation from these authoritative results; do not re-ask about these candidates.',
-    inputs.flatMap((input) => ['<decision-result>', ...knowledgeDecisionItem(input), '</decision-result>']),
+    instructionWithNextStep(
+      'Structured brand-knowledge decisions committed in one batch confirmation. Continue the current GEO operation from these authoritative results; do not re-ask about these candidates.',
+      nextStep,
+    ),
+    [
+      ...inputs.flatMap((input) => ['<decision-result>', ...knowledgeDecisionItem(input), '</decision-result>']),
+      ...nextStepBlock(nextStep),
+    ],
   );
 }
 
 export function buildQuestionPoolDecisionReminder(input: QuestionPoolDecisionReminderInput): string {
   return envelope(
     'XIAOJING_QUESTION_POOL_DECISION',
-    'A structured GEO question-pool selection committed. Continue from this artifact.',
+    instructionWithNextStep(
+      'A structured GEO question-pool selection committed. Continue from this artifact; do not re-ask about the selection.',
+      input.nextStep,
+    ),
     [
       '<decision-result>',
       `<pool-id>${escape(input.poolId)}</pool-id>`,
@@ -128,6 +193,7 @@ export function buildQuestionPoolDecisionReminder(input: QuestionPoolDecisionRem
       `<selected-count>${natural(input.selectedCount)}</selected-count>`,
       `<knowledge-version>${natural(input.knowledgeVersion)}</knowledge-version>`,
       '</decision-result>',
+      ...nextStepBlock(input.nextStep),
     ],
   );
 }
@@ -135,7 +201,10 @@ export function buildQuestionPoolDecisionReminder(input: QuestionPoolDecisionRem
 export function buildTopicPlanDecisionReminder(input: TopicPlanDecisionReminderInput): string {
   return envelope(
     'XIAOJING_TOPIC_PLAN_DECISION',
-    'A structured GEO topic plan committed. Use only its selected items downstream.',
+    instructionWithNextStep(
+      'A structured GEO topic plan committed. Use only its selected items downstream; do not re-ask about this plan.',
+      input.nextStep,
+    ),
     [
       '<decision-result>',
       `<plan-id>${escape(input.planId)}</plan-id>`,
@@ -146,6 +215,7 @@ export function buildTopicPlanDecisionReminder(input: TopicPlanDecisionReminderI
       `<question-pool-revision>${natural(input.questionPoolRevision)}</question-pool-revision>`,
       `<knowledge-version>${natural(input.knowledgeVersion)}</knowledge-version>`,
       '</decision-result>',
+      ...nextStepBlock(input.nextStep),
     ],
   );
 }
@@ -153,7 +223,10 @@ export function buildTopicPlanDecisionReminder(input: TopicPlanDecisionReminderI
 export function buildArticleApprovalDecisionReminder(input: ArticleApprovalDecisionReminderInput): string {
   return envelope(
     'XIAOJING_ARTICLE_APPROVAL_DECISION',
-    'A structured article review decision committed. Continue the current GEO operation from this authoritative review result — approved articles flow into distribution planning, a rejected article needs regeneration or user guidance; do not re-ask about this article.',
+    instructionWithNextStep(
+      'A structured article review decision committed. Continue the current GEO operation from this authoritative review result — approved articles flow into distribution planning, a rejected article needs regeneration or user guidance; do not re-ask about this article.',
+      input.nextStep,
+    ),
     [
       '<decision-result>',
       `<operation-id>${escape(input.operationId)}</operation-id>`,
@@ -163,6 +236,7 @@ export function buildArticleApprovalDecisionReminder(input: ArticleApprovalDecis
       `<approved-revision>${reminderVersion(input.approvedRevision)}</approved-revision>`,
       `<knowledge-version>${natural(input.knowledgeVersion)}</knowledge-version>`,
       '</decision-result>',
+      ...nextStepBlock(input.nextStep),
     ],
   );
 }
@@ -170,7 +244,10 @@ export function buildArticleApprovalDecisionReminder(input: ArticleApprovalDecis
 export function buildDistributionPlanDecisionReminder(input: DistributionPlanDecisionReminderInput): string {
   return envelope(
     'XIAOJING_DISTRIBUTION_PLAN_DECISION',
-    'A structured distribution plan confirmation committed. Continue the current GEO operation from this authoritative plan — publish preparation follows the confirmed assignments; do not re-ask about this plan.',
+    instructionWithNextStep(
+      'A structured distribution plan confirmation committed. Continue the current GEO operation from this authoritative plan — publish preparation follows the confirmed assignments; do not re-ask about this plan.',
+      input.nextStep,
+    ),
     [
       '<decision-result>',
       `<plan-id>${escape(input.planId)}</plan-id>`,
@@ -180,14 +257,18 @@ export function buildDistributionPlanDecisionReminder(input: DistributionPlanDec
       `<revision>${natural(input.revision)}</revision>`,
       `<assignment-count>${natural(input.assignmentCount)}</assignment-count>`,
       '</decision-result>',
+      ...nextStepBlock(input.nextStep),
     ],
   );
 }
 
 export function buildGeoOperationEventReminder(input: GeoOperationEventReminderInput): string {
+  const nextStep = nextStepBlock(input.nextStep);
   return envelope(
     'XIAOJING_GEO_OPERATION_EVENT',
-    'A structured GEO workbench action committed. Re-read the operation, then immediately execute the next planned step — no re-planning, no recap of finished steps; stop only at the next confirmation gate.',
+    nextStep.length > 0
+      ? `A structured GEO workbench action committed. Re-read the operation, then execute the next-step quoted in this envelope as-is — no re-planning, no recap of finished steps, no re-deriving what comes next; stop only at the next confirmation gate.`
+      : 'A structured GEO workbench action committed. Re-read the operation, then immediately execute the next planned step — no re-planning, no recap of finished steps; stop only at the next confirmation gate.',
     [
       '<operation-event>',
       `<workspace-id>${escape(input.workspaceId)}</workspace-id>`,
@@ -197,6 +278,7 @@ export function buildGeoOperationEventReminder(input: GeoOperationEventReminderI
       `<action>${escape(input.action)}</action>`,
       `<status>${escape(input.status)}</status>`,
       '</operation-event>',
+      ...nextStep,
     ],
   );
 }

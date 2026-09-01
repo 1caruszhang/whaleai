@@ -4,7 +4,7 @@ import { gateAutoConfirms } from '../../shared/geo/autonomy';
 import type { QuestionPoolQuestion } from '../../shared/geo/questionPool';
 import { buildQuestionPoolDecisionReminder } from '../../shared/systemReminder';
 import { currentGeoAutonomyProfile } from '../geo/autonomy-profile';
-import { recordGeoOperationMilestone } from '../geo/operation-progress';
+import { recordGeoOperationMilestone, quoteGeoNextStepForGateKind } from '../geo/operation-progress';
 import { jsonResponse } from '../utils/http';
 import { sendXiaojingMessage } from '../xiaojing-reminder-send';
 import {
@@ -101,6 +101,10 @@ export async function handleXiaojingQuestionPoolsRoute(
                 revision: decision.revision,
                 selectedCount: decision.selectedQuestionIds.length,
                 knowledgeVersion: decision.knowledgeVersion,
+                nextStep: await quoteGeoNextStepForGateKind(
+                  identity,
+                  'question-selection',
+                ),
               }),
               requestAccountToken: requestAccountAccessToken(request),
             });
@@ -179,6 +183,10 @@ export async function handleXiaojingQuestionPoolsRoute(
           revision: decision.revision,
           selectedCount: decision.selectedQuestionIds.length,
           knowledgeVersion: decision.knowledgeVersion,
+          nextStep: await quoteGeoNextStepForGateKind(
+            identity,
+            'question-selection',
+          ),
         }),
         requestAccountToken: requestAccountAccessToken(request),
       });
