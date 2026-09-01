@@ -83,6 +83,7 @@ import {
 } from '../../shared/sessionFileReference';
 import {
   GEO_OPERATION_KINDS,
+  GEO_OPERATION_PHASE_ID_ORDER,
   GEO_OPERATION_PHASES,
   GEO_OPERATION_REFERENCE_KINDS,
   type GeoOperationReference,
@@ -132,28 +133,18 @@ export function configureXiaojingGeo(
   });
 }
 
+/**
+ * 会话身份快照：brandWorkspaceId + sessionId。静态能力清单不再随调用返回
+ * （常量数据对模型是重复噪声，逐次占据上下文）——能力边界的说明收敛到
+ * system prompt 一次说清；本函数只保留随会话变化的标识字段。
+ */
 export function xiaojingGeoContextSnapshot(): {
   brandWorkspaceId: string | null;
   sessionId: string;
-  capabilities: Array<{ id: string; status: 'available' | 'planned' }>;
 } {
   return {
     brandWorkspaceId: context.workspace ? basename(context.workspace) : null,
     sessionId: context.sessionId,
-    capabilities: [
-      { id: 'inspect-brand-context', status: 'available' },
-      { id: 'brand-knowledge', status: 'available' },
-      { id: 'brand-material-import', status: 'available' },
-      { id: 'intent-driven-operations', status: 'available' },
-      { id: 'question-opportunities', status: 'available' },
-      { id: 'content-planning', status: 'available' },
-      { id: 'content-production', status: 'available' },
-      { id: 'geo-observation', status: 'available' },
-      { id: 'distribution-planning', status: 'available' },
-      { id: 'publishing', status: 'available' },
-      { id: 'monitoring', status: 'available' },
-      { id: 'geo-dashboard', status: 'available' },
-    ],
   };
 }
 
@@ -307,6 +298,8 @@ export async function brandWorkspaceStateSummary(): Promise<BrandWorkspaceStateS
     productLines: contextResult?.productLines ?? [],
     confirmedCompetitors,
     questionPool: stageStateFrom(pools, (pool) => ({
+      id: pool.id,
+      revision: pool.revision,
       status: pool.status,
       productLine: pool.productLine,
       targetRegion: pool.targetRegion,
@@ -314,12 +307,15 @@ export async function brandWorkspaceStateSummary(): Promise<BrandWorkspaceStateS
       updatedAt: pool.updatedAt,
     })),
     topicPlan: stageStateFrom(plans, (plan) => ({
+      id: plan.id,
+      revision: plan.revision,
       status: plan.status,
       productLine: plan.productLine,
       topicCount: plan.topics.length,
       updatedAt: plan.updatedAt,
     })),
     articles: stageStateFrom(articleOperations, (operation) => ({
+      operationId: operation.id,
       status: operation.status,
       articleCount: operation.articles.length,
       approvedCount: operation.articles.filter((article) => article.approvedVersion).length,
@@ -335,11 +331,27 @@ export async function brandWorkspaceStateSummary(): Promise<BrandWorkspaceStateS
       publishStartAt: execution.publishStartAt,
       updatedAt: execution.updatedAt,
     })),
-    unfinishedOperations: stageStateFrom(unfinished, (operations) => ({
+    unfinishedOperations: stageStateFrom(unfinished, ({ operations, total }) => ({
       operations: operations.map(brandWorkspaceUnfinishedOperationEntry),
+      // 上界换算：total 是品牌内非终态轮次全量数，列表只带最新 5 条；
+      // truncatedCount > 0 时按最新优先继续推进，不把未列出的当作不存在。
+      total,
+      truncatedCount: Math.max(0, total - operations.length),
     })),
   };
 }
+
+/**
+ * 同会话未变化重读的瘦身信封（上下文经济）：inspect_brand_context 的全量
+ * 返回会留在对话历史里被后续每轮重复计费；持久状态没变时，第二次及以后
+ * 的读取只回一个「未变化」标记，模型复用先前的全量结果。状态一变（本
+ * 会话写入、接管或另一会话的更新都会改 updatedAt 等字段）序列化即不一致，
+ * 自动回到全量返回——新鲜度由逐字节比较保证，不靠失效钩子。
+ */
+let lastBrandContextRead: { sessionId: string; serialized: string } | null = null;
+
+const BRAND_CONTEXT_UNCHANGED_ENVELOPE_NOTE =
+  'The persisted brand workspace state is identical to your previous full read in this session. Reuse that earlier inspect_brand_context result; nothing changed that could re-open a question to the user.';
 
 function geoOperationService() {
   if (!context.workspace)
@@ -889,6 +901,47 @@ export function rankingCompetitorRequirement(error: unknown): {
   };
 }
 
+/**
+ * generate_articles 工具入参 → ArticleOperationSource（票 #34）：
+ * planId 与 direct 互斥（空 planId 走 Rust「最新 confirmed plan」回落）；
+ * itemIds 是生成时选取的计划项子集，只对 plan 入口有意义，与 direct 同传
+ * 即歧义。子集成员资格与逐项 approved 由 Rust seeds 准备校验。
+ */
+export function articleOperationSourceFromGenerateInput(input: {
+  planId?: string;
+  itemIds?: string[];
+  direct?: {
+    count: number;
+    themes: string[];
+    contentType: string;
+    constraints: string;
+  };
+}): ArticleOperationSource {
+  if (input.planId && input.direct) {
+    throw new Error(
+      "generate_articles accepts planId or direct, never both; omit both to use the latest confirmed plan",
+    );
+  }
+  if (input.itemIds && input.direct) {
+    throw new Error(
+      "generate_articles itemIds selects plan items and cannot be combined with direct",
+    );
+  }
+  return input.direct
+    ? {
+        kind: "direct",
+        count: input.direct.count,
+        themes: input.direct.themes,
+        contentType: input.direct.contentType as GeoContentType,
+        constraints: input.direct.constraints,
+      }
+    : {
+        kind: "confirmed-topic-plan",
+        ...(input.planId ? { planId: input.planId } : {}),
+        ...(input.itemIds ? { itemIds: input.itemIds } : {}),
+      };
+}
+
 export async function inspectBrandFact(key: FactKeyInput) {
   return knowledgeAuthority().inspect(key);
 }
@@ -1066,19 +1119,38 @@ export async function createXiaojingGeoServer() {
     tools: [
       tool(
         'inspect_brand_context',
-        "Read the current Xiaojing brand/session identity, the registered GEO capability availability, and the cross-session BrandWorkspace state summary (brand name, product lines, confirmed ranking competitors, and the latest persisted artifact status per stage: question pool, topic plan, articles, distribution plan, publish execution). The summary also lists this brand's unfinished GEO operation rounds from any prior session as read-only metadata (kind, goal, the stuck step and its display phase, pending review count, owning session, created/updated times) — use it to recognize an interrupted round and offer to continue it; draft bodies and chat transcripts are never included and stay private to their owning session. Call this before proposing a GEO action and before asking the user for any brand facts — prior sessions' confirmed knowledge and approved artifacts are already persisted here; only ask the user when this summary or inspect_brand_fact shows the fact is missing.",
+        "Read the current Xiaojing brand/session identity and the cross-session BrandWorkspace state summary (brand name, product lines, confirmed ranking competitors, and the latest persisted artifact status per stage: question pool, topic plan, articles, distribution plan, publish execution). The summary also lists this brand's unfinished GEO operation rounds from any prior session as read-only metadata (kind, goal, the stuck step and its display phase, pending review count, owning session, created/updated times) — use it to recognize an interrupted round and offer to continue it; only the 5 most recently updated rounds are listed, truncatedCount names how many older ones exist, and draft bodies and chat transcripts are never included. Call this once early in a session, before proposing a GEO action and before asking the user for any brand facts — prior sessions' confirmed knowledge and approved artifacts are already persisted here; only ask the user when this summary or inspect_brand_fact shows the fact is missing. Do not re-read speculatively: while the persisted state is unchanged, a re-read returns only the slim {kind:'brand-workspace-state-unchanged'} marker — reuse your previous full read; re-read after your own writes (material import, knowledge confirmation, takeover) or when the user reports another session's activity.",
         { reason: z.string().max(200).optional().describe('Why the current GEO context is needed.') },
-        async () => ({
-          content: [{ type: 'text' as const, text: JSON.stringify({
+        async () => {
+          const payload = {
             ...xiaojingGeoContextSnapshot(),
             workspaceState: await brandWorkspaceStateSummary(),
-          }) }],
-        }),
+          };
+          const serialized = JSON.stringify(payload);
+          if (
+            lastBrandContextRead?.sessionId === context.sessionId &&
+            lastBrandContextRead.serialized === serialized
+          ) {
+            return {
+              content: [
+                {
+                  type: 'text' as const,
+                  text: JSON.stringify({
+                    kind: 'brand-workspace-state-unchanged',
+                    note: BRAND_CONTEXT_UNCHANGED_ENVELOPE_NOTE,
+                  }),
+                },
+              ],
+            };
+          }
+          lastBrandContextRead = { sessionId: context.sessionId, serialized };
+          return { content: [{ type: 'text' as const, text: serialized }] };
+        },
         { alwaysLoad: true },
       ),
       tool(
         'start_geo_operation',
-        "Create the one BrandWorkspace GeoOperation that matches the user's intent. Use the direct intent when the user names a specific stage; when the user states a GEO goal without naming a stage, create full-optimization instead of asking which intent to pick. Keep goal a short plain-language phrase (e.g. 一轮完整的 GEO 优化) — the chat progress card broadcasts the full stage and step plan, so never restate every step in prose; report only the stage and the confirmation gate the operation currently stops at. When the starting point was derived from the brand-state summary and the user just picked it in your recommended-option question (continue last round / start a new round without a knowledge update / start over from knowledge), pass that derived starting point and its reason as startingPointReason in one plain sentence — the plan acknowledgement gate then shows where this round starts and why, so the user confirms the starting point, not just the start. Every new operation first parks at the plan acknowledgement gate: after creating it, briefly state the goal and the opening stage, tell the user to review and release the plan on the progress card, then end your turn — do not start any stage before the operation event reminder tells you the plan was released. For next-round-optimization, omit updateKnowledge first so the operation stops and asks, then record the user's answer with choose_next_round_knowledge; the explicit answer releases the replaced plan, which starts directly at its first work step (still stopping at that stage's confirmation gate); if the user already answered the knowledge branch explicitly while picking the starting point, pass that answer here instead of re-asking. When reporting to the user, use natural, professional Simplified Chinese and keep your own thinking in Simplified Chinese; never surface internal enum values, operation IDs, UUIDs, revision numbers, tool names, or endpoint names — describe the operation by its goal and stages in plain language.",
+        "Create the one BrandWorkspace GeoOperation that matches the user's intent. Use the direct intent when the user names a specific stage; when the user states a GEO goal without naming a stage, create full-optimization instead of asking which intent to pick. The starting-point derivation question also settles where the round ENDS: pass the user-picked end as endingPhase (with a one-sentence endingPointReason) so one operation spans start to end — never create a follow-up operation to continue the same chain inside the round; a new operation or takeover only happens when the user changes the plan mid-round. Keep goal a short plain-language phrase (e.g. 一轮完整的 GEO 优化) — the chat progress card broadcasts the full stage and step plan, so never restate every step in prose; report only the stage and the confirmation gate the operation currently stops at. When the starting point was derived from the brand-state summary and the user just picked it in your recommended-option question (continue last round / start a new round without a knowledge update / start over from knowledge), pass that derived starting point and its reason as startingPointReason in one plain sentence — the plan acknowledgement gate then shows where this round starts and why, so the user confirms the starting point, not just the start. Every new operation first parks at the plan acknowledgement gate: after creating it, briefly state the goal and the opening stage, tell the user to review and release the plan on the progress card, then end your turn — do not start any stage before the operation event reminder tells you the plan was released. For next-round-optimization, omit updateKnowledge first so the operation stops and asks, then record the user's answer with choose_next_round_knowledge; the explicit answer releases the replaced plan, which starts directly at its first work step (still stopping at that stage's confirmation gate); if the user already answered the knowledge branch explicitly while picking the starting point, pass that answer here instead of re-asking. When reporting to the user, use natural, professional Simplified Chinese and keep your own thinking in Simplified Chinese; never surface internal enum values, operation IDs, UUIDs, revision numbers, tool names, or endpoint names — describe the operation by its goal and stages in plain language.",
         {
           intent: z.enum(GEO_OPERATION_KINDS),
           goal: z.string().min(1).max(500),
@@ -1090,15 +1162,29 @@ export async function createXiaojingGeoServer() {
             .regex(/^[A-Za-z0-9_.-]+$/)
             .optional(),
           updateKnowledge: z.boolean().optional(),
-          startingPointReason: z
-            .string()
-            .min(1)
-            .max(300)
-            .optional()
-            .describe(
-              'One plain sentence stating the derived starting point and why (e.g. 知识 3 天前刚确认，直接从问题机会继续). Only pass it when the starting point was derived from inspect_brand_context and the user picked it; it appears on the plan acknowledgement gate so the user confirms where the round starts.',
-            ),
-        },
+            startingPointReason: z
+              .string()
+              .min(1)
+              .max(300)
+              .optional()
+              .describe(
+                'One plain sentence stating the derived starting point and why (e.g. 知识 3 天前刚确认，直接从问题机会继续). Only pass it when the starting point was derived from inspect_brand_context and the user picked it; it appears on the plan acknowledgement gate so the user confirms where the round starts, not just the start.',
+              ),
+            endingPhase: z
+              .enum(GEO_OPERATION_PHASE_ID_ORDER)
+              .optional()
+              .describe(
+                'The stage where this round ends (from the starting-point derivation question the user answered). Omit only when the user explicitly wants a single stage; otherwise pass the user-picked end so the plan card shows the full start-to-end span and the round continues through downstream stages without creating follow-up operations. Must be strictly downstream of the intent start — an end equal to the start is not a span; omit endingPhase for single-stage rounds.',
+              ),
+            endingPointReason: z
+              .string()
+              .min(1)
+              .max(300)
+              .optional()
+              .describe(
+                'One plain sentence stating why the round ends there (e.g. 用户选择先发文验证效果，做到发布为止). Only pass it together with endingPhase; it appears on the plan acknowledgement gate.',
+              ),
+          },
         async (input) => ({
           content: [
             {
@@ -1114,6 +1200,8 @@ export async function createXiaojingGeoServer() {
                   sourceOperationId: input.sourceOperationId,
                   updateKnowledge: input.updateKnowledge,
                   startingPointReason: input.startingPointReason,
+                  endingPhase: input.endingPhase,
+                  endingPointReason: input.endingPointReason,
                 }),
               }),
             },
@@ -1700,9 +1788,10 @@ export async function createXiaojingGeoServer() {
       ),
       tool(
         'generate_articles',
-        'Run the article stage from the confirmed topic plan (or a direct explicit article task the user asked for). Real provider spend; drafts then pass the dual quality-gate review. The result renders as the approval card where the user reads each draft and approves — never claim an article is approved; only the user can approve on the card.',
+        'Run the article stage from the confirmed topic plan (or a direct explicit article task the user asked for). Real provider spend; drafts then pass the dual quality-gate review. The result renders as the approval card where the user reads each draft, checks the ones to approve and approves the selection — never claim an article is approved; only the user can approve on the card. Omit planId to consume the latest confirmed topic plan; pass planId only to pin a specific confirmed plan. Pass itemIds only when the user names a subset of the confirmed plan items to write now (e.g. "先写这三篇" — copy the item ids from the confirmed plan card); the rest stay available for later generations. Never pass both planId/direct together, and never combine itemIds with direct.',
         {
           planId: z.string().min(1).max(120).optional(),
+          itemIds: z.array(z.string().min(1).max(200)).min(1).max(20).optional(),
           direct: z.object({
             count: z.number().int().min(1).max(10),
             themes: z.array(z.string().min(1).max(200)).min(1).max(10),
@@ -1713,22 +1802,13 @@ export async function createXiaojingGeoServer() {
           }).optional(),
         },
         async (input): Promise<{ content: Array<{ type: 'text'; text: string }> }> => {
-          if ((input.planId ? 1 : 0) + (input.direct ? 1 : 0) !== 1) {
-            throw new Error('generate_articles requires exactly one of planId or direct');
-          }
+          // 空 planId 走 Rust「最新 confirmed plan」回落（规格：指定或最新）；
+          // planId/direct 互斥与 itemIds 归属校验收敛在纯函数里（含历史注释
+          // 的初衷：旧实现强制二选一，模型被迫空参试探报错后绕路四步打捞
+          // planId——inspect_brand_fact 打错库、重跑 pool/plan）。
+          const source: ArticleOperationSource =
+            articleOperationSourceFromGenerateInput(input);
           const identity = stageIdentity();
-          const source: ArticleOperationSource = input.direct
-            ? {
-                kind: "direct",
-                count: input.direct.count,
-                themes: input.direct.themes,
-                contentType: input.direct.contentType as GeoContentType,
-                constraints: input.direct.constraints,
-              }
-            : {
-                kind: "confirmed-topic-plan",
-                ...(input.planId ? { planId: input.planId } : {}),
-              };
           // 执行段先行 begin：文章生成是全程最长的真实工作段，进度条从
           // 工具开始即进入 running，逐篇落定由 onArticleSettled 回报 N/M。
           await recordGeoOperationMilestone(identity, 'article-generation-started');

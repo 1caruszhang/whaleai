@@ -37,8 +37,10 @@ function sanitizePreviewHtml(html: string): string {
 
 interface AskUserQuestionPromptProps {
     request: AskUserQuestionRequest;
-    onSubmit: (requestId: string, answers: Record<string, string>) => void;
-    onCancel: (requestId: string) => void;
+    /** 返回 false 表示提交未送达（如网络失败），卡片保持可重试。 */
+    onSubmit: (requestId: string, answers: Record<string, string>) => Promise<boolean> | boolean;
+    /** 返回 false 表示取消未送达，卡片保持可重试。 */
+    onCancel: (requestId: string) => Promise<boolean> | boolean;
 }
 
 /**
@@ -166,13 +168,21 @@ export function AskUserQuestionPrompt({ request, onSubmit, onCancel }: AskUserQu
         }
     }, [hasCurrentAnswer, isLastQuestion]);
 
-    const handleSubmit = useCallback(() => {
+    // 提交/取消共用的送达守卫：送达失败（返回 false 或抛错）时解除
+    // isSubmitting，卡片保持可重试；送达成功则卡片即将被事件撤下。
+    const sendGuarded = useCallback(async (send: () => Promise<boolean> | boolean) => {
+        const handled = await Promise.resolve(send()).catch(() => false);
+        if (!handled) setIsSubmitting(false);
+    }, []);
+
+    const handleSubmit = useCallback(async () => {
         if (!allAnswered || isSubmitting) return;
         setIsSubmitting(true);
 
-        // Convert answers to the runtime format. Builtin/CC questions omit
-        // `id` and keep the historical numeric keys; the wire contract requires
-        // native question ids in ToolRequestUserInputResponse.answers.
+        // Convert answers to the runtime format. The Agent SDK's
+        // AskUserQuestion contract keys `answers` by the question's full
+        // text (not id/index) — anything else resolves to "user did not
+        // answer" on the model side.
         const formattedAnswers: Record<string, string> = {};
         request.questions.forEach((question, idx) => {
             const selectedOptions = answers[idx] || [];
@@ -181,17 +191,17 @@ export function AskUserQuestionPrompt({ request, onSubmit, onCancel }: AskUserQu
                 opt === CUSTOM_INPUT_MARKER ? (customInputs[idx] || '').trim() : opt
             ).filter(Boolean);
             if (finalOptions.length === 0 && question.required === false) return;
-            formattedAnswers[question.id ?? String(idx)] = finalOptions.join(',');
+            formattedAnswers[question.question] = finalOptions.join(', ');
         });
 
-        onSubmit(request.requestId, formattedAnswers);
-    }, [allAnswered, isSubmitting, answers, customInputs, request, onSubmit]);
+        await sendGuarded(() => onSubmit(request.requestId, formattedAnswers));
+    }, [allAnswered, isSubmitting, answers, customInputs, request, onSubmit, sendGuarded]);
 
-    const handleCancel = useCallback(() => {
+    const handleCancel = useCallback(async () => {
         if (isSubmitting) return;
         setIsSubmitting(true);
-        onCancel(request.requestId);
-    }, [isSubmitting, request.requestId, onCancel]);
+        await sendGuarded(() => onCancel(request.requestId));
+    }, [isSubmitting, request.requestId, onCancel, sendGuarded]);
 
     // Navigate to specific question by clicking indicator
     const handleIndicatorClick = useCallback((idx: number) => {

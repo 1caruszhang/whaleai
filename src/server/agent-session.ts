@@ -121,6 +121,28 @@ function messageId(prefix: 'user' | 'assistant'): string {
   return `${prefix}-${Date.now()}-${turnSequence}`;
 }
 
+/**
+ * 单条提问失效：撤登记、广播 expired 让渲染层撤卡、deny 掉 SDK 侧
+ * Promise（无人消费也不泄漏）。
+ */
+function failQuestion(requestId: string, reason: string): void {
+  const pending = pendingQuestions.get(requestId);
+  if (!pending) return;
+  pendingQuestions.delete(requestId);
+  broadcast('ask-user-question:expired', { requestId });
+  pending.resolve({ behavior: 'deny', message: reason });
+}
+
+/**
+ * turn 死亡但用户尚未作答时，悬挂的提问必须随之失效——否则卡片
+ * 残挂，点击提交后什么都不会发生。
+ */
+function failAllPendingQuestions(reason: string): void {
+  for (const requestId of [...pendingQuestions.keys()]) {
+    failQuestion(requestId, reason);
+  }
+}
+
 function cloneMessage(message: LiveMessage): LiveMessage {
   return structuredClone(message);
 }
@@ -212,6 +234,8 @@ function armStoppingWatchdog(): void {
     flushStreamingMessage();
     activeQuery = null;
     activeAbortController = null;
+    // 强杀不经 abort，提问监听器不会触发；这里一并失效，防止卡片残挂。
+    failAllPendingQuestions('Agent turn force-terminated; the question is no longer pending.');
     broadcast('chat:agent-error', {
       message: `停止响应超时（${STOPPING_WATCHDOG_MS / 1000}s）：Agent 未结束本轮，已强制终止。`,
     });
@@ -321,19 +345,14 @@ async function askUserQuestion(
 ): Promise<PermissionResult> {
   const requestId = randomUUID();
   return await new Promise<PermissionResult>((resolve) => {
-    const finish = (result: PermissionResult) => {
-      pendingQuestions.delete(requestId);
-      resolve(result);
-    };
-    pendingQuestions.set(requestId, { input, resolve: finish });
+    pendingQuestions.set(requestId, { input, resolve });
     broadcast('ask-user-question:request', {
       requestId,
       questions: Array.isArray(input.questions) ? input.questions : [],
       previewFormat: 'html',
     });
     signal.addEventListener('abort', () => {
-      broadcast('ask-user-question:expired', { requestId });
-      finish({ behavior: 'deny', message: 'User question was cancelled.' });
+      failQuestion(requestId, 'User question was cancelled.');
     }, { once: true });
   });
 }
@@ -546,6 +565,8 @@ async function runTurn(
         turnId,
         status: 'complete',
       };
+      // 流在提问未决时非异常收尾（罕见但真实）：扫尾防悬挂死卡。
+      failAllPendingQuestions('Agent turn completed; the question is no longer pending.');
       setState('idle');
     }
   } catch (error) {
@@ -576,6 +597,8 @@ async function runTurn(
         });
         setState('idle');
       } else {
+        // turn 非中止性死亡：悬挂提问随 turn 失效（abort 监听器不会触发）。
+        failAllPendingQuestions('Agent turn failed; the question is no longer pending.');
         const message = error instanceof Error ? error.message : String(error);
         broadcast('chat:agent-error', { message });
         setState('error');
@@ -604,6 +627,9 @@ export async function initializeAgent(
   workspacePath = nextWorkspacePath;
   currentSessionId = initialSessionId ?? randomUUID();
   hasInitialPrompt = Boolean(initialPrompt?.trim());
+  // transcript 加载可能抛错，悬挂提问的失效清理必须先行——旧会话的
+  // 死卡不能在任何失败路径下跨初始化存活。
+  failAllPendingQuestions('Session reinitialized; the question is no longer pending.');
   const transcript = await loadSessionTranscript(currentSessionId);
   transcriptCursor = transcript.cursor;
   messages = transcript.messages.map(message => ({ ...message }));

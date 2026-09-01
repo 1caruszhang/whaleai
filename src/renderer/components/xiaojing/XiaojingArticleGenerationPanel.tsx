@@ -13,6 +13,7 @@ import {
   type ArticleOperationProjection,
   type ArticleProjection,
 } from "../../../shared/geo/articleGeneration";
+import { ARTICLE_STATUS_LABELS } from "./articleStatusLabels";
 import { CONTENT_TYPE_LABELS } from "./contentTypeLabels";
 import ArticleBodyPreview from "./ArticleBodyPreview";
 
@@ -22,16 +23,6 @@ interface XiaojingArticleGenerationPanelProps {
   /** 会话内工具推进后的产物刷新信号（票 29：面板只读化后的刷新联动）。 */
   refreshKey?: number;
 }
-
-const STATUS_LABELS: Record<ArticleProjection["status"], string> = {
-  planned: "排队中",
-  drafting: "生成中",
-  draft_ready: "草稿待审核",
-  reviewing: "审校中",
-  approved: "已批准",
-  generation_failed: "生成失败",
-  rejected: "风险阻断",
-};
 
 /**
  * 票 29：文章阶段面板是纯只读投影。生成、编辑、重试与批准只出现在
@@ -64,9 +55,11 @@ export default memo(function XiaojingArticleGenerationPanel({
       return () => {
         active = false;
       };
-    void (operationId
-      ? loadArticleOperation(apiPost, identity, operationId)
-      : loadLatestArticleOperation(apiPost, identity))
+    void (
+      operationId
+        ? loadArticleOperation(apiPost, identity, operationId)
+        : loadLatestArticleOperation(apiPost, identity)
+    )
       .then((latest) => {
         if (!active) return;
         setError(null);
@@ -176,7 +169,8 @@ export default memo(function XiaojingArticleGenerationPanel({
                       </p>
                       <p className="mt-1 text-xs text-[var(--ink-muted)]">
                         {CONTENT_TYPE_LABELS[article.contentType]} ·{" "}
-                        {STATUS_LABELS[article.status]} · v{article.revision}
+                        {ARTICLE_STATUS_LABELS[article.status]} · v
+                        {article.revision}
                         {article.approvedRevision
                           ? ` · 正式稿 v${article.approvedRevision}`
                           : ""}

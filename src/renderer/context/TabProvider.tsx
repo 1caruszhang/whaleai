@@ -366,11 +366,31 @@ export default function TabProvider({
     }
   }, [apiPost]);
 
-  const respondAskUserQuestion = useCallback(async (answers: Record<string, string> | null) => {
+  // 返回 true = 卡片可撤（已送达或服务端确认提问已失效）；
+  // 返回 false = 未知状态（网络失败），保留卡片供用户重试。
+  const respondAskUserQuestion = useCallback(async (answers: Record<string, string> | null): Promise<boolean> => {
     const requestId = pendingAskUserQuestion?.requestId;
-    if (!requestId) return;
-    const response = await apiPost<{ success: boolean }>('/api/ask-user-question/respond', { requestId, answers });
-    if (response.success) setPendingAskUserQuestion(null);
+    if (!requestId) return true;
+    try {
+      const response = await apiPost<{ success: boolean }>('/api/ask-user-question/respond', { requestId, answers });
+      if (response.success) {
+        setPendingAskUserQuestion(null);
+        return true;
+      }
+      // 服务端已不认识这个提问（turn 已终止 / 侧车重启 / 他处已答）：
+      // 撤卡并告知，否则死卡冻在聊天流里，点击永远没有效果。
+      setAgentError(answers === null
+        ? '该问题已失效，取消未能送达；请直接用自然语言继续。'
+        : '该问题已失效，你的选择未能送达；请用自然语言重新说明。');
+      setPendingAskUserQuestion(null);
+      return true;
+    } catch (error) {
+      // 网络类失败：提问在服务端可能仍活着，撤卡反而把结构化作答入口
+      // 丢掉（turn 仍 running 时新消息也会被拒）。保留卡片允许重试。
+      const reason = error instanceof Error ? error.message : String(error);
+      setAgentError(`提交未送达（${reason}）；请在卡片上重试，或停止本轮后用自然语言继续。`);
+      return false;
+    }
   }, [apiPost, pendingAskUserQuestion]);
 
   const apiValue = useMemo<TabApiContextValue>(() => ({

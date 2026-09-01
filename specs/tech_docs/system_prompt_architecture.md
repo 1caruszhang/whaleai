@@ -4,13 +4,13 @@
 
 `src/server/system-prompt.ts::buildSystemPrompt()` 组装产品身份、GEO 意图决策表、知识 authority 和人工确认边界。`agent-session.ts` 把它作为 SDK `systemPrompt`，同时固定模型、effort、builtin tool allowlist、`xiaojing-geo` server 与 `canUseTool` gate。
 
-意图决策表与 `src/shared/geo/operation.ts::classifyGeoIntent` 保持一致：用户点名具体环节用对应直接意图；表达 GEO 目标但未点名环节默认 `full-optimization`。创建操作后，完整阶段与步骤计划由聊天里的进度卡片播报并停在首个确认门，不就范围做开放式提问；`goal` 只用简短目标短语（如「一轮完整的 GEO 优化」），正文不复述阶段链条，只说明当前停靠的确认门。每个有后果的步骤自带确认门，默认意图因此是安全的。
+意图决策表与 `src/shared/geo/operation.ts::classifyGeoIntent` 保持一致：用户点名具体环节用对应直接意图；表达 GEO 目标但未点名环节默认 `full-optimization`。创建操作后，完整阶段与步骤计划由聊天里的进度卡片播报并停在首个确认门，不就范围做开放式提问；`goal` 只用简短目标短语（如「一轮完整的 GEO 优化」），正文不复述阶段链条，只说明当前停靠的确认门；`goal` 措辞必须与结构跨度一致（ADR-0011）：起点为知识链路时不得写「从问题选择开始」类措辞，起止选择如实经 `startingPointReason`/`endingPhase` 进入认可门文案，goal、认可门 summary 与进度卡跨度标签三处叙事不得互相矛盾。每个有后果的步骤自带确认门，默认意图因此是安全的。
 
 通信规则：默认用陈述句告知（notify），只有真正阻塞且无安全默认时才经 `AskUserQuestion` 工具提问，一次回复最多一个问题、2 到 4 个选项、推荐项放第一个。该规则与 `XIAOJING_SESSION_FILES` 提醒的附件处置措辞一致，两处必须同步修改。
 
-新轮次入口的起点推导（ADR-0010 Decision 5，票 #27）：「先读后问」细化为「带推荐与理由的选项式询问」——摘要有可复用已确认状态或未完成轮次、而用户未指明起点时，先读摘要再做一次起点推导询问（继续上轮〔附卡点〕/ 开新一轮不更新知识 / 全量重来，推荐项放第一个并写明理由；全新品牌无可推导则直接按决策表创建）。推导结果经 `start_geo_operation` 的 `startingPointReason` 进入计划认可门文案（「从哪里开始、为什么」），不改写步骤序列或确认门位置；接管被拒时把工具结果 hint 转述为可行动的下一步，不裸报错误。
+新轮次入口的起止推导（ADR-0010 Decision 5，票 #27 起点、票 #34 扩展到终点）：「先读后问」细化为「带推荐与理由的选项式询问」——摘要有可复用已确认状态或未完成轮次、而用户未指明起点时，先读摘要再做一次起止推导询问（继续上轮〔附卡点〕/ 开新一轮不更新知识 / 全量重来，推荐项放第一个并写明理由；同一个问题里以封闭选项追问终点、推荐项从用户目标与品牌状态推导，用户目标已点名终点则不问；全新品牌无可推导则直接按决策表创建）。推导结果经 `start_geo_operation` 的 `startingPointReason` 与 `endingPhase`/`endingPointReason` 进入计划认可门文案（「从哪里开始、到哪里结束、为什么」）；起止推导只决定步骤跨度（跨度组合与校验语义见 `geo_operations.md`），不增删确认门、不移动门位置。一个轮次从起点到终点只用一个操作：终点之后的阶段不新起操作、轮内不重复征询「接下来做什么」，只有用户中途改主意才新开操作或发起接管。接管被拒时把工具结果 hint 转述为可行动的下一步，不裸报错误。文章生成时选取与弃用的 prompt 指引（`itemIds` 子集、以已批准集合为事实依据、不替用户追问弃用原因）随 `article_generation.md` 的票 #34 行为演进同步维护。
 
-SDK `settingSources` 为空，因此不会从用户级或 workspace 配置自动扩展产品能力。Prompt 不是权限边界；tool allowlist、Rust admission 和 BrandWorkspace revision checks 必须独立拒绝越权。
+SDK `settingSources` 为空，因此不会从用户级或 workspace 配置自动扩展产品能力。产品能力边界的静态说明（登记能力全部可用、范围外不得声称或代答）收敛在 prompt 身份段一次说清，`inspect_brand_context` 返回体不再逐次重复携带。Prompt 不是权限边界；tool allowlist、Rust admission 和 BrandWorkspace revision checks 必须独立拒绝越权。
 
 主聊天是唯一 Agent 发起入口。结构化卡片只提交用户决策或确定性 action，不能组装第二套 prompt 或启动另一个 Agent。排行榜生成返回已确认竞品不足 5 家时有一个窄例外：Agent 留在当前聊天说明缺口；Session Sidecar 同时绑定原文章请求与签发时用户消息，该状态跨 Agent turn 与每轮 MCP server 重建存续，同请求重试不移动原签发边界。用户随后明确写出名称后，`confirm_ranking_competitors` 只传名称；服务端从 Gate 取主体、逐字核对最新持久化用户消息，再把该原话作为 `asked/user-stated` 审计，经同一 KnowledgeAuthority 提议并立即采纳；补足后工具直接恢复原文章请求。该入口不得接收模型推断、联网发现或仅被提到的名称。
 

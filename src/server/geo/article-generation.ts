@@ -84,6 +84,12 @@ export interface ArticlePersistencePort {
     /** 聊天修订（票 38）携带用户指令原文，写入版本行 model_audit。 */
     reason?: string;
   }): Promise<ArticleProjection>;
+  /** 用户显式弃用（票 #34）：终态翻转，Rust 校验来源状态与 CAS。 */
+  discard(input: {
+    operationId: string;
+    articleId: string;
+    expectedRevision: number;
+  }): Promise<ArticleProjection>;
   body(input: {
     operationId: string;
     articleId: string;
@@ -154,12 +160,14 @@ export class RustArticlePort implements ArticlePersistencePort {
       source.kind === "confirmed-topic-plan"
         ? {
             sourceKind: source.kind,
-            topicPlanId: source.planId,
+            topicPlanId: source.planId ?? null,
+            itemIds: source.itemIds ?? null,
             directSpec: null,
           }
         : {
             sourceKind: source.kind,
             topicPlanId: null,
+            itemIds: null,
             directSpec: {
               count: source.count,
               themes: source.themes,
@@ -213,6 +221,12 @@ export class RustArticlePort implements ArticlePersistencePort {
     input: Parameters<ArticlePersistencePort["edit"]>[0],
   ): Promise<ArticleProjection> {
     return this.post("/api/brand-articles/edit", input, "article");
+  }
+
+  discard(
+    input: Parameters<ArticlePersistencePort["discard"]>[0],
+  ): Promise<ArticleProjection> {
+    return this.post("/api/brand-articles/discard", input, "article");
   }
 
   body(
@@ -855,6 +869,23 @@ export class ArticleGenerationService {
       throw new Error("article_generation_title_mismatch");
     }
     return this.persistence.edit(input);
+  }
+
+  /**
+   * 用户显式弃用（票 #34）：批准卡上的「不要这篇」。终态翻转由 Rust owner
+   * 校验（draft_ready/generation_failed/rejected 可弃，approved/planned/
+   * 在途态拒绝；CAS revision）。弃用不投递决策 reminder——它是减法，不改
+   * 变「以 approved 集合为事实依据继续」的推进语义。
+   */
+  discard(input: {
+    workspaceId: string;
+    sessionId: string;
+    operationId: string;
+    articleId: string;
+    expectedRevision: number;
+  }): Promise<ArticleProjection> {
+    this.assertIdentity(input);
+    return this.persistence.discard(input);
   }
 
   async approve(input: {

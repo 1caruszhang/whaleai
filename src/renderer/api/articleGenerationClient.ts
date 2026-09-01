@@ -105,7 +105,19 @@ export function approveArticle(
   ).then(requireArticle);
 }
 
-/** 单篇重试（同步执行到新版本落盘）：generation_failed 的文章逐篇恢复，不重跑整批。 */
+/** 用户显式弃用（票 #34）：draft_ready/生成失败/风险阻断稿可弃，终态不进分发计划；已批准稿不可弃。 */
+export function discardArticle(
+  apiPost: ArticleApiPost,
+  identity: { workspaceId: string; sessionId: string },
+  input: { operationId: string; articleId: string; expectedRevision: number },
+): Promise<ArticleProjection> {
+  return apiPost<ArticleResponse>(
+    "/api/xiaojing/articles/discard",
+    { ...identity, ...input },
+  ).then(requireArticle);
+}
+
+/** 单篇重试（fire-and-forget：返回 claim 前旧快照，新稿/再失败由 /latest 轮询追上）：generation_failed 的文章逐篇恢复，不重跑整批。 */
 export function retryArticle(
   apiPost: ArticleApiPost,
   identity: { workspaceId: string; sessionId: string },

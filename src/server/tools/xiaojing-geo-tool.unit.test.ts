@@ -11,6 +11,7 @@ import type { DistributionPlanProjection } from '../../shared/geo/distributionPl
 import type { PublishExecutionProjection } from '../../shared/geo/publishScheduler';
 import {
   accountTokenCacheFingerprint,
+  articleOperationSourceFromGenerateInput,
   brandWorkspaceStateSummary,
   configureXiaojingGeo,
   confirmRankingCompetitors,
@@ -386,6 +387,45 @@ describe('startGeoOperation starting-point derivation reason (ticket #27)', () =
     expect(ack?.confirmation?.summary).toContain('从哪里开始');
     expect(ack?.confirmation?.summary).toContain('知识 3 天前刚确认，直接从问题机会继续');
   });
+
+  // 起止推导：endingPhase/endingPointReason 随创建透传，认可门呈现完整跨度。
+  it('spans the plan from the derived start through the endingPhase on the plan-ack gate', async () => {
+    configureXiaojingGeo({}, {
+      sessionId: 'session-round-two',
+      workspace: 'C:/ws/brand-a',
+    });
+    api.mockResolvedValue({ ok: true, operation: operation() });
+
+    await startGeoOperation({
+      intent: 'article-generation',
+      goal: '从文章一路做到发布',
+      startingPointReason: '知识、问题池与内容计划均已确认',
+      endingPhase: 'publishing',
+      endingPointReason: '用户选择先发文验证效果',
+    });
+
+    expect(api).toHaveBeenCalledTimes(1);
+    const [path, , body] = api.mock.calls[0] as unknown as [
+      string,
+      string,
+      { payload: { steps: Array<{ id: string; confirmation?: { kind: string; summary: string } }> } },
+    ];
+    expect(path).toBe('/api/brand-geo-operations/create');
+    const ids = body.payload.steps.map((step) => step.id);
+    // 跨度 = 文章直达段 + 分发段 + 发布段；计划认可门仍在首位。
+    expect(ids).toEqual([
+      'acknowledge-plan',
+      'generate-articles',
+      'confirm-articles',
+      'plan-distribution',
+      'confirm-distribution',
+      'prepare-publish',
+      'confirm-publish',
+      'observe-publish',
+    ]);
+    const ack = body.payload.steps.find((step) => step.id === 'acknowledge-plan');
+    expect(ack?.confirmation?.summary).toContain('到哪里结束：发布——用户选择先发文验证效果');
+  });
 });
 
 /**
@@ -555,6 +595,7 @@ describe('brandWorkspaceStateSummary', () => {
       '/api/brand-question-pools/latest': {
         ok: true,
         pool: {
+          id: 'pool-latest-1', revision: 2,
           status: 'confirmed', productLine: '汽车音响改装', targetRegion: '成都',
           questions: [{}, {}], updatedAt: '2026-08-27T10:00:00Z',
         },
@@ -562,6 +603,7 @@ describe('brandWorkspaceStateSummary', () => {
       '/api/brand-topic-plans/latest': {
         ok: true,
         plan: {
+          id: 'plan-latest-1', revision: 4,
           status: 'confirmed', productLine: '汽车音响改装', topics: [{}],
           updatedAt: '2026-08-27T11:00:00Z',
         },
@@ -569,6 +611,7 @@ describe('brandWorkspaceStateSummary', () => {
       '/api/brand-articles/latest': {
         ok: true,
         operation: {
+          id: 'article-op-latest-1',
           status: 'completed',
           articles: [{ approvedVersion: { id: 'v' } }, { approvedVersion: null }],
           updatedAt: '2026-08-27T12:00:00Z',
@@ -594,9 +637,10 @@ describe('brandWorkspaceStateSummary', () => {
       brandName: '目标品牌',
       productLines: ['汽车音响改装'],
       confirmedCompetitors: ['甲', '乙', '丙', '丁', '戊'],
-      questionPool: { present: true, state: { status: 'confirmed', questionCount: 2 } },
-      topicPlan: { present: true, state: { topicCount: 1 } },
-      articles: { present: true, state: { articleCount: 2, approvedCount: 1 } },
+      // id/revision 让 Agent 无需重跑 pool/plan 打捞句柄（起点推导直连）。
+      questionPool: { present: true, state: { id: 'pool-latest-1', revision: 2, status: 'confirmed', questionCount: 2 } },
+      topicPlan: { present: true, state: { id: 'plan-latest-1', revision: 4, topicCount: 1 } },
+      articles: { present: true, state: { operationId: 'article-op-latest-1', articleCount: 2, approvedCount: 1 } },
       distributionPlan: { present: true, state: { industry: '汽车后市场' } },
       publish: { present: true, state: { status: 'scheduled' } },
     });
@@ -677,6 +721,7 @@ describe('brandWorkspaceStateSummary', () => {
     routeBrandWorkspace({
       '/api/brand-geo-operations/unfinished': {
         ok: true,
+        total: 1,
         operations: [
           {
             id: 'op-prior-round',
@@ -706,7 +751,8 @@ describe('brandWorkspaceStateSummary', () => {
 
     const summary = await brandWorkspaceStateSummary();
 
-    // 元信息五要素 + 展示阶段；无正文字段进入摘要。
+    // 元信息五要素 + 展示阶段；无正文字段进入摘要。total=1、条目 1：
+    // 未超上界时无截断。
     expect(summary?.unfinishedOperations).toEqual({
       present: true,
       state: {
@@ -730,6 +776,8 @@ describe('brandWorkspaceStateSummary', () => {
             updatedAt: '2026-08-30T18:00:00Z',
           },
         ],
+        total: 1,
+        truncatedCount: 0,
       },
     });
 
@@ -737,5 +785,129 @@ describe('brandWorkspaceStateSummary', () => {
     routeBrandWorkspace({});
     const degraded = await brandWorkspaceStateSummary();
     expect(degraded?.unfinishedOperations).toEqual({ present: false });
+  });
+
+  it('derives truncatedCount when the unfinished list is capped below the total', async () => {
+    configureXiaojingGeo({}, {
+      sessionId: 'summary-session',
+      workspace: 'C:/ws/brand-a',
+    });
+    routeBrandWorkspace({
+      '/api/brand-geo-operations/unfinished': {
+        ok: true,
+        // Rust 侧 LIMIT 截断后的响应：只回最新 1 条，但 total 报全量 7。
+        operations: [
+          {
+            id: 'op-newest',
+            sessionId: 'session-prior',
+            kind: 'full-optimization',
+            goal: '最新一轮',
+            status: 'awaiting-confirmation',
+            stuckStep: null,
+            pendingConfirmation: null,
+            pendingReviewCount: 0,
+            createdAt: '2026-08-29T09:00:00Z',
+            updatedAt: '2026-08-31T18:00:00Z',
+          },
+        ],
+        total: 7,
+      },
+    });
+
+    const summary = await brandWorkspaceStateSummary();
+
+    // 摘要如实报告截断：truncatedCount = total - 条目数，模型据此知道
+    // 还有更旧的未完成轮次未列出，而不是当作不存在。
+    const unfinished = summary?.unfinishedOperations;
+    expect(unfinished?.present).toBe(true);
+    if (unfinished?.present) {
+      expect(unfinished.state.operations).toHaveLength(1);
+      expect(unfinished.state.total).toBe(7);
+      expect(unfinished.state.truncatedCount).toBe(6);
+    }
+  });
+
+  it('treats a missing total as a contract error and degrades the stage to absent', async () => {
+    configureXiaojingGeo({}, {
+      sessionId: 'summary-session',
+      workspace: 'C:/ws/brand-a',
+    });
+    // 对端 Rust 版本落后于契约：有 operations 没有 total。静默降级会谎报
+    // truncatedCount=0，端口层必须拒绝；摘要按既有单阶段失败语义降级。
+    routeBrandWorkspace({
+      '/api/brand-geo-operations/unfinished': {
+        ok: true,
+        operations: [],
+      },
+    });
+
+    const summary = await brandWorkspaceStateSummary();
+
+    expect(summary?.unfinishedOperations).toEqual({ present: false });
+  });
+});
+
+describe('articleOperationSourceFromGenerateInput (票 #34 生成时选取)', () => {
+  it('defaults to the latest confirmed plan and carries an explicit subset', () => {
+    expect(articleOperationSourceFromGenerateInput({})).toEqual({
+      kind: 'confirmed-topic-plan',
+    });
+    expect(
+      articleOperationSourceFromGenerateInput({
+        planId: 'plan-7',
+        itemIds: ['item-b', 'item-a'],
+      }),
+    ).toEqual({
+      kind: 'confirmed-topic-plan',
+      planId: 'plan-7',
+      itemIds: ['item-b', 'item-a'],
+    });
+  });
+
+  it('keeps planId and direct mutually exclusive', () => {
+    expect(() =>
+      articleOperationSourceFromGenerateInput({
+        planId: 'plan-7',
+        direct: {
+          count: 1,
+          themes: ['主题'],
+          contentType: 'guide',
+          constraints: '',
+        },
+      }),
+    ).toThrow(/never both/);
+  });
+
+  it('rejects a plan item subset combined with direct', () => {
+    expect(() =>
+      articleOperationSourceFromGenerateInput({
+        itemIds: ['item-a'],
+        direct: {
+          count: 1,
+          themes: ['主题'],
+          contentType: 'guide',
+          constraints: '',
+        },
+      }),
+    ).toThrow(/cannot be combined with direct/);
+  });
+
+  it('maps the direct payload verbatim', () => {
+    expect(
+      articleOperationSourceFromGenerateInput({
+        direct: {
+          count: 2,
+          themes: ['主题一', '主题二'],
+          contentType: 'ranking',
+          constraints: '六家并列',
+        },
+      }),
+    ).toEqual({
+      kind: 'direct',
+      count: 2,
+      themes: ['主题一', '主题二'],
+      contentType: 'ranking',
+      constraints: '六家并列',
+    });
   });
 });

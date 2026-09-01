@@ -231,8 +231,8 @@ export default function Chat({
           {pendingAskUserQuestion && (
             <AskUserQuestionPrompt
               request={pendingAskUserQuestion}
-              onSubmit={(_requestId, answers) => void respondAskUserQuestion(answers)}
-              onCancel={() => void respondAskUserQuestion(null)}
+              onSubmit={(_requestId, answers) => respondAskUserQuestion(answers)}
+              onCancel={() => respondAskUserQuestion(null)}
             />
           )}
         </div>

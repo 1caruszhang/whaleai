@@ -28,6 +28,12 @@ export type ArticleOperationSource =
   | {
       kind: "confirmed-topic-plan";
       planId?: string;
+      /**
+       * 本次消费的计划项子集（生成时选取，票 #34）：缺省 = 该 plan 的全部
+       * selectedItemIds；传入时必须是 selectedItemIds 的子集且逐项 approved。
+       * 确认的 plan 冻结的是「有资格生成」，不是「必须全部生成」。
+       */
+      itemIds?: string[];
     }
   | {
       kind: "direct";
@@ -44,7 +50,9 @@ export type ArticleGenerationStatus =
   | "reviewing"
   | "approved"
   | "generation_failed"
-  | "rejected";
+  | "rejected"
+  /** 用户显式弃用（票 #34）：终态，不进分发计划；approved 不可弃用。 */
+  | "discarded";
 
 export interface ArticleReviewIssue {
   source: "deterministic" | "reflection";

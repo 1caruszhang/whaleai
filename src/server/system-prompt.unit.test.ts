@@ -18,6 +18,10 @@ describe('buildSystemPrompt', () => {
     expect(prompt).toContain('xiaojing-geo');
     expect(prompt).toContain('start_geo_operation');
     expect(prompt).not.toMatch(/mcp__[a-z-]+__/);
+    // 静态能力清单从 inspect_brand_context 返回体收敛到 prompt 身份段：
+    // 登记能力全部可用、范围外不得声称——一次说清，不逐次重复发送。
+    expect(prompt).toContain('产品登记的能力范围（当前全部处于可用状态）');
+    expect(prompt).toContain('不得虚构计划中的能力切片');
   });
 
   // 回归（跨 Session 状态盲区）：品牌事实与已确认竞品是 BrandWorkspace 持久
@@ -142,10 +146,24 @@ describe('starting-point derivation asks with a recommended option (ADR-0010, ti
     expect(prompt).toContain('裸报');
   });
 
-  // AC5：推导不改写步骤序列与确认门位置（入口智能 + 中间确定）。
+  // AC5：推导只经 endingPhase 表达跨度，理由不碰确认门（入口智能 + 中间确定）。
   it('keeps derivation from rewriting the step sequence or moving any gate', () => {
-    expect(prompt).toContain('不改写步骤序列');
+    expect(prompt).toContain('跨度必须由 endingPhase 显式表达');
     expect(prompt).toContain('不增删确认门');
+    expect(prompt).toContain('不移动任何确认门的位置');
+  });
+
+  // 起止推导（endingPhase）：起点询问同时裁决终点，一个轮次一张计划卡。
+  it('settles the round end in the same starting-point question and never re-asks mid-round', () => {
+    expect(prompt).toContain('起止推导');
+    expect(prompt).toContain('到哪里结束');
+    expect(prompt).toContain('endingPhase');
+    expect(prompt).toContain('endingPointReason');
+    // 终点之后不新起操作、不重复征询「接下来做什么」。
+    expect(prompt).toContain('一个轮次从起点到终点只用一个操作');
+    expect(prompt).toContain('不在轮内重复征询');
+    // 用户目标已点名终点时不问，直接带上。
+    expect(prompt).toContain('不问终点，直接带上');
   });
 });
 

@@ -259,6 +259,19 @@ export interface PlanGeoOperationInput {
    * 步骤序列或确认门位置。可选；空白视为未提供。
    */
   startingPointReason?: string;
+  /**
+   * 终点阶段（起止推导）：本轮在哪个阶段收尾。省略 = 意图的自然跨度
+   * （单阶段意图一段；full/next-round 全链）。提供时必须是意图起点阶段
+   * 的下游阶段，否则 geo_operation_ending_phase_invalid——起点与终点
+   * 一起决定计划卡的步骤跨度，轮内不再为同一链条新起操作重复问
+   * 「接下来做什么」。产物确认门位置不受影响。
+   */
+  endingPhase?: GeoOperationPhaseId;
+  /**
+   * 终点推导理由：与 startingPointReason 同款纪律，只进入计划认可门
+   * summary。仅在携带 endingPhase 时允许提供。
+   */
+  endingPointReason?: string;
 }
 
 interface StepDefinition {
@@ -470,6 +483,89 @@ const FULL_OPTIMIZATION_STEPS: readonly StepDefinition[] = [
   ...MONITOR_STEPS,
 ];
 
+/**
+ * 六阶段链序（与 GEO_OPERATION_PHASES 的展示分组同一词汇）。起止推导
+ * （endingPhase）按这张表组合跨度：意图的起点段 + 下游各段，直到终点段。
+ * 单一词汇源：`GeoOperationPhaseId` 联合类型与 MCP 层的 zod 枚举都从这
+ * 张表派生，新增阶段只改这里。
+ */
+export const GEO_OPERATION_PHASE_ID_ORDER = [
+  "knowledge",
+  "questions",
+  "content",
+  "distribution",
+  "publishing",
+  "monitoring",
+] as const;
+
+export type GeoOperationPhaseId = (typeof GEO_OPERATION_PHASE_ID_ORDER)[number];
+
+const PHASE_SEGMENTS: Record<GeoOperationPhaseId, readonly StepDefinition[]> = {
+  knowledge: KNOWLEDGE_STEPS,
+  questions: QUESTION_STEPS,
+  content: CONTENT_STEPS,
+  distribution: DISTRIBUTION_STEPS,
+  publishing: PUBLISH_STEPS,
+  monitoring: MONITOR_STEPS,
+};
+
+/**
+ * 跨度组合：无终点时整段照用意图的自然跨度；带终点时起点段（缺省＝自然
+ * 跨度，意图可用覆盖替换该段，如文章直达用 DIRECT_ARTICLE_STEPS 跳过已
+ * 确认的计划步骤）+ 链序上直到终点段的各标准段。覆盖必须恰好覆盖
+ * startPhase 一个阶段——多盖一段会让链序追加重复（无计划发布意图的自然
+ * 跨度含两段，带终点时覆盖只留分发段）。终点不在起点严格下游（上游或
+ * 同段，含 performance-inspection 等链外意图）直接 fail-loud——那不是
+ * 跨度，是矛盾的输入；单阶段轮次省略 endingPhase，不用终点重申起点。
+ */
+function spanDefinitions(
+  startPhase: GeoOperationPhaseId,
+  endingPhase: GeoOperationPhaseId | undefined,
+  naturalDefinitions: readonly StepDefinition[],
+  startSegment: readonly StepDefinition[] = naturalDefinitions,
+): readonly StepDefinition[] {
+  if (!endingPhase) return naturalDefinitions;
+  const startIndex = GEO_OPERATION_PHASE_ID_ORDER.indexOf(startPhase);
+  const endIndex = GEO_OPERATION_PHASE_ID_ORDER.indexOf(endingPhase);
+  if (endIndex <= startIndex) {
+    throw new Error("geo_operation_ending_phase_invalid");
+  }
+  return [
+    ...startSegment,
+    ...GEO_OPERATION_PHASE_ID_ORDER.slice(startIndex + 1, endIndex + 1).flatMap(
+      (phase) => PHASE_SEGMENTS[phase],
+    ),
+  ];
+}
+
+/** 终点推导理由的归一：与起点理由同款纪律；无 endingPhase 时拒绝提供。 */
+function endingPointReasonOf(
+  reason: string | undefined,
+  endingPhase: GeoOperationPhaseId | undefined,
+): string | null {
+  const value = reason?.trim();
+  if (!endingPhase && value) {
+    throw new Error("geo_operation_ending_point_reason_invalid");
+  }
+  if (!value) return null;
+  if ([...value].length > SPAN_POINT_REASON_MAX_CHARS) {
+    throw new Error("geo_operation_ending_point_reason_invalid");
+  }
+  return value;
+}
+
+/** 终点在计划认可门上的一句话（阶段口语名 + 可选理由）。 */
+function endingStatement(
+  endingPhase: GeoOperationPhaseId | undefined,
+  reason: string | null,
+): string | null {
+  if (!endingPhase) return null;
+  const title =
+    GEO_OPERATION_PHASES.find((phase) => phase.id === endingPhase)?.title ??
+    endingPhase;
+  return reason ? `${title}——${reason}` : title;
+}
+
 function cloneRefs(
   refs: readonly GeoOperationReference[] | undefined,
 ): GeoOperationReference[] {
@@ -484,7 +580,7 @@ function requireGoal(goal: string): string {
   return value;
 }
 
-const STARTING_POINT_REASON_MAX_CHARS = 300;
+const SPAN_POINT_REASON_MAX_CHARS = 300;
 
 /**
  * 起点推导理由的归一：空白视为未提供（保持认可门默认文案零漂移），
@@ -494,7 +590,7 @@ const STARTING_POINT_REASON_MAX_CHARS = 300;
 function startingPointReasonOf(reason: string | undefined): string | null {
   const value = reason?.trim();
   if (!value) return null;
-  if ([...value].length > STARTING_POINT_REASON_MAX_CHARS) {
+  if ([...value].length > SPAN_POINT_REASON_MAX_CHARS) {
     throw new Error("geo_operation_starting_point_reason_invalid");
   }
   return value;
@@ -515,17 +611,24 @@ function nextRoundKnowledgeDecision(): GeoOperationConfirmation {
  * once, then each stage still stops at its own consequential gate. The step
  * borrows the first work step's capability so it groups into the opening
  * phase instead of a stray「其他」group. The optional starting-point
- * derivation reason (ticket #27, ADR-0010 Decision 5) only enriches the
- * summary text so the gate shows where the round starts and why — the step
- * sequence and gate positions never change.
+ * derivation reason (ticket #27, ADR-0010 Decision 5) and the ending
+ * statement only enrich the summary text so the gate shows where the round
+ * starts, where it ends and why — the gate positions never change.
  */
 function planAckStep(
   capability: GeoOperationCapability,
-  startingPointReason?: string,
+  startingPointReason: string | undefined,
+  ending: string | null,
 ): StepDefinition {
   const reason = startingPointReasonOf(startingPointReason);
   const releaseSummary =
     "查看上方阶段与步骤计划后放行；各阶段的产物仍会停在各自的确认门。";
+  const lead = [
+    reason ? `从哪里开始：${reason}。` : null,
+    ending ? `到哪里结束：${ending}。` : null,
+  ]
+    .filter((part): part is string => part !== null)
+    .join("");
   return {
     id: "acknowledge-plan",
     title: "认可本轮计划",
@@ -534,7 +637,7 @@ function planAckStep(
       "plan-ack",
       "geo-operation",
       "认可本轮计划",
-      reason ? `从哪里开始：${reason}。${releaseSummary}` : releaseSummary,
+      `${lead}${releaseSummary}`,
     ),
   };
 }
@@ -559,6 +662,10 @@ export function planGeoOperation(
     input.intent === "next-round-optimization" &&
     input.updateKnowledge === undefined
   ) {
+    // 分支未决时没有可裁量的跨度：终点只能等知识分支定了再带。
+    if (input.endingPhase) {
+      throw new Error("geo_operation_ending_phase_invalid");
+    }
     const pendingConfirmation = nextRoundKnowledgeDecision();
     return {
       ...common,
@@ -584,15 +691,31 @@ export function planGeoOperation(
   let definitions: readonly StepDefinition[];
   switch (input.intent) {
     case "knowledge-update":
-      definitions = KNOWLEDGE_STEPS;
+      definitions = spanDefinitions(
+        "knowledge",
+        input.endingPhase,
+        KNOWLEDGE_STEPS,
+      );
       break;
     case "question-opportunities":
-      definitions = QUESTION_STEPS;
+      definitions = spanDefinitions(
+        "questions",
+        input.endingPhase,
+        QUESTION_STEPS,
+      );
       break;
     case "article-generation":
-      definitions = DIRECT_ARTICLE_STEPS;
+      definitions = spanDefinitions(
+        "content",
+        input.endingPhase,
+        DIRECT_ARTICLE_STEPS,
+      );
       break;
     case "performance-inspection":
+      if (input.endingPhase) {
+        // 链外意图：效果巡检不落六阶段链，没有「下游」可言。
+        throw new Error("geo_operation_ending_phase_invalid");
+      }
       definitions = [
         {
           id: "load-real-evidence",
@@ -626,46 +749,92 @@ export function planGeoOperation(
       ];
       break;
     case "distribution-planning":
-      definitions = DISTRIBUTION_STEPS;
+      definitions = spanDefinitions(
+        "distribution",
+        input.endingPhase,
+        DISTRIBUTION_STEPS,
+      );
       break;
     case "publishing":
+      // 引用已确认分发计划时从发布段起步；否则分发段先补（无计划可消费）。
+      // 两种起点的 endingPhase 校验都按实际起点段裁决；无计划分支的自然
+      // 跨度含分发+发布两段，带终点时覆盖只留分发段，发布段由链序追加。
       definitions = inputRefs.some(
         (reference) => reference.kind === "distribution-plan",
       )
-        ? PUBLISH_STEPS
-        : [...DISTRIBUTION_STEPS, ...PUBLISH_STEPS];
+        ? spanDefinitions("publishing", input.endingPhase, PUBLISH_STEPS)
+        : spanDefinitions(
+            "distribution",
+            input.endingPhase,
+            [...DISTRIBUTION_STEPS, ...PUBLISH_STEPS],
+            DISTRIBUTION_STEPS,
+          );
       break;
     case "monitoring":
-      definitions = MONITOR_STEPS;
+      definitions = spanDefinitions(
+        "monitoring",
+        input.endingPhase,
+        MONITOR_STEPS,
+      );
       break;
     case "full-optimization":
-      definitions = FULL_OPTIMIZATION_STEPS;
+      // 全链意图带终点 = 截尾（如「只做到文章为止」）；不带 = 完整六段。
+      definitions = spanDefinitions(
+        "knowledge",
+        input.endingPhase,
+        FULL_OPTIMIZATION_STEPS,
+        KNOWLEDGE_STEPS,
+      );
       break;
-    case "next-round-optimization":
-      definitions = input.updateKnowledge
-        ? FULL_OPTIMIZATION_STEPS
-        : [
-            {
-              id: "select-next-question-pool",
-              title: "从问题池选择下一轮问题",
-              capability: "question-opportunities",
-              confirmation: confirmation(
-                "question-selection",
-                "brand-workspace",
-                "选择下一轮问题",
-                "本轮不更新知识，请从已有问题池明确选择后续问题。",
-              ),
-            },
-            ...CONTENT_STEPS,
-            ...DISTRIBUTION_STEPS,
-            ...PUBLISH_STEPS,
-            ...MONITOR_STEPS,
-          ];
+    case "next-round-optimization": {
+      if (input.updateKnowledge) {
+        // 更新知识：与全链同构；带终点 = 截尾。
+        definitions = spanDefinitions(
+          "knowledge",
+          input.endingPhase,
+          FULL_OPTIMIZATION_STEPS,
+          KNOWLEDGE_STEPS,
+        );
+        break;
+      }
+      // 不更新知识：问题段替换为「从池选择」（不重新生成池），其余段按
+      // 链序跟随；带终点时从选择步起截到终点段为止。
+      const selectNextQuestion: StepDefinition = {
+        id: "select-next-question-pool",
+        title: "从问题池选择下一轮问题",
+        capability: "question-opportunities",
+        confirmation: confirmation(
+          "question-selection",
+          "brand-workspace",
+          "选择下一轮问题",
+          "本轮不更新知识，请从已有问题池明确选择后续问题。",
+        ),
+      };
+      definitions = spanDefinitions(
+        "questions",
+        input.endingPhase,
+        [
+          selectNextQuestion,
+          ...CONTENT_STEPS,
+          ...DISTRIBUTION_STEPS,
+          ...PUBLISH_STEPS,
+          ...MONITOR_STEPS,
+        ],
+        [selectNextQuestion],
+      );
       break;
+    }
   }
 
   const plannedSteps = steps([
-    planAckStep(definitions[0].capability, input.startingPointReason),
+    planAckStep(
+      definitions[0].capability,
+      input.startingPointReason,
+      endingStatement(
+        input.endingPhase,
+        endingPointReasonOf(input.endingPointReason, input.endingPhase),
+      ),
+    ),
     ...definitions,
   ]);
   const firstConfirmation = plannedSteps[0]?.confirmation ?? null;

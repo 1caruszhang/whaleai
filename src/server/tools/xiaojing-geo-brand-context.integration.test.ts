@@ -149,6 +149,7 @@ describe('inspect_brand_context over a live MCP server', () => {
         const routes: Record<string, Record<string, unknown>> = {
           '/api/brand-geo-operations/unfinished': {
             ok: true,
+            total: 1,
             operations: [
               {
                 id: 'op-round-one',
@@ -201,6 +202,7 @@ describe('inspect_brand_context over a live MCP server', () => {
       };
 
       // 元信息五要素一次到手：类型、卡住步骤/阶段、待审数量、所属会话、时间。
+      // total/truncatedCount 是上界语义：未超上界时无截断。
       expect(payload.workspaceState.unfinishedOperations).toEqual({
         present: true,
         state: {
@@ -224,12 +226,191 @@ describe('inspect_brand_context over a live MCP server', () => {
               updatedAt: '2026-08-31T18:00:00Z',
             },
           ],
+          total: 1,
+          truncatedCount: 0,
         },
       });
 
       // 摘要不含草稿正文与聊天记录（AC2）：整份工具输出没有任何正文字段
       // 或会话转录（其他阶段本就被路由为 absent）。
       expect(text).not.toMatch(/body|transcript|messages/i);
+    } finally {
+      await client.close();
+      await config.instance.close();
+      delete process.env.XIAOJING_SIDECAR_ID;
+    }
+  });
+
+  it('answers an unchanged re-read with a slim envelope and returns full after state changes', async () => {
+    process.env.XIAOJING_SIDECAR_ID = 'sidecar-brand-context-it';
+    configureXiaojingGeo({}, {
+      sessionId: 'session-dedup',
+      workspace: 'C:/ws/brand-a',
+    });
+    let poolUpdatedAt = '2026-08-27T10:00:00Z';
+    vi.mocked(managementApi).mockImplementation(
+      async (path: string): Promise<Record<string, unknown>> => {
+        const routes: Record<string, Record<string, unknown>> = {
+          '/api/brand-materials/context': {
+            ok: true,
+            context: {
+              workspaceId: 'brand-a',
+              brandName: '目标品牌',
+              productLines: ['汽车音响改装'],
+            },
+          },
+          '/api/brand-question-pools/latest': {
+            ok: true,
+            pool: {
+              status: 'confirmed',
+              productLine: '汽车音响改装',
+              targetRegion: '成都',
+              questions: [{}, {}],
+              updatedAt: poolUpdatedAt,
+            },
+          },
+        };
+        const response = routes[path];
+        if (!response) return { ok: false, error: `unrouted:${path}` };
+        return response;
+      },
+    );
+
+    const config = await createXiaojingGeoServer();
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await config.instance.connect(serverTransport);
+    const client = new Client({ name: 'integration-client', version: '1.0.0' });
+    await client.connect(clientTransport);
+    const readPayload = async (): Promise<Record<string, unknown>> => {
+      const result = await client.callTool({ name: 'inspect_brand_context', arguments: {} });
+      const text = (result.content as Array<{ type: string; text?: string }>)[0]?.text ?? '';
+      return JSON.parse(text) as Record<string, unknown>;
+    };
+    try {
+      // 第一次读：全量摘要。
+      const first = await readPayload();
+      expect(first.kind ?? first.workspaceState).toBeDefined();
+
+      // 状态未变的重读：瘦身信封，不再把整份摘要塞进对话历史。
+      const second = await readPayload();
+      expect(second).toEqual({
+        kind: 'brand-workspace-state-unchanged',
+        note: expect.any(String),
+      });
+
+      // 状态一变（问题池更新）：序列化不一致，自动回到全量返回。
+      poolUpdatedAt = '2026-08-31T09:00:00Z';
+      const third = await readPayload();
+      expect(third.kind).toBeUndefined();
+      expect(third.workspaceState).toMatchObject({
+        questionPool: { present: true, state: { updatedAt: '2026-08-31T09:00:00Z' } },
+      });
+    } finally {
+      await client.close();
+      await config.instance.close();
+      delete process.env.XIAOJING_SIDECAR_ID;
+    }
+  });
+});
+
+describe('generate_articles latest-confirmed-plan fallback over a live MCP server', () => {
+  it('forwards an empty call to the start port with topicPlanId null (Rust picks latest confirmed plan)', async () => {
+    process.env.XIAOJING_SIDECAR_ID = 'sidecar-articles-it';
+    configureXiaojingGeo({}, {
+      sessionId: 'session-articles',
+      workspace: 'C:/ws/brand-a',
+    });
+    const startCalls: Array<Record<string, unknown>> = [];
+    // 捕获 start 的请求体：空参必须以 topicPlanId: null 落到端口，
+    // 由 Rust「最新 confirmed plan」回落裁决，而不是工具层报错。
+    // start 成功后服务按规格回读自身（get_article_operation），一并路由。
+    vi.mocked(managementApi).mockImplementation(
+      async (path: string, _method?: string, body?: Record<string, unknown>) => {
+        if (path === '/api/brand-articles/start' && body) startCalls.push(body);
+        const operation = {
+          id: 'article-op-1',
+          workspaceId: 'brand-a',
+          createdBySessionId: 'session-articles',
+          sourceKind: 'confirmed-topic-plan',
+          topicPlanId: null,
+          topicPlanRevision: null,
+          knowledgeVersion: 3,
+          policyVersion: 'xiaojing-content-prompt-v7',
+          status: 'running',
+          articles: [],
+          createdAt: '2026-09-01T00:00:00Z',
+          updatedAt: '2026-09-01T00:00:00Z',
+        };
+        const routes: Record<string, Record<string, unknown>> = {
+          '/api/brand-articles/start': { ok: true, operation },
+          '/api/brand-articles/operation/get': { ok: true, operation },
+        };
+        const response = routes[path];
+        if (!response) return { ok: false, error: `unrouted:${path}` };
+        return response;
+      },
+    );
+
+    const config = await createXiaojingGeoServer();
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await config.instance.connect(serverTransport);
+    const client = new Client({ name: 'integration-client', version: '1.0.0' });
+    await client.connect(clientTransport);
+    try {
+      const result = await client.callTool({ name: 'generate_articles', arguments: {} });
+      const text = (result.content as Array<{ type: string; text?: string }>)[0]?.text ?? '';
+      expect(result.isError).toBeFalsy();
+      expect(startCalls).toHaveLength(1);
+      expect(startCalls[0].payload).toMatchObject({
+        sourceKind: 'confirmed-topic-plan',
+        directSpec: null,
+      });
+      // planId 缺席（undefined 序列化后字段消失）→ Rust Option<String> 为
+      // None →「最新 confirmed plan」回落。显式 null/字符串都会钉住 plan。
+      const payload = startCalls[0].payload as Record<string, unknown>;
+      expect(payload.topicPlanId ?? null).toBeNull();
+      expect(JSON.parse(text)).toMatchObject({ kind: 'article-operation' });
+    } finally {
+      await client.close();
+      await config.instance.close();
+      delete process.env.XIAOJING_SIDECAR_ID;
+    }
+  });
+
+  it('rejects planId and direct together with an actionable error', async () => {
+    process.env.XIAOJING_SIDECAR_ID = 'sidecar-articles-it';
+    configureXiaojingGeo({}, {
+      sessionId: 'session-articles',
+      workspace: 'C:/ws/brand-a',
+    });
+    vi.mocked(managementApi).mockImplementation(
+      async (path: string): Promise<Record<string, unknown>> => {
+        void path;
+        return { ok: false, error: 'unrouted' };
+      },
+    );
+
+    const config = await createXiaojingGeoServer();
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await config.instance.connect(serverTransport);
+    const client = new Client({ name: 'integration-client', version: '1.0.0' });
+    await client.connect(clientTransport);
+    try {
+      const result = await client.callTool({
+        name: 'generate_articles',
+        arguments: {
+          planId: 'plan-1',
+          direct: {
+            count: 1,
+            themes: ['主题'],
+            contentType: 'guide',
+            constraints: '无',
+          },
+        },
+      });
+      const text = (result.content as Array<{ type: string; text?: string }>)[0]?.text ?? '';
+      expect(result.isError).toBe(true);
+      expect(text).toContain('never both');
     } finally {
       await client.close();
       await config.instance.close();

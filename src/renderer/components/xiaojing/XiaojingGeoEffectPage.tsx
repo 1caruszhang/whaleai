@@ -111,7 +111,7 @@ function EffectSessionScope({
       sendMessage: async () => false,
       stopResponse: async () => ({ success: false, alreadyStopped: true }),
       retryCurrentSessionRestore: async () => ({ restored: false }),
-      respondAskUserQuestion: async () => undefined,
+      respondAskUserQuestion: async () => true,
     }),
     [api],
   );

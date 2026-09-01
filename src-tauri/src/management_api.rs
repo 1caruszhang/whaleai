@@ -280,6 +280,10 @@ pub async fn start_management_api() -> Result<u16, String> {
             post(brand_article_generation_fail_handler),
         )
         .route("/api/brand-articles/edit", post(brand_article_edit_handler))
+        .route(
+            "/api/brand-articles/discard",
+            post(brand_article_discard_handler),
+        )
         .route("/api/brand-articles/body", post(brand_article_body_handler))
         .route(
             "/api/brand-articles/review/claim",
@@ -917,7 +921,11 @@ async fn brand_geo_operation_unfinished_handler(
         Err(error) => return Json(error),
     };
     match store.list_unfinished_geo_operations(&request.workspace_id) {
-        Ok(operations) => Json(serde_json::json!({ "ok": true, "operations": operations })),
+        Ok(list) => Json(serde_json::json!({
+            "ok": true,
+            "operations": list.operations,
+            "total": list.total,
+        })),
         Err(error) => Json(serde_json::json!({ "ok": false, "error": error })),
     }
 }
@@ -1789,6 +1797,20 @@ async fn brand_article_edit_handler(
         Err(error) => return Json(error),
     };
     match store.edit_article(&request.workspace_id, &request.session_id, request.payload) {
+        Ok(article) => Json(serde_json::json!({ "ok": true, "article": article })),
+        Err(error) => Json(serde_json::json!({ "ok": false, "error": error })),
+    }
+}
+
+async fn brand_article_discard_handler(
+    headers: HeaderMap,
+    Json(request): Json<BrandKnowledgeEnvelope<crate::brand_workspace::ArticleDiscardRequest>>,
+) -> Json<serde_json::Value> {
+    let store = match validate_brand_knowledge_request(&headers, &request) {
+        Ok(store) => store,
+        Err(error) => return Json(error),
+    };
+    match store.discard_article(&request.workspace_id, &request.session_id, request.payload) {
         Ok(article) => Json(serde_json::json!({ "ok": true, "article": article })),
         Err(error) => Json(serde_json::json!({ "ok": false, "error": error })),
     }

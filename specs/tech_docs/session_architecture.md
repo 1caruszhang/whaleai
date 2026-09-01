@@ -25,6 +25,10 @@ Tab 请求携带 exact Session hint 与 Tab owner，经 Rust HTTP/SSE proxy 分�
 
 turn 以 stopped/error 终止时，已流出的 assistant partial 输出随 `terminal` 标记（`stopped`/`error`）写入 transcript；恢复渲染凭该标记标注「未完成」，不丢已生成的回答。主 Agent 凭据缺失时 turn 在启动前 fail-fast：广播明确原因并进入 error 状态，不把失败推迟成 SDK 的隐晦 401。
 
+## ask-user-question 生命周期
+
+`AskUserQuestion` 权限请求登记进 `pendingQuestions`，以 `ask-user-question:request` 广播给渲染层出卡；用户作答经 `ask-user-question:respond` 回填，resolve 后撤登记。悬挂提问（用户尚未作答）必须在 turn 的每条死亡路径上失效：用户 abort、停止看门狗强杀、turn 非异常收尾、turn 非中止性失败，以及 Sidecar 重新初始化（在 transcript 加载之前清理，旧会话死卡不跨初始化存活）。失效统一走撤登记 + 广播 `ask-user-question:expired`（渲染层据此撤卡）+ 对 SDK 侧 Promise resolve deny，保证无人作答也不泄漏。渲染层提交/取消回执为送达布尔：送达失败（如网络错误）卡片保持可重试。作答回执按 Agent SDK 契约以问题全文为键（`Record<问题文本, 选项文本>`，多选以「, 」连接）；按 id 或序号作键会被 SDK 侧判为「未作答」。
+
 ## 删除
 
 用户删除由 Rust `cmd_delete_session_if_unowned` 裁决。它验证 canonical ID、mounted Tab 授权、Sidecar idle 和非 Tab owner，在相同 lifecycle fence 内停止目标 generation，并以文件锁删除当前 Xiaojing Session metadata、transcript 与附件。

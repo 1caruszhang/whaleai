@@ -41,7 +41,7 @@ export interface TabContextValue extends TabApiContextValue {
   sendMessage: (text: string, images?: ImageAttachment[], files?: SessionFileRef[]) => Promise<boolean>;
   stopResponse: () => Promise<{ success: boolean; alreadyStopped: boolean }>;
   retryCurrentSessionRestore: () => Promise<{ restored: boolean }>;
-  respondAskUserQuestion: (answers: Record<string, string> | null) => Promise<void>;
+  respondAskUserQuestion: (answers: Record<string, string> | null) => Promise<boolean>;
 }
 
 export const TabContext = createContext<TabContextValue | null>(null);

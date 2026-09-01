@@ -3,6 +3,7 @@ import {
   type GeoOperationCheckpoint,
   type GeoOperationError,
   type GeoOperationKind,
+  type GeoOperationPhaseId,
   type GeoOperationPlan,
   type GeoOperationProjection,
   type GeoOperationReference,
@@ -40,11 +41,26 @@ export interface GeoOperationCreateInput {
    * 选择后由 MCP 工具层传入；只随计划进入认可门 summary，不改步骤序列。
    */
   startingPointReason?: string;
+  /**
+   * 终点阶段与终点理由（起止推导）：计划卡呈现从起点到终点的完整跨度，
+   * 轮内不再为同一链条新起操作重复征询。透传给 planGeoOperation 裁决
+   * 下游合法性与步骤组合。
+   */
+  endingPhase?: GeoOperationPhaseId;
+  endingPointReason?: string;
 }
 
 export interface GeoOperationListInput {
   includeAllSessions?: boolean;
   limit?: number;
+}
+
+/** 截断视图（Rust `GeoOperationUnfinishedList`）：最新至多 5 条元信息 + 品牌
+ * 内非终态轮次全量计数——弃置轮次只累积不消失，无上界会让每个新会话的
+ * 品牌状态摘要为全部历史轮次付上下文。 */
+export interface GeoOperationUnfinishedList {
+  operations: GeoOperationUnfinishedSummary[];
+  total: number;
 }
 
 interface GeoOperationCreateRequest {
@@ -81,8 +97,9 @@ export interface GeoOperationPersistencePort {
   get(operationId: string): Promise<GeoOperationProjection>;
   list(input: GeoOperationListInput): Promise<GeoOperationProjection[]>;
   mutate(request: GeoOperationMutationRequest): Promise<GeoOperationProjection>;
-  /** 跨会话只读元信息（ADR-0010）：品牌内非终态轮次，不含正文/聊天记录。 */
-  listUnfinished(): Promise<GeoOperationUnfinishedSummary[]>;
+  /** 跨会话只读元信息（ADR-0010）：品牌内非终态轮次，不含正文/聊天记录；
+   * 条目按最新截到上界，total 报全量计数。 */
+  listUnfinished(): Promise<GeoOperationUnfinishedList>;
   /** 接管 mutation（ADR-0010）：CAS 所有权转移到当前 Session。 */
   takeover(input: {
     operationId: string;
@@ -144,12 +161,24 @@ export class RustGeoOperationPort implements GeoOperationPersistencePort {
     );
   }
 
-  listUnfinished(): Promise<GeoOperationUnfinishedSummary[]> {
-    return this.post(
+  listUnfinished(): Promise<GeoOperationUnfinishedList> {
+    // 响应同时携带 operations 与 total 两个键，无法走单键的 post 助手。
+    return managementApi(
       "/api/brand-geo-operations/unfinished",
-      {},
-      "operations",
-    );
+      "POST",
+      { ...this.identity, payload: {} },
+    ).then((result) => {
+      if (result.ok !== true) throw persistenceError(result);
+      const operations = Array.isArray(result.operations)
+        ? (result.operations as GeoOperationUnfinishedSummary[])
+        : [];
+      // total 是上界语义的一半：缺失说明对端 Rust 版本落后于契约
+      // （截断已发生但未上报），静默降级会让摘要谎报 truncatedCount=0。
+      if (typeof result.total !== "number") {
+        throw new Error("geo_operation_unfinished_total_missing");
+      }
+      return { operations, total: result.total };
+    });
   }
 
   takeover(input: {
@@ -209,9 +238,10 @@ export class GeoOperationService {
   /**
    * 跨会话只读 tracer（ADR-0010 Decision 3）：本品牌所有会话的非终态
    * 轮次元信息——类型、卡住步骤、待审数量、所属会话、时间。供品牌状态
-   * 摘要在新会话一次读取；不含草稿正文与聊天记录。
+   * 摘要在新会话一次读取；不含草稿正文与聊天记录；条目按最新截到
+   * 上界，total 报全量计数。
    */
-  listUnfinished(): Promise<GeoOperationUnfinishedSummary[]> {
+  listUnfinished(): Promise<GeoOperationUnfinishedList> {
     return this.persistence.listUnfinished();
   }
 

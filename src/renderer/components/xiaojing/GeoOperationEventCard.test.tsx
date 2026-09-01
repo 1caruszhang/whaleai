@@ -303,6 +303,31 @@ describe("GeoOperationEventCard", () => {
     expect(label?.parentElement?.textContent).toContain("完整 GEO 优化");
   });
 
+  // 带 endingPhase 的计划：跨度标签终点收在终点段（票 #29/起止推导）。
+  it("ends the span label at the endingPhase segment", () => {
+    const plan = planGeoOperation({
+      intent: "full-optimization",
+      goal: "本轮做到发布为止",
+      endingPhase: "publishing",
+    });
+    const bounded = {
+      ...operation,
+      id: "operation-bounded",
+      goal: "本轮做到发布为止",
+      steps: plan.steps,
+    } as unknown as GeoOperationProjection;
+
+    const { container } = render(
+      <GeoOperationEventCard
+        data={{ kind: "geo-operation", operations: [bounded] }}
+      />,
+    );
+
+    expect(
+      container.querySelector("[data-geo-operation-span='operation-bounded']"),
+    ).toHaveTextContent("跨度：品牌知识 → 发布");
+  });
+
   // 轻量条不重复报跨度：跨度只在完整卡头部出现一次。
   it("keeps the span label off the compact strip", () => {
     const { container } = render(

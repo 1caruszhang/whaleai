@@ -59,7 +59,7 @@ function persistence(current = projection()): GeoOperationPersistencePort & {
     ),
     get: vi.fn(async () => current),
     list: vi.fn(async () => [current]),
-    listUnfinished: vi.fn(async () => []),
+    listUnfinished: vi.fn(async () => ({ operations: [], total: 0 })),
     takeover: vi.fn(async () => ({
       operation: projection({ ...current, revision: current.revision + 1 }),
       previousOwnerSessionId: "session-16-previous",

@@ -271,6 +271,20 @@ pub struct GeoOperationUnfinishedSummary {
     pub updated_at: String,
 }
 
+/// 品牌状态摘要一次读取的未完成轮次上界：跨会话弃置的轮次只会累积，
+/// 无上界会让每个新 Session 的 `inspect_brand_context` 为全部历史轮次
+/// 付上下文。超出部分只以 `total` 计数报告，摘要侧换算 truncatedCount。
+pub const UNFINISHED_GEO_OPERATION_SUMMARY_LIMIT: usize = 5;
+
+/// 截断视图：最多 `UNFINISHED_GEO_OPERATION_SUMMARY_LIMIT` 条最新元信息 +
+/// 品牌内非终态轮次总数（`total >= operations.len()`）。
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GeoOperationUnfinishedList {
+    pub operations: Vec<GeoOperationUnfinishedSummary>,
+    pub total: usize,
+}
+
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -565,26 +579,42 @@ impl BrandWorkspaceStore {
     /// session-private visibility rules elsewhere stay untouched. Rows
     /// whose owning session was deleted (`ON DELETE SET NULL`) are
     /// skipped — the owning session is part of the metadata contract.
+    /// Returns at most `UNFINISHED_GEO_OPERATION_SUMMARY_LIMIT` newest
+    /// entries plus the brand's full non-terminal count, so abandoned
+    /// rounds cannot grow the summary without bound.
     pub fn list_unfinished_geo_operations(
         &self,
         workspace_id: &str,
-    ) -> Result<Vec<GeoOperationUnfinishedSummary>, String> {
+    ) -> Result<GeoOperationUnfinishedList, String> {
         let workspace = self.workspace(workspace_id)?;
         let connection = open_database(&workspace)?;
         ensure_schema(&connection)?;
+        let unfinished_filter =
+            "kind!='artifact-lineage' AND session_id IS NOT NULL \
+             AND status NOT IN ('succeeded','failed','cancelled')";
+        let total: usize = connection
+            .query_row(
+                &format!("SELECT COUNT(*) FROM geo_operations WHERE {unfinished_filter}"),
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(|error| format!("count unfinished GEO operations: {error}"))?
+            .try_into()
+            .map_err(|_| "count unfinished GEO operations: overflow".to_string())?;
         let mut statement = connection
-            .prepare(
+            .prepare(&format!(
                 "SELECT id,session_id,kind,goal,status,steps_json,
                     pending_confirmation_json,created_at,COALESCE(updated_at,created_at)
                  FROM geo_operations
-                 WHERE kind!='artifact-lineage'
-                   AND session_id IS NOT NULL
-                   AND status NOT IN ('succeeded','failed','cancelled')
-                 ORDER BY COALESCE(updated_at,created_at) DESC,id DESC",
-            )
+                 WHERE {unfinished_filter}
+                 ORDER BY COALESCE(updated_at,created_at) DESC,id DESC
+                 LIMIT ?1"
+            ))
             .map_err(|error| format!("prepare unfinished GEO operation list: {error}"))?;
         let rows = statement
-            .query_map([], |row| {
+            .query_map(
+                [UNFINISHED_GEO_OPERATION_SUMMARY_LIMIT as i64],
+                |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
@@ -656,7 +686,10 @@ impl BrandWorkspaceStore {
                 updated_at,
             });
         }
-        Ok(summaries)
+        Ok(GeoOperationUnfinishedList {
+            operations: summaries,
+            total,
+        })
     }
 
     /// Disk-first app shutdown boundary. Only locally executing states are
@@ -2341,14 +2374,19 @@ mod tests {
         let before = store
             .get_geo_operation(&workspace.id, &waiting.id)
             .unwrap();
-        let summaries = store.list_unfinished_geo_operations(&workspace.id).unwrap();
+        let list = store
+            .list_unfinished_geo_operations(&workspace.id)
+            .unwrap();
+        let summaries = &list.operations;
         let after = store
             .get_geo_operation(&workspace.id, &waiting.id)
             .unwrap();
 
         // 只读 tracer：列表调用不推进任何 revision，也不改状态。
         assert_eq!(before, after);
+        // 上界语义：条目数与总数一致（未超过 LIMIT 时全量返回）。
         assert_eq!(summaries.len(), 1);
+        assert_eq!(list.total, 1);
         let summary = &summaries[0];
         assert_eq!(summary.id, waiting.id);
         assert_eq!(summary.session_id, "session-operation");
@@ -2378,7 +2416,45 @@ mod tests {
         assert!(store
             .list_unfinished_geo_operations(&other_workspace.id)
             .unwrap()
+            .operations
             .is_empty());
+    }
+
+    #[test]
+    fn unfinished_list_caps_entries_and_reports_the_full_total() {
+        let (store, workspace) = fixture();
+        let count = UNFINISHED_GEO_OPERATION_SUMMARY_LIMIT + 2;
+        for index in 0..count {
+            store
+                .create_geo_operation(GeoOperationCreateRequest {
+                    workspace_id: workspace.id.clone(),
+                    session_id: "session-operation".into(),
+                    kind: "question-opportunities".into(),
+                    goal: format!("第 {index} 轮"),
+                    status: "ready".into(),
+                    steps: vec![step(
+                        "collect-questions",
+                        "question-opportunities",
+                        "ready",
+                        None,
+                    )],
+                    input_refs: vec![],
+                    pending_confirmation: None,
+                    source_operation_id: None,
+                })
+                .unwrap();
+        }
+
+        let list = store
+            .list_unfinished_geo_operations(&workspace.id)
+            .unwrap();
+
+        // 上界：条目截到 LIMIT，total 报全量，摘要侧换算 truncatedCount。
+        assert_eq!(
+            list.operations.len(),
+            UNFINISHED_GEO_OPERATION_SUMMARY_LIMIT
+        );
+        assert_eq!(list.total, count);
     }
 
     #[test]
@@ -3364,7 +3440,10 @@ mod tests {
 
         // 元信息 tracer 跟随当前所有者：B 名下待审 = 随行转移的 3 篇 + B
         // 自己原有的 1 篇（#25 的会话级计数语义）；A 名下已无待审草稿。
-        let summaries = store.list_unfinished_geo_operations(&workspace.id).unwrap();
+        let summaries = &store
+            .list_unfinished_geo_operations(&workspace.id)
+            .unwrap()
+            .operations;
         let summary = summaries
             .iter()
             .find(|summary| summary.id == taken_over.id)

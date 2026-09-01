@@ -145,15 +145,18 @@ describe("GeoOperation intent policy", () => {
   it("keeps baseline probing out of the composed main chain (19 steps)", () => {
     for (const updateKnowledge of [undefined, true]) {
       const plan = planGeoOperation({
-        intent: updateKnowledge === undefined ? "full-optimization" : "next-round-optimization",
+        intent:
+          updateKnowledge === undefined
+            ? "full-optimization"
+            : "next-round-optimization",
         goal: "完整 GEO 优化",
         ...(updateKnowledge === undefined ? {} : { updateKnowledge }),
       });
 
       expect(plan.steps).toHaveLength(19);
-      expect(plan.steps.some((step) => step.capability === "geo-observation")).toBe(
-        false,
-      );
+      expect(
+        plan.steps.some((step) => step.capability === "geo-observation"),
+      ).toBe(false);
       expect(
         plan.steps.filter((step) => step.requiresConfirmation).length,
       ).toBe(8);
@@ -166,7 +169,9 @@ describe("GeoOperation intent policy", () => {
     });
     expect(withoutKnowledge.steps).toHaveLength(15);
     expect(
-      withoutKnowledge.steps.some((step) => step.capability === "geo-observation"),
+      withoutKnowledge.steps.some(
+        (step) => step.capability === "geo-observation",
+      ),
     ).toBe(false);
   });
 
@@ -289,7 +294,9 @@ describe("GeoOperation intent policy", () => {
     });
 
     // 18+1 步序列与确认门位置不变：id 与 confirmation kind 全等。
-    expect(withReason.steps.map((step) => [step.id, step.confirmation?.kind])).toEqual(
+    expect(
+      withReason.steps.map((step) => [step.id, step.confirmation?.kind]),
+    ).toEqual(
       withoutReason.steps.map((step) => [step.id, step.confirmation?.kind]),
     );
     expect(withReason.steps).toHaveLength(19);
@@ -325,6 +332,172 @@ describe("GeoOperation intent policy", () => {
         startingPointReason: "长".repeat(301),
       }),
     ).toThrow("geo_operation_starting_point_reason_invalid");
+  });
+
+  // 起止推导（endingPhase）：一张计划卡覆盖起点到终点的完整跨度，
+  // 轮内不再为同一链条新起操作。产物确认门位置不变。
+  it("extends a direct intent through downstream phases with endingPhase", () => {
+    const plan = planGeoOperation({
+      intent: "article-generation",
+      goal: "从文章一路做到发布",
+      endingPhase: "publishing",
+    });
+    expect(plan.steps.map((step) => step.id)).toEqual([
+      "acknowledge-plan",
+      // 起点段仍是文章直达（计划已确认，不回补规划步骤）……
+      "generate-articles",
+      "confirm-articles",
+      // ……下游各段按链序追加，含各自的产物确认门。
+      "plan-distribution",
+      "confirm-distribution",
+      "prepare-publish",
+      "confirm-publish",
+      "observe-publish",
+    ]);
+    // 认可门仍是第一步，操作仍在计划门停靠。
+    expect(plan.steps[0]?.confirmation?.kind).toBe("plan-ack");
+    expect(plan.status).toBe("awaiting-confirmation");
+  });
+
+  it("truncates the full chain when full-optimization carries an endingPhase", () => {
+    const plan = planGeoOperation({
+      intent: "full-optimization",
+      goal: "这轮只做到文章为止",
+      endingPhase: "content",
+    });
+    expect(plan.steps.map((step) => step.id)).toEqual([
+      "acknowledge-plan",
+      "collect-materials",
+      "extract-facts",
+      "confirm-knowledge",
+      "generate-question-pool",
+      "confirm-question-selection",
+      "plan-topics",
+      "confirm-content-plan",
+      "generate-articles",
+      "confirm-articles",
+    ]);
+  });
+
+  it("composes the no-update next round from the selection step up to the endingPhase", () => {
+    const plan = planGeoOperation({
+      intent: "next-round-optimization",
+      goal: "下一轮做到分发为止",
+      updateKnowledge: false,
+      endingPhase: "distribution",
+    });
+    expect(plan.steps.map((step) => step.id)).toEqual([
+      "acknowledge-plan",
+      "select-next-question-pool",
+      "plan-topics",
+      "confirm-content-plan",
+      "generate-articles",
+      "confirm-articles",
+      "plan-distribution",
+      "confirm-distribution",
+    ]);
+  });
+
+  it("rejects an endingPhase upstream of the intent start, off-chain intents, and orphan reasons", () => {
+    expect(() =>
+      planGeoOperation({
+        intent: "distribution-planning",
+        goal: "分发",
+        endingPhase: "content",
+      }),
+    ).toThrow("geo_operation_ending_phase_invalid");
+
+    // 终点＝起点不是跨度：单阶段轮次省略 endingPhase（无计划发布意图把
+    // 起点推导到分发段时，endingPhase=distribution 会静默丢掉发布段）。
+    expect(() =>
+      planGeoOperation({
+        intent: "distribution-planning",
+        goal: "只做分发",
+        endingPhase: "distribution",
+      }),
+    ).toThrow("geo_operation_ending_phase_invalid");
+
+    expect(() =>
+      planGeoOperation({
+        intent: "performance-inspection",
+        goal: "巡检",
+        endingPhase: "monitoring",
+      }),
+    ).toThrow("geo_operation_ending_phase_invalid");
+
+    // 分支未决的下一轮没有可裁量的跨度。
+    expect(() =>
+      planGeoOperation({
+        intent: "next-round-optimization",
+        goal: "下一轮",
+        endingPhase: "content",
+      }),
+    ).toThrow("geo_operation_ending_phase_invalid");
+
+    // 终点理由没有终点阶段可挂。
+    expect(() =>
+      planGeoOperation({
+        intent: "article-generation",
+        goal: "生成三篇文章",
+        endingPointReason: "用户选择先发文",
+      }),
+    ).toThrow("geo_operation_ending_point_reason_invalid");
+
+    expect(() =>
+      planGeoOperation({
+        intent: "article-generation",
+        goal: "生成三篇文章",
+        // 终点取严格下游（distribution），隔离考察理由长度规则本身；
+        // 等于起点的终点已在上文按 phase 无效拒绝。
+        endingPhase: "distribution",
+        endingPointReason: "长".repeat(301),
+      }),
+    ).toThrow("geo_operation_ending_point_reason_invalid");
+  });
+
+  it("does not duplicate the publish segment when publishing without a confirmed plan carries an endingPhase", () => {
+    // 无计划发布意图的自然跨度含分发+发布两段；带终点时起点覆盖只留
+    // 分发段，发布段由链序追加——终点落在发布上时发布步骤只出现一次。
+    const plan = planGeoOperation({
+      intent: "publishing",
+      goal: "补齐分发计划后发布",
+      endingPhase: "publishing",
+    });
+    expect(plan.steps.map((step) => step.id)).toEqual([
+      "acknowledge-plan",
+      "plan-distribution",
+      "confirm-distribution",
+      "prepare-publish",
+      "confirm-publish",
+      "observe-publish",
+    ]);
+  });
+
+  it("carries the ending statement on the plan-ack gate and keeps gate positions untouched", () => {
+    const plan = planGeoOperation({
+      intent: "article-generation",
+      goal: "从文章一路做到发布",
+      startingPointReason: "知识、问题池与内容计划均已确认",
+      endingPhase: "publishing",
+      endingPointReason: "用户选择先发文验证效果",
+    });
+    const gate = plan.steps[0]?.confirmation;
+    expect(gate?.summary).toContain(
+      "从哪里开始：知识、问题池与内容计划均已确认。",
+    );
+    expect(gate?.summary).toContain(
+      "到哪里结束：发布——用户选择先发文验证效果。",
+    );
+    expect(plan.pendingConfirmation?.summary).toContain("到哪里结束");
+
+    // 不带终点时认可门文案零漂移（默认路径不受影响）。
+    const plain = planGeoOperation({
+      intent: "article-generation",
+      goal: "生成三篇文章",
+    });
+    expect(plain.steps[0]?.confirmation?.summary).toBe(
+      "查看上方阶段与步骤计划后放行；各阶段的产物仍会停在各自的确认门。",
+    );
   });
 });
 
@@ -434,6 +607,15 @@ describe("GeoOperation span label", () => {
     expect(formatGeoOperationSpanLabel(plan.steps)).toBe(
       "跨度：品牌知识 → 监测",
     );
+  });
+
+  it("ends the label at the endingPhase segment when provided", () => {
+    const plan = planGeoOperation({
+      intent: "full-optimization",
+      goal: "做到文章为止",
+      endingPhase: "publishing",
+    });
+    expect(formatGeoOperationSpanLabel(plan.steps)).toBe("跨度：品牌知识 → 发布");
   });
 
   it("reports a single stage name when start and end share the phase", () => {

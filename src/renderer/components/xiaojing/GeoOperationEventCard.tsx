@@ -123,6 +123,9 @@ export function parseGeoOperationEventCard(
   }
 }
 
+/** 操作状态文案与状态行派生（ADR-0011）在 GeoGateProgressStrip 与停靠条同源。 */
+export { GEO_OPERATION_STATUS_LABEL } from "./GeoGateProgressStrip";
+
 const STEP_STATUS_LABEL: Record<
   GeoOperationProjection["steps"][number]["status"],
   string
@@ -410,7 +413,6 @@ function OperationArticle({ operation }: { operation: GeoOperationProjection }) 
   const spanLabel = fullMode
     ? formatGeoOperationSpanLabel(live.steps)
     : null;
-
 
   // 计划认可门是本卡的主操作：认可面板停靠在目标行之后、步骤重播之前，
   // 面板内的确认键按闸门卡统一规范固定页脚右下；其余闸门面板保持在卡尾。

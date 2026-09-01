@@ -25,6 +25,10 @@ pub struct ArticleDirectSpec {
 pub struct ArticleOperationStartRequest {
     pub source_kind: String,
     pub topic_plan_id: Option<String>,
+    /// 生成时选取（票 #28）：本次消费的计划项子集；None = plan 全部
+    /// selectedItemIds。校验必须是 selectedItemIds 的子集且逐项 approved。
+    #[serde(default)]
+    pub item_ids: Option<Vec<String>>,
     pub direct_spec: Option<ArticleDirectSpec>,
 }
 
@@ -88,9 +92,20 @@ pub struct ArticleEditRequest {
     pub expected_revision: i64,
     pub title: String,
     pub body: String,
-    /// 聊天修订（票 38）携带的用户指令原文，写入版本行 model_audit_json。
+    /// 聊天修订（票 38）携带用户指令原文，写入版本行 model_audit_json。
     #[serde(default)]
     pub reason: Option<String>,
+}
+
+/// 用户显式弃用（票 #28）：draft_ready / generation_failed / rejected 均可
+/// 弃用（清掉失败稿与风险阻断稿），approved 不可——已批准是进入分发的
+/// 事实依据，撤回属另一语义。终态，不产生新版本行。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArticleDiscardRequest {
+    pub operation_id: String,
+    pub article_id: String,
+    pub expected_revision: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -247,7 +262,7 @@ pub(super) fn ensure_schema(connection: &Connection) -> Result<(), String> {
                 constraints TEXT NOT NULL,
                 planned_facts_json TEXT NOT NULL,
                 ranking_dimensions_json TEXT,
-                status TEXT NOT NULL CHECK(status IN ('planned','drafting','draft_ready','reviewing','approved','generation_failed','rejected')),
+                status TEXT NOT NULL CHECK(status IN ('planned','drafting','draft_ready','reviewing','approved','generation_failed','rejected','discarded')),
                 revision INTEGER NOT NULL DEFAULT 0,
                 approved_revision INTEGER,
                 failure_reason TEXT,
@@ -317,7 +332,91 @@ pub(super) fn ensure_schema(connection: &Connection) -> Result<(), String> {
     super::drop_brand_sessions_foreign_keys(
         connection,
         &["geo_article_operations", "geo_article_versions"],
-    )
+    )?;
+    extend_geo_articles_status_check(connection)
+}
+
+/// 存量库迁移（票 #28）：geo_articles.status 的 CHECK 约束不含 'discarded'
+/// 时按 sqlite_master 原文重建（foreign_keys=OFF 包裹、索引随 DROP 消失后
+/// 按原文重建——与 drop_brand_sessions_foreign_keys 同一先例）。SQLite 的
+/// CHECK 在 UPDATE 上同样强制，无法绕开重建。
+fn extend_geo_articles_status_check(connection: &Connection) -> Result<(), String> {
+    let table = "geo_articles";
+    let existing: Option<String> = connection
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?1",
+            [table],
+            |row| row.get(0),
+        )
+        .map_err(|error| format!("inspect {table} status check: {error}"))?;
+    let Some(existing_sql) = existing else {
+        return Ok(());
+    };
+    if !existing_sql.contains("status TEXT NOT NULL CHECK") || existing_sql.contains("'discarded'") {
+        return Ok(());
+    }
+    let rebuilt_sql = existing_sql.replace(
+        "('planned','drafting','draft_ready','reviewing','approved','generation_failed','rejected')",
+        "('planned','drafting','draft_ready','reviewing','approved','generation_failed','rejected','discarded')",
+    );
+    if rebuilt_sql == existing_sql {
+        // 非预期形态（历史 schema 措辞不同）：fail loud 而不是静默跳过，
+        // 丢弃路径会因 CHECK 拒绝而显式报错，不会被误认为已迁移。
+        return Err("geo_articles status check migration target missing".to_string());
+    }
+    let renamed_sql = super::rename_table_in_ddl(
+        &rebuilt_sql,
+        table,
+        &format!("{table}__status_check_extended"),
+    )?;
+
+    let mut index_ddls: Vec<String> = Vec::new();
+    {
+        let mut statement = connection
+            .prepare(
+                "SELECT sql FROM sqlite_master
+                 WHERE type = 'index' AND tbl_name = ?1 AND sql IS NOT NULL",
+            )
+            .map_err(|error| format!("list {table} indexes: {error}"))?;
+        let mut rows = statement
+            .query([table])
+            .map_err(|error| format!("read {table} indexes: {error}"))?;
+        while let Some(row) = rows
+            .next()
+            .map_err(|error| format!("advance {table} index cursor: {error}"))?
+        {
+            index_ddls.push(
+                row.get(0)
+                    .map_err(|error| format!("read {table} index ddl: {error}"))?,
+            );
+        }
+    }
+
+    connection
+        .execute_batch("PRAGMA foreign_keys = OFF;")
+        .map_err(|error| format!("unlock {table} status check rebuild: {error}"))?;
+    let rebuild = connection.execute_batch(&format!(
+        "BEGIN IMMEDIATE;
+         {renamed_sql};
+         INSERT INTO {table}__status_check_extended SELECT * FROM {table};
+         DROP TABLE {table};
+         ALTER TABLE {table}__status_check_extended RENAME TO {table};
+         {}
+         COMMIT;",
+        index_ddls
+            .iter()
+            .map(|ddl| format!("{ddl};"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    ));
+    let restored = connection.execute_batch("PRAGMA foreign_keys = ON;");
+    match (rebuild, restored) {
+        (Ok(()), Ok(())) => Ok(()),
+        (rebuild, _) => {
+            let _ = connection.execute_batch("ROLLBACK;");
+            rebuild.map_err(|error| format!("rebuild {table} status check: {error}"))
+        }
+    }
 }
 
 /// 所有权判定键（ADR-0010 改键）：文章操作/文章草稿的当前所有者 =
@@ -445,6 +544,7 @@ impl BrandWorkspaceStore {
                 &transaction,
                 &workspace,
                 request.topic_plan_id.as_deref(),
+                request.item_ids.as_deref(),
             )?,
             "direct" => prepare_direct_article_seeds(
                 &transaction,
@@ -874,7 +974,12 @@ impl BrandWorkspaceStore {
             return Err("article_generation_operation_mismatch".to_string());
         }
         require_article_operation_visibility(&transaction, &operation_id, session_id, false)?;
-        if matches!(status.as_str(), "drafting" | "reviewing") || revision == 0 {
+        // discarded 是终态：弃用稿不再可编辑（票 #28）。
+        if matches!(
+            status.as_str(),
+            "drafting" | "reviewing" | "discarded"
+        ) || revision == 0
+        {
             return Err("article_edit_status_invalid".to_string());
         }
         let next_revision = revision + 1;
@@ -928,6 +1033,63 @@ impl BrandWorkspaceStore {
         transaction
             .commit()
             .map_err(|error| format!("commit article edit: {error}"))?;
+        read_article(&connection, workspace_id, &request.article_id)
+    }
+
+    /// 用户显式弃用（票 #28）：终态翻转，不建版本、不碰正文文件。CAS 同
+    /// 其他 mutation（revision + 状态守卫的 UPDATE），与在途重试的 claim
+    /// 互斥。approved 不可弃用——已批准是分发事实依据，撤回属另一语义。
+    pub fn discard_article(
+        &self,
+        workspace_id: &str,
+        session_id: &str,
+        request: ArticleDiscardRequest,
+    ) -> Result<ArticleProjection, String> {
+        let workspace = self.workspace(workspace_id)?;
+        let mut connection = open_database(&workspace)?;
+        require_article_session(&connection, session_id)?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| format!("start article discard: {error}"))?;
+        let (operation_id, revision, status): (String, i64, String) = transaction
+            .query_row(
+                "SELECT operation_id, revision, status FROM geo_articles WHERE id=?1",
+                [&request.article_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()
+            .map_err(|error| format!("read article discard: {error}"))?
+            .ok_or_else(|| "article_generation_article_not_found".to_string())?;
+        if revision != request.expected_revision {
+            return Err("article_generation_revision_conflict".to_string());
+        }
+        if operation_id != request.operation_id {
+            return Err("article_generation_operation_mismatch".to_string());
+        }
+        require_article_operation_visibility(&transaction, &operation_id, session_id, false)?;
+        if !matches!(
+            status.as_str(),
+            "draft_ready" | "generation_failed" | "rejected"
+        ) {
+            return Err("article_discard_status_invalid".to_string());
+        }
+        let now = Utc::now().to_rfc3339();
+        let changed = transaction
+            .execute(
+                "UPDATE geo_articles SET status='discarded',
+                     failure_reason=NULL, generation_claim_token=NULL,
+                     review_claim_token=NULL, updated_at=?2
+                 WHERE id=?1 AND revision=?3 AND status=?4",
+                params![request.article_id, now, revision, status],
+            )
+            .map_err(|error| format!("discard article: {error}"))?;
+        if changed != 1 {
+            return Err("article_generation_revision_conflict".to_string());
+        }
+        refresh_article_operation_status(&transaction, &operation_id, &now)?;
+        transaction
+            .commit()
+            .map_err(|error| format!("commit article discard: {error}"))?;
         read_article(&connection, workspace_id, &request.article_id)
     }
 
@@ -1332,6 +1494,7 @@ fn prepare_plan_article_seeds(
     connection: &Connection,
     workspace: &BrandWorkspace,
     requested_plan_id: Option<&str>,
+    requested_item_ids: Option<&[String]>,
 ) -> Result<PreparedArticleSeeds, String> {
     let plan_id = if let Some(id) = requested_plan_id {
         validate_short_text(id, 160, "article_generation_plan_id_invalid")?
@@ -1409,7 +1572,27 @@ fn prepare_plan_article_seeds(
     {
         return Err("article_generation_plan_selection_invalid".to_string());
     }
-    let selected_has_ranking = selected.iter().any(|item_id| {
+    // 生成时选取（票 #28）：确认的 plan 冻结的是「有资格生成」的集合，不是
+    // 「必须全部生成」的义务。缺省消费全部 selectedItemIds；显式子集必须
+    // 逐项命中资格集合且无重复。
+    let consumed: Vec<String> = match requested_item_ids {
+        None => selected.clone(),
+        Some(requested) => {
+            if requested.is_empty()
+                || requested.len() > MAX_ARTICLES
+                || requested.iter().collect::<HashSet<_>>().len() != requested.len()
+            {
+                return Err("article_generation_plan_selection_invalid".to_string());
+            }
+            for item_id in requested {
+                if !selected_set.contains(item_id) {
+                    return Err("article_generation_plan_item_not_selected".to_string());
+                }
+            }
+            requested.to_vec()
+        }
+    };
+    let selected_has_ranking = consumed.iter().any(|item_id| {
         by_id
             .get(item_id)
             .and_then(|item| item.get("contentType"))
@@ -1439,8 +1622,8 @@ fn prepare_plan_article_seeds(
     } else {
         None
     };
-    let mut seeds = Vec::with_capacity(selected.len());
-    for item_id in &selected {
+    let mut seeds = Vec::with_capacity(consumed.len());
+    for item_id in &consumed {
         let item = by_id
             .get(item_id)
             .ok_or_else(|| "article_generation_plan_selection_invalid".to_string())?;
@@ -1486,7 +1669,10 @@ fn prepare_plan_article_seeds(
         "kind": "confirmed-topic-plan",
         "planId": plan_id,
         "planRevision": revision,
-        "selectedItemIds": selected,
+        // 本次实际消费的子集（票 #28）：未传子集时等于全集。
+        "selectedItemIds": consumed,
+        // 资格全集（血缘）：确认 plan 当时冻结的 selectedItemIds。
+        "planSelectedItemIds": selected,
     });
     Ok((
         effective_knowledge_version,
@@ -1995,10 +2181,14 @@ fn refresh_article_operation_status(
     };
     let status = if statuses.iter().all(|status| status == "approved") {
         "completed"
-    } else if statuses
-        .iter()
-        .all(|status| matches!(status.as_str(), "approved" | "generation_failed"))
-    {
+    } else if statuses.iter().all(|status| {
+        matches!(
+            status.as_str(),
+            "approved" | "generation_failed" | "discarded"
+        )
+    }) {
+        // discarded 与 generation_failed 同视为「未获批准的已收束终态」
+        // （票 #28）：批准 + 弃用的组合让操作走出 running，卡片不再挂起。
         "completed-with-failures"
     } else {
         "running"
@@ -2335,6 +2525,7 @@ mod tests {
                 ArticleOperationStartRequest {
                     source_kind: "direct".to_string(),
                     topic_plan_id: None,
+                    item_ids: None,
                     direct_spec: Some(ArticleDirectSpec {
                         count: 1,
                         themes: vec!["本地服务六家对比".to_string()],
@@ -2362,6 +2553,7 @@ mod tests {
                 ArticleOperationStartRequest {
                     source_kind: "direct".to_string(),
                     topic_plan_id: None,
+                    item_ids: None,
                     direct_spec: Some(ArticleDirectSpec {
                         count: 1,
                         themes: vec!["本地服务六家对比".to_string()],
@@ -2430,6 +2622,7 @@ mod tests {
                 ArticleOperationStartRequest {
                     source_kind: "confirmed-topic-plan".to_string(),
                     topic_plan_id: Some("plan-ranking".to_string()),
+                    item_ids: None,
                     direct_spec: None,
                 },
             )
@@ -2456,6 +2649,7 @@ mod tests {
                 ArticleOperationStartRequest {
                     source_kind: "direct".to_string(),
                     topic_plan_id: None,
+                    item_ids: None,
                     direct_spec: Some(ArticleDirectSpec {
                         count: 2,
                         themes: vec!["知识库指南".to_string()],
@@ -2686,6 +2880,7 @@ mod tests {
                 ArticleOperationStartRequest {
                     source_kind: "direct".to_string(),
                     topic_plan_id: None,
+                    item_ids: None,
                     direct_spec: Some(ArticleDirectSpec {
                         count: 1,
                         themes: vec!["另一个会话的新任务".to_string()],
@@ -2757,6 +2952,7 @@ mod tests {
                 ArticleOperationStartRequest {
                     source_kind: "direct".to_string(),
                     topic_plan_id: None,
+                    item_ids: None,
                     direct_spec: Some(ArticleDirectSpec {
                         count: 2,
                         themes: vec!["主题".to_string()],
@@ -2828,6 +3024,7 @@ mod tests {
                 ArticleOperationStartRequest {
                     source_kind: "direct".to_string(),
                     topic_plan_id: None,
+                    item_ids: None,
                     direct_spec: Some(ArticleDirectSpec {
                         count: 1,
                         themes: vec!["Session A 私有草稿".to_string()],
@@ -2949,6 +3146,7 @@ mod tests {
                 ArticleOperationStartRequest {
                     source_kind: "confirmed-topic-plan".to_string(),
                     topic_plan_id: Some("plan-article".to_string()),
+                    item_ids: None,
                     direct_spec: None,
                 },
             )
@@ -2984,7 +3182,8 @@ mod tests {
                 "kind": "confirmed-topic-plan",
                 "planId": "plan-article",
                 "planRevision": 7,
-                "selectedItemIds": ["selected-item"]
+                "selectedItemIds": ["selected-item"],
+                "planSelectedItemIds": ["selected-item"]
             })
         );
     }
@@ -3001,6 +3200,7 @@ mod tests {
                 ArticleOperationStartRequest {
                     source_kind: "direct".to_string(),
                     topic_plan_id: None,
+                    item_ids: None,
                     direct_spec: Some(ArticleDirectSpec {
                         count: 2,
                         themes: vec!["知识库指南".to_string()],
@@ -3094,6 +3294,7 @@ mod tests {
                 ArticleOperationStartRequest {
                     source_kind: "direct".to_string(),
                     topic_plan_id: None,
+                    item_ids: None,
                     direct_spec: Some(ArticleDirectSpec {
                         count: 2,
                         themes: vec!["知识库指南".to_string()],
@@ -3199,6 +3400,703 @@ mod tests {
                 "category": "geo-citability",
                 "count": 1
             }])
+        );
+    }
+
+    /// 票 #28 夹具：三项全 approved 的 confirmed plan，selectedItemIds 全选。
+    fn seed_confirmed_plan_with_three_items(workspace: &BrandWorkspace, plan_id: &str) {
+        let connection = open_database(workspace).expect("db");
+        let topics = json!([{
+            "id": "topic-1",
+            "name": "知识库选型",
+            "summary": "解释企业知识库选型标准"
+        }]);
+        let fact = json!({
+            "factKey": "fact-1",
+            "predicate": "profile.history",
+            "normalizedValueJson": "\"成立10年\""
+        });
+        let item = |id: &str, title: &str| {
+            json!({
+                "id": id,
+                "topicId": "topic-1",
+                "contentType": "guide",
+                "typeSelectionReason": "适合指南",
+                "title": title,
+                "plannedFacts": [fact.clone()],
+                "approvalStatus": "approved"
+            })
+        };
+        let items = json!([
+            item("item-a", "A 篇"),
+            item("item-b", "B 篇"),
+            item("item-c", "C 篇")
+        ]);
+        connection
+            .execute_batch("PRAGMA foreign_keys=OFF;")
+            .expect("disable fixture foreign keys");
+        connection
+            .execute(
+                "INSERT INTO geo_topic_plans
+                    (id, operation_id, created_by_session_id, question_pool_id,
+                     question_pool_revision, knowledge_version, product_line, target_region,
+                     policy_version, status, revision, topics_json, items_json,
+                     selected_item_ids_json, model_audit_json, provider_snapshot_json,
+                     model_attempts_json, created_at, updated_at)
+                 VALUES (?1, 'plan-operation', 'session-article', 'pool-article',
+                         3, 1, '知识服务', '中国', 'topic-policy', 'confirmed', 7,
+                         ?2, ?3, '[\"item-a\",\"item-b\",\"item-c\"]', '{}', '{}', '[]',
+                         '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+                params![plan_id, topics.to_string(), items.to_string()],
+            )
+            .expect("confirmed topic plan fixture");
+        connection
+            .execute_batch("PRAGMA foreign_keys=ON;")
+            .expect("restore fixture foreign keys");
+    }
+
+    #[test]
+    fn plan_subset_generation_consumes_only_requested_items() {
+        // 票 #28：确认的 plan 冻结资格，不是生成义务。显式子集只建请求项
+        // 的稿，operation spec 同时记录消费子集与资格全集；未请求项留在
+        // 资格集里可被后续 operation 消费。投影顺序按 (created_at, id)，
+        // 同 operation 内 created_at 相同，不承诺请求顺序，按集合断言。
+        let (_root, store, workspace) = seeded_store();
+        seed_confirmed_plan_with_three_items(&workspace, "plan-subset");
+
+        let operation = store
+            .start_article_operation(
+                &workspace.id,
+                "session-article",
+                ArticleOperationStartRequest {
+                    source_kind: "confirmed-topic-plan".to_string(),
+                    topic_plan_id: Some("plan-subset".to_string()),
+                    item_ids: Some(vec!["item-c".to_string(), "item-a".to_string()]),
+                    direct_spec: None,
+                },
+            )
+            .expect("subset start");
+        assert_eq!(operation.articles.len(), 2);
+        let consumed_ids = operation
+            .articles
+            .iter()
+            .map(|article| article.source_plan_item_id.clone())
+            .collect::<HashSet<_>>();
+        assert_eq!(
+            consumed_ids,
+            ["item-c", "item-a"]
+                .iter()
+                .map(|id| Some(id.to_string()))
+                .collect::<HashSet<_>>()
+        );
+
+        let connection = open_database(&workspace).expect("db");
+        let spec: String = connection
+            .query_row(
+                "SELECT operation_spec_json FROM geo_article_operations WHERE operation_id=?1",
+                [&operation.id],
+                |row| row.get(0),
+            )
+            .expect("operation spec");
+        assert_eq!(
+            serde_json::from_str::<Value>(&spec).expect("operation spec JSON"),
+            json!({
+                "kind": "confirmed-topic-plan",
+                "planId": "plan-subset",
+                "planRevision": 7,
+                "selectedItemIds": ["item-c", "item-a"],
+                "planSelectedItemIds": ["item-a", "item-b", "item-c"]
+            })
+        );
+
+        // 同一 plan 可再次消费其余项（跨 operation 无重复守卫，与「重新
+        // 生成只产生新草稿」语义一致）。
+        let remainder = store
+            .start_article_operation(
+                &workspace.id,
+                "session-article",
+                ArticleOperationStartRequest {
+                    source_kind: "confirmed-topic-plan".to_string(),
+                    topic_plan_id: Some("plan-subset".to_string()),
+                    item_ids: Some(vec!["item-b".to_string()]),
+                    direct_spec: None,
+                },
+            )
+            .expect("remainder start");
+        assert_eq!(remainder.articles.len(), 1);
+        assert_eq!(
+            remainder.articles[0].source_plan_item_id.as_deref(),
+            Some("item-b")
+        );
+    }
+
+    #[test]
+    fn plan_subset_rejects_unselected_or_duplicated_items() {
+        let (_root, store, workspace) = seeded_store();
+        seed_confirmed_plan_with_three_items(&workspace, "plan-subset-guard");
+        let start = |item_ids: Option<Vec<String>>| {
+            store.start_article_operation(
+                &workspace.id,
+                "session-article",
+                ArticleOperationStartRequest {
+                    source_kind: "confirmed-topic-plan".to_string(),
+                    topic_plan_id: Some("plan-subset-guard".to_string()),
+                    item_ids,
+                    direct_spec: None,
+                },
+            )
+        };
+        // 非资格集合成员（即使是 approved 的 plan 项）不可消费。
+        assert_eq!(
+            start(Some(vec!["item-a".to_string(), "ghost".to_string()]))
+                .unwrap_err(),
+            "article_generation_plan_item_not_selected"
+        );
+        // 重复与空子集同按选择集合无效处理。
+        assert_eq!(
+            start(Some(vec!["item-a".to_string(), "item-a".to_string()]))
+                .unwrap_err(),
+            "article_generation_plan_selection_invalid"
+        );
+        assert_eq!(
+            start(Some(vec![])).unwrap_err(),
+            "article_generation_plan_selection_invalid"
+        );
+    }
+
+    #[test]
+    fn discard_article_is_terminal_and_resolves_the_operation_gate() {
+        // 票 #28：弃用是用户裁决终态。draft_ready/generation_failed 可弃用；
+        // 弃用后编辑、复审、重试入口全部关闭；批准+弃用的组合让 operation
+        // 走出 running（completed-with-failures），批准卡不再挂起。
+        let (_root, store, workspace) = seeded_store();
+        let operation = store
+            .start_article_operation(
+                &workspace.id,
+                "session-article",
+                ArticleOperationStartRequest {
+                    source_kind: "direct".to_string(),
+                    topic_plan_id: None,
+                    item_ids: None,
+                    direct_spec: Some(ArticleDirectSpec {
+                        count: 2,
+                        themes: vec!["知识库指南".to_string()],
+                        content_type: "guide".to_string(),
+                        constraints: String::new(),
+                    }),
+                },
+            )
+            .expect("operation");
+        let draft = &operation.articles[0];
+        let failed = &operation.articles[1];
+        let draft_claim = store
+            .claim_article_generation(
+                &workspace.id,
+                "session-article",
+                ArticleGenerationClaimRequest {
+                    operation_id: operation.id.clone(),
+                    article_id: draft.id.clone(),
+                    expected_revision: 0,
+                    mode: "initial".to_string(),
+                },
+            )
+            .expect("draft claim");
+        store
+            .finish_article_generation(
+                &workspace.id,
+                "session-article",
+                ArticleGenerationFinishRequest {
+                    operation_id: operation.id.clone(),
+                    article_id: draft.id.clone(),
+                    expected_revision: 0,
+                    claim_token: draft_claim.claim_token,
+                    title: "知识库指南".to_string(),
+                    body: body("知识库指南"),
+                    ranking_dimensions: None,
+                    model_audit: json!({"model": "mock-generation"}),
+                },
+            )
+            .expect("draft ready");
+        let failed_claim = store
+            .claim_article_generation(
+                &workspace.id,
+                "session-article",
+                ArticleGenerationClaimRequest {
+                    operation_id: operation.id.clone(),
+                    article_id: failed.id.clone(),
+                    expected_revision: 0,
+                    mode: "initial".to_string(),
+                },
+            )
+            .expect("failed claim");
+        store
+            .fail_article_generation(
+                &workspace.id,
+                "session-article",
+                ArticleGenerationFailRequest {
+                    operation_id: operation.id.clone(),
+                    article_id: failed.id.clone(),
+                    expected_revision: 0,
+                    claim_token: failed_claim.claim_token,
+                    failure_reason: "provider_unavailable".to_string(),
+                },
+            )
+            .expect("generation failed");
+
+        // planned 状态不可弃用（本夹具已无 planned 稿，这里从 draft_ready 弃）。
+        let discarded = store
+            .discard_article(
+                &workspace.id,
+                "session-article",
+                ArticleDiscardRequest {
+                    operation_id: operation.id.clone(),
+                    article_id: draft.id.clone(),
+                    expected_revision: 1,
+                },
+            )
+            .expect("discard draft");
+        assert_eq!(discarded.status, "discarded");
+        assert_eq!(discarded.failure_reason, None);
+
+        // 操作状态：approved ∪ discarded ∪ generation_failed 收束。
+        let projection = store
+            .get_article_operation(
+                &workspace.id,
+                "session-article",
+                ArticleOperationGetRequest {
+                    operation_id: operation.id.clone(),
+                },
+            )
+            .expect("operation read");
+        assert_eq!(projection.status, "completed-with-failures");
+
+        // 终态门：编辑/复审/重试全部对弃用稿关闭。
+        assert_eq!(
+            store
+                .edit_article(
+                    &workspace.id,
+                    "session-article",
+                    ArticleEditRequest {
+                        operation_id: operation.id.clone(),
+                        article_id: draft.id.clone(),
+                        expected_revision: 1,
+                        title: "新标题".to_string(),
+                        body: "# 新标题\n\n## 定义\n品牌成立10年。".to_string(),
+                        reason: None,
+                    },
+                )
+                .unwrap_err(),
+            "article_edit_status_invalid"
+        );
+        assert_eq!(
+            store
+                .claim_article_review(
+                    &workspace.id,
+                    "session-article",
+                    ArticleReviewClaimRequest {
+                        operation_id: operation.id.clone(),
+                        article_id: draft.id.clone(),
+                        expected_revision: 1,
+                    },
+                )
+                .unwrap_err(),
+            "article_review_status_invalid"
+        );
+        assert_eq!(
+            store
+                .claim_article_generation(
+                    &workspace.id,
+                    "session-article",
+                    ArticleGenerationClaimRequest {
+                        operation_id: operation.id.clone(),
+                        article_id: draft.id.clone(),
+                        expected_revision: 1,
+                        mode: "regenerate".to_string(),
+                    },
+                )
+                .unwrap_err(),
+            "article_generation_status_invalid"
+        );
+
+        // CAS：过期 revision 的弃用被拒。
+        assert_eq!(
+            store
+                .discard_article(
+                    &workspace.id,
+                    "session-article",
+                    ArticleDiscardRequest {
+                        operation_id: operation.id.clone(),
+                        article_id: failed.id.clone(),
+                        expected_revision: 99,
+                    },
+                )
+                .unwrap_err(),
+            "article_generation_revision_conflict"
+        );
+
+        // 失败稿同样可弃用（清掉重试挂起）。
+        let discarded_failed = store
+            .discard_article(
+                &workspace.id,
+                "session-article",
+                ArticleDiscardRequest {
+                    operation_id: operation.id,
+                    article_id: failed.id.clone(),
+                    expected_revision: 0,
+                },
+            )
+            .expect("discard failed article");
+        assert_eq!(discarded_failed.status, "discarded");
+    }
+
+    #[test]
+    fn discard_article_covers_rejected_after_failed_review() {
+        // 票 #28 弃用状态机的第三入口：文档宣称 draft_ready /
+        // generation_failed / rejected 均可弃，rejected 路径（复审拒绝后
+        // 用户显式弃用）在此补齐——弃用仍是终态、清掉审核挂起的
+        // failure_reason，且关闭后续复审/重试入口。
+        let (_root, store, workspace) = seeded_store();
+        let operation = store
+            .start_article_operation(
+                &workspace.id,
+                "session-article",
+                ArticleOperationStartRequest {
+                    source_kind: "direct".to_string(),
+                    topic_plan_id: None,
+                    item_ids: None,
+                    direct_spec: Some(ArticleDirectSpec {
+                        count: 1,
+                        themes: vec!["知识库指南".to_string()],
+                        content_type: "guide".to_string(),
+                        constraints: String::new(),
+                    }),
+                },
+            )
+            .expect("operation");
+        let article = &operation.articles[0];
+        let claim = store
+            .claim_article_generation(
+                &workspace.id,
+                "session-article",
+                ArticleGenerationClaimRequest {
+                    operation_id: operation.id.clone(),
+                    article_id: article.id.clone(),
+                    expected_revision: 0,
+                    mode: "initial".to_string(),
+                },
+            )
+            .expect("draft claim");
+        store
+            .finish_article_generation(
+                &workspace.id,
+                "session-article",
+                ArticleGenerationFinishRequest {
+                    operation_id: operation.id.clone(),
+                    article_id: article.id.clone(),
+                    expected_revision: 0,
+                    claim_token: claim.claim_token,
+                    title: "知识库指南".to_string(),
+                    body: body("知识库指南"),
+                    ranking_dimensions: None,
+                    model_audit: json!({"model": "mock-generation"}),
+                },
+            )
+            .expect("draft ready");
+        let review = store
+            .claim_article_review(
+                &workspace.id,
+                "session-article",
+                ArticleReviewClaimRequest {
+                    operation_id: operation.id.clone(),
+                    article_id: article.id.clone(),
+                    expected_revision: 1,
+                },
+            )
+            .expect("review claim");
+        let rejected = store
+            .finish_article_review(
+                &workspace.id,
+                "session-article",
+                ArticleReviewFinishRequest {
+                    operation_id: operation.id.clone(),
+                    article_id: article.id.clone(),
+                    expected_revision: 1,
+                    claim_token: review.0.claim_token,
+                    review: json!({"passed":false,"issues":[
+                        {"severity":"blocking","category":"fabrication"}
+                    ]}),
+                    passed: false,
+                },
+            )
+            .expect("reject");
+        assert_eq!(rejected.status, "rejected");
+
+        let discarded = store
+            .discard_article(
+                &workspace.id,
+                "session-article",
+                ArticleDiscardRequest {
+                    operation_id: operation.id.clone(),
+                    article_id: article.id.clone(),
+                    expected_revision: 1,
+                },
+            )
+            .expect("discard rejected article");
+        assert_eq!(discarded.status, "discarded");
+        assert_eq!(discarded.failure_reason, None);
+
+        // 终态门：复审与重试对弃用稿关闭。
+        assert_eq!(
+            store
+                .claim_article_review(
+                    &workspace.id,
+                    "session-article",
+                    ArticleReviewClaimRequest {
+                        operation_id: operation.id.clone(),
+                        article_id: article.id.clone(),
+                        expected_revision: 1,
+                    },
+                )
+                .unwrap_err(),
+            "article_review_status_invalid"
+        );
+        assert_eq!(
+            store
+                .claim_article_generation(
+                    &workspace.id,
+                    "session-article",
+                    ArticleGenerationClaimRequest {
+                        operation_id: operation.id,
+                        article_id: article.id.clone(),
+                        expected_revision: 1,
+                        mode: "regenerate".to_string(),
+                    },
+                )
+                .unwrap_err(),
+            "article_generation_status_invalid"
+        );
+    }
+
+    #[test]
+    fn legacy_status_check_is_rebuilt_to_accept_discarded() {
+        // 存量库迁移（票 #28）：把 geo_articles 降级成迁移前的旧版 CHECK
+        // 形态（先例 materials/post_publish_monitoring 的同款测法），下一次
+        // store 调用经 open_database 重走 ensure_schema 触发重建；迁移后
+        // 'discarded' 既出现在 DDL 里，也能真实落库。
+        let (_root, store, workspace) = seeded_store();
+        {
+            let connection = Connection::open(workspace.root_path.join("project.sqlite"))
+                .expect("open");
+            connection
+                .execute_batch("PRAGMA foreign_keys = OFF;")
+                .expect("unlock");
+            connection
+                .execute_batch("DROP TABLE geo_articles;")
+                .expect("drop");
+            connection
+                .execute_batch(
+                    "CREATE TABLE geo_articles (
+                        id TEXT PRIMARY KEY,
+                        operation_id TEXT NOT NULL REFERENCES geo_article_operations(operation_id),
+                        source_plan_item_id TEXT,
+                        knowledge_version INTEGER NOT NULL REFERENCES knowledge_versions(version),
+                        content_type TEXT NOT NULL CHECK(content_type IN ('guide','showcase','ranking','news','news_light')),
+                        topic TEXT NOT NULL,
+                        requested_title TEXT NOT NULL,
+                        constraints TEXT NOT NULL,
+                        planned_facts_json TEXT NOT NULL,
+                        ranking_dimensions_json TEXT,
+                        status TEXT NOT NULL CHECK(status IN ('planned','drafting','draft_ready','reviewing','approved','generation_failed','rejected')),
+                        revision INTEGER NOT NULL DEFAULT 0,
+                        approved_revision INTEGER,
+                        failure_reason TEXT,
+                        generation_attempt INTEGER NOT NULL DEFAULT 0,
+                        generation_claim_token TEXT,
+                        review_claim_token TEXT,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        UNIQUE(operation_id, source_plan_item_id)
+                     );",
+                )
+                .expect("legacy schema");
+            connection
+                .execute_batch("PRAGMA foreign_keys = ON;")
+                .expect("restore");
+        }
+
+        // start 内部先经 open_database → ensure_schema 完成重建，INSERT 落
+        // 在新表上；随后弃用一个失败稿，旧 CHECK 会拒绝的 UPDATE 现在成立。
+        let operation = store
+            .start_article_operation(
+                &workspace.id,
+                "session-article",
+                ArticleOperationStartRequest {
+                    source_kind: "direct".to_string(),
+                    topic_plan_id: None,
+                    item_ids: None,
+                    direct_spec: Some(ArticleDirectSpec {
+                        count: 1,
+                        themes: vec!["知识库指南".to_string()],
+                        content_type: "guide".to_string(),
+                        constraints: String::new(),
+                    }),
+                },
+            )
+            .expect("start after migration");
+        let article = &operation.articles[0];
+        let claim = store
+            .claim_article_generation(
+                &workspace.id,
+                "session-article",
+                ArticleGenerationClaimRequest {
+                    operation_id: operation.id.clone(),
+                    article_id: article.id.clone(),
+                    expected_revision: 0,
+                    mode: "initial".to_string(),
+                },
+            )
+            .expect("claim");
+        store
+            .fail_article_generation(
+                &workspace.id,
+                "session-article",
+                ArticleGenerationFailRequest {
+                    operation_id: operation.id.clone(),
+                    article_id: article.id.clone(),
+                    expected_revision: 0,
+                    claim_token: claim.claim_token,
+                    failure_reason: "provider_unavailable".to_string(),
+                },
+            )
+            .expect("generation failed");
+        let discarded = store
+            .discard_article(
+                &workspace.id,
+                "session-article",
+                ArticleDiscardRequest {
+                    operation_id: operation.id,
+                    article_id: article.id.clone(),
+                    expected_revision: 0,
+                },
+            )
+            .expect("discard after migration");
+        assert_eq!(discarded.status, "discarded");
+
+        let connection = open_database(&workspace).expect("db");
+        let ddl: String = connection
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='geo_articles'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read table ddl");
+        assert!(ddl.contains("'discarded'"), "ddl must contain discarded: {ddl}");
+    }
+
+    #[test]
+    fn discard_article_rejects_approved_and_planned_drafts() {
+        // approved 是进入分发的事实依据，不可弃用；planned 是在途前置态。
+        let (_root, store, workspace) = seeded_store();
+        let operation = store
+            .start_article_operation(
+                &workspace.id,
+                "session-article",
+                ArticleOperationStartRequest {
+                    source_kind: "direct".to_string(),
+                    topic_plan_id: None,
+                    item_ids: None,
+                    direct_spec: Some(ArticleDirectSpec {
+                        count: 2,
+                        themes: vec!["知识库指南".to_string()],
+                        content_type: "guide".to_string(),
+                        constraints: String::new(),
+                    }),
+                },
+            )
+            .expect("operation");
+        let approved = &operation.articles[0];
+        let planned = &operation.articles[1];
+        let claim = store
+            .claim_article_generation(
+                &workspace.id,
+                "session-article",
+                ArticleGenerationClaimRequest {
+                    operation_id: operation.id.clone(),
+                    article_id: approved.id.clone(),
+                    expected_revision: 0,
+                    mode: "initial".to_string(),
+                },
+            )
+            .expect("claim");
+        store
+            .finish_article_generation(
+                &workspace.id,
+                "session-article",
+                ArticleGenerationFinishRequest {
+                    operation_id: operation.id.clone(),
+                    article_id: approved.id.clone(),
+                    expected_revision: 0,
+                    claim_token: claim.claim_token,
+                    title: "知识库指南".to_string(),
+                    body: body("知识库指南"),
+                    ranking_dimensions: None,
+                    model_audit: json!({"model": "mock-generation"}),
+                },
+            )
+            .expect("draft ready");
+        let review = store
+            .claim_article_review(
+                &workspace.id,
+                "session-article",
+                ArticleReviewClaimRequest {
+                    operation_id: operation.id.clone(),
+                    article_id: approved.id.clone(),
+                    expected_revision: 1,
+                },
+            )
+            .expect("review claim");
+        store
+            .finish_article_review(
+                &workspace.id,
+                "session-article",
+                ArticleReviewFinishRequest {
+                    operation_id: operation.id.clone(),
+                    article_id: approved.id.clone(),
+                    expected_revision: 1,
+                    claim_token: review.0.claim_token,
+                    review: json!({"passed": true, "issues": []}),
+                    passed: true,
+                },
+            )
+            .expect("approved");
+
+        assert_eq!(
+            store
+                .discard_article(
+                    &workspace.id,
+                    "session-article",
+                    ArticleDiscardRequest {
+                        operation_id: operation.id.clone(),
+                        article_id: approved.id.clone(),
+                        expected_revision: 1,
+                    },
+                )
+                .unwrap_err(),
+            "article_discard_status_invalid"
+        );
+        assert_eq!(
+            store
+                .discard_article(
+                    &workspace.id,
+                    "session-article",
+                    ArticleDiscardRequest {
+                        operation_id: operation.id.clone(),
+                        article_id: planned.id.clone(),
+                        expected_revision: 0,
+                    },
+                )
+                .unwrap_err(),
+            "article_discard_status_invalid"
         );
     }
 }

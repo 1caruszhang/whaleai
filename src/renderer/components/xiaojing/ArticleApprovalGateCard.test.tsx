@@ -13,6 +13,7 @@ const mocks = vi.hoisted(() => ({
   loadLatest: vi.fn(),
   edit: vi.fn(),
   approve: vi.fn(),
+  discard: vi.fn(),
   retry: vi.fn(),
   fetchImage: vi.fn(),
   createObjectURL: vi.fn(),
@@ -29,6 +30,7 @@ vi.mock("@/api/articleGenerationClient", () => ({
   loadLatestArticleOperation: mocks.loadLatest,
   editArticle: mocks.edit,
   approveArticle: mocks.approve,
+  discardArticle: mocks.discard,
   retryArticle: mocks.retry,
 }));
 
@@ -126,12 +128,34 @@ function wrappedResult(operation: ArticleOperationProjection): string {
   ]);
 }
 
+// 重试用例共用时序脚手架：点击「重试本篇」并冲刷 fire-and-forget 的
+// POST 返回（fake timers 下微任务随 advance(0) 排空）。
+async function clickRetry(card: HTMLElement) {
+  await act(async () => {
+    fireEvent.click(within(card).getByRole("button", { name: /重试本篇/ }));
+  });
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(0);
+  });
+}
+
+// 推过 3s 轮询窗口：新投影到达并完成落定派生的两级渲染冲刷。
+async function advancePastPollWindow() {
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(3_100);
+  });
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(10);
+  });
+}
+
 beforeEach(() => {
   mocks.apiPost.mockReset();
   mocks.loadBody.mockReset();
   mocks.loadLatest.mockReset().mockResolvedValue(null);
   mocks.edit.mockReset();
   mocks.approve.mockReset();
+  mocks.discard.mockReset();
   mocks.retry.mockReset();
   mocks.fetchImage.mockReset().mockResolvedValue({ mediaType: "image/png", bytes: pngBytes() });
   mocks.createObjectURL.mockReset().mockImplementation(() => `blob:gate-${Math.random()}`);
@@ -360,7 +384,7 @@ describe("ArticleApprovalGateCard", () => {
       within(card).queryByRole("textbox", { name: /编辑源文输入/ }),
     ).not.toBeInTheDocument();
 
-    fireEvent.click(within(card).getByRole("button", { name: "批准并继续（1 篇）" }));
+    fireEvent.click(within(card).getByRole("button", { name: "批准所选（1 篇）" }));
     await waitFor(() => expect(mocks.approve).toHaveBeenCalledTimes(1));
     expect(mocks.approve).toHaveBeenCalledWith(
       mocks.apiPost,
@@ -445,7 +469,7 @@ describe("ArticleApprovalGateCard", () => {
     expect(within(card).getByText(/已批准 0\/2/)).toBeInTheDocument();
 
     fireEvent.click(
-      within(card).getByRole("button", { name: "批准并继续（2 篇）" }),
+      within(card).getByRole("button", { name: "批准所选（2 篇）" }),
     );
     await waitFor(() =>
       expect(
@@ -474,7 +498,7 @@ describe("ArticleApprovalGateCard", () => {
       },
     );
     expect(
-      within(card).queryByRole("button", { name: /批准并继续/ }),
+      within(card).queryByRole("button", { name: /批准所选/ }),
     ).not.toBeInTheDocument();
   });
 
@@ -501,7 +525,7 @@ describe("ArticleApprovalGateCard", () => {
     const card = screen.getByRole("region", { name: "文章审核批准" });
 
     fireEvent.click(
-      within(card).getByRole("button", { name: "批准并继续（2 篇）" }),
+      within(card).getByRole("button", { name: "批准所选（2 篇）" }),
     );
     await waitFor(() =>
       expect(within(card).getByText(/部分文章未能批准/)).toBeInTheDocument(),
@@ -511,7 +535,7 @@ describe("ArticleApprovalGateCard", () => {
     ).toBeInTheDocument();
     expect(within(card).getByText(/已批准 1\/2/)).toBeInTheDocument();
     expect(
-      within(card).getByRole("button", { name: "批准并继续（1 篇）" }),
+      within(card).getByRole("button", { name: "批准所选（1 篇）" }),
     ).toBeInTheDocument();
     expect(
       within(card).queryByText(/已全部批准/),
@@ -534,7 +558,7 @@ describe("ArticleApprovalGateCard", () => {
     const card = screen.getByRole("region", { name: "文章审核批准" });
 
     fireEvent.click(
-      within(card).getByRole("button", { name: "批准并继续（1 篇）" }),
+      within(card).getByRole("button", { name: "批准所选（1 篇）" }),
     );
     await waitFor(() =>
       expect(within(card).getByText(/指南 · 风险阻断/)).toBeInTheDocument(),
@@ -566,7 +590,7 @@ describe("ArticleApprovalGateCard", () => {
       within(card).getByText(/已全部批准（1 篇）/),
     ).toBeInTheDocument();
     expect(
-      within(card).queryByRole("button", { name: /批准并继续/ }),
+      within(card).queryByRole("button", { name: /批准所选/ }),
     ).not.toBeInTheDocument();
   });
 
@@ -597,17 +621,25 @@ describe("ArticleApprovalGateCard", () => {
     ).toBeInTheDocument();
   });
 
-  it("retries the failed article with exact revision and adopts the regenerated draft", async () => {
+  // 重试是 fire-and-forget：retry 返回 claim 前旧快照（仍是失败态、
+  // attempt 未变），行内翻「重新生成中」并收起旧失败原因；整批无待审稿
+  // 时轮询也必须跑（票据开启），投递 attempt 递增的新稿后自动退出等待。
+  it("flips the failed row to regenerating and adopts the polled draft", async () => {
+    vi.useFakeTimers();
     const failed = makeArticle({
       status: "generation_failed",
       revision: 0,
+      generationAttempt: 1,
       approvedRevision: null,
       failureReason: "article_generation_ranking_output_invalid:实体集合不符",
       currentVersion: null,
     });
+    // 服务端契约：retry 路由返回的是 claim 之前的旧投影。
+    mocks.retry.mockResolvedValue(failed);
     const recovered = makeArticle({
       status: "draft_ready",
       revision: 1,
+      generationAttempt: 2,
       approvedRevision: null,
       failureReason: null,
       currentVersion: {
@@ -622,7 +654,6 @@ describe("ArticleApprovalGateCard", () => {
         approvedAt: null,
       },
     });
-    mocks.retry.mockResolvedValue(recovered);
     render(
       <ArticleApprovalGateCard
         data={{ kind: "article-operation", operation: makeOperation([failed]) }}
@@ -630,19 +661,182 @@ describe("ArticleApprovalGateCard", () => {
     );
     const card = screen.getByRole("region", { name: "文章审核批准" });
 
-    fireEvent.click(within(card).getByRole("button", { name: /重试本篇/ }));
-    await waitFor(() => expect(mocks.retry).toHaveBeenCalledTimes(1));
+    await clickRetry(card);
+    expect(mocks.retry).toHaveBeenCalledTimes(1);
     expect(mocks.retry).toHaveBeenCalledWith(
       mocks.apiPost,
       { workspaceId: "brand-17", sessionId: "session-17" },
       { operationId: "operation-17", articleId: "article-1", expectedRevision: 0 },
     );
-    await waitFor(() =>
-      expect(within(card).getByText(/草稿待审核/)).toBeInTheDocument(),
-    );
+    expect(within(card).getByText(/重新生成中/)).toBeInTheDocument();
+    expect(within(card).queryByText(/实体集合不符/)).not.toBeInTheDocument();
     expect(
-      within(card).getByRole("button", { name: /批准并继续（1 篇）/ }),
+      within(card).getByRole("button", { name: /重试本篇/ }),
+    ).toBeDisabled();
+
+    // 3s 轮询投递新稿（attempt 2 落定）→ 退出等待、进入待审。
+    mocks.loadLatest.mockResolvedValue({
+      ...makeOperation([recovered]),
+      updatedAt: "2026-08-18T00:02:30Z",
+    });
+    await advancePastPollWindow();
+    expect(within(card).queryByText(/重新生成中/)).not.toBeInTheDocument();
+    expect(within(card).getByText(/草稿待审核/)).toBeInTheDocument();
+    expect(
+      within(card).queryByRole("button", { name: /重试本篇/ }),
+    ).not.toBeInTheDocument();
+    expect(
+      within(card).getByRole("button", { name: /批准所选（1 篇）/ }),
     ).toBeInTheDocument();
+  });
+
+  // 再失败：attempt 递增、revision 不变——同样由轮询送达，翻回「生成失
+  // 败」并显示新一轮失败原因，重试入口恢复。
+  it("flips back to failed with the new reason when the retry fails again", async () => {
+    vi.useFakeTimers();
+    const failed = makeArticle({
+      status: "generation_failed",
+      revision: 0,
+      generationAttempt: 1,
+      approvedRevision: null,
+      failureReason: "provider_unavailable",
+      currentVersion: null,
+    });
+    mocks.retry.mockResolvedValue(failed);
+    const failedAgain = makeArticle({
+      status: "generation_failed",
+      revision: 0,
+      generationAttempt: 2,
+      approvedRevision: null,
+      failureReason: "article_generation_ranking_output_invalid:实体集合不符",
+      currentVersion: null,
+    });
+    render(
+      <ArticleApprovalGateCard
+        data={{ kind: "article-operation", operation: makeOperation([failed]) }}
+      />,
+    );
+    const card = screen.getByRole("region", { name: "文章审核批准" });
+
+    await clickRetry(card);
+    expect(within(card).getByText(/重新生成中/)).toBeInTheDocument();
+
+    mocks.loadLatest.mockResolvedValue({
+      ...makeOperation([failedAgain]),
+      updatedAt: "2026-08-18T00:03:00Z",
+    });
+    await advancePastPollWindow();
+    expect(within(card).queryByText(/重新生成中/)).not.toBeInTheDocument();
+    expect(within(card).getByText(/指南 · 生成失败/)).toBeInTheDocument();
+    expect(within(card).getByText(/实体集合不符/)).toBeInTheDocument();
+    expect(
+      within(card).getByRole("button", { name: /重试本篇/ }),
+    ).toBeEnabled();
+  });
+
+  // 兜底：重生成正常 1–2 分钟；超过 5 分钟未落定时提示「生成时间较长」
+  // 并恢复重试入口，等待动画与轮询不中断。
+  it("keeps waiting but re-enables retry with a slow hint after 5 minutes", async () => {
+    vi.useFakeTimers();
+    const failed = makeArticle({
+      status: "generation_failed",
+      revision: 0,
+      approvedRevision: null,
+      failureReason: "provider_unavailable",
+      currentVersion: null,
+    });
+    mocks.retry.mockResolvedValue(failed);
+    render(
+      <ArticleApprovalGateCard
+        data={{ kind: "article-operation", operation: makeOperation([failed]) }}
+      />,
+    );
+    const card = screen.getByRole("region", { name: "文章审核批准" });
+
+    await clickRetry(card);
+    expect(within(card).getByText(/重新生成中/)).toBeInTheDocument();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(4 * 60_000);
+    });
+    expect(within(card).queryByText(/生成时间较长/)).not.toBeInTheDocument();
+    expect(
+      within(card).getByRole("button", { name: /重试本篇/ }),
+    ).toBeDisabled();
+    // 票据在途时轮询必须持续运行（整批无 draft_ready 也跑）。
+    expect(mocks.loadLatest).toHaveBeenCalled();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60_000 + 1_000);
+    });
+    expect(
+      within(card).getByText(/生成时间较长，可稍候/),
+    ).toBeInTheDocument();
+    expect(within(card).getByText(/重新生成中/)).toBeInTheDocument();
+    expect(
+      within(card).getByRole("button", { name: /重试本篇/ }),
+    ).toBeEnabled();
+  });
+
+  // 本卡票据丢失（卡片重挂载）后再次点击：服务端报在途 → 同样进入等待
+  // 态，而不是留在可重复点击的失败态。
+  it("enters the waiting state when the server says a retry is already running", async () => {
+    vi.useFakeTimers();
+    const failed = makeArticle({
+      status: "generation_failed",
+      revision: 0,
+      approvedRevision: null,
+      failureReason: "provider_unavailable",
+      currentVersion: null,
+    });
+    mocks.retry.mockRejectedValue(new Error("article_retry_in_progress"));
+    render(
+      <ArticleApprovalGateCard
+        data={{ kind: "article-operation", operation: makeOperation([failed]) }}
+      />,
+    );
+    const card = screen.getByRole("region", { name: "文章审核批准" });
+
+    await clickRetry(card);
+    expect(within(card).getByText(/重试已在进行中/)).toBeInTheDocument();
+    expect(within(card).getByText(/重新生成中/)).toBeInTheDocument();
+    expect(
+      within(card).getByRole("button", { name: /重试本篇/ }),
+    ).toBeDisabled();
+  });
+
+  // 共识 Q1：重试进行中只影响本篇——同卡另一篇待审稿的预览与批准入口
+  // 不受干扰。
+  it("keeps other articles interactive while one is regenerating", async () => {
+    vi.useFakeTimers();
+    const ready = makeArticle({ id: "article-ready" });
+    const failed = makeArticle({
+      id: "article-failed",
+      status: "generation_failed",
+      revision: 0,
+      approvedRevision: null,
+      failureReason: "provider_unavailable",
+      currentVersion: null,
+    });
+    mocks.retry.mockResolvedValue(failed);
+    render(
+      <ArticleApprovalGateCard
+        data={{
+          kind: "article-operation",
+          operation: makeOperation([ready, failed]),
+        }}
+      />,
+    );
+    const card = screen.getByRole("region", { name: "文章审核批准" });
+
+    await clickRetry(card);
+    expect(within(card).getByText(/重新生成中/)).toBeInTheDocument();
+    expect(
+      within(card).getByRole("button", { name: /查看正文/ }),
+    ).toBeEnabled();
+    expect(
+      within(card).getByRole("button", { name: /批准所选（1 篇）/ }),
+    ).toBeEnabled();
   });
 
   it("surfaces a retry error without losing the retry affordance", async () => {
@@ -845,5 +1039,150 @@ describe("ArticleApprovalGateCard", () => {
     // 取回次数：初始 2 张 + 修订重挂载后对仅存占位符（image-1）重取 1 次
     // （旧实例卸载时 blob 已回收，重挂载必须重取，不泄漏也不复用失效 URL）。
     expect(mocks.fetchImage).toHaveBeenCalledTimes(3);
+  });
+
+  // 票 #34：待审稿默认全选；取消勾选的篇目不随「批准所选」提交。
+  it("approves only checked pending articles and leaves unchecked ones pending", async () => {
+    const first = makeArticle();
+    const second = makeArticle({ id: "article-2" });
+    mocks.approve.mockImplementation(
+      async (
+        _api: unknown,
+        _identity: unknown,
+        input: { articleId: string; expectedRevision: number },
+      ) =>
+        makeArticle({
+          id: input.articleId,
+          revision: input.expectedRevision,
+          status: "approved",
+          approvedRevision: input.expectedRevision,
+        }),
+    );
+    render(
+      <ArticleApprovalGateCard
+        data={{
+          kind: "article-operation",
+          operation: makeOperation([first, second]),
+        }}
+      />,
+    );
+    const card = screen.getByRole("region", { name: "文章审核批准" });
+
+    // 默认全选：按钮计数覆盖全部待审稿。
+    expect(
+      within(card).getByRole("button", { name: "批准所选（2 篇）" }),
+    ).toBeInTheDocument();
+
+    // 两篇同名标题 → 用 getAllBy 定位第一个 checkbox（article-1）。
+    const checkboxes = within(card).getAllByRole("checkbox", {
+      name: "选择批准 成都车载音响选购指南",
+    });
+    expect(checkboxes).toHaveLength(2);
+    expect(checkboxes[0]).toBeChecked();
+    fireEvent.click(checkboxes[0]);
+    expect(checkboxes[0]).not.toBeChecked();
+    expect(
+      within(card).getByRole("button", { name: "批准所选（1 篇）" }),
+    ).toBeInTheDocument();
+
+    fireEvent.click(
+      within(card).getByRole("button", { name: "批准所选（1 篇）" }),
+    );
+    await waitFor(() => expect(mocks.approve).toHaveBeenCalledTimes(1));
+    expect(mocks.approve).toHaveBeenCalledWith(
+      mocks.apiPost,
+      { workspaceId: "brand-17", sessionId: "session-17" },
+      {
+        operationId: "operation-17",
+        articleId: "article-2",
+        expectedRevision: 3,
+      },
+    );
+    // 未勾选篇目留在待审：按钮回落到「批准所选（0 篇）」并禁用，卡片不进终态。
+    expect(within(card).queryByText(/已全部批准/)).not.toBeInTheDocument();
+    const idleButton = within(card).getByRole("button", {
+      name: "批准所选（0 篇）",
+    });
+    expect(idleButton).toBeDisabled();
+  });
+
+  // 票 #34：明确不要的稿走两步确认弃用，终态不进分发；批准 + 弃用收束
+  // 后卡片呈现「已全部处理」。
+  it("discards an unwanted draft via two-step confirm and settles the card", async () => {
+    const first = makeArticle();
+    const second = makeArticle({ id: "article-2" });
+    mocks.discard.mockResolvedValue(
+      makeArticle({ id: "article-1", status: "discarded" }),
+    );
+    mocks.approve.mockImplementation(
+      async (
+        _api: unknown,
+        _identity: unknown,
+        input: { articleId: string; expectedRevision: number },
+      ) =>
+        makeArticle({
+          id: input.articleId,
+          revision: input.expectedRevision,
+          status: "approved",
+          approvedRevision: input.expectedRevision,
+        }),
+    );
+    render(
+      <ArticleApprovalGateCard
+        data={{
+          kind: "article-operation",
+          operation: makeOperation([first, second]),
+        }}
+      />,
+    );
+    const card = screen.getByRole("region", { name: "文章审核批准" });
+
+    // 第一步「不要这篇」只进入确认态，不调用接口。
+    fireEvent.click(
+      within(card).getAllByRole("button", { name: /不要这篇/ })[0],
+    );
+    expect(mocks.discard).not.toHaveBeenCalled();
+    expect(
+      within(card).getAllByRole("button", { name: /确认不要/ })[0],
+    ).toBeInTheDocument();
+
+    // 「算了」退回；再次确认才真正弃用。
+    fireEvent.click(within(card).getAllByRole("button", { name: "算了" })[0]);
+    expect(mocks.discard).not.toHaveBeenCalled();
+    fireEvent.click(
+      within(card).getAllByRole("button", { name: /不要这篇/ })[0],
+    );
+    fireEvent.click(
+      within(card).getAllByRole("button", { name: /确认不要/ })[0],
+    );
+    await waitFor(() => expect(mocks.discard).toHaveBeenCalledTimes(1));
+    expect(mocks.discard).toHaveBeenCalledWith(
+      mocks.apiPost,
+      { workspaceId: "brand-17", sessionId: "session-17" },
+      {
+        operationId: "operation-17",
+        articleId: "article-1",
+        expectedRevision: 3,
+      },
+    );
+    expect(within(card).getByText(/已弃用，不进入分发/)).toBeInTheDocument();
+
+    // 弃用稿不再渲染勾选；批准其余稿后卡片收束为已全部处理。
+    expect(
+      within(card).getAllByRole("checkbox", {
+        name: "选择批准 成都车载音响选购指南",
+      }),
+    ).toHaveLength(1);
+    fireEvent.click(
+      within(card).getByRole("button", { name: "批准所选（1 篇）" }),
+    );
+    await waitFor(() =>
+      expect(
+        within(card).getByText(/已全部处理（批准 1 · 弃用 1）/),
+      ).toBeInTheDocument(),
+    );
+    expect(
+      within(card).queryByRole("button", { name: /批准所选/ }),
+    ).not.toBeInTheDocument();
   });
 });

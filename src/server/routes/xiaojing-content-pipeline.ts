@@ -490,6 +490,45 @@ export async function handleXiaojingContentPipelineRoute(
   }
 
   if (
+    pathname === "/api/xiaojing/articles/discard" &&
+    request.method === "POST"
+  ) {
+    try {
+      const payload = (await request.json()) as {
+        workspaceId: string;
+        sessionId: string;
+        operationId: string;
+        articleId: string;
+        expectedRevision: number;
+      };
+      const runtimeSessionId = getRuntimeSessionIdForRequest();
+      const workspaceId = basename(resolve(workspacePath));
+      if (
+        payload.workspaceId !== workspaceId ||
+        payload.sessionId !== runtimeSessionId
+      ) {
+        return jsonResponse(
+          { success: false, error: "article_generation_identity_mismatch" },
+          403,
+        );
+      }
+      const identity = { workspaceId, sessionId: runtimeSessionId };
+      const article = await getXiaojingArticleService(identity).discard({
+        ...payload,
+        ...identity,
+      });
+      return jsonResponse({ success: true, article });
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : String(error);
+      return jsonResponse(
+        { success: false, error: message },
+        message.includes("revision_conflict") ? 409 : 400,
+      );
+    }
+  }
+
+  if (
     pathname === "/api/xiaojing/articles/approve" &&
     request.method === "POST"
   ) {
