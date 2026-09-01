@@ -960,7 +960,9 @@ describe("ArticleApprovalGateCard", () => {
     expect(
       within(card).queryByRole("img", { name: "环境照" }),
     ).not.toBeInTheDocument();
-    expect(mocks.revokeObjectURL).toHaveBeenCalled();
+    // revoke 与图片从 DOM 消失同拍（useMaterialImages effect 体内执行），
+    // 但断言仍走 waitFor：不把正确性押在渲染调度的时序细节上。
+    await waitFor(() => expect(mocks.revokeObjectURL).toHaveBeenCalled());
   });
 
   // #16 AC3：聊天闸门修订（「删掉第二张图」类指令作用于占位符）——3s 轮询

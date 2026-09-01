@@ -135,7 +135,11 @@ describe('ArticleBodyPreview', () => {
     await waitFor(() => {
       expect(screen.queryByRole('img')).not.toBeInTheDocument();
     });
-    expect(mocks.revokeObjectURL).toHaveBeenCalledWith(firstUrl);
+    // revoke 与图片消失同拍（useMaterialImages effect 体内执行），断言仍
+    // 走 waitFor：不把正确性押在渲染调度时序上。
+    await waitFor(() => {
+      expect(mocks.revokeObjectURL).toHaveBeenCalledWith(firstUrl);
+    });
     expect(mocks.fetchImage).toHaveBeenCalledTimes(1);
     expect(screen.getByRole('heading', { level: 2, name: '选购要点' })).toBeInTheDocument();
   });

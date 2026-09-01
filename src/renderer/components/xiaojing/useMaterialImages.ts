@@ -42,54 +42,69 @@ export function useMaterialImages(
   );
   const apiPostRef = useRef(apiPost);
   const sessionIdRef = useRef(sessionId);
-  const entriesRef = useRef(entries);
   const urlsRef = useRef(new Map<string, string>());
-  // react_stability_rules：apiPost/sessionId/取回结果经 ref 读取，不进取数
-  // effect 依赖；镜像写放在 effect 里（useGateCardRefresh 同款）。
+  /** 已发起过取回（或因无会话而终局 failed）的 id，跨 idsKey 累计防重取。 */
+  const startedRef = useRef(new Set<string>());
+
+  // react_stability_rules：apiPost/sessionId 经 ref 读取，不进取数 effect
+  // 依赖（镜像写放独立 effect，与 useGateCardRefresh 同款）。
   useEffect(() => {
     apiPostRef.current = apiPost;
     sessionIdRef.current = sessionId;
-    entriesRef.current = entries;
   });
 
-  useEffect(() => {
-    const wanted = new Set(idsKey === "" ? [] : idsKey.split(","));
-    let cancelled = false;
-
-    // 清掉不再被正文引用的条目（编辑删占位符/聊天修订后）：blob 即刻回收。
+  // 正文占位符集合变化时同步调整 entries：React 官方「输入变化时调整
+  // state」的渲染期守卫模式（不放 effect——effect 体内同步 setState 造成
+  // 级联渲染，react-hooks/set-state-in-effect；先例 MaterialImageCandidatesBar
+  // 的身份重置同款）。收缩不再引用的条目、给缺失 id 补占位（无会话直接
+  // failed，与旧语义一致不重试）。setState 后立即重渲染，守卫收敛为零
+  // 开销；updater 只读入参与闭包常量，不触碰 ref——渲染期不得有副作用。
+  const [syncedIdsKey, setSyncedIdsKey] = useState(idsKey);
+  if (
+    idsKey !== syncedIdsKey ||
+    imageIds.some((imageId) => !entries.has(imageId))
+  ) {
+    setSyncedIdsKey(idsKey);
+    const wanted = new Set(imageIds);
     setEntries((current) => {
       let next: Map<string, MaterialImageEntry> | null = null;
-      for (const [imageId, entry] of current) {
+      for (const imageId of current.keys()) {
         if (wanted.has(imageId)) continue;
-        if (!next) next = new Map(current);
-        if (entry.status === "ready") {
-          const url = urlsRef.current.get(imageId);
-          if (url) {
-            URL.revokeObjectURL(url);
-            urlsRef.current.delete(imageId);
-          }
-        }
+        next ??= new Map(current);
         next.delete(imageId);
+      }
+      for (const imageId of imageIds) {
+        if (current.has(imageId)) continue;
+        next ??= new Map(current);
+        next.set(
+          imageId,
+          hasRealSession
+            ? { status: "loading" }
+            : { status: "failed", reason: "暂无会话，无法取回材料图片" },
+        );
       }
       return next ?? current;
     });
+  }
 
+  // 取回与回收（对外部系统）：effect 体内只做 object URL 回收与取回发起，
+  // 全部 setState 都在异步回调里。revoke 必须直接在 effect 体内执行——
+  // setState updater 必须纯（React 可延迟/重放），把 revoke 夹带进 updater
+  // 会让回收时机挂在 update 调度上，与「图片从 DOM 消失」之间出现可观察
+  // 竞态；urlsRef 只登记 ready 条目的 URL，幂等可重放。
+  useEffect(() => {
+    const wanted = new Set(idsKey === "" ? [] : idsKey.split(","));
+    for (const [imageId, url] of urlsRef.current) {
+      if (wanted.has(imageId)) continue;
+      URL.revokeObjectURL(url);
+      urlsRef.current.delete(imageId);
+    }
+
+    let cancelled = false;
     for (const imageId of wanted) {
-      if (entriesRef.current.has(imageId)) continue;
-      if (!hasRealSession) {
-        const reason = "暂无会话，无法取回材料图片";
-        setEntries((current) =>
-          current.has(imageId)
-            ? current
-            : new Map(current).set(imageId, { status: "failed", reason }),
-        );
-        continue;
-      }
-      setEntries((current) =>
-        current.has(imageId)
-          ? current
-          : new Map(current).set(imageId, { status: "loading" }),
-      );
+      if (startedRef.current.has(imageId)) continue;
+      startedRef.current.add(imageId);
+      if (!hasRealSession) continue;
       void (async () => {
         try {
           const { bytes, mediaType } = await fetchMaterialImageContent(
