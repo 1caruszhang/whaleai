@@ -16,10 +16,10 @@ import { useCurrentWorkspace } from "@/context/CurrentWorkspaceContext";
 import { useTabApi, useTabState } from "@/context/TabContext";
 import { isPendingSessionId } from "../../../shared/constants";
 import type { GeoOperationProjection } from "../../../shared/geo/operation";
-import { GEO_OPERATION_STATUS_LABEL, TERMINAL } from "./GeoOperationEventCard";
+import { TERMINAL } from "./GeoOperationEventCard";
 import GeoGateProgressStrip, {
   deriveGateSegments,
-  formatGeoOperationProgressLine,
+  formatGeoOperationStatusLine,
 } from "./GeoGateProgressStrip";
 
 function GeoOperationDockedStrip({
@@ -111,9 +111,9 @@ function GeoOperationDockedStrip({
 
   if (!live) return null;
   const gateSegments = deriveGateSegments(live.steps);
-  // 状态行与进度卡共用同一条派生：执行期优先报真实执行
-  // （如「正在生成文章 3/5」），详见 formatGeoOperationProgressLine。
-  const progressLine = formatGeoOperationProgressLine(live.steps);
+  // 状态行与进度卡共用同一条派生（ADR-0011）：从 steps[].status 如实
+  // 派生，两处展示一致。
+  const statusLine = formatGeoOperationStatusLine(live);
 
   return (
     <button
@@ -129,7 +129,7 @@ function GeoOperationDockedStrip({
             {live.goal}
           </span>
           <span className="ml-auto shrink-0 text-xs text-[var(--ink-muted)]">
-            {GEO_OPERATION_STATUS_LABEL[live.status]} · {progressLine}
+            {statusLine}
           </span>
         </div>
         {gateSegments.length > 0 && (

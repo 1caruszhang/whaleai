@@ -83,10 +83,21 @@ const operation = {
   ],
 } as unknown as GeoOperationProjection;
 
+// 真实 mid-run 投影（ADR-0011）：工作步骤 running 带量化进度，
+// 后续确认门尚未停靠（pending）——状态行报「正在生成文章 3/5」，
+// 不把远未停靠的门标成「当前」。
 const runningOperation = {
   ...operation,
   status: "running",
   revision: 7,
+  steps: [
+    {
+      ...operation.steps[0],
+      status: "running",
+      progress: { current: 3, total: 5 },
+    },
+    { ...operation.steps[1], status: "pending" },
+  ],
   checkpoint: {
     activeStepId: "generate",
     completedStepIds: [],
@@ -118,6 +129,19 @@ const releasedFullPlan = {
   steps: parkedFullPlan.steps.map((step, index) => ({
     ...step,
     status: index === 0 ? "succeeded" : index === 1 ? "running" : step.status,
+  })),
+} as unknown as GeoOperationProjection;
+
+// 放行后的 armed 窗口（ADR-0011 Decision 1）：认可门已放行（succeeded），
+// 首个工作步骤 armed（ready）还未 running——正是用户放行后长时间静默
+// 曾被误报成「待开始 · N/M 道闸门 · 当前：下一道门」的矛盾组合。
+const armedFullPlan = {
+  ...parkedFullPlan,
+  status: "ready",
+  revision: 6,
+  steps: parkedFullPlan.steps.map((step, index) => ({
+    ...step,
+    status: index === 0 ? "succeeded" : index === 1 ? "ready" : step.status,
   })),
 } as unknown as GeoOperationProjection;
 
@@ -374,8 +398,9 @@ describe("GeoOperationEventCard", () => {
     expect(screen.getByText("当前会话还没有 GEO 操作记录。")).toBeInTheDocument();
   });
 
-  // 中间态快照（阀门确认后的 inspect 回合）不再重播完整计划：
-  // 只保留一条轻量进度条——状态、闸门进度、生命周期控制与阀门面板。
+  // 中间态快照（执行期 inspect 回合）不再重播完整计划：只保留一条轻量
+  // 进度条——状态、闸门进度、生命周期控制与阀门面板；状态行从投影如实
+  // 派生，running 工作步骤带量化进度时报「正在<步骤名> N/M」（ADR-0011）。
   it("renders mid-run snapshots as a compact strip without the step plan replay", async () => {
     mocks.loadGeoOperation.mockResolvedValue(runningOperation);
     const { container } = render(
@@ -391,8 +416,10 @@ describe("GeoOperationEventCard", () => {
     expect(screen.queryByText("GEO 操作已更新")).toBeNull();
     expect(container.querySelector("[data-geo-gate-progress]")).not.toBeNull();
     expect(
-      screen.getByText(/进行中 · 0\/1 道闸门 · 当前：审核并批准文章/),
+      screen.getByText(/进行中 · 正在生成文章 3\/5/),
     ).toBeInTheDocument();
+    // 确认门尚未停靠：状态行不得把它标成「当前」。
+    expect(screen.queryByText(/当前：/)).toBeNull();
     expect(await screen.findByRole("button", { name: "取消" })).toBeInTheDocument();
     expect(container.querySelectorAll("[data-geo-gate-stub]").length).toBe(1);
   });
@@ -415,6 +442,24 @@ describe("GeoOperationEventCard", () => {
     expect(
       screen.getByText(/待确认 · 0\/1 道闸门 · 当前：审核并批准文章/),
     ).toBeInTheDocument();
+  });
+
+  // ADR-0011 Decision 1 armed 窗口：工作步骤 armed（ready）且无 running
+  // 时，状态行报「正在推进：<步骤名>」；操作 ready 但已放行过门时状态词
+  // 报「进行中」，不再出现「待开始 · 当前：远未停靠的门」的矛盾组合。
+  it("reports the armed work step after plan release instead of the far next gate", () => {
+    mocks.loadGeoOperation.mockResolvedValue(armedFullPlan);
+    render(
+      <GeoOperationEventCard
+        data={{ kind: "geo-operation", operations: [armedFullPlan] }}
+      />,
+    );
+
+    expect(
+      screen.getByText(/进行中 · 正在推进：收集品牌材料/),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/当前：/)).toBeNull();
+    expect(screen.queryByText(/待开始/)).toBeNull();
   });
 
   // 用户诉求回归：「GEO 操作已更新」大卡在计划放行后就地收敛为闸门进度条，

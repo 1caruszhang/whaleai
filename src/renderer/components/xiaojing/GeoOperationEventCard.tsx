@@ -36,7 +36,7 @@ import { unwrapToolResultText } from "../../../shared/toolResult";
 import GeoOperationGatePanels from "./GeoOperationGatePanels";
 import GeoGateProgressStrip, {
   deriveGateSegments,
-  formatGeoOperationProgressLine,
+  formatGeoOperationStatusLine,
 } from "./GeoGateProgressStrip";
 
 export interface GeoOperationEventCardData {
@@ -121,22 +121,6 @@ export function parseGeoOperationEventCard(
     return null;
   }
 }
-
-/** 操作状态文案：进度卡与输入框上方停靠条共用。 */
-export const GEO_OPERATION_STATUS_LABEL: Record<
-  GeoOperationProjection["status"],
-  string
-> = {
-  ready: "待开始",
-  queued: "排队中",
-  running: "进行中",
-  "awaiting-confirmation": "待确认",
-  paused: "已暂停",
-  recovering: "恢复中",
-  succeeded: "已完成",
-  failed: "失败",
-  cancelled: "已取消",
-};
 
 const STEP_STATUS_LABEL: Record<
   GeoOperationProjection["steps"][number]["status"],
@@ -418,11 +402,8 @@ function OperationArticle({ operation }: { operation: GeoOperationProjection }) 
   if (!fullMode && !isHost) return null;
 
   // 轻量条按闸门报进度（只显示门，不复述步骤）；无确认门的计划回退步数。
-  // 执行期优先报真实工作步骤（如「正在生成文章 3/5」），完整卡保持步数。
+  // 状态行与停靠条共用同一条派生（ADR-0011），完整卡保持步数。
   const gateSegments = deriveGateSegments(live.steps);
-  const progressLine = formatGeoOperationProgressLine(live.steps, {
-    fullCard: fullMode,
-  });
 
   // 计划认可门是本卡的主操作：认可面板停靠在目标行之后、步骤重播之前，
   // 面板内的确认键按闸门卡统一规范固定页脚右下；其余闸门面板保持在卡尾。
@@ -437,7 +418,7 @@ function OperationArticle({ operation }: { operation: GeoOperationProjection }) 
             {live.goal}
           </p>
           <p className="mt-1 text-xs text-[var(--ink-muted)]">
-            {GEO_OPERATION_STATUS_LABEL[live.status]} · {progressLine}
+            {formatGeoOperationStatusLine(live, { fullCard: fullMode })}
           </p>
           {gateSegments.length > 0 && (
             <GeoGateProgressStrip operationId={live.id} steps={live.steps} />

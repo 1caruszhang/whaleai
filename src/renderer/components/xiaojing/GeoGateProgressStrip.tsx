@@ -6,8 +6,9 @@
  * 派生——全量优化 8 道门，直接意图只显示自己的门子集。计划卡与轻量条
  * 都渲染同一条：停靠认可门时它随计划卡一起出现（「计划」段停在待确认），
  * 放行后原地推进，不作为新元素出现。段下放两字短名，闸门全称与停靠
- * 状态放 title tooltip；「N/M 道闸门 · 当前：…」状态行由
- * GeoOperationEventCard 提供，本组件只负责条形本身。
+ * 状态放 title tooltip；「N/M 道闸门 · 当前：…」状态行也由本模块派生
+ * （formatGeoOperationStatusLine，ADR-0011：只依据 steps[].status 如实
+ * 派生），进度卡与停靠条共用同一函数。
  *
  * 执行段真实进度：工作步骤 running 时，条下追加一条确定进度的细条
  * （如「生成文章 3/5」），由 Sidecar 逐篇回报驱动；这样长耗时执行期
@@ -16,6 +17,7 @@
 
 import type {
   GeoOperationConfirmationKind,
+  GeoOperationProjection,
   GeoOperationStep,
   GeoOperationStepStatus,
 } from "../../../shared/geo/operation";
@@ -75,11 +77,51 @@ export function findCurrentGate(
   return segments.find((segment) => !isGateDone(segment)) ?? null;
 }
 
+/** 操作状态词基础表：进度卡与输入框上方停靠条共用。 */
+export const GEO_OPERATION_STATUS_LABEL: Record<
+  GeoOperationProjection["status"],
+  string
+> = {
+  ready: "待开始",
+  queued: "排队中",
+  running: "进行中",
+  "awaiting-confirmation": "待确认",
+  paused: "已暂停",
+  recovering: "恢复中",
+  succeeded: "已完成",
+  failed: "失败",
+  cancelled: "已取消",
+};
+
 /**
- * 状态行文案（停靠条与进度卡共用）：轻量模式执行期优先报真实工作步骤
- * （如「正在生成文章 3/5」），把未到的确认门标成「当前」会误导用户以为
- * 在等他操作；有确认门的计划报 `N/M 道闸门 · 当前：…`，无门计划回退
- * `N/M 步`。fullCard（计划边界完整卡）保持步数——步骤重放就在卡内。
+ * 状态词（ADR-0011 Decision 1）：操作 ready 但已放行过至少一道门
+ * （有步骤完成/跳过/运行）时报「进行中」——放行后的静默窗口不再被译成
+ * 「待开始」；全新未放行操作不受影响。
+ */
+function geoOperationStatusWord(
+  operation: GeoOperationProjection,
+): string {
+  if (
+    operation.status === "ready" &&
+    operation.steps.some(
+      (step) =>
+        step.status === "succeeded" ||
+        step.status === "skipped" ||
+        step.status === "running",
+    )
+  ) {
+    return "进行中";
+  }
+  return GEO_OPERATION_STATUS_LABEL[operation.status];
+}
+
+/**
+ * 状态行进度描述（停靠条与进度卡共用，ADR-0011）：只依据 `steps[].status`
+ * 如实派生，不做门序启发式——只有门步骤真处 `awaiting-confirmation` 才报
+ * `N/M 道闸门 · 当前：…`，把远未停靠的门标成「当前」会误导用户以为在等
+ * 他操作；工作步骤 running 优先报真实执行（如「正在生成文章 3/5」），
+ * armed（ready）报「正在推进：<步骤名>」；无确认门的计划回退 `N/M 步`。
+ * fullCard（计划边界完整卡）保持步数——步骤重放就在卡内。
  */
 export function formatGeoOperationProgressLine(
   steps: GeoOperationStep[],
@@ -90,17 +132,39 @@ export function formatGeoOperationProgressLine(
     return `正在${formatGeoStepProgressNote(running)}`;
   }
   const gateSegments = deriveGateSegments(steps);
-  if (!options.fullCard && gateSegments.length > 0) {
-    const gateDone = gateSegments.filter(isGateDone).length;
-    const currentGate = findCurrentGate(gateSegments);
-    return `${gateDone}/${gateSegments.length} 道闸门${
-      currentGate ? ` · 当前：${currentGate.title}` : ""
-    }`;
+  if (!options.fullCard) {
+    const parkedGate = gateSegments.find(
+      (segment) => segment.status === "awaiting-confirmation",
+    );
+    if (parkedGate) {
+      const gateDone = gateSegments.filter(isGateDone).length;
+      return `${gateDone}/${gateSegments.length} 道闸门 · 当前：${parkedGate.title}`;
+    }
+    // 放行后的静默窗口：工作步骤已 armed（ready）还未 running，如实报
+    // 「正在推进」。与 runningGeoOperationStep 同一不变量：确认门按状态机
+    // 只会 pending → awaiting-confirmation → succeeded，ready 必然是
+    // 待执行的工作步骤。
+    const armed = steps.find((step) => step.status === "ready");
+    if (armed) {
+      return `正在推进：${armed.title}`;
+    }
+    if (gateSegments.length > 0) {
+      const gateDone = gateSegments.filter(isGateDone).length;
+      return `${gateDone}/${gateSegments.length} 道闸门`;
+    }
   }
   const completed = steps.filter(
     (step) => step.status === "succeeded" || step.status === "skipped",
   ).length;
   return `${completed}/${steps.length} 步`;
+}
+
+/** 状态行全文案（状态词 + 进度描述）：进度卡与停靠条同一派生，展示一致。 */
+export function formatGeoOperationStatusLine(
+  operation: GeoOperationProjection,
+  options: { fullCard?: boolean } = {},
+): string {
+  return `${geoOperationStatusWord(operation)} · ${formatGeoOperationProgressLine(operation.steps, options)}`;
 }
 
 function segmentTooltip(segment: GeoGateSegment, done: boolean, isCurrent: boolean): string {
