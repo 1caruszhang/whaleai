@@ -25,7 +25,7 @@ pub struct ArticleDirectSpec {
 pub struct ArticleOperationStartRequest {
     pub source_kind: String,
     pub topic_plan_id: Option<String>,
-    /// 生成时选取（票 #28）：本次消费的计划项子集；None = plan 全部
+    /// 生成时选取（票 #34）：本次消费的计划项子集；None = plan 全部
     /// selectedItemIds。校验必须是 selectedItemIds 的子集且逐项 approved。
     #[serde(default)]
     pub item_ids: Option<Vec<String>>,
@@ -97,7 +97,7 @@ pub struct ArticleEditRequest {
     pub reason: Option<String>,
 }
 
-/// 用户显式弃用（票 #28）：draft_ready / generation_failed / rejected 均可
+/// 用户显式弃用（票 #34）：draft_ready / generation_failed / rejected 均可
 /// 弃用（清掉失败稿与风险阻断稿），approved 不可——已批准是进入分发的
 /// 事实依据，撤回属另一语义。终态，不产生新版本行。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -336,7 +336,7 @@ pub(super) fn ensure_schema(connection: &Connection) -> Result<(), String> {
     extend_geo_articles_status_check(connection)
 }
 
-/// 存量库迁移（票 #28）：geo_articles.status 的 CHECK 约束不含 'discarded'
+/// 存量库迁移（票 #34）：geo_articles.status 的 CHECK 约束不含 'discarded'
 /// 时按 sqlite_master 原文重建（foreign_keys=OFF 包裹、索引随 DROP 消失后
 /// 按原文重建——与 drop_brand_sessions_foreign_keys 同一先例）。SQLite 的
 /// CHECK 在 UPDATE 上同样强制，无法绕开重建。
@@ -974,7 +974,7 @@ impl BrandWorkspaceStore {
             return Err("article_generation_operation_mismatch".to_string());
         }
         require_article_operation_visibility(&transaction, &operation_id, session_id, false)?;
-        // discarded 是终态：弃用稿不再可编辑（票 #28）。
+        // discarded 是终态：弃用稿不再可编辑（票 #34）。
         if matches!(
             status.as_str(),
             "drafting" | "reviewing" | "discarded"
@@ -1036,7 +1036,7 @@ impl BrandWorkspaceStore {
         read_article(&connection, workspace_id, &request.article_id)
     }
 
-    /// 用户显式弃用（票 #28）：终态翻转，不建版本、不碰正文文件。CAS 同
+    /// 用户显式弃用（票 #34）：终态翻转，不建版本、不碰正文文件。CAS 同
     /// 其他 mutation（revision + 状态守卫的 UPDATE），与在途重试的 claim
     /// 互斥。approved 不可弃用——已批准是分发事实依据，撤回属另一语义。
     pub fn discard_article(
@@ -1572,7 +1572,7 @@ fn prepare_plan_article_seeds(
     {
         return Err("article_generation_plan_selection_invalid".to_string());
     }
-    // 生成时选取（票 #28）：确认的 plan 冻结的是「有资格生成」的集合，不是
+    // 生成时选取（票 #34）：确认的 plan 冻结的是「有资格生成」的集合，不是
     // 「必须全部生成」的义务。缺省消费全部 selectedItemIds；显式子集必须
     // 逐项命中资格集合且无重复。
     let consumed: Vec<String> = match requested_item_ids {
@@ -1669,7 +1669,7 @@ fn prepare_plan_article_seeds(
         "kind": "confirmed-topic-plan",
         "planId": plan_id,
         "planRevision": revision,
-        // 本次实际消费的子集（票 #28）：未传子集时等于全集。
+        // 本次实际消费的子集（票 #34）：未传子集时等于全集。
         "selectedItemIds": consumed,
         // 资格全集（血缘）：确认 plan 当时冻结的 selectedItemIds。
         "planSelectedItemIds": selected,
@@ -2188,7 +2188,7 @@ fn refresh_article_operation_status(
         )
     }) {
         // discarded 与 generation_failed 同视为「未获批准的已收束终态」
-        // （票 #28）：批准 + 弃用的组合让操作走出 running，卡片不再挂起。
+        // （票 #34）：批准 + 弃用的组合让操作走出 running，卡片不再挂起。
         "completed-with-failures"
     } else {
         "running"
@@ -3403,7 +3403,7 @@ mod tests {
         );
     }
 
-    /// 票 #28 夹具：三项全 approved 的 confirmed plan，selectedItemIds 全选。
+    /// 票 #34 夹具：三项全 approved 的 confirmed plan，selectedItemIds 全选。
     fn seed_confirmed_plan_with_three_items(workspace: &BrandWorkspace, plan_id: &str) {
         let connection = open_database(workspace).expect("db");
         let topics = json!([{
@@ -3457,7 +3457,7 @@ mod tests {
 
     #[test]
     fn plan_subset_generation_consumes_only_requested_items() {
-        // 票 #28：确认的 plan 冻结资格，不是生成义务。显式子集只建请求项
+        // 票 #34：确认的 plan 冻结资格，不是生成义务。显式子集只建请求项
         // 的稿，operation spec 同时记录消费子集与资格全集；未请求项留在
         // 资格集里可被后续 operation 消费。投影顺序按 (created_at, id)，
         // 同 operation 内 created_at 相同，不承诺请求顺序，按集合断言。
@@ -3566,7 +3566,7 @@ mod tests {
 
     #[test]
     fn discard_article_is_terminal_and_resolves_the_operation_gate() {
-        // 票 #28：弃用是用户裁决终态。draft_ready/generation_failed 可弃用；
+        // 票 #34：弃用是用户裁决终态。draft_ready/generation_failed 可弃用；
         // 弃用后编辑、复审、重试入口全部关闭；批准+弃用的组合让 operation
         // 走出 running（completed-with-failures），批准卡不再挂起。
         let (_root, store, workspace) = seeded_store();
@@ -3751,7 +3751,7 @@ mod tests {
 
     #[test]
     fn discard_article_covers_rejected_after_failed_review() {
-        // 票 #28 弃用状态机的第三入口：文档宣称 draft_ready /
+        // 票 #34 弃用状态机的第三入口：文档宣称 draft_ready /
         // generation_failed / rejected 均可弃，rejected 路径（复审拒绝后
         // 用户显式弃用）在此补齐——弃用仍是终态、清掉审核挂起的
         // failure_reason，且关闭后续复审/重试入口。
@@ -3879,7 +3879,7 @@ mod tests {
 
     #[test]
     fn legacy_status_check_is_rebuilt_to_accept_discarded() {
-        // 存量库迁移（票 #28）：把 geo_articles 降级成迁移前的旧版 CHECK
+        // 存量库迁移（票 #34）：把 geo_articles 降级成迁移前的旧版 CHECK
         // 形态（先例 materials/post_publish_monitoring 的同款测法），下一次
         // store 调用经 open_database 重走 ensure_schema 触发重建；迁移后
         // 'discarded' 既出现在 DDL 里，也能真实落库。
