@@ -352,7 +352,8 @@ fn extend_geo_articles_status_check(connection: &Connection) -> Result<(), Strin
     let Some(existing_sql) = existing else {
         return Ok(());
     };
-    if !existing_sql.contains("status TEXT NOT NULL CHECK") || existing_sql.contains("'discarded'") {
+    if !existing_sql.contains("status TEXT NOT NULL CHECK") || existing_sql.contains("'discarded'")
+    {
         return Ok(());
     }
     let rebuilt_sql = existing_sql.replace(
@@ -839,11 +840,7 @@ impl BrandWorkspaceStore {
                 .execute(
                     "UPDATE geo_articles SET ranking_dimensions_json=?2, updated_at=?3
                      WHERE id=?1",
-                    params![
-                        request.article_id,
-                        canonical_article_json(dimensions)?,
-                        now
-                    ],
+                    params![request.article_id, canonical_article_json(dimensions)?, now],
                 )
                 .map_err(|error| format!("persist article ranking dimensions: {error}"))?;
         }
@@ -975,11 +972,7 @@ impl BrandWorkspaceStore {
         }
         require_article_operation_visibility(&transaction, &operation_id, session_id, false)?;
         // discarded 是终态：弃用稿不再可编辑（票 #34）。
-        if matches!(
-            status.as_str(),
-            "drafting" | "reviewing" | "discarded"
-        ) || revision == 0
-        {
+        if matches!(status.as_str(), "drafting" | "reviewing" | "discarded") || revision == 0 {
             return Err("article_edit_status_invalid".to_string());
         }
         let next_revision = revision + 1;
@@ -1402,11 +1395,9 @@ impl BrandWorkspaceStore {
         // 下哪条规则在杀人」。
         let mut issue_counts: BTreeMap<(String, String, String), u64> = BTreeMap::new();
         for row in rows {
-            let (content_type, outcome, review_json) = row
-                .map_err(|error| format!("read article review stats row: {error}"))?;
-            let counters = by_content_type
-                .entry(content_type)
-                .or_insert([0, 0, 0]);
+            let (content_type, outcome, review_json) =
+                row.map_err(|error| format!("read article review stats row: {error}"))?;
+            let counters = by_content_type.entry(content_type).or_insert([0, 0, 0]);
             counters[0] += 1;
             match outcome.as_str() {
                 "passed" => counters[1] += 1,
@@ -1949,10 +1940,7 @@ fn validate_snapshot_facts(
 /// 检查一律经这里解析「当前所有者会话」。ADR-0010 落地后，所有者从
 /// 「创建会话」改键为 `COALESCE(owner_session_id, created_by_session_id)`
 /// （接管写覆盖列、审计列不动），散落的比较收敛于此。
-fn article_operation_owner(
-    connection: &Connection,
-    operation_id: &str,
-) -> Result<String, String> {
+fn article_operation_owner(connection: &Connection, operation_id: &str) -> Result<String, String> {
     connection
         .query_row(
             &format!(
@@ -3548,14 +3536,12 @@ mod tests {
         };
         // 非资格集合成员（即使是 approved 的 plan 项）不可消费。
         assert_eq!(
-            start(Some(vec!["item-a".to_string(), "ghost".to_string()]))
-                .unwrap_err(),
+            start(Some(vec!["item-a".to_string(), "ghost".to_string()])).unwrap_err(),
             "article_generation_plan_item_not_selected"
         );
         // 重复与空子集同按选择集合无效处理。
         assert_eq!(
-            start(Some(vec!["item-a".to_string(), "item-a".to_string()]))
-                .unwrap_err(),
+            start(Some(vec!["item-a".to_string(), "item-a".to_string()])).unwrap_err(),
             "article_generation_plan_selection_invalid"
         );
         assert_eq!(
@@ -3885,8 +3871,8 @@ mod tests {
         // 'discarded' 既出现在 DDL 里，也能真实落库。
         let (_root, store, workspace) = seeded_store();
         {
-            let connection = Connection::open(workspace.root_path.join("project.sqlite"))
-                .expect("open");
+            let connection =
+                Connection::open(workspace.root_path.join("project.sqlite")).expect("open");
             connection
                 .execute_batch("PRAGMA foreign_keys = OFF;")
                 .expect("unlock");
@@ -3990,7 +3976,10 @@ mod tests {
                 |row| row.get(0),
             )
             .expect("read table ddl");
-        assert!(ddl.contains("'discarded'"), "ddl must contain discarded: {ddl}");
+        assert!(
+            ddl.contains("'discarded'"),
+            "ddl must contain discarded: {ddl}"
+        );
     }
 
     #[test]

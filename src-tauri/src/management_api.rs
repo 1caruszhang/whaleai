@@ -1324,11 +1324,7 @@ async fn brand_material_image_save_handler(
         Ok(store) => store,
         Err(error) => return Json(error),
     };
-    match store.save_material_image(
-        &request.workspace_id,
-        &request.session_id,
-        request.payload,
-    ) {
+    match store.save_material_image(&request.workspace_id, &request.session_id, request.payload) {
         Ok(image) => Json(serde_json::json!({ "ok": true, "image": image })),
         Err(error) => Json(serde_json::json!({ "ok": false, "error": error })),
     }

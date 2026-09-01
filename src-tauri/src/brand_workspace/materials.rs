@@ -835,8 +835,7 @@ impl BrandWorkspaceStore {
         let workspace = self.workspace(workspace_id)?;
         let connection = open_database(&workspace)?;
         require_committed_session(&connection, session_id)?;
-        if let Some(existing) =
-            read_material_image_by_sha256(&connection, &workspace.id, &sha256)?
+        if let Some(existing) = read_material_image_by_sha256(&connection, &workspace.id, &sha256)?
         {
             return Ok(MaterialImageSaveResult {
                 id: existing.id,
@@ -1195,10 +1194,7 @@ fn resolve_material_path(workspace: &BrandWorkspace, relative: &str) -> Result<P
 
 /// 候选池图片路径闸：只接受 media/images/<name> 形态且 canonical 后仍在
 /// media/images 根内（与材料本体路径闸同款纪律）。
-fn resolve_media_image_path(
-    workspace: &BrandWorkspace,
-    relative: &str,
-) -> Result<PathBuf, String> {
+fn resolve_media_image_path(workspace: &BrandWorkspace, relative: &str) -> Result<PathBuf, String> {
     let path = Path::new(relative);
     let mut components = path.components();
     if components.next() != Some(Component::Normal("media".as_ref()))
@@ -1280,9 +1276,7 @@ fn read_material_image_by_id(
 ) -> Result<MaterialImage, String> {
     connection
         .query_row(
-            &format!(
-                "SELECT {MATERIAL_IMAGE_COLUMNS} FROM brand_material_images WHERE id=?1"
-            ),
+            &format!("SELECT {MATERIAL_IMAGE_COLUMNS} FROM brand_material_images WHERE id=?1"),
             [image_id],
             |row| material_image_from_row(row, workspace_id),
         )
@@ -1298,9 +1292,7 @@ fn read_material_image_by_sha256(
 ) -> Result<Option<MaterialImage>, String> {
     connection
         .query_row(
-            &format!(
-                "SELECT {MATERIAL_IMAGE_COLUMNS} FROM brand_material_images WHERE sha256=?1"
-            ),
+            &format!("SELECT {MATERIAL_IMAGE_COLUMNS} FROM brand_material_images WHERE sha256=?1"),
             [sha256],
             |row| material_image_from_row(row, workspace_id),
         )
@@ -1829,8 +1821,13 @@ mod tests {
     #[test]
     fn accepts_standalone_image_files_as_brand_materials() {
         let (_root, store, workspace, session_id) = fixture();
-        let material =
-            import_material_file(&store, &workspace, &session_id, "展拍.png", &png_bytes(800, 600));
+        let material = import_material_file(
+            &store,
+            &workspace,
+            &session_id,
+            "展拍.png",
+            &png_bytes(800, 600),
+        );
         assert_eq!(material.file_ext, "png");
         assert_eq!(material.media_type, "image/png");
         assert!(material.relative_path.ends_with(".png"));
@@ -1840,8 +1837,7 @@ mod tests {
     fn saves_tagged_image_to_candidate_pool_with_content_addressed_bytes() {
         let (_root, store, workspace, session_id) = fixture();
         let bytes = png_bytes(800, 600);
-        let material =
-            import_material_file(&store, &workspace, &session_id, "展拍.png", &bytes);
+        let material = import_material_file(&store, &workspace, &session_id, "展拍.png", &bytes);
 
         let saved = store
             .save_material_image(&workspace.id, &session_id, image_save(&material, &bytes))
@@ -1875,10 +1871,8 @@ mod tests {
     fn deduplicates_pool_entries_by_sha256_across_source_materials() {
         let (_root, store, workspace, session_id) = fixture();
         let bytes = png_bytes(800, 600);
-        let first =
-            import_material_file(&store, &workspace, &session_id, "first.png", &bytes);
-        let second =
-            import_material_file(&store, &workspace, &session_id, "second.png", &bytes);
+        let first = import_material_file(&store, &workspace, &session_id, "first.png", &bytes);
+        let second = import_material_file(&store, &workspace, &session_id, "second.png", &bytes);
 
         let first_save = store
             .save_material_image(&workspace.id, &session_id, image_save(&first, &bytes))
@@ -1900,13 +1894,23 @@ mod tests {
     fn saves_embedded_image_bytes_from_document_materials() {
         let (_root, store, workspace, session_id) = fixture();
         // 来源材料是 docx 文档本体（字节与内嵌图无关）。
-        let document = import_material_file(&store, &workspace, &session_id, "品牌介绍.docx", b"docx-bytes");
+        let document = import_material_file(
+            &store,
+            &workspace,
+            &session_id,
+            "品牌介绍.docx",
+            b"docx-bytes",
+        );
         let image_bytes = png_bytes(800, 600);
         let image_hash = format!("{:x}", Sha256::digest(&image_bytes));
         assert_ne!(document.sha256, image_hash);
 
         let saved = store
-            .save_material_image(&workspace.id, &session_id, embedded_image_save(&document, &image_bytes))
+            .save_material_image(
+                &workspace.id,
+                &session_id,
+                embedded_image_save(&document, &image_bytes),
+            )
             .expect("save");
         assert!(!saved.deduplicated);
 
@@ -1934,15 +1938,28 @@ mod tests {
         let standalone =
             import_material_file(&store, &workspace, &session_id, "展拍.png", &image_bytes);
         let first = store
-            .save_material_image(&workspace.id, &session_id, image_save(&standalone, &image_bytes))
+            .save_material_image(
+                &workspace.id,
+                &session_id,
+                image_save(&standalone, &image_bytes),
+            )
             .expect("standalone save");
         assert!(!first.deduplicated);
 
         // 再从文档提取同一张图（字节经载荷直送的路径）→ 合一为一个候选。
-        let document =
-            import_material_file(&store, &workspace, &session_id, "品牌介绍.docx", b"docx-bytes");
+        let document = import_material_file(
+            &store,
+            &workspace,
+            &session_id,
+            "品牌介绍.docx",
+            b"docx-bytes",
+        );
         let second = store
-            .save_material_image(&workspace.id, &session_id, embedded_image_save(&document, &image_bytes))
+            .save_material_image(
+                &workspace.id,
+                &session_id,
+                embedded_image_save(&document, &image_bytes),
+            )
             .expect("embedded save");
         assert!(second.deduplicated);
         assert_eq!(first.id, second.id);
@@ -1956,8 +1973,13 @@ mod tests {
     #[test]
     fn rejects_embedded_images_whose_payload_does_not_match_the_declared_hash() {
         let (_root, store, workspace, session_id) = fixture();
-        let document =
-            import_material_file(&store, &workspace, &session_id, "品牌介绍.docx", b"docx-bytes");
+        let document = import_material_file(
+            &store,
+            &workspace,
+            &session_id,
+            "品牌介绍.docx",
+            b"docx-bytes",
+        );
         let image_bytes = png_bytes(800, 600);
 
         // 声明哈希与载荷字节不符。
@@ -2000,8 +2022,7 @@ mod tests {
     fn truncates_over_long_descriptions_by_code_points_instead_of_rejecting() {
         let (_root, store, workspace, session_id) = fixture();
         let bytes = png_bytes(800, 600);
-        let material =
-            import_material_file(&store, &workspace, &session_id, "展拍.png", &bytes);
+        let material = import_material_file(&store, &workspace, &session_id, "展拍.png", &bytes);
         let mut input = image_save(&material, &bytes);
         // 400 码点（其中含代理对）超长描述：截断保图，不整图拒绝。
         input.description = format!("{}长", "🌊".repeat(320));
@@ -2019,8 +2040,7 @@ mod tests {
     fn rejects_invalid_image_metadata_and_hash_mismatch() {
         let (_root, store, workspace, session_id) = fixture();
         let bytes = png_bytes(800, 600);
-        let material =
-            import_material_file(&store, &workspace, &session_id, "展拍.png", &bytes);
+        let material = import_material_file(&store, &workspace, &session_id, "展拍.png", &bytes);
 
         let mut icon = image_save(&material, &bytes);
         icon.category = "icon-decoration".to_string();
@@ -2048,8 +2068,7 @@ mod tests {
     fn deleting_source_material_cascades_pool_rows_and_files() {
         let (_root, store, workspace, session_id) = fixture();
         let bytes = png_bytes(800, 600);
-        let material =
-            import_material_file(&store, &workspace, &session_id, "展拍.png", &bytes);
+        let material = import_material_file(&store, &workspace, &session_id, "展拍.png", &bytes);
         let saved = store
             .save_material_image(&workspace.id, &session_id, image_save(&material, &bytes))
             .expect("save");
@@ -2075,8 +2094,13 @@ mod tests {
     #[test]
     fn finishes_image_material_attempt_with_processed_status() {
         let (_root, store, workspace, session_id) = fixture();
-        let material =
-            import_material_file(&store, &workspace, &session_id, "展拍.png", &png_bytes(800, 600));
+        let material = import_material_file(
+            &store,
+            &workspace,
+            &session_id,
+            "展拍.png",
+            &png_bytes(800, 600),
+        );
         let attempt = store
             .begin_material_processing(&workspace.id, &session_id, &material.id)
             .expect("begin");
@@ -2112,10 +2136,23 @@ mod tests {
             )
             .expect("other session");
         // 旧会话导入的存量 docx/pptx + 不参与重扫的 txt/png 材料。
-        let legacy_doc = import_material_file(&store, &workspace, &other_session, "旧品牌介绍.docx", b"docx");
-        let legacy_deck = import_material_file(&store, &workspace, &other_session, "旧路演.pptx", b"pptx");
+        let legacy_doc = import_material_file(
+            &store,
+            &workspace,
+            &other_session,
+            "旧品牌介绍.docx",
+            b"docx",
+        );
+        let legacy_deck =
+            import_material_file(&store, &workspace, &other_session, "旧路演.pptx", b"pptx");
         import_material_file(&store, &workspace, &other_session, "旧资料.txt", b"text");
-        import_material_file(&store, &workspace, &other_session, "旧实拍.png", &png_bytes(800, 600));
+        import_material_file(
+            &store,
+            &workspace,
+            &other_session,
+            "旧实拍.png",
+            &png_bytes(800, 600),
+        );
 
         let listed = store
             .list_workspace_document_materials(&workspace.id, &session_id, 100)
@@ -2145,8 +2182,13 @@ mod tests {
     #[test]
     fn widens_legacy_processing_status_check_in_existing_databases() {
         let (_root, store, workspace, session_id) = fixture();
-        let material =
-            import_material_file(&store, &workspace, &session_id, "展拍.png", &png_bytes(800, 600));
+        let material = import_material_file(
+            &store,
+            &workspace,
+            &session_id,
+            "展拍.png",
+            &png_bytes(800, 600),
+        );
 
         // 把 attempt 表降级成迁移前的旧版 CHECK 形态，模拟存量库。
         {

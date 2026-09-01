@@ -285,7 +285,6 @@ pub struct GeoOperationUnfinishedList {
     pub total: usize,
 }
 
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GeoOperationMutationRequest {
@@ -589,8 +588,7 @@ impl BrandWorkspaceStore {
         let workspace = self.workspace(workspace_id)?;
         let connection = open_database(&workspace)?;
         ensure_schema(&connection)?;
-        let unfinished_filter =
-            "kind!='artifact-lineage' AND session_id IS NOT NULL \
+        let unfinished_filter = "kind!='artifact-lineage' AND session_id IS NOT NULL \
              AND status NOT IN ('succeeded','failed','cancelled')";
         let total: usize = connection
             .query_row(
@@ -612,9 +610,7 @@ impl BrandWorkspaceStore {
             ))
             .map_err(|error| format!("prepare unfinished GEO operation list: {error}"))?;
         let rows = statement
-            .query_map(
-                [UNFINISHED_GEO_OPERATION_SUMMARY_LIMIT as i64],
-                |row| {
+            .query_map([UNFINISHED_GEO_OPERATION_SUMMARY_LIMIT as i64], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
@@ -664,8 +660,7 @@ impl BrandWorkspaceStore {
             let pending_review_count = match pending_review_by_session.get(&session_id) {
                 Some(count) => *count,
                 None => {
-                    let count =
-                        count_session_draft_ready_articles(&connection, &session_id)?;
+                    let count = count_session_draft_ready_articles(&connection, &session_id)?;
                     pending_review_by_session.insert(session_id.clone(), count);
                     count
                 }
@@ -1649,7 +1644,8 @@ fn count_session_draft_ready_articles(
         .map_err(|error| format!("count pending article reviews: {error}"))
 }
 
-pub(super) fn mark_artifacts_affected_by_knowledge_change(    transaction: &rusqlite::Transaction<'_>,
+pub(super) fn mark_artifacts_affected_by_knowledge_change(
+    transaction: &rusqlite::Transaction<'_>,
     knowledge_version: i64,
     fact_key: &str,
     now: &str,
@@ -2371,16 +2367,10 @@ mod tests {
         }
         drop(connection);
 
-        let before = store
-            .get_geo_operation(&workspace.id, &waiting.id)
-            .unwrap();
-        let list = store
-            .list_unfinished_geo_operations(&workspace.id)
-            .unwrap();
+        let before = store.get_geo_operation(&workspace.id, &waiting.id).unwrap();
+        let list = store.list_unfinished_geo_operations(&workspace.id).unwrap();
         let summaries = &list.operations;
-        let after = store
-            .get_geo_operation(&workspace.id, &waiting.id)
-            .unwrap();
+        let after = store.get_geo_operation(&workspace.id, &waiting.id).unwrap();
 
         // 只读 tracer：列表调用不推进任何 revision，也不改状态。
         assert_eq!(before, after);
@@ -2445,9 +2435,7 @@ mod tests {
                 .unwrap();
         }
 
-        let list = store
-            .list_unfinished_geo_operations(&workspace.id)
-            .unwrap();
+        let list = store.list_unfinished_geo_operations(&workspace.id).unwrap();
 
         // 上界：条目截到 LIMIT，total 报全量，摘要侧换算 truncatedCount。
         assert_eq!(
