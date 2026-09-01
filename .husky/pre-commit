@@ -1,0 +1,2 @@
+# 只拦已暂存文件：*.rs 走 rustfmt（与 CI cargo fmt 同源），格式不符自动修复并重新暂存。
+npx lint-staged

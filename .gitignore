@@ -102,3 +102,6 @@ specs/research/
 # Agent tool session artifacts (not for GitHub)
 .zcode/
 .playwright-mcp/
+
+# husky v9 generated shims
+.husky/_
