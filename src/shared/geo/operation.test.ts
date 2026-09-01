@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   classifyGeoIntent,
+  formatGeoOperationSpanLabel,
   geoOperationPhaseStatus,
   groupGeoOperationSteps,
   planGeoOperation,
@@ -420,5 +421,46 @@ describe("GeoOperation phase grouping", () => {
         })),
       ),
     ).toBe("awaiting-confirmation");
+  });
+});
+
+describe("GeoOperation span label", () => {
+  it("derives the natural span from the first and last work steps", () => {
+    const plan = planGeoOperation({
+      intent: "full-optimization",
+      goal: "完整 GEO 优化",
+    });
+    // 认可门借用首步 capability（品牌知识段起步），自然跨度末段是监测。
+    expect(formatGeoOperationSpanLabel(plan.steps)).toBe(
+      "跨度：品牌知识 → 监测",
+    );
+  });
+
+  it("reports a single stage name when start and end share the phase", () => {
+    const knowledge = planGeoOperation({
+      intent: "knowledge-update",
+      goal: "更新品牌知识",
+    });
+    expect(formatGeoOperationSpanLabel(knowledge.steps)).toBe("跨度：品牌知识");
+
+    const questions = planGeoOperation({
+      intent: "question-opportunities",
+      goal: "生成问题机会",
+    });
+    expect(formatGeoOperationSpanLabel(questions.steps)).toBe("跨度：问题机会");
+  });
+
+  it("returns null when an endpoint capability maps to no stage", () => {
+    // 残缺投影防御：端点 capability 不落六阶段链时不猜测跨度（效果巡检
+    // 等链外意图的 geo-observation 即此类；其 geo-dashboard 端点仍归监测段）。
+    const torn = [
+      {
+        ...planGeoOperation({ intent: "knowledge-update", goal: "更新知识" })
+          .steps[0],
+        capability: "geo-observation" as never,
+      },
+    ];
+    expect(formatGeoOperationSpanLabel(torn)).toBeNull();
+    expect(formatGeoOperationSpanLabel([])).toBeNull();
   });
 });

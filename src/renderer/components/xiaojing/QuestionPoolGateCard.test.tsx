@@ -115,6 +115,39 @@ describe("QuestionPoolGateCard", () => {
     ).toBeInTheDocument();
   });
 
+  // ADR-0011 Decision 3 展示侧：复用命中（服务端返回已确认池）时卡片
+  // 初始即处 confirmed 态——页脚讲复用事实，不摆「确认后进入下一阶段」
+  // 的待决话术，也不再渲染确认按钮或「本轮问题已确认」的死卡组合。
+  it("explains pool reuse instead of the pending footer when the pool arrives confirmed", () => {
+    const reused = {
+      ...pool,
+      status: "confirmed",
+      reused: true,
+    } as unknown as QuestionPoolProjection;
+    render(<QuestionPoolGateCard data={{ kind: "question-pool", pool: reused }} />);
+
+    expect(
+      screen.getByText("已复用此前确认的题库，无需再次确认"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("确认后进入下一阶段")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button")).not.toBeInTheDocument();
+    expect(screen.queryByText(/本轮问题已确认/)).not.toBeInTheDocument();
+    expect(screen.getByText("已复用确认池")).toBeInTheDocument();
+  });
+
+  // 正常待决流程不回归：awaiting-selection 起步仍显示待决提示与确认键。
+  it("keeps the pending footer note while awaiting selection", () => {
+    render(<QuestionPoolGateCard data={{ kind: "question-pool", pool }} />);
+
+    expect(screen.getByText("确认后进入下一阶段")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /确认本轮问题（1）/ }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText("已复用此前确认的题库，无需再次确认"),
+    ).not.toBeInTheDocument();
+  });
+
   it("keeps the gate user-owned and surfaces CAS failures for retry", async () => {
     mocks.confirm.mockRejectedValue(new Error("question_pool_revision_conflict"));
     render(<QuestionPoolGateCard data={{ kind: "question-pool", pool }} />);

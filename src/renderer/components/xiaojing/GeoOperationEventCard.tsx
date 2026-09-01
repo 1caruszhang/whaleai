@@ -28,6 +28,7 @@ import { isTauriEnvironment } from "@/utils/browserMock";
 import { listenWithCleanup } from "@/utils/tauriListen";
 import { isPendingSessionId } from "../../../shared/constants";
 import {
+  formatGeoOperationSpanLabel,
   geoOperationPhaseStatus,
   groupGeoOperationSteps,
 } from "../../../shared/geo/operation";
@@ -404,6 +405,12 @@ function OperationArticle({ operation }: { operation: GeoOperationProjection }) 
   // 轻量条按闸门报进度（只显示门，不复述步骤）；无确认门的计划回退步数。
   // 状态行与停靠条共用同一条派生（ADR-0011），完整卡保持步数。
   const gateSegments = deriveGateSegments(live.steps);
+  // 完整卡头部与 goal 并排的结构派生跨度（ADR-0011 Decision 4）：措辞与
+  // 结构矛盾时并排可见，不依赖模型措辞自律；轻量条不重复报跨度。
+  const spanLabel = fullMode
+    ? formatGeoOperationSpanLabel(live.steps)
+    : null;
+
 
   // 计划认可门是本卡的主操作：认可面板停靠在目标行之后、步骤重播之前，
   // 面板内的确认键按闸门卡统一规范固定页脚右下；其余闸门面板保持在卡尾。
@@ -414,9 +421,19 @@ function OperationArticle({ operation }: { operation: GeoOperationProjection }) 
       <div className="flex min-w-0 items-start gap-2">
         {statusIcon(live)}
         <div className="min-w-0 flex-1">
-          <p className="break-words text-sm font-medium text-[var(--ink)]">
-            {live.goal}
-          </p>
+          <div className="flex flex-wrap items-center gap-1.5">
+            <p className="min-w-0 break-words text-sm font-medium text-[var(--ink)]">
+              {live.goal}
+            </p>
+            {spanLabel && (
+              <span
+                data-geo-operation-span={live.id}
+                className="shrink-0 rounded-full bg-[var(--paper-inset)] px-2 py-0.5 text-xs text-[var(--ink-muted)]"
+              >
+                {spanLabel}
+              </span>
+            )}
+          </div>
           <p className="mt-1 text-xs text-[var(--ink-muted)]">
             {formatGeoOperationStatusLine(live, { fullCard: fullMode })}
           </p>

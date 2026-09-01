@@ -746,6 +746,37 @@ export function groupGeoOperationSteps(
   return groups;
 }
 
+/** capability → 阶段的反查：跨度标签端点归段用（不命中返回 undefined）。 */
+function phaseOfCapability(
+  capability: GeoOperationCapability,
+): GeoOperationPhase | undefined {
+  return GEO_OPERATION_PHASES.find((phase) =>
+    phase.capabilities.includes(capability),
+  );
+}
+
+/**
+ * 结构派生的跨度标签（ADR-0011 Decision 4）：起点取首个工作步骤
+ * capability 映射的阶段名（认可门借用首步 capability，同段）；终点取
+ * 计划末步映射的阶段名——带 endingPhase 组合的跨度恰好收在终点段，
+ * 不带时即自然跨度末段。起终同段只报一个段名；端点 capability 不落
+ * 任何阶段（残缺投影的防御分支）返回 null，调用方不渲染——
+ * 跨度只从结构读出，不靠 goal 措辞或门序猜测。
+ */
+export function formatGeoOperationSpanLabel(
+  steps: readonly GeoOperationStep[],
+): string | null {
+  const first = steps[0];
+  const last = steps[steps.length - 1];
+  if (!first || !last) return null;
+  const startPhase = phaseOfCapability(first.capability);
+  const endPhase = phaseOfCapability(last.capability);
+  if (!startPhase || !endPhase) return null;
+  return startPhase.id === endPhase.id
+    ? `跨度：${startPhase.title}`
+    : `跨度：${startPhase.title} → ${endPhase.title}`;
+}
+
 /** 阶段状态：任一步骤失败即失败；全部完成才算完成；否则取首个活跃状态。 */
 export function geoOperationPhaseStatus(
   steps: readonly GeoOperationStep[],

@@ -96,7 +96,14 @@ export default function QuestionPoolGateCard({
   const [questions, setQuestions] = useState<QuestionPoolQuestion[]>(
     data.pool.questions,
   );
-  const [confirmed, setConfirmed] = useState(data.pool.status === "confirmed");
+  // 复用命中（ADR-0011 Decision 3）：服务端返回的是已确认池，卡片初始即处
+  // confirmed 态——页脚讲复用事实，不摆「确认后进入下一阶段」的待决话术。
+  // 按挂载时快照判定（此后轮询/用户确认只改 confirmed，不翻页脚）；判定只
+  // 看 status：confirmed 到达的池必然是此前确认过的，reused 标记只影响
+  // 头部徽章，不构成第二条件。用户在卡上确认（awaiting 起步）不属此类，
+  // 成功态保持原有呈现。
+  const [initiallyConfirmed] = useState(data.pool.status === "confirmed");
+  const [confirmed, setConfirmed] = useState(initiallyConfirmed);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const selectedCount = questions.filter((q) => q.selected).length;
@@ -242,9 +249,17 @@ export default function QuestionPoolGateCard({
           {error}
         </p>
       )}
-      <GateCardFooter note="确认后进入下一阶段">
+      <GateCardFooter
+        note={
+          initiallyConfirmed
+            ? "已复用此前确认的题库，无需再次确认"
+            : "确认后进入下一阶段"
+        }
+      >
         {confirmed ? (
-          <GateCardSuccess>本轮问题已确认（{selectedCount}）</GateCardSuccess>
+          initiallyConfirmed ? null : (
+            <GateCardSuccess>本轮问题已确认（{selectedCount}）</GateCardSuccess>
+          )
         ) : (
           <button
             type="button"

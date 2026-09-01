@@ -285,6 +285,36 @@ describe("GeoOperationEventCard", () => {
     expect(screen.getByText(/认可本轮计划 — 停在待确认门/)).toBeInTheDocument();
   });
 
+  // ADR-0011 Decision 4：完整卡头部显示结构派生的跨度标签，与 goal
+  // 短语并排——措辞与结构矛盾时人工可检，不依赖模型措辞自律。
+  it("shows the structure-derived span label beside the goal on the full card", () => {
+    const { container } = render(
+      <GeoOperationEventCard
+        data={{ kind: "geo-operation", operations: [parkedFullPlan] }}
+      />,
+    );
+
+    const label = container.querySelector(
+      "[data-geo-operation-span='operation-full']",
+    );
+    expect(label).not.toBeNull();
+    expect(label).toHaveTextContent("跨度：品牌知识 → 监测");
+    // 并排呈现：goal 与跨度标签同处卡头一行，矛盾肉眼同屏可见。
+    expect(label?.parentElement?.textContent).toContain("完整 GEO 优化");
+  });
+
+  // 轻量条不重复报跨度：跨度只在完整卡头部出现一次。
+  it("keeps the span label off the compact strip", () => {
+    const { container } = render(
+      <GeoOperationEventCard
+        data={{ kind: "geo-operation", operations: [releasedFullPlan] }}
+      />,
+    );
+
+    expect(container.querySelector("[data-geo-operation-strip]")).not.toBeNull();
+    expect(screen.queryByText(/跨度：/)).toBeNull();
+  });
+
   // 回归：revision 是内部乐观锁版本号，属于工程术语，
   // 不得出现在用户可见的卡片文案里。
   it("does not surface the internal revision counter", () => {
