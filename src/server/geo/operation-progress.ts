@@ -4,6 +4,7 @@ import type {
   GeoOperationStep,
   GeoOperationStepProgress,
 } from "../../shared/geo/operation";
+import { QUESTION_POOL_REUSE_CONTRACT } from "../../shared/geo/questionPool";
 import type { NextStepReminderInput } from "../../shared/systemReminder";
 import { createGeoOperationService } from "./operation";
 
@@ -168,8 +169,9 @@ export const GEO_NEXT_STEP_GUIDES: Readonly<Record<string, GeoNextStepGuide>> = 
   },
   "generate-question-pool": {
     tool: "run_question_pool",
-    guidance:
-      "Run the question pool for the confirmed product line and target region; the selection card parks at the question gate.",
+    // 复用契约（ADR-0011 Decision 3）：话术与工具描述、结果信封逐字同源
+    //（QUESTION_POOL_REUSE_CONTRACT）——引述里就说清按计划调用即安全。
+    guidance: `Call run_question_pool for the confirmed product line and target region without judging whether to skip — ${QUESTION_POOL_REUSE_CONTRACT}; when the service generates a fresh pool instead, the selection card parks at the question gate.`,
   },
   "select-next-question-pool": {
     tool: "run_question_pool",

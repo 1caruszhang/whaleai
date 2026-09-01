@@ -52,7 +52,11 @@ import {
   type ArticleOperationProjection,
   type ArticleOperationSource,
 } from '../../shared/geo/articleGeneration';
-import type { QuestionPoolProjection } from '../../shared/geo/questionPool';
+import {
+  QUESTION_POOL_REUSE_CONTRACT,
+  QUESTION_POOL_REUSE_OUTCOME,
+  type QuestionPoolProjection,
+} from '../../shared/geo/questionPool';
 import { cnyToPoints, pointsToCny } from '../../shared/geo/points';
 import { GEO_PORT_CONTRACT } from '../../shared/geo/portContract';
 import type { GeoContentType } from '../../shared/geo/portContract';
@@ -1705,7 +1709,7 @@ export async function createXiaojingGeoServer() {
       ),
       tool(
         'run_question_pool',
-        'Run the question-opportunity stage for one product line (domain-level, e.g. 汽车音响改装 — not a fine-grained service item): the service reuses the confirmed pool for the current knowledge version when valid, otherwise mines keywords online and generates candidate questions (real provider spend). Omit productLine to use the brand\'s first confirmed product line (synced from the industry fact at knowledge confirmation — if none exists, call request_brand_material so the user can import brand material and confirm knowledge first, then retry). When the user names a specific business within the domain (e.g. 汽车隔音), pass it as businessFocus instead of inventing a new product line. The result renders as the confirmation card where the user reviews the mined keywords and selects questions — never claim the pool is confirmed; the user confirms on the card. Keyword geography is bounded by the user-declared service area (服务区域): the declared scope kept at its own granularity (e.g. 新都区 stays 新都区, not the whole 成都) is both the mining anchor and the ceiling — terms never reference regions beyond it, and store addresses only anchor when no usable scope is declared. For targetRegion pass the declared scope as a plain name (e.g. 新都区 or 成都); never prose like 成都本地，辐射西南地区 and never boundless values such as 全国 — nationwide/online service mines in geo-free mode.',
+        `Run the question-opportunity stage for one product line (domain-level, e.g. 汽车音响改装 — not a fine-grained service item). Reuse contract: ${QUESTION_POOL_REUSE_CONTRACT}; call it as planned without judging whether to skip or rerun — when no reusable pool exists the service mines keywords online and generates candidate questions (real provider spend). Omit productLine to use the brand's first confirmed product line (synced from the industry fact at knowledge confirmation — if none exists, call request_brand_material so the user can import brand material and confirm knowledge first, then retry). When the user names a specific business within the domain (e.g. 汽车隔音), pass it as businessFocus instead of inventing a new product line. On fresh generation the result renders as the confirmation card where the user reviews the mined keywords and selects questions — never claim the pool is confirmed; the user confirms on the card (a reused confirmed pool needs no re-confirmation and says so in the result envelope). Keyword geography is bounded by the user-declared service area (服务区域): the declared scope kept at its own granularity (e.g. 新都区 stays 新都区, not the whole 成都) is both the mining anchor and the ceiling — terms never reference regions beyond it, and store addresses only anchor when no usable scope is declared. For targetRegion pass the declared scope as a plain name (e.g. 新都区 or 成都); never prose like 成都本地，辐射西南地区 and never boundless values such as 全国 — nationwide/online service mines in geo-free mode.`,
         {
           productLine: z.string().min(1).max(120).optional(),
           targetRegion: z.string().min(1).max(60),
@@ -1755,8 +1759,20 @@ export async function createXiaojingGeoServer() {
             idempotencyKey: input.idempotencyKey ?? `agent-pool-${crypto.randomUUID()}`,
           });
           await recordGeoOperationMilestone(identity, 'question-pool-generated');
+          // 复用契约（ADR-0011 Decision 3 协议侧）：已确认池到达时结果信封
+          // 携带 outcome + proceed 提示，与工具描述、next-step 表同一话术——
+          // 模型不再判断「已有确认池要不要重跑」。判定与确认卡展示侧（#29）
+          // 同口径：只看 status=confirmed；reused 徽章不构成第二条件。
+          const envelope = pool.status === 'confirmed'
+            ? {
+                kind: 'question-pool',
+                outcome: QUESTION_POOL_REUSE_OUTCOME,
+                proceed: `Zero-cost reuse hit — ${QUESTION_POOL_REUSE_CONTRACT}; the user does not re-confirm this pool.`,
+                pool,
+              }
+            : { kind: 'question-pool', pool };
           return {
-            content: [{ type: 'text' as const, text: JSON.stringify({ kind: 'question-pool', pool }) }],
+            content: [{ type: 'text' as const, text: JSON.stringify(envelope) }],
           };
         },
         { alwaysLoad: true },

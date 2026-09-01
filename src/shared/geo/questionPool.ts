@@ -14,6 +14,18 @@ export const QUESTION_POOL_STAGES = [
   "persist",
 ] as const;
 
+/**
+ * 问题池复用契约（ADR-0011 Decision 3 协议侧）：同知识版本已有有效确认池
+ * 时，run_question_pool 的调用零消耗秒回——模型按计划调用即安全，不现场
+ * 判断「已有确认池要不要重跑」。同一话术必须逐字出现在三处：工具描述、
+ * 复用命中的结果信封（outcome + proceed 提示）、next-step 单表的
+ * generate-question-pool 条目；改话术三处同改，由 MCP 集成测试
+ * （xiaojing-geo-question-pool-reuse）断言三处一致。
+ */
+export const QUESTION_POOL_REUSE_OUTCOME = "reused-confirmed-pool";
+export const QUESTION_POOL_REUSE_CONTRACT =
+  "a valid confirmed pool for the same knowledge version is reused at zero cost and returned instantly — proceed directly with the next step";
+
 export type QuestionPoolStage = (typeof QUESTION_POOL_STAGES)[number];
 export type KeywordCategory = "core" | "scene" | "longtail";
 export type KeywordHeat = "high" | "medium" | "low";

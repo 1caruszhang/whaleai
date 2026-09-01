@@ -51,6 +51,7 @@ embedding 失败语义（折中降级，用户裁决）：Provider 侧只对瞬�
 - 待决（awaiting-selection）池的搜索词与候选问题可经通用闸门修订工具 `revise_gate_content`（gate=`question-pool`，`subject='keyword'` 指词、缺省指问题）改/删/增：`QuestionPoolService.revise` 只读最新待决池，数组策略在 `applyQuestionPoolRevision` 纯函数中执行（文本 1–500、去重、问题 1–50 条、上限内新增），Rust `/api/brand-question-pools/revise` 做形状校验、身份/状态/CAS 栅栏并逐条写 `geo_question_pool_revisions` 审计（before/after 全量数组 + 用户指令原文）。
 - 用户补充的问题无模型评分：中性占位分（全 0、低优先级、formula=`user-added; not scored`）+ `user-added` 证据；补充的词默认 `longtail`/`medium`，id 续 `kw-user-*`/`q-user-*`。
 - 修订不改 pool 状态、不产生 decision、不投送 reminder；确认卡（`QuestionPoolGateCard`）待决期间每 3s 轮询 `/question-pools/latest`，按问题文本指纹做服务端胜合并（被改行采信服务端、未改行保留本地勾选），确认用最新 revision CAS。
+- 复用契约协议侧（票 #32，ADR-0011 Decision 3）：`run_question_pool` 的复用契约以同一话术（`QUESTION_POOL_REUSE_CONTRACT`，shared 常量）逐字落在三处——工具描述、复用命中的结果信封（`outcome=reused-confirmed-pool` + proceed 提示）、next-step 单表的 `generate-question-pool` 条目；模型按计划调用即安全，不现场判断「已有确认池要不要重跑」。判定与展示侧同口径：只看 `status=confirmed`（待决池到达不携带 outcome，正常确认卡流程不误导）；三处一致由 MCP 集成测试（`xiaojing-geo-question-pool-reuse`）守护。
 - 复用命中（`run_question_pool` 返回已确认池）时确认卡初始即处 confirmed 态：页脚显示「已复用此前确认的题库，无需再次确认」，不显示「确认后进入下一阶段」的待决话术，也不渲染确认按钮（ADR-0011 Decision 3 展示侧）；awaiting-selection 起步的正常待决流程与用户确认后的原位成功态不受影响。
 
 ## 测试边界

@@ -806,7 +806,26 @@ describe("QuestionPoolService billing permits (ticket 07)", () => {
     ]);
   });
 
-  it("skips the permit channel entirely on reused pools (cache hit, free)", async () => {
+  // 复用契约的服务端事实（ADR-0011 Decision 3 / 票 #32）：reuseExisting 命中
+  // 已确认池时，prepare 之后的路径立即返回——不申请 permit、不产生任何
+  // provider 调用，调用零消耗秒回。
+  it("skips the permit channel and every provider call when reuseExisting hits a confirmed pool (票 #32)", async () => {
+    const persistence = new FakePersistence();
+    persistence.reuse = basePool({ status: "confirmed", reused: true });
+    const permits = permitPort();
+    const provider = providers();
+    const subject = billedService(persistence, permits.port, provider);
+
+    const pool = await subject.generate(input);
+
+    expect(pool).toBe(persistence.reuse);
+    expect(permits.calls).toEqual([]);
+    expect(provider.keywordSearch.search).not.toHaveBeenCalled();
+    expect(provider.generation.complete).not.toHaveBeenCalled();
+    expect(provider.embedding.embed).not.toHaveBeenCalled();
+  });
+
+  it("also skips the permit channel when reuse returns this session's pending pool", async () => {
     const persistence = new FakePersistence();
     persistence.reuse = basePool({ status: "awaiting-selection" });
     const permits = permitPort();
