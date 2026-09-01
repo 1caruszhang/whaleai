@@ -4,7 +4,7 @@
 
 `src/server/system-prompt.ts::buildSystemPrompt()` 组装产品身份、GEO 意图决策表、知识 authority 和人工确认边界。`agent-session.ts` 把它作为 SDK `systemPrompt`，同时固定模型、effort、builtin tool allowlist、`xiaojing-geo` server 与 `canUseTool` gate。
 
-意图决策表与 `src/shared/geo/operation.ts::classifyGeoIntent` 保持一致：用户点名具体环节用对应直接意图；表达 GEO 目标但未点名环节默认 `full-optimization`。创建操作后，完整阶段与步骤计划由聊天里的进度卡片播报并停在首个确认门，不就范围做开放式提问；`goal` 只用简短目标短语（如「一轮完整的 GEO 优化」），正文不复述阶段链条，只说明当前停靠的确认门；`goal` 措辞必须与结构跨度一致（ADR-0011）：起点为知识链路时不得写「从问题选择开始」类措辞，起止选择如实经 `startingPointReason`/`endingPhase` 进入认可门文案，goal、认可门 summary 与进度卡跨度标签三处叙事不得互相矛盾。每个有后果的步骤自带确认门，默认意图因此是安全的。
+意图决策表与 `src/shared/geo/operation.ts::classifyGeoIntent` 保持一致：用户点名具体环节用对应直接意图；表达 GEO 目标但未点名环节默认 `full-optimization`。创建操作后，完整阶段与步骤计划由聊天里的进度卡片播报并停在首个确认门，不就范围做开放式提问；`goal` 只用简短目标短语（如「一轮完整的 GEO 优化」），正文不复述阶段链条，只说明当前停靠的确认门；`goal` 措辞必须与结构跨度一致（ADR-0011 Decision 5，票 #33）：起点为知识链路时不得写「从问题选择开始」类措辞，起止选择如实经 `startingPointReason`/`endingPhase` 进入认可门文案，goal、认可门 summary 与进度卡跨度标签三处叙事不得互相矛盾。每个有后果的步骤自带确认门，默认意图因此是安全的。
 
 通信规则：默认用陈述句告知（notify），只有真正阻塞且无安全默认时才经 `AskUserQuestion` 工具提问，一次回复最多一个问题、2 到 4 个选项、推荐项放第一个。该规则与 `XIAOJING_SESSION_FILES` 提醒的附件处置措辞一致，两处必须同步修改。
 

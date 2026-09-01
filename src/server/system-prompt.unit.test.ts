@@ -168,6 +168,35 @@ describe('starting-point derivation asks with a recommended option (ADR-0010, ti
 });
 
 /**
+ * ADR-0011 Decision 5 / 票 #33 回归：goal 措辞纪律——goal 必须与结构跨度
+ * 一致，起点为知识链路时不得写「从问题选择开始」类矛盾措辞；起止如实经
+ * startingPointReason/endingPhase 进入认可门文案。与 #30 的 next-step 条款
+ * 同 PR 审读过：纪律只管创建时的叙事口径，放行后的门间推进仍照信封引述
+ * 的 next-step 执行——两条分别锚定不同生命周期段，互不冲突。
+ */
+describe('keeps goal wording consistent with the structural span (ADR-0011, ticket #33)', () => {
+  const prompt = buildSystemPrompt();
+
+  // AC1：起点为知识链路时禁用「从问题选择开始」类矛盾措辞。
+  it('bans question-selection wording when the round starts from the knowledge chain', () => {
+    expect(prompt).toContain('goal 措辞纪律');
+    expect(prompt).toContain('goal 的措辞还必须与计划的真实跨度一致');
+    expect(prompt).toContain('起点为知识链路');
+    expect(prompt).toContain('「从问题选择开始」');
+    expect(prompt).toContain('与起点矛盾的措辞');
+  });
+
+  // AC1 后半：起止如实经 startingPointReason/endingPhase 进入认可门文案，
+  // goal、认可门文案与跨度标签三处同跨度，不得两张皮。
+  it('routes the truthful span through startingPointReason/endingPhase so goal, gate copy and span label agree', () => {
+    expect(prompt).toContain('起止如实经 start_geo_operation 的 startingPointReason 与 endingPhase');
+    expect(prompt).toContain('进入认可门文案');
+    expect(prompt).toContain('三处必须是同一个跨度');
+    expect(prompt).toContain('不得互相矛盾');
+  });
+});
+
+/**
  * GD-8③ 回归：XIAOJING_SESSION_FILES 提醒（systemReminder.ts，随消息投送）
  * 与主系统提示词里的会话文件规则（system-prompt.ts）是同一契约的两份文案，
  * system_reminder_protocol.md 要求两处必须同步修改。这里按"规则 token"而非
