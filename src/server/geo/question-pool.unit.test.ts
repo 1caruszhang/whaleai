@@ -339,6 +339,7 @@ describe("QuestionPoolService", () => {
 
   it("anchors mining on the declared service scope over store addresses", async () => {
     // ADR-0006 修正四：声明「新都区」不升格为成都市，地址只作兜底。
+    // targetRegion 传声明口径的带前缀变体（票 #31：归一后在界内放行）。
     const persistence = new FakePersistence([
       {
         factKey: "addresses",
@@ -358,13 +359,98 @@ describe("QuestionPoolService", () => {
       },
     ]);
     const { service: subject, provider } = service(persistence);
-    await subject.generate(input);
+    await subject.generate({ ...input, targetRegion: "成都市新都区" });
 
     const prompt = provider.keywordSearch.search.mock.calls[0]?.[0] as string;
     expect(prompt).toContain("我在【新都区】经营");
     expect(prompt).toContain("【地域白名单（用户声明的服务范围）】新都区");
     expect(prompt).toContain("区县级服务范围不再向下裂变");
     expect(prompt).not.toContain("我在【成都】经营");
+  });
+
+  it("rejects an out-of-scope targetRegion fail-loud before any provider call (票 #31)", async () => {
+    // 声明「新都区」而 targetRegion 升格到成都市：先于计费与 Provider 调用
+    // fail-loud，错误信息可转述为可行动提示。
+    const persistence = new FakePersistence([
+      {
+        factKey: "serviceArea",
+        subject: "鲸跃",
+        predicate: "enterprise-profile.serviceArea",
+        scopeJson: '{"entityScope":"brand"}',
+        normalizedValueJson: '"新都区"',
+        sources: [],
+      },
+    ]);
+    const { service: subject, provider } = service(persistence);
+
+    await expect(subject.generate(input)).rejects.toThrow(
+      "question_pool_target_region_out_of_scope:品牌声明的服务区域为新都区，请以新都区为目标地域",
+    );
+    expect(provider.keywordSearch.search).not.toHaveBeenCalled();
+    expect(provider.generation.complete).not.toHaveBeenCalled();
+    expect(provider.embedding.embed).not.toHaveBeenCalled();
+    expect(persistence.persistCalls).toBe(0);
+  });
+
+  it("rejects a boundless targetRegion the same way when a scope is declared", async () => {
+    const persistence = new FakePersistence([
+      {
+        factKey: "serviceArea",
+        subject: "鲸跃",
+        predicate: "enterprise-profile.serviceArea",
+        scopeJson: '{"entityScope":"brand"}',
+        normalizedValueJson: '"成都、德阳"',
+        sources: [],
+      },
+    ]);
+    const { service: subject } = service(persistence);
+
+    await expect(
+      subject.generate({ ...input, targetRegion: "全国" }),
+    ).rejects.toThrow(
+      "question_pool_target_region_out_of_scope:品牌声明的服务区域为成都、德阳，请以成都、德阳为目标地域",
+    );
+  });
+
+  it("rejects an out-of-scope targetRegion even when a reusable pool exists", async () => {
+    // 校验先于复用返回（票 #31）：复用是零成本契约，不豁免越界入参。
+    const persistence = new FakePersistence([
+      {
+        factKey: "serviceArea",
+        subject: "鲸跃",
+        predicate: "enterprise-profile.serviceArea",
+        scopeJson: '{"entityScope":"brand"}',
+        normalizedValueJson: '"成都"',
+        sources: [],
+      },
+    ]);
+    persistence.reuse = basePool({ status: "confirmed", reused: true });
+    const { service: subject, provider } = service(persistence);
+
+    await expect(
+      subject.generate({ ...input, targetRegion: "绵阳" }),
+    ).rejects.toThrow("question_pool_target_region_out_of_scope");
+    expect(provider.keywordSearch.search).not.toHaveBeenCalled();
+  });
+
+  it("keeps geo-free behavior untouched for boundless declarations (口径缺失不拦截)", async () => {
+    // 「全国/线上」类声明即无地缘模式：无声明口径可校验，targetRegion
+    // 行为与现状一致（票 #31：不做缺省替换，只做声明口径存在时的兜底）。
+    const persistence = new FakePersistence([
+      {
+        factKey: "serviceArea",
+        subject: "鲸跃",
+        predicate: "enterprise-profile.serviceArea",
+        scopeJson: '{"entityScope":"brand"}',
+        normalizedValueJson: '"全国，支持线上交付"',
+        sources: [],
+      },
+    ]);
+    const { service: subject, provider } = service(persistence);
+    const pool = await subject.generate({ ...input, targetRegion: "全国" });
+
+    expect(provider.keywordSearch.search).toHaveBeenCalledTimes(1);
+    expect(pool.status).toBe("awaiting-selection");
   });
 
   it("fails explicitly when generation returns only ungrounded questions", async () => {

@@ -24,6 +24,7 @@ import {
   projectBrandProfile,
   renderFullProfileBlock,
   renderMiningProfileBlock,
+  targetRegionScopeViolation,
 } from "../../shared/geo/profileInjection";
 import { anySignal } from "../utils/cancellation";
 import { managementApi } from "../utils/management-api-client";
@@ -472,15 +473,23 @@ function hash(value: unknown): string {
   return createHash("sha256").update(JSON.stringify(value)).digest("hex");
 }
 
-function deriveGenerationContext(
+/** 产品线视角的事实：产品线 scoped 事实按线过滤，品牌 scoped 事实全保留。 */
+function productLineFacts(
   context: QuestionPoolKnowledgeContext,
   productLine: string,
-) {
-  const productFacts = context.facts.filter(
+): QuestionPoolKnowledgeFact[] {
+  return context.facts.filter(
     (fact) =>
       fact.scopeJson.includes(productLine) ||
       !fact.scopeJson.includes("product-line"),
   );
+}
+
+function deriveGenerationContext(
+  context: QuestionPoolKnowledgeContext,
+  productLine: string,
+) {
+  const productFacts = productLineFacts(context, productLine);
   const profile = projectBrandProfile(productFacts);
   const brandNames = [
     ...new Set([
@@ -604,6 +613,20 @@ export class QuestionPoolService {
       reuseExisting: true,
       retry: input.retry === true,
     });
+    // targetRegion 越界校验（票 #31 / ADR-0011 增量校验）：声明口径存在时
+    // fail-loud（含「全国」等无界值），先于复用返回与计费；口径缺失不拦
+    // 截——地理策略仍由模型按工具描述执行，服务端只兜底，不做缺省替换。
+    // 复用路径只投影画像做轻量校验，不跑完整 deriveGenerationContext
+    //（industry 检查不在复用路径上重复执行）。
+    const scopeViolationMessage = targetRegionScopeViolation(
+      projectBrandProfile(productLineFacts(preparation.context, productLine)),
+      targetRegion,
+    );
+    if (scopeViolationMessage) {
+      throw new Error(
+        `question_pool_target_region_out_of_scope:${scopeViolationMessage}`,
+      );
+    }
     if (preparation.kind === "reused") return preparation.pool;
     const attempt = preparation.attempt;
     if (!attempt) throw new Error("question_pool_attempt_not_found");

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  declaredServiceScope,
   deriveCompetitorScope,
   deriveServiceScope,
   firstProfileValue,
@@ -9,6 +10,7 @@ import {
   renderFullProfileBlock,
   renderMiningProfileBlock,
   resolveBrandName,
+  targetRegionScopeViolation,
   type BrandProfileFact,
 } from "./profileInjection";
 
@@ -209,6 +211,192 @@ describe("deriveServiceScope（ADR-0006 修正四：声明服务范围 = 锚 + �
     expect(
       deriveServiceScope(
         projectBrandProfile([fact("brand.industry", "MES系统")]),
+      ),
+    ).toBeUndefined();
+  });
+});
+
+describe("declaredServiceScope（票 #31：声明口径单独派生，地址兜底不参与）", () => {
+  it("returns the declared serviceArea scope without any address fallback", () => {
+    expect(
+      declaredServiceScope(
+        projectBrandProfile([fact("brand.serviceArea", "新都区")]),
+      ),
+    ).toEqual({ primary: "新都区", allowed: ["新都区"] });
+  });
+
+  it("returns undefined when serviceArea is absent even if addresses exist", () => {
+    expect(
+      declaredServiceScope(
+        projectBrandProfile([
+          fact("brand.addresses", ["四川省成都市龙泉驿区某街道1号"]),
+        ]),
+      ),
+    ).toBeUndefined();
+  });
+
+  it("returns undefined for boundless and unparseable declarations", () => {
+    expect(
+      declaredServiceScope(
+        projectBrandProfile([fact("brand.serviceArea", "全国，支持线上交付")]),
+      ),
+    ).toBeUndefined();
+    expect(
+      declaredServiceScope(
+        projectBrandProfile([fact("brand.serviceArea", "广东省")]),
+      ),
+    ).toBeUndefined();
+  });
+});
+
+describe("targetRegionScopeViolation（票 #31 / ADR-0011：声明口径存在时越界 fail-loud）", () => {
+  it("flags boundless values like 全国 when a usable scope is declared", () => {
+    const violation = targetRegionScopeViolation(
+      projectBrandProfile([fact("brand.serviceArea", "成都")]),
+      "全国",
+    );
+    expect(violation).toContain("服务区域为成都");
+    expect(violation).toContain("请以成都为目标地域");
+  });
+
+  it("flags regions outside the declared whitelist", () => {
+    expect(
+      targetRegionScopeViolation(
+        projectBrandProfile([fact("brand.serviceArea", "成都、德阳")]),
+        "绵阳",
+      ),
+    ).toContain("成都、德阳");
+  });
+
+  it("flags upgrades beyond the declared granularity (新都区 → 成都)", () => {
+    expect(
+      targetRegionScopeViolation(
+        projectBrandProfile([fact("brand.serviceArea", "新都区")]),
+        "成都",
+      ),
+    ).toContain("新都区");
+  });
+
+  it("flags province names covering a city-level declaration", () => {
+    expect(
+      targetRegionScopeViolation(
+        projectBrandProfile([fact("brand.serviceArea", "成都")]),
+        "四川",
+      ),
+    ).toContain("成都");
+  });
+
+  it("redirects narrowing back to the declared scope (无归属数据，口径唯一)", () => {
+    // 声明「成都」而传「新都区」：收窄不是越界，但代码无行政区归属数据
+    // 判包含，声明口径是唯一入参口径——重定向而非放行。
+    expect(
+      targetRegionScopeViolation(
+        projectBrandProfile([fact("brand.serviceArea", "成都")]),
+        "成都市新都区",
+      ),
+    ).toContain("成都");
+  });
+
+  it("passes 和/与-joined names inside the declared whitelist (连接词兜底)", () => {
+    expect(
+      targetRegionScopeViolation(
+        projectBrandProfile([fact("brand.serviceArea", "成都、绵阳")]),
+        "成都和绵阳",
+      ),
+    ).toBeUndefined();
+    expect(
+      targetRegionScopeViolation(
+        projectBrandProfile([fact("brand.serviceArea", "成都、绵阳")]),
+        "成都与德阳",
+      ),
+    ).toContain("成都、绵阳");
+  });
+
+  it("does not mis-split names that contain 和 (和田 regression)", () => {
+    expect(
+      targetRegionScopeViolation(
+        projectBrandProfile([fact("brand.serviceArea", "和田")]),
+        "和田",
+      ),
+    ).toBeUndefined();
+  });
+
+  it("flags regions that normalize to nothing recognizable", () => {
+    expect(
+      targetRegionScopeViolation(
+        projectBrandProfile([fact("brand.serviceArea", "成都")]),
+        "西南地区",
+      ),
+    ).toContain("成都");
+  });
+
+  it("passes suffix/prefix variants of the declared segments", () => {
+    expect(
+      targetRegionScopeViolation(
+        projectBrandProfile([fact("brand.serviceArea", "成都")]),
+        "成都市",
+      ),
+    ).toBeUndefined();
+    expect(
+      targetRegionScopeViolation(
+        projectBrandProfile([fact("brand.serviceArea", "成都市新都区")]),
+        "新都区",
+      ),
+    ).toBeUndefined();
+    expect(
+      targetRegionScopeViolation(
+        projectBrandProfile([fact("brand.serviceArea", "成都")]),
+        "四川省成都市",
+      ),
+    ).toBeUndefined();
+  });
+
+  it("passes subsets of a multi-segment declaration", () => {
+    expect(
+      targetRegionScopeViolation(
+        projectBrandProfile([fact("brand.serviceArea", "成都、德阳")]),
+        "德阳",
+      ),
+    ).toBeUndefined();
+    expect(
+      targetRegionScopeViolation(
+        projectBrandProfile([fact("brand.serviceArea", "成都、德阳")]),
+        "德阳、成都市",
+      ),
+    ).toBeUndefined();
+  });
+
+  it("does not intercept when no usable declaration exists (口径缺失不拦截)", () => {
+    // 无 serviceArea：地址兜底不是声明口径，targetRegion 再远也不拦。
+    expect(
+      targetRegionScopeViolation(
+        projectBrandProfile([
+          fact("brand.addresses", ["四川省成都市某街道1号"]),
+        ]),
+        "北京",
+      ),
+    ).toBeUndefined();
+    // 无界声明 = 无地缘模式，全国照放。
+    expect(
+      targetRegionScopeViolation(
+        projectBrandProfile([fact("brand.serviceArea", "全国，支持线上交付")]),
+        "全国",
+      ),
+    ).toBeUndefined();
+    // 省级声明没有城市段白名单，不做拦截（宁松勿拦）。
+    expect(
+      targetRegionScopeViolation(
+        projectBrandProfile([fact("brand.serviceArea", "广东省")]),
+        "全国",
+      ),
+    ).toBeUndefined();
+  });
+
+  it("passes prose naming the declared city (cleans down to the in-scope segment)", () => {
+    expect(
+      targetRegionScopeViolation(
+        projectBrandProfile([fact("brand.serviceArea", "成都")]),
+        "成都本地，辐射西南地区",
       ),
     ).toBeUndefined();
   });

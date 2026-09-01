@@ -46,6 +46,11 @@ const MACRO_REGION_RE =
 /** 「线上/全国/不限」类交付方式声明：服务本身无地缘，不落地址兜底。 */
 const BOUNDLESS_SERVICE_RE = /(线上|线下|不限|全国|全球)/;
 
+/** serviceArea 声明是否为无界（全国/线上/不限类）：显式无地缘，不做锚。 */
+function isBoundlessServiceDeclaration(value: string): boolean {
+  return isGenericTargetRegion(value) || BOUNDLESS_SERVICE_RE.test(value);
+}
+
 /** 候选城市名必须是不含标点/修饰的纯中文短名。 */
 export function isValidCityName(value: string): boolean {
   const trimmed = value.trim();
@@ -99,6 +104,24 @@ export interface ServiceScope {
 }
 
 /**
+ * 声明口径（serviceArea）单独派生的服务范围；地址兜底不参与——
+ * targetRegion 越界校验（票 #31）只认用户声明，地址只是挖词锚的兜底
+ * 来源，不构成可裁决的口径。无界声明（全国/线上）与清洗不出城市段的
+ * 声明（如省级）同样返回 undefined（无口径可校验）。
+ */
+export function declaredServiceScope(
+  profile: BrandProfile,
+): ServiceScope | undefined {
+  const serviceArea = firstProfileValue(profile, "serviceArea");
+  if (serviceArea) {
+    if (isBoundlessServiceDeclaration(serviceArea)) return undefined;
+    const allowed = extractServiceAreaSegments(serviceArea);
+    if (allowed.length > 0) return { primary: allowed[0], allowed };
+  }
+  return undefined;
+}
+
+/**
  * 省级行政区短名名单（竞品腿锚分类用，ADR-0007 用户裁决 2026-08-30）。
  * 只用于识别「声明段是不是一个省」（同华南/全国用正则名单识别），不做
  * 省→市归属映射——城市属于哪个省的地理推理交由抽取模型判断。
@@ -144,12 +167,7 @@ export function deriveCompetitorScope(
 ): CompetitorScope | undefined {
   const serviceArea = firstProfileValue(profile, "serviceArea");
   if (serviceArea) {
-    if (
-      isGenericTargetRegion(serviceArea) ||
-      BOUNDLESS_SERVICE_RE.test(serviceArea)
-    ) {
-      return undefined;
-    }
+    if (isBoundlessServiceDeclaration(serviceArea)) return undefined;
     const rawSegments = serviceArea
       .split(/[，,、；;（）()及]/)
       .map((segment) => segment.trim().replace(/(全省|全市)$/, ""))
@@ -175,20 +193,7 @@ export function deriveCompetitorScope(
  * （声明「新都区」就是新都区，不升格为成都市）；地址只在声明不可用时兜底
  * 提取城市短名；全国/线上类声明 → 无地缘模式（不落地址兜底）。
  */
-export function deriveServiceScope(
-  profile: BrandProfile,
-): ServiceScope | undefined {
-  const serviceArea = firstProfileValue(profile, "serviceArea");
-  if (serviceArea) {
-    if (
-      isGenericTargetRegion(serviceArea) ||
-      BOUNDLESS_SERVICE_RE.test(serviceArea)
-    ) {
-      return undefined;
-    }
-    const allowed = extractServiceAreaSegments(serviceArea);
-    if (allowed.length > 0) return { primary: allowed[0], allowed };
-  }
+function addressCityScope(profile: BrandProfile): ServiceScope | undefined {
   for (const address of profileValues(profile, "addresses")) {
     const stripped = address.replace(/^[\u4e00-\u9fa5]{2,4}(?:省|自治区)/, "");
     const cityMatch = stripped.match(/([\u4e00-\u9fa5]{2,4})市/);
@@ -196,6 +201,56 @@ export function deriveServiceScope(
       return { primary: cityMatch[1], allowed: [cityMatch[1]] };
   }
   return undefined;
+}
+
+export function deriveServiceScope(
+  profile: BrandProfile,
+): ServiceScope | undefined {
+  const serviceArea = firstProfileValue(profile, "serviceArea");
+  // 无界声明（全国/线上）= 显式的无地缘模式，不落地址兜底；省级等不可
+  // 解析的非无界声明落地址兜底（与原行为一致）。
+  if (serviceArea && isBoundlessServiceDeclaration(serviceArea)) {
+    return undefined;
+  }
+  return declaredServiceScope(profile) ?? addressCityScope(profile);
+}
+
+/**
+ * targetRegion 越界校验（票 #31）：品牌声明了可用服务范围（城市/区县级
+ * 白名单）时，run_question_pool 的 targetRegion 越界 fail-loud——含
+ * 「全国」等无界值、白名单外地名、升格到更大行政层级（新都区声明传
+ * 成都/四川），收窄到声明市内的区县同样重定向回声明口径（无行政区
+ * 归属数据可判包含，声明口径是唯一入参口径）。判定复用声明段的同一
+ * 清洗（extractServiceAreaSegments），「成都市」「成都市新都区」
+ * 「四川省成都市」变体与「成都和绵阳」类连接归一后放行。声明口径
+ * 缺失（未声明、无界声明、省级声明）不拦截：地理策略仍由模型按工具
+ * 描述执行，服务端只做兜底校验，不做缺省替换。
+ */
+export function targetRegionScopeViolation(
+  profile: BrandProfile,
+  targetRegion: string,
+): string | undefined {
+  const scope = declaredServiceScope(profile);
+  if (!scope) return undefined;
+  const inScope = (value: string): boolean => {
+    const segments = extractServiceAreaSegments(value);
+    return (
+      segments.length > 0 &&
+      segments.every((segment) => scope.allowed.includes(segment))
+    );
+  };
+  if (inScope(targetRegion)) return undefined;
+  // 连接词兜底：「成都和绵阳」整串清洗不出段（split 名单只有「及」），
+  // 先整串判、不过再按和/与拆判——和田这类含「和」的地名单独出现时
+  // 整串即命中，不会误拆。
+  if (/[和与]/.test(targetRegion)) {
+    const parts = targetRegion.split(/[和与]/).filter(Boolean);
+    if (parts.length > 1 && parts.every((part) => inScope(part))) {
+      return undefined;
+    }
+  }
+  const scopeText = scope.allowed.join("、");
+  return `品牌声明的服务区域为${scopeText}，请以${scopeText}为目标地域`;
 }
 
 function parseFactValue(fact: BrandProfileFact): unknown {
