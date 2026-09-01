@@ -194,6 +194,14 @@ describe('keeps goal wording consistent with the structural span (ADR-0011, tick
     expect(prompt).toContain('三处必须是同一个跨度');
     expect(prompt).toContain('不得互相矛盾');
   });
+
+  // 验收观察（#33 关单后修复）：「从哪里开始、到哪里结束、为什么」是起止推导
+  // 段的认可门呈现事实，纪律条款只指路不复述——短语全提示词仅出现一次，
+  // 防两段同短语漂移。
+  it('keeps the gate-copy phrase single-sourced in the starting-point derivation paragraph', () => {
+    const gateCopyPhrase = '从哪里开始、到哪里结束、为什么';
+    expect(prompt.split(gateCopyPhrase).length - 1).toBe(1);
+  });
 });
 
 /**
