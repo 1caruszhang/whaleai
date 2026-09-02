@@ -17,11 +17,11 @@
     "dataRoot": "%LOCALAPPDATA%\\Xiaojing"
   },
   "icons": {
-    "src-tauri/icons/32x32.png": "e21cea48e9f43e9042cf0f3b0c2b3e3a5e5515530d1d4943fc5f079a0aa85c50",
-    "src-tauri/icons/128x128.png": "6391412dd8c651c395560e44c7684f6f666669841b0ab10b97ff9ff2afc02ae3",
-    "src-tauri/icons/128x128@2x.png": "e7d575ff59bd523d71f1f299b41aa9dad1e870a2dbc0652b785eeeb881bfeedd",
-    "src-tauri/icons/icon.icns": "b43179726626604ba2c67009057224a43ba2408a0a5904092c485fc0977010db",
-    "src-tauri/icons/icon.ico": "365b7ef06796a9e1f90f92f315e4e6d07c957d8cbfe440be0b45e96f52dd31f0"
+    "src-tauri/icons/32x32.png": "12238918edd6886947ff8d14eb6cfc58b6fffacc4c85ea848801a3bd4e006e66",
+    "src-tauri/icons/128x128.png": "5d12e8942c0c238e24216abd0a57dc88ba1f06e6b48a5b7eab43602cadfb5d38",
+    "src-tauri/icons/128x128@2x.png": "2641d46f74cc9931f5195b5703f8d9e604bb932634d3f3a6087ed2c328fd478d",
+    "src-tauri/icons/icon.icns": "aa8a9031143bf5b209c395472e368c89595bcbc09433cf1e070b5c86030b90be",
+    "src-tauri/icons/icon.ico": "7b400fff6fd77aadc9b6cce3dd63e81f8ae1f4453817c83441b3527c47783f36"
   },
   "sessionSidecar": {
     "kind": "bundled-node-resource",
