@@ -28,12 +28,15 @@ const CANCELLED_MESSAGE =
   '存量清理取消：该轮卡死在材料收集步骤（跳过材料收集出口上线前的旧计划形状），' +
   '由 geo-plan-normalization 票 09 清理；操作记录见仓库 scripts/cancel-legacy-geo-operations.mjs。';
 
-// 票 09 指名的三具死锁轮（id 前缀即票据口径：fa450460 会话 97495290、
-// f74ce69e 会话 b5c8420c、NULL 1b44fd12）。
+// 票 09 指名的三具死锁轮：id 与所属会话的配对以真实库核实为准
+// （2026-09-02 对 %LOCALAPPDATA%/Xiaojing/brands/6a7cb326…/project.sqlite
+// 全量核对：brand_sessions 无 97495290/b5c8420c 会话，fa450460/f74ce69e
+// 是「炊班主」品牌会话；「fa450460 会话 97495290」= fa450460 会话名下的
+// 操作 97495290）。运行时再次断言配对，id 撞库但会话不符即 fail-loud。
 const TARGETS = [
-  '97495290-6165-400f-aa0c-8978edc398a0',
-  'b5c8420c-becb-4fbf-b711-f4c0124728ff',
-  '1b44fd12-e061-49f4-a707-3e1fad2444d1',
+  { id: '97495290-6165-400f-aa0c-8978edc398a0', sessionPrefix: 'fa450460' },
+  { id: 'b5c8420c-becb-4fbf-b711-f4c0124728ff', sessionPrefix: 'f74ce69e' },
+  { id: '1b44fd12-e061-49f4-a707-3e1fad2444d1', sessionPrefix: null },
 ];
 // 保留不动的验收样本（票 10 跨会话接管端到端）。
 const PRESERVED = '0cada786-d2c7-4f48-809b-a3ed247943c9';
@@ -106,13 +109,23 @@ for (const path of databases) {
         `警告：验收样本 ${PRESERVED} 已处于终态 ${preserved.status}（票 10 完成后的合法状态）`,
       );
     }
-    for (const id of TARGETS) {
+    for (const target of TARGETS) {
+      const { id, sessionPrefix } = target;
       const operation = db
         .prepare(
-          'SELECT status, revision, steps_json FROM geo_operations WHERE id = ?',
+          'SELECT session_id, status, revision, steps_json FROM geo_operations WHERE id = ?',
         )
         .get(id);
       if (!operation) continue;
+      const sessionMatches =
+        sessionPrefix === null
+          ? operation.session_id === null
+          : operation.session_id?.startsWith(sessionPrefix) === true;
+      if (!sessionMatches) {
+        throw new Error(
+          `id 与会话配对不符：${id} 实际属会话 ${operation.session_id ?? 'NULL'}，票面口径期望 ${sessionPrefix ?? 'NULL'}——先停下核对，不写库`,
+        );
+      }
       if (TERMINAL_STATUSES.has(operation.status)) {
         console.log(`跳过 ${id}（已终态 ${operation.status}）`);
         skipped += 1;
