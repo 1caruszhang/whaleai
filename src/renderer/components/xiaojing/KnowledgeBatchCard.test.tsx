@@ -19,6 +19,7 @@ vi.mock('@/context/TabContext', () => ({
 
 import KnowledgeBatchCard, { KNOWLEDGE_DECIDED_EVENT } from './KnowledgeBatchCard';
 import ToolUse from '../ToolUse';
+import { formatCardCompletionTime } from './CardStatusTime';
 import type { ToolUseSimple } from '@/types/chat';
 
 /** 顶层 `predicate` 便捷覆盖会同步进 `key.predicate`（字段行分组按它归组）。 */
@@ -1041,5 +1042,98 @@ describe('KnowledgeBatchCard（行内「更改」暂存与轮询存活）', () =
     // 该行无「更改」入口（已裁决），整卡确认只剩未决行。
     expect(within(industryRow).queryByRole('button', { name: '更改：行业' })).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: '确认（采纳全部 1 条）' })).toBeInTheDocument();
+  });
+
+  // 卡片时间戳两态（geo-plan-normalization 票 08）：整卡裁决未收口
+  // （仍有候选待确认/冲突未选/失败待重试）时页脚显示「生成中」状态词、
+  // 绝不出钟点；全部候选落定后显示完成时刻 = 各候选 resolvedAt 的最大值
+  // （最后一次裁决落库时刻，Rust 决策事务内写入，不造第二时间源）。
+  describe('card timestamp semantics (ticket 08)', () => {
+    it('页脚时间戳切换：裁决未收口显示「生成中」，整卡落定显示最后一次裁决的完成时刻', async () => {
+      const decidedAt = new Map([
+        ['c-a', '2026-09-02T05:04:03Z'],
+        ['c-b', '2026-09-02T05:06:07Z'],
+      ]);
+      mocks.apiPost.mockImplementation(async (path: string, body?: {
+        candidateIds?: string[];
+        decisions?: Array<{ candidateId: string; decision: string }>;
+      }) => {
+        if (path === '/api/xiaojing/knowledge/candidates') {
+          return { success: true, candidates: (body?.candidateIds ?? []).map(() => null) };
+        }
+        return {
+          success: true,
+          results: (body?.decisions ?? []).map((decision) => ({
+            candidateId: decision.candidateId,
+            ok: true,
+            status: 'adopted',
+            settledAt: decidedAt.get(decision.candidateId),
+          })),
+        };
+      });
+      const { container } = render(<KnowledgeBatchCard data={cardData([
+        candidateSource({ id: 'c-a' }),
+        candidateSource({ id: 'c-b' }),
+      ])} />);
+      const footer = () => container.querySelector('[data-gate-card-footer]') as HTMLElement;
+
+      // 未收口：状态词在场，任何钟点缺席。
+      expect(within(footer()).getByText('生成中')).toBeInTheDocument();
+      expect(footer().querySelector('[data-card-timestamp="settled"]')).toBeNull();
+
+      fireEvent.click(screen.getByRole('button', { name: '确认（采纳全部 2 条）' }));
+
+      // 落定：状态词被完成时刻替换，时刻取两条裁决的较晚者。
+      const stamp = await waitFor(() => {
+        const node = footer().querySelector('[data-card-timestamp="settled"]');
+        expect(node).not.toBeNull();
+        return node as HTMLElement;
+      });
+      expect(within(footer()).queryByText('生成中')).not.toBeInTheDocument();
+      expect(stamp).toHaveAttribute('data-completed-at', '2026-09-02T05:06:07Z');
+      expect(stamp).toHaveTextContent(`完成于 ${formatCardCompletionTime('2026-09-02T05:06:07Z')}`);
+    });
+
+    it('水合重挂载的已裁决卡直接显示完成时刻（resolvedAt 投影贯通）', async () => {
+      mocks.apiPost.mockImplementation(async (path: string, body?: { candidateIds?: string[] }) => {
+        if (path === '/api/xiaojing/knowledge/candidates') {
+          return {
+            success: true,
+            candidates: (body?.candidateIds ?? []).map(() => ({
+              ...candidateSource({ id: 'c-hydrated' }),
+              status: 'adopted',
+              resolvedAt: '2026-09-02T08:00:00Z',
+            })),
+          };
+        }
+        return { success: true, results: [] };
+      });
+      const { container } = render(<KnowledgeBatchCard data={cardData([
+        candidateSource({ id: 'c-hydrated' }),
+      ])} />);
+
+      const stamp = await waitFor(() => {
+        const node = container.querySelector('[data-card-timestamp="settled"]');
+        expect(node).not.toBeNull();
+        return node as HTMLElement;
+      });
+      expect(stamp).toHaveAttribute('data-completed-at', '2026-09-02T08:00:00Z');
+      expect(stamp).toHaveTextContent(`完成于 ${formatCardCompletionTime('2026-09-02T08:00:00Z')}`);
+      // 重挂载的已裁决卡不再出现「生成中」。
+      expect(screen.queryByText('生成中')).not.toBeInTheDocument();
+    });
+
+    it('落定但缺权威时刻时保持页脚成功态、不伪造时间', async () => {
+      // 缺省 mock 的 decide-batch 结果不带 settledAt：整卡仍落定，时间槽
+      // 整体缺席而不是显示客户端钟点。
+      const { container } = render(<KnowledgeBatchCard data={cardData([
+        candidateSource({ id: 'c-no-time' }),
+      ])} />);
+
+      fireEvent.click(screen.getByRole('button', { name: '确认（采纳全部 1 条）' }));
+      await waitFor(() =>
+        expect(container.querySelector('[data-gate-card-success]')).toBeInTheDocument());
+      expect(container.querySelector('[data-card-timestamp]')).toBeNull();
+    });
   });
 });

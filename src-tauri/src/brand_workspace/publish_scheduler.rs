@@ -5090,6 +5090,9 @@ mod tests {
             Arc::new(move || clock.load(Ordering::SeqCst)),
         );
         let workspace = fixture.workspace.clone();
+        // tick 绑定当前 #[tokio::test] runtime（current_thread 语义），不适用
+        // tauri::async_runtime 红线——该红线针对生产代码的无 caller context 场景。
+        #[allow(clippy::disallowed_methods)]
         let tick = tokio::spawn(async move { runner.tick_workspace(&workspace).await });
         while !upload_entered.load(Ordering::SeqCst) {
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;

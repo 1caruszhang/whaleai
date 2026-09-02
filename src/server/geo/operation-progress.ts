@@ -4,6 +4,12 @@ import type {
   GeoOperationStep,
   GeoOperationStepProgress,
 } from "../../shared/geo/operation";
+import {
+  currentGeoOperationStep,
+  GEO_STEP_PAST_STATUSES as STEP_PAST_STATUSES,
+  TERMINAL_GEO_OPERATION_STATUSES,
+} from "../../shared/geo/operation";
+import { MATERIAL_COLLECTION_CONTRACT } from "../../shared/geo/materialRequestCard";
 import { QUESTION_POOL_REUSE_CONTRACT } from "../../shared/geo/questionPool";
 import type { NextStepReminderInput } from "../../shared/systemReminder";
 import { createGeoOperationService } from "./operation";
@@ -141,11 +147,13 @@ export interface GeoOperationProgressService {
   }): Promise<GeoOperationProjection>;
 }
 
-const TERMINAL_OPERATION = new Set([
-  "succeeded",
-  "failed",
-  "cancelled",
-]);
+/** 终态操作集（导出供顺序闸等消费方同口径判定「非终态」）；口径下沉
+ * shared policy（票 07），此处按既有名字转发，消费方零改动。「已走完」
+ * 步骤状态集与 currentGeoOperationStep 同源 shared policy，上方以
+ * STEP_PAST_STATUSES 别名引入，正文复用。 */
+export const TERMINAL_OPERATION = TERMINAL_GEO_OPERATION_STATUSES;
+
+export { currentGeoOperationStep };
 
 /**
  * next-step 单表（ADR-0011 Decision 2，与上方里程碑表同文件维护）：
@@ -164,8 +172,10 @@ export interface GeoNextStepGuide {
 export const GEO_NEXT_STEP_GUIDES: Readonly<Record<string, GeoNextStepGuide>> = {
   "collect-materials": {
     tool: "request_brand_material",
-    guidance:
-      "Request brand material on the chat material-request card (paste, URL or upload) and wait there; pasted text goes through import_pasted_material.",
+    // 材料收集契约（票 03）：话术与工具描述、系统提示词材料段逐字同源
+    //（MATERIAL_COLLECTION_CONTRACT）——引述里就说清按计划调用即安全，
+    // 不在调用现场重新权衡品牌知识是否够用。
+    guidance: `Request brand material on the chat material-request card and wait there — ${MATERIAL_COLLECTION_CONTRACT}; pasted text goes through import_pasted_material.`,
   },
   "decide-knowledge-refresh": {
     tool: "choose_next_round_knowledge",
@@ -211,9 +221,6 @@ export const GEO_NEXT_STEP_GUIDES: Readonly<Record<string, GeoNextStepGuide>> = 
  * 与 builder 侧的 NextStepReminderInput 同一契约（结构一致，直传）。 */
 export type GeoNextStepQuotation = NextStepReminderInput;
 
-/** 引述时视为「已走完」的步骤状态（failed 可引述：指引重试）。 */
-const STEP_PAST_STATUSES = new Set(["succeeded", "skipped"]);
-
 /**
  * 从持久化计划引述 next-step（ADR-0011 Decision 2）：锚定 afterStepId 时
  * 取其后首个未走完的步骤，无锚点时取整单首个未走完步骤。查不到表项、
@@ -228,9 +235,9 @@ export function quoteGeoNextStep(
     ? operation.steps.findIndex((step) => step.id === afterStepId)
     : -1;
   if (afterStepId && anchorIndex === -1) return null;
-  const candidate = operation.steps
-    .slice(anchorIndex + 1)
-    .find((step) => !STEP_PAST_STATUSES.has(step.status));
+  const candidate = currentGeoOperationStep(
+    operation.steps.slice(anchorIndex + 1),
+  );
   if (!candidate) return null;
   const guide = GEO_NEXT_STEP_GUIDES[candidate.id];
   if (!guide) return null;
@@ -291,8 +298,9 @@ export async function quoteGeoNextStepForGateKind(
 
 /**
  * 操作事件信封的引述锚点策略：confirm-step 锚定刚放行的门之后，
- * resume/retry/next-round 锚定首个未完成步骤；pause/cancel 是停进或
- * 终态，不引述。
+ * resume/retry/next-round/skip-material-collection 锚定首个未完成步骤；
+ * pause/cancel 是停进或终态，不引述。跳过出口（票 07）的回执读的是替换
+ * 后的持久化计划——引述即跳过后的真实下一步，与顺序闸同口径不分叉。
  */
 export function quoteGeoNextStepForAction(
   operation: GeoOperationProjection,
@@ -301,7 +309,12 @@ export function quoteGeoNextStepForAction(
   if (action.startsWith("confirm-step:")) {
     return quoteGeoNextStep(operation, action.slice("confirm-step:".length)) ?? undefined;
   }
-  if (action === "resume" || action === "retry" || action.startsWith("next-round-")) {
+  if (
+    action === "resume" ||
+    action === "retry" ||
+    action === "skip-material-collection" ||
+    action.startsWith("next-round-")
+  ) {
     return quoteGeoNextStep(operation) ?? undefined;
   }
   return undefined;

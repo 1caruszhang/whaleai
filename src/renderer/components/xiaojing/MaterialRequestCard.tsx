@@ -25,11 +25,13 @@ import {
 } from '@/api/brandMaterialClient';
 import { useCurrentWorkspace } from '@/context/CurrentWorkspaceContext';
 import { useTabApi, useTabState } from '@/context/TabContext';
+import { skipMaterialCollection } from '@/api/geoOperationClient';
 import { isPendingSessionId } from '../../../shared/constants';
 import type { KnowledgeCandidatesCardData } from '../../../shared/geo/knowledgeCard';
 import { isMaterialImageExtension, MATERIAL_IMAGE_EXTENSIONS } from '../../../shared/geo/materialImages';
 import type { MaterialRescanResult } from '../../../shared/geo/materials';
 import { parseMaterialRequestCard, type MaterialRequestCardData } from '../../../shared/geo/materialRequestCard';
+import CardStatusTime from './CardStatusTime';
 import KnowledgeBatchCard from './KnowledgeBatchCard';
 import MaterialImageCandidatesBar from './MaterialImageCandidatesBar';
 
@@ -46,6 +48,12 @@ interface MaterialRow {
   materialId?: string;
   candidateCount?: number;
   errorCode?: string;
+  /**
+   * 行落定（success/failed）的完成时刻（票 08）：材料投影的
+   * updated_at——Rust 在写终态的同一条 UPDATE 里更新它，是唯一权威源；
+   * processing 行不带（显示「生成中」态），重试重置回 processing 时清除。
+   */
+  settledAt?: string;
   /** 独立图片材料行：文案走配图候选池口径而非「待确认事实」口径。 */
   image?: boolean;
   /**
@@ -65,6 +73,18 @@ type MaterialRescanState =
   | { status: 'running' }
   | { status: 'done'; summary: MaterialRescanResult }
   | { status: 'failed'; errorCode: string };
+
+/**
+ * 跳过出口（geo-plan-normalization 票 07）的卡内投影状态：初始态 →
+ * 二次确认态（防误触）→ 提交中 → 完成/失败。完成后不再回退——跳过是
+ * 一次 CAS 计划替换，重复提交只会得到 revision 冲突。
+ */
+type MaterialSkipExitState =
+  | { phase: 'idle' }
+  | { phase: 'confirming' }
+  | { phase: 'submitting' }
+  | { phase: 'done' }
+  | { phase: 'failed'; errorCode: string };
 
 /** 卡片保留上限：与会话恢复的 Rust 端材料列表上限一致。 */
 const CARD_RETAIN_LIMIT = 10;
@@ -91,7 +111,13 @@ function rowPatchFromStatus(entry: BrandMaterialStatusEntry): Partial<MaterialRo
   const { material, card } = entry;
   const image = isMaterialImageExtension(material.fileExt);
   if (material.status === 'failed') {
-    return { status: 'failed', image, errorCode: material.lastErrorCode ?? 'material_processing_failed' };
+    return {
+      status: 'failed',
+      image,
+      errorCode: material.lastErrorCode ?? 'material_processing_failed',
+      // 失败也是落定：完成时刻与成功行同源（终态 UPDATE 的 updated_at）。
+      settledAt: material.updatedAt,
+    };
   }
   if (material.status === 'awaiting-confirmation' || material.status === 'processed') {
     return {
@@ -100,6 +126,7 @@ function rowPatchFromStatus(entry: BrandMaterialStatusEntry): Partial<MaterialRo
       image,
       candidateCount: card?.candidates.length ?? 0,
       errorCode: undefined,
+      settledAt: material.updatedAt,
     };
   }
   return {};
@@ -334,7 +361,9 @@ export default memo(function MaterialRequestCard({ data }: MaterialRequestCardPr
 
   const retryOne = useCallback(async (row: MaterialRow) => {
     if (!canSubmit || !identity || !row.materialId) return;
-    replaceRow(row.key, { status: 'processing', errorCode: undefined, recoverable: false });
+    // 重试重置回「生成中」：旧完成时刻必须清除，避免与新一次抽取的时刻
+    // 打架（票 08：时间槽要么状态词要么当前这次落定的时刻）。
+    replaceRow(row.key, { status: 'processing', errorCode: undefined, recoverable: false, settledAt: undefined });
     try {
       const [entry] = await retryBrandMaterial(
         apiPost,
@@ -422,6 +451,108 @@ export default memo(function MaterialRequestCard({ data }: MaterialRequestCardPr
     return `最近一次存量重扫另有 ${degraded} 张图片未入池（打标降级/过滤/格式跳过），不逐张展示。`;
   }, [rescan]);
 
+  // 跳过出口（票 07）：只有卡片锚定了停在材料收集步骤的操作时才呈现。
+  // 语义与材料收集契约单源一致——知识充分性在起点推导已判断，跳过不在
+  // 现场重新权衡，只是把「本轮不再等待新材料」落成计划替换；计划外补
+  // 材料入口不受影响（skipTarget 缺省时整个区块不渲染）。
+  const [skipExit, setSkipExit] = useState<MaterialSkipExitState>({ phase: 'idle' });
+  const submitSkip = useCallback(async () => {
+    const target = data.skipTarget;
+    if (!identity || !target || skipExit.phase === 'submitting') return;
+    setSkipExit({ phase: 'submitting' });
+    try {
+      await skipMaterialCollection(apiPost, identity, {
+        operationId: target.operationId,
+        expectedRevision: target.expectedRevision,
+      });
+      setSkipExit({ phase: 'done' });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '';
+      setSkipExit({
+        phase: 'failed',
+        errorCode: message.startsWith('geo_operation_') || message.includes('revision_conflict')
+          ? message
+          : 'geo_operation_request_failed',
+      });
+    }
+  }, [apiPost, data.skipTarget, identity, skipExit.phase]);
+
+  const skipExitNode = useMemo(() => {
+    if (!data.skipTarget) return null;
+    if (skipExit.phase === 'idle') {
+      return (
+        <div className="flex justify-end">
+          <button
+            type="button"
+            onClick={() => setSkipExit({ phase: 'confirming' })}
+            disabled={!identity}
+            aria-label="跳过材料收集"
+            title="本轮不再等待新材料，从下一步继续推进"
+            className="rounded-md px-2.5 py-1.5 text-xs font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)] disabled:opacity-50"
+          >
+            跳过材料收集
+          </button>
+        </div>
+      );
+    }
+    if (skipExit.phase === 'confirming' || skipExit.phase === 'submitting') {
+      const submitting = skipExit.phase === 'submitting';
+      return (
+        <div
+          role="alertdialog"
+          aria-label="确认跳过材料收集"
+          data-material-skip-confirm
+          className="w-full rounded-lg border border-[var(--line)] bg-[var(--paper-inset)] px-3 py-2.5"
+        >
+          <p className="text-xs leading-5 text-[var(--ink-secondary)]">
+            确认跳过材料收集？跳过后本轮不再等待新材料，将以现有品牌知识从下一步继续推进；之后仍可随时在这里补充材料。
+          </p>
+          <div className="mt-2 flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => { void submitSkip(); }}
+              disabled={!identity || submitting}
+              className="flex items-center gap-1.5 rounded-md bg-[var(--button-secondary-bg)] px-3 py-1.5 text-sm font-medium text-[var(--button-secondary-text)] disabled:opacity-50"
+            >
+              {submitting ? <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" /> : null}
+              {submitting ? '正在跳过…' : '确认跳过材料收集'}
+            </button>
+            <button
+              type="button"
+              onClick={() => setSkipExit({ phase: 'idle' })}
+              disabled={submitting}
+              className="rounded-md px-3 py-1.5 text-sm font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-elevated)] hover:text-[var(--ink)] disabled:opacity-50"
+            >
+              暂不跳过
+            </button>
+          </div>
+        </div>
+      );
+    }
+    if (skipExit.phase === 'done') {
+      return (
+        <p data-material-skip-result className="text-xs leading-5 text-[var(--ink-muted)]">
+          已跳过材料收集：本轮按现有品牌知识继续推进；之后仍可随时补充材料。
+        </p>
+      );
+    }
+    return (
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <p data-material-skip-result className="min-w-0 text-xs leading-5 text-[var(--error)]">
+          跳过失败：{skipExit.errorCode}。操作可能已有新进展，稍后重试或按最新进展继续。
+        </p>
+        <button
+          type="button"
+          onClick={() => setSkipExit({ phase: 'confirming' })}
+          disabled={!identity}
+          className="shrink-0 rounded-md px-2.5 py-1.5 text-xs font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)] disabled:opacity-50"
+        >
+          再次尝试跳过
+        </button>
+      </div>
+    );
+  }, [data.skipTarget, identity, skipExit, submitSkip]);
+
   return (
     <section
       aria-label="品牌材料导入"
@@ -478,6 +609,12 @@ export default memo(function MaterialRequestCard({ data }: MaterialRequestCardPr
         refreshKey={imagePoolRefresh}
         unpooledNote={imagePoolUnpooledNote}
       />
+
+      {skipExitNode && (
+        <div data-material-skip-exit className="mt-2 border-t border-[var(--line)] pt-2">
+          {skipExitNode}
+        </div>
+      )}
 
       {!currentWorkspace && (
         <p className="mt-2 rounded-lg bg-[var(--paper-inset)] px-3 py-2 text-xs leading-5 text-[var(--ink-muted)]">
@@ -569,6 +706,13 @@ export default memo(function MaterialRequestCard({ data }: MaterialRequestCardPr
                     </p>
                   )}
                 </div>
+                {/* 时间戳两态（票 08）：抽取进行中 → 「生成中」；行落定 →
+                    完成时刻（updatedAt）。无服务端材料的传输失败行整个
+                    时间槽缺席——不存在权威时刻，不用客户端钟点伪造。 */}
+                <CardStatusTime
+                  state={row.status === 'processing' ? 'generating' : 'settled'}
+                  completedAt={row.settledAt}
+                />
                 {(row.status === 'failed' || (row.status === 'processing' && row.recoverable))
                   && row.materialId && (
                     <button

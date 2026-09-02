@@ -58,6 +58,13 @@ export interface BrandMaterialProjection {
   status: 'stored' | 'processing' | 'awaiting-confirmation' | 'processed' | 'failed';
   attemptCount: number;
   lastErrorCode?: string | null;
+  /**
+   * 材料投影的最近状态变更时刻（geo-plan-normalization 票 08）：服务端
+   * 投影自始至终携带（Rust BrandMaterial.updated_at），共享类型此前未
+   * 声明。终态行的该字段即「完成时刻」——Rust 在写终态的同一条 UPDATE
+   * 里更新它；卡片时间戳只读这一字段，不造第二时间源。
+   */
+  updatedAt?: string;
 }
 
 export interface MaterialProcessSuccess<TMaterial = unknown> {

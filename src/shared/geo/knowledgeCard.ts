@@ -58,6 +58,13 @@ export interface KnowledgeCardCandidate {
   origin: string;
   source: KnowledgeCardSource;
   current?: KnowledgeCardCurrent | null;
+  /**
+   * 候选裁决落库时刻（geo-plan-normalization 票 08）：Rust 决策事务内与
+   * 终态同笔写入 knowledge_fact_candidates.resolved_at 的原样值。卡片级
+   * 「完成时刻」取全部候选该字段的最大值（最后一次裁决）；未裁决候选
+   * 缺省，显式 null 原样保留——渲染侧不造第二时间源。
+   */
+  resolvedAt?: string | null;
 }
 
 export interface KnowledgeCandidatesCardData {
@@ -131,6 +138,11 @@ export interface KnowledgeBatchDecisionItemResult {
   ok: boolean;
   status?: string;
   error?: string;
+  /**
+   * 该条裁决的落库时刻（票 08）：服务端 decide-batch 从 Rust 决策结果的
+   * resolvedAt 原样透传。卡片「完成时刻」取全部成功条目的最大值。
+   */
+  settledAt?: string | null;
 }
 
 /** 服务端 KnowledgeCandidate 的结构化子集；投影为卡片候选，剥离 identity 与来源明细。 */
@@ -151,6 +163,8 @@ export interface KnowledgeCardCandidateSource {
   status: KnowledgeCardCandidate["status"];
   baseVersion: number;
   origin: string;
+  /** 裁决落库时刻（票 08）：卡片完成时刻的权威源，见 KnowledgeCardCandidate.resolvedAt。 */
+  resolvedAt?: string | null;
   source: {
     materialId?: string | null;
     excerpt: string;
@@ -227,6 +241,9 @@ export function toKnowledgeCardCandidate(
           : {}),
       }
       : null,
+    ...(candidate.resolvedAt !== undefined
+      ? { resolvedAt: candidate.resolvedAt }
+      : {}),
   };
 }
 

@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { BrandMaterialProcessResult, TabApiPost } from '@/api/brandMaterialClient';
 import type { MaterialRescanResult } from '../../../shared/geo/materials';
 import MaterialRequestCard from './MaterialRequestCard';
+import { formatCardCompletionTime } from './CardStatusTime';
 
 const mocks = vi.hoisted(() => ({
   sessionId: 'session-07',
@@ -18,6 +19,7 @@ const mocks = vi.hoisted(() => ({
   rescanImages: vi.fn(),
   fetchStatuses: vi.fn(),
   fetchImageAssets: vi.fn(),
+  skipMaterialCollection: vi.fn(),
 }));
 
 vi.mock('@/context/TabContext', () => ({
@@ -56,6 +58,14 @@ vi.mock('@/api/brandMaterialClient', async (importOriginal) => {
   };
 });
 
+vi.mock('@/api/geoOperationClient', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/api/geoOperationClient')>();
+  return {
+    ...actual,
+    skipMaterialCollection: mocks.skipMaterialCollection,
+  };
+});
+
 function started(id: string, kind: 'file' | 'pasted-text' | 'website-url'): BrandMaterialProcessResult {
   return {
     ok: true,
@@ -78,6 +88,8 @@ function statusEntry(input: {
   lastErrorCode?: string;
   candidateCount?: number;
   fileExt?: string;
+  /** 材料投影的 updated_at：终态行的「完成时刻」权威源（票 08）。 */
+  updatedAt?: string;
 }) {
   const candidates = Array.from({ length: input.candidateCount ?? 0 }, (_unused, index) => ({
     id: `candidate-${input.id}-${index}`,
@@ -114,6 +126,7 @@ function statusEntry(input: {
       status: input.status,
       attemptCount: 1,
       ...(input.lastErrorCode ? { lastErrorCode: input.lastErrorCode } : {}),
+      ...(input.updatedAt ? { updatedAt: input.updatedAt } : {}),
     },
     card: input.status === 'awaiting-confirmation' && candidates.length > 0
       ? {
@@ -126,10 +139,18 @@ function statusEntry(input: {
   };
 }
 
-function renderRequestCard(reason = '还没有已确认的品牌知识，先补充材料再推进计划。') {
+function renderRequestCard(
+  reason = '还没有已确认的品牌知识，先补充材料再推进计划。',
+  skipTarget?: { operationId: string; expectedRevision: number } | null,
+) {
   return render(
     <MaterialRequestCard
-      data={{ kind: 'material-request-card', requiresUserDecision: true, reason }}
+      data={{
+        kind: 'material-request-card',
+        requiresUserDecision: true,
+        reason,
+        ...(skipTarget === undefined ? {} : { skipTarget }),
+      }}
     />,
   );
 }
@@ -149,6 +170,7 @@ describe('MaterialRequestCard', () => {
       mocks.rescanImages,
       mocks.fetchStatuses,
       mocks.fetchImageAssets,
+      mocks.skipMaterialCollection,
     ]) mock.mockReset();
     // 默认恢复查询返回空；个别用例按需覆盖。
     mocks.fetchStatuses.mockResolvedValue([]);
@@ -646,5 +668,206 @@ describe('MaterialRequestCard', () => {
       expect(screen.getByText(/存量重扫完成：入池 2 张/)).toBeInTheDocument());
     // 重扫同步一次通过后池已变化：无处理中行可挂靠轮询，这里直接补一次刷新。
     await waitFor(() => expect(mocks.fetchImageAssets).toHaveBeenCalledTimes(2));
+  });
+
+  describe('skip-material-collection exit (ticket 07)', () => {
+    const skipTarget = { operationId: 'op-skip-07', expectedRevision: 7 };
+
+    it('hides the skip action entirely for out-of-plan cards without an operation anchor', () => {
+      renderRequestCard('用户主动要求补充品牌材料。', null);
+
+      expect(screen.queryByRole('button', { name: '跳过材料收集' })).not.toBeInTheDocument();
+      expect(screen.queryByTestId('material-skip-exit')).not.toBeInTheDocument();
+      // 计划外补材料入口不受影响：三条上传路径照常。
+      expect(screen.getByRole('button', { name: '选择文件' })).toBeInTheDocument();
+    });
+
+    it('keeps the skip action in the initial state: one click only arms the confirmation', () => {
+      renderRequestCard('按计划停在材料收集步骤。', skipTarget);
+
+      const skipButton = screen.getByRole('button', { name: '跳过材料收集' });
+      fireEvent.click(skipButton);
+
+      // 二次确认防误触：单次点击不发起任何请求，进入确认态。
+      expect(mocks.skipMaterialCollection).not.toHaveBeenCalled();
+      const confirm = screen.getByRole('alertdialog', { name: '确认跳过材料收集' });
+      expect(
+        within(confirm).getByText(/跳过后本轮不再等待新材料，将以现有品牌知识从下一步继续推进/),
+      ).toBeInTheDocument();
+      expect(
+        within(confirm).getByRole('button', { name: '确认跳过材料收集' }),
+      ).toBeInTheDocument();
+      expect(within(confirm).getByRole('button', { name: '暂不跳过' })).toBeInTheDocument();
+    });
+
+    it('returns to the initial state when the user cancels the confirmation', () => {
+      renderRequestCard('按计划停在材料收集步骤。', skipTarget);
+
+      fireEvent.click(screen.getByRole('button', { name: '跳过材料收集' }));
+      fireEvent.click(screen.getByRole('button', { name: '暂不跳过' }));
+
+      expect(screen.queryByRole('alertdialog', { name: '确认跳过材料收集' })).not.toBeInTheDocument();
+      expect(screen.getByRole('button', { name: '跳过材料收集' })).toBeInTheDocument();
+      expect(mocks.skipMaterialCollection).not.toHaveBeenCalled();
+    });
+
+    it('submits the skip with the card-anchored operation identity after the second click', async () => {
+      mocks.skipMaterialCollection.mockResolvedValueOnce({ id: 'op-skip-07' });
+      renderRequestCard('按计划停在材料收集步骤。', skipTarget);
+
+      fireEvent.click(screen.getByRole('button', { name: '跳过材料收集' }));
+      fireEvent.click(screen.getByRole('button', { name: '确认跳过材料收集' }));
+
+      // 卡片锚定的操作身份（workspaceId/sessionId 来自 Tab 上下文，
+      // operationId/expectedRevision 来自卡数据）随跳过动作贯通。
+      await waitFor(() => expect(mocks.skipMaterialCollection).toHaveBeenCalledWith(
+        mocks.apiPost,
+        { workspaceId: 'brand-07', sessionId: 'session-07' },
+        { operationId: 'op-skip-07', expectedRevision: 7 },
+      ));
+      // 成功后收口：跳过是一次 CAS 计划替换，完成态不再回退。
+      await waitFor(() =>
+        expect(
+          screen.getByText(/已跳过材料收集：本轮按现有品牌知识继续推进/),
+        ).toBeInTheDocument());
+      expect(screen.queryByRole('button', { name: '跳过材料收集' })).not.toBeInTheDocument();
+      // 计划外补材料入口不受影响：上传表单仍然可用。
+      expect(screen.getByRole('button', { name: '选择文件' })).toBeInTheDocument();
+    });
+
+    it('surfaces a skip failure with the server error code and keeps the card usable', async () => {
+      mocks.skipMaterialCollection.mockRejectedValueOnce(
+        new Error('revision_conflict: stale expectedRevision'),
+      );
+      renderRequestCard('按计划停在材料收集步骤。', skipTarget);
+
+      fireEvent.click(screen.getByRole('button', { name: '跳过材料收集' }));
+      fireEvent.click(screen.getByRole('button', { name: '确认跳过材料收集' }));
+
+      await waitFor(() =>
+        expect(screen.getByText(/跳过失败：revision_conflict/)).toBeInTheDocument());
+      expect(screen.queryByRole('alertdialog', { name: '确认跳过材料收集' })).not.toBeInTheDocument();
+      // 失败后可以重新发起（再次走二次确认）。
+      fireEvent.click(screen.getByRole('button', { name: '再次尝试跳过' }));
+      expect(screen.getByRole('alertdialog', { name: '确认跳过材料收集' })).toBeInTheDocument();
+    });
+
+    it('disables the skip entry when the Tab has no exact-match brand', () => {
+      mocks.hasWorkspace = false;
+      renderRequestCard('按计划停在材料收集步骤。', skipTarget);
+
+      expect(screen.getByRole('button', { name: '跳过材料收集' })).toBeDisabled();
+      fireEvent.click(screen.getByRole('button', { name: '跳过材料收集' }));
+      expect(screen.queryByRole('alertdialog', { name: '确认跳过材料收集' })).not.toBeInTheDocument();
+      expect(mocks.skipMaterialCollection).not.toHaveBeenCalled();
+    });
+  });
+
+  // 卡片时间戳两态（geo-plan-normalization 票 08）：进行中（抽取在后台
+  // 生成待确认事实）显示「生成中」状态词、绝不出钟点；行落定（成功或
+  // 失败都是终态）显示完成时刻，时刻唯一来源是材料投影的 updated_at——
+  // Rust 在写终态的同一条 UPDATE 里更新它，不造第二时间源。
+  describe('card timestamp semantics (ticket 08)', () => {
+    it('shows the generating state without any clock time while extracting, then the completion moment on success', async () => {
+      vi.useFakeTimers();
+      mocks.importText.mockResolvedValue([started('material-ts', 'pasted-text')]);
+      renderRequestCard();
+
+      fireEvent.change(screen.getByPlaceholderText('粘贴企业介绍、产品资料或品牌事实'), {
+        target: { value: '公司全称：鲸跃科技' },
+      });
+      fireEvent.click(screen.getByRole('button', { name: '保存并抽取粘贴资料' }));
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+
+      let results = screen.getByRole('region', { name: '材料处理结果' });
+      // 进行中：状态词「生成中」，没有任何钟点时间。
+      expect(within(results).getByText('生成中')).toBeInTheDocument();
+      expect(results.querySelector('[data-card-timestamp="settled"]')).toBeNull();
+
+      mocks.fetchStatuses.mockResolvedValue([
+        statusEntry({
+          id: 'material-ts',
+          status: 'awaiting-confirmation',
+          candidateCount: 2,
+          updatedAt: '2026-09-02T05:04:03Z',
+        }),
+      ]);
+      await act(async () => { await vi.advanceTimersByTimeAsync(3000); });
+
+      results = screen.getByRole('region', { name: '材料处理结果' });
+      // 落定：状态词消失，完成时刻出现（原样 ISO 可追溯 + 同口径格式化）。
+      expect(within(results).queryByText('生成中')).not.toBeInTheDocument();
+      const stamp = results.querySelector('[data-card-timestamp="settled"]');
+      expect(stamp).not.toBeNull();
+      expect(stamp).toHaveAttribute('data-completed-at', '2026-09-02T05:04:03Z');
+      expect(stamp).toHaveTextContent(`完成于 ${formatCardCompletionTime('2026-09-02T05:04:03Z')}`);
+    });
+
+    it('marks a settled failure with its completion moment, and retry returns the row to the generating state', async () => {
+      vi.useFakeTimers();
+      mocks.open.mockResolvedValue(['C:\\selected\\价格.docx']);
+      mocks.importFiles.mockResolvedValue([started('material-cycle', 'file')]);
+      renderRequestCard();
+
+      fireEvent.click(screen.getByRole('button', { name: '选择文件' }));
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+
+      // 失败同样是落定：完成时刻来自材料投影的 updated_at。
+      mocks.fetchStatuses.mockResolvedValue([
+        statusEntry({
+          id: 'material-cycle',
+          status: 'failed',
+          lastErrorCode: 'model_failed',
+          updatedAt: '2026-09-02T06:00:00Z',
+        }),
+      ]);
+      await act(async () => { await vi.advanceTimersByTimeAsync(3000); });
+      let results = screen.getByRole('region', { name: '材料处理结果' });
+      expect(
+        results.querySelector('[data-card-timestamp="settled"]'),
+      ).toHaveAttribute('data-completed-at', '2026-09-02T06:00:00Z');
+
+      // 仅重试此项：行回到生成中，旧完成时刻必须消失（不再误导）。
+      mocks.retry.mockResolvedValue([started('material-cycle', 'file')]);
+      fireEvent.click(within(results).getByRole('button', { name: '仅重试 价格.docx' }));
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      results = screen.getByRole('region', { name: '材料处理结果' });
+      expect(within(results).getByText('生成中')).toBeInTheDocument();
+      expect(results.querySelector('[data-card-timestamp="settled"]')).toBeNull();
+
+      // 重试后再次落定：显示新的完成时刻，而不是重试前的旧时刻。
+      mocks.fetchStatuses.mockResolvedValue([
+        statusEntry({
+          id: 'material-cycle',
+          status: 'processed',
+          updatedAt: '2026-09-02T07:30:00Z',
+        }),
+      ]);
+      await act(async () => { await vi.advanceTimersByTimeAsync(3000); });
+      expect(
+        screen.getByRole('region', { name: '材料处理结果' }).querySelector('[data-card-timestamp="settled"]'),
+      ).toHaveAttribute('data-completed-at', '2026-09-02T07:30:00Z');
+    });
+
+    it('renders no timestamp slot for transport failures that never reached a material projection', async () => {
+      mocks.importText.mockRejectedValue(new Error('proxy timeout'));
+      renderRequestCard();
+
+      fireEvent.change(screen.getByPlaceholderText('粘贴企业介绍、产品资料或品牌事实'), {
+        target: { value: '公司全称：鲸跃科技' },
+      });
+      fireEvent.click(screen.getByRole('button', { name: '保存并抽取粘贴资料' }));
+
+      // 传输层失败没有到达服务端，不存在权威完成时刻：时间槽整体缺席，
+      // 不用客户端钟点伪造。失败文案必须等待式断言——结果 region 在
+      // processing 中间态即渲染，同步查询会与 importText rejection 的
+      // 状态更新竞态（全量并发下间歇失败）；文案落定后行不再变化，
+      // 时间槽断言随之稳定。
+      expect(
+        await screen.findByText('处理失败：material_request_failed'),
+      ).toBeInTheDocument();
+      const results = screen.getByRole('region', { name: '材料处理结果' });
+      expect(results.querySelector('[data-card-timestamp]')).toBeNull();
+    });
   });
 });

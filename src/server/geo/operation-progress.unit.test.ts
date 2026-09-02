@@ -308,6 +308,22 @@ describe("next-step 引述（ADR-0011 Decision 2）", () => {
     expect(quoteGeoNextStepForAction(cancelled, "cancel")).toBeUndefined();
   });
 
+  it("跳过材料收集的决策回执引述替换后计划的首个未完成步骤（票 07）", () => {
+    // 跳过后的真实计划：认可门成功、知识段已剥离，当前步是问题池生成。
+    const skipped = operationWithStepReady("op-skip-07", "generate-question-pool");
+    const quotation = quoteGeoNextStepForAction(skipped, "skip-material-collection");
+    // 信封引述与顺序闸同口径：agent 照引述调用 run_question_pool 不会被闸拒。
+    expect(quotation?.stepId).toBe("generate-question-pool");
+    expect(quotation?.tool).toBe("run_question_pool");
+    expect(quotation?.planRevision).toBe(skipped.revision);
+    // 操作已随剥离收口（知识更新单意图跳空后）时不虚构引述，信封退回收据。
+    const finished = operationWithStepReady("op-skip-done", "generate-question-pool");
+    finished.status = "succeeded";
+    expect(
+      quoteGeoNextStepForAction(finished, "skip-material-collection"),
+    ).toBeUndefined();
+  });
+
   it("五类确认门后的下一步在全部意图×跨度组合下都落在 next-step 单表内（表是唯一事实源）", () => {
     const plans: ReturnType<typeof planGeoOperation>[] = [];
     const directInputs: PlanGeoOperationInput[] = [

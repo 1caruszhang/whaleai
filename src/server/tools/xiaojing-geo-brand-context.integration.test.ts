@@ -13,12 +13,13 @@ import {
   configureXiaojingGeo,
   createXiaojingGeoServer,
 } from './xiaojing-geo-tool';
+import { planGeoOperation } from '../../shared/geo/operation';
 
 /**
  * 跨 Session 状态盲区回归（MCP 协议级）：新 Session 的 agent 第一个动作
  * 是经真实 MCP server 调用 inspect_brand_context，必须一次拿到 Rust 持久的
  * 品牌状态摘要（含第一轮已确认的 5 家竞品），而不是向用户重新征集；
- * 另一用例覆盖 ADR-0010 Decision 3 的跨会话未完成轮次元信息（五要素，
+ * 另一用例覆盖 ADR-0010 Decision 3 的跨会话未完成轮次元信息（六要素，
  * 只读，不含草稿正文与聊天记录）。Rust 端点以 managementApi mock 模拟，
  * 无真实网络。
  */
@@ -117,8 +118,9 @@ describe('inspect_brand_context over a live MCP server', () => {
       };
 
       // 摘要一次到位：agent 不需要再问竞品，也不需要重读任何阶段产物。
-      // 无未完成轮次：未走到的 /unfinished 端点按 absent 降级，摘要与
-      // 现状回归一致（AC3：既有跨会话状态盲区回归不破）。
+      // 票 #10 修订：摘要不再携带未完成轮次——他轮信息在场会诱发起点
+      // 推导的现场取舍；轮次元信息只经点名续轮查询（inspect_geo_operations
+      // includeUnfinishedRounds）按需读取。
       expect(payload.workspaceState).toMatchObject({
         kind: 'brand-workspace-state',
         brandName: '目标品牌',
@@ -127,8 +129,8 @@ describe('inspect_brand_context over a live MCP server', () => {
         articles: { present: true, state: { articleCount: 2, approvedCount: 2 } },
         distributionPlan: { present: true, state: { status: 'confirmed' } },
         publish: { present: true, state: { status: 'scheduled' } },
-        unfinishedOperations: { present: false },
       });
+      expect(payload.workspaceState && 'unfinishedOperations' in payload.workspaceState).toBe(false);
     } finally {
       await client.close();
       await config.instance.close();
@@ -136,7 +138,7 @@ describe('inspect_brand_context over a live MCP server', () => {
     }
   });
 
-  it('returns unfinished cross-session operation metadata with the five elements and no bodies', async () => {
+  it('serves the named-continuation unfinished-rounds query via inspect_geo_operations, not the summary', async () => {
     process.env.XIAOJING_SIDECAR_ID = 'sidecar-brand-context-it';
     // 新 Session：上一轮在另一个 Session 做到文章批准门，草稿审到一半。
     configureXiaojingGeo({}, {
@@ -145,11 +147,10 @@ describe('inspect_brand_context over a live MCP server', () => {
     });
     vi.mocked(managementApi).mockImplementation(
       async (path: string): Promise<Record<string, unknown>> => {
-        // 只路由 /unfinished：其余阶段读取降级为 absent，不影响本断言。
         const routes: Record<string, Record<string, unknown>> = {
           '/api/brand-geo-operations/unfinished': {
             ok: true,
-            total: 1,
+            total: 2,
             operations: [
               {
                 id: 'op-round-one',
@@ -172,6 +173,26 @@ describe('inspect_brand_context over a live MCP server', () => {
                 pendingReviewCount: 3,
                 createdAt: '2026-08-30T09:00:00Z',
                 updatedAt: '2026-08-31T18:00:00Z',
+                // 票 #04：该轮不更新品牌知识——查询必须如实呈现复用轮。
+                updateKnowledge: false,
+              },
+              {
+                // 无主轮（票 10 验收实证）：sessionId null 原样透传。
+                id: 'op-ownerless',
+                sessionId: null,
+                kind: 'next-round-optimization',
+                goal: '新一轮内容优化到发布',
+                status: 'awaiting-confirmation',
+                stuckStep: {
+                  id: 'select-next-question-pool',
+                  title: '从问题池选择',
+                  capability: 'question-opportunities',
+                  status: 'awaiting-confirmation',
+                },
+                pendingConfirmation: null,
+                pendingReviewCount: 0,
+                createdAt: '2026-08-30T09:00:00Z',
+                updatedAt: '2026-08-31T19:00:00Z',
               },
             ],
           },
@@ -188,51 +209,71 @@ describe('inspect_brand_context over a live MCP server', () => {
     const client = new Client({ name: 'integration-client', version: '1.0.0' });
     await client.connect(clientTransport);
     try {
-      const result = await client.callTool({ name: 'inspect_brand_context', arguments: {} });
+      // 摘要侧不携带任何轮次（只路由了 /unfinished：brand context 其余
+      // absent——若摘要仍消费该端点，这里会出现 unfinishedOperations）。
+      const summaryResult = await client.callTool({ name: 'inspect_brand_context', arguments: {} });
+      const summaryText = (summaryResult.content as Array<{ type: string; text?: string }>)[0]?.text ?? '';
+      expect(summaryText).not.toContain('unfinishedOperations');
+      expect(summaryText).not.toContain('op-round-one');
+
+      // 点名续轮查询一次到手：元信息六要素 + 展示阶段；无主轮 sessionId=null；
+      // updateKnowledge 缺省为 null（不臆断）、显式 false 为复用轮。
+      const result = await client.callTool({
+        name: 'inspect_geo_operations',
+        arguments: { includeUnfinishedRounds: true },
+      });
       const text = (result.content as Array<{ type: string; text?: string }>)[0]?.text ?? '';
       const payload = JSON.parse(text) as {
-        workspaceState: {
-          unfinishedOperations:
-            | { present: false }
-            | {
-                present: true;
-                state: { operations: unknown[] };
-              };
-        };
+        kind: string;
+        total: number;
+        truncatedCount: number;
+        rounds: Array<Record<string, unknown>>;
       };
-
-      // 元信息五要素一次到手：类型、卡住步骤/阶段、待审数量、所属会话、时间。
-      // total/truncatedCount 是上界语义：未超上界时无截断。
-      expect(payload.workspaceState.unfinishedOperations).toEqual({
-        present: true,
-        state: {
-          operations: [
-            {
-              operationId: 'op-round-one',
-              sessionId: 'session-round-one',
-              kind: 'full-optimization',
-              goal: '一轮完整 GEO 优化',
-              status: 'awaiting-confirmation',
-              stuckStep: {
-                id: 'confirm-articles',
-                title: '批准文章',
-                capability: 'content-production',
-                status: 'awaiting-confirmation',
-                phase: { id: 'content', title: '内容生产' },
-              },
-              pendingConfirmation: { kind: 'article-approval', title: '批准文章' },
-              pendingReviewCount: 3,
-              createdAt: '2026-08-30T09:00:00Z',
-              updatedAt: '2026-08-31T18:00:00Z',
-            },
-          ],
-          total: 1,
-          truncatedCount: 0,
+      expect(payload.kind).toBe('geo-operation-unfinished-rounds');
+      expect(payload.total).toBe(2);
+      expect(payload.truncatedCount).toBe(0);
+      expect(payload.rounds).toEqual([
+        {
+          operationId: 'op-round-one',
+          sessionId: 'session-round-one',
+          kind: 'full-optimization',
+          goal: '一轮完整 GEO 优化',
+          status: 'awaiting-confirmation',
+          stuckStep: {
+            id: 'confirm-articles',
+            title: '批准文章',
+            capability: 'content-production',
+            status: 'awaiting-confirmation',
+            phase: { id: 'content', title: '内容生产' },
+          },
+          pendingConfirmation: { kind: 'article-approval', title: '批准文章' },
+          pendingReviewCount: 3,
+          createdAt: '2026-08-30T09:00:00Z',
+          updatedAt: '2026-08-31T18:00:00Z',
+          updateKnowledge: false,
         },
-      });
+        {
+          operationId: 'op-ownerless',
+          sessionId: null,
+          kind: 'next-round-optimization',
+          goal: '新一轮内容优化到发布',
+          status: 'awaiting-confirmation',
+          stuckStep: {
+            id: 'select-next-question-pool',
+            title: '从问题池选择',
+            capability: 'question-opportunities',
+            status: 'awaiting-confirmation',
+            phase: { id: 'questions', title: '问题机会' },
+          },
+          pendingConfirmation: null,
+          pendingReviewCount: 0,
+          createdAt: '2026-08-30T09:00:00Z',
+          updatedAt: '2026-08-31T19:00:00Z',
+          updateKnowledge: null,
+        },
+      ]);
 
-      // 摘要不含草稿正文与聊天记录（AC2）：整份工具输出没有任何正文字段
-      // 或会话转录（其他阶段本就被路由为 absent）。
+      // 查询不含草稿正文与聊天记录：整份工具输出没有任何正文字段。
       expect(text).not.toMatch(/body|transcript|messages/i);
     } finally {
       await client.close();
@@ -324,6 +365,16 @@ describe('generate_articles latest-confirmed-plan fallback over a live MCP serve
     // 捕获 start 的请求体：空参必须以 topicPlanId: null 落到端口，
     // 由 Rust「最新 confirmed plan」回落裁决，而不是工具层报错。
     // start 成功后服务按规格回读自身（get_article_operation），一并路由。
+    // 顺序闸（票 #05）放行形态：本会话操作当前步 = generate-articles，
+    // 空参调用是计划内的当前阶段。
+    const gateSteps = planGeoOperation({
+      intent: 'article-generation',
+      goal: '写文章',
+    }).steps.map((step) =>
+      step.id === 'generate-articles'
+        ? { ...step, status: 'ready' as const }
+        : { ...step, status: 'succeeded' as const },
+    );
     vi.mocked(managementApi).mockImplementation(
       async (path: string, _method?: string, body?: Record<string, unknown>) => {
         if (path === '/api/brand-articles/start' && body) startCalls.push(body);
@@ -344,6 +395,22 @@ describe('generate_articles latest-confirmed-plan fallback over a live MCP serve
         const routes: Record<string, Record<string, unknown>> = {
           '/api/brand-articles/start': { ok: true, operation },
           '/api/brand-articles/operation/get': { ok: true, operation },
+          '/api/brand-geo-operations/list': {
+            ok: true,
+            operations: [
+              {
+                id: 'op-articles-it',
+                sessionId: 'session-articles',
+                kind: 'article-generation',
+                goal: '写文章',
+                status: 'running',
+                steps: gateSteps,
+                revision: 3,
+                createdAt: '2026-09-01T00:00:00Z',
+                updatedAt: '2026-09-01T00:00:00Z',
+              },
+            ],
+          },
         };
         const response = routes[path];
         if (!response) return { ok: false, error: `unrouted:${path}` };

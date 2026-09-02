@@ -909,7 +909,7 @@ async fn brand_geo_operation_list_handler(
 struct GeoOperationUnfinishedListPayload {}
 
 /// 跨会话未完成轮次的只读元信息（ADR-0010 Decision 3）：品牌状态摘要的
-/// 取数端点。按品牌列出非终态 operation 的元信息五要素，不含草稿正文与
+/// 取数端点。按品牌列出非终态 operation 的元信息六要素，不含草稿正文与
 /// 聊天记录；信封仍按当前 Sidecar/Session/工作区鉴权，但不按 Session
 /// 过滤——跨会话可见正是本端点的用途（metadata-only 例外）。
 async fn brand_geo_operation_unfinished_handler(

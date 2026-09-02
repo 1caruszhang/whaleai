@@ -81,6 +81,10 @@ pub struct KnowledgeCandidate {
     pub status: String,
     pub base_version: i64,
     pub proposed_at: String,
+    /// 裁决落库时刻（geo-plan-normalization 票 08）：与终态同笔事务内写入
+    /// knowledge_fact_candidates.resolved_at；未裁决候选为 None。交互卡片
+    /// 「完成时刻」的唯一权威源，经管理面投影透传给 Node/渲染侧。
+    pub resolved_at: Option<String>,
     pub current: Option<KnowledgeCurrentFact>,
 }
 
@@ -106,6 +110,8 @@ pub struct KnowledgeDecisionResult {
     pub fact_key: String,
     pub decision: String,
     pub status: String,
+    /// 本次裁决的落库时刻（票 08）：与终态同笔写入的 resolved_at 原值。
+    pub resolved_at: String,
     pub current: Option<KnowledgeCurrentFact>,
     pub knowledge_version: Option<i64>,
     pub affected_artifacts: Vec<GeoArtifactFreshnessProjection>,
@@ -579,6 +585,7 @@ impl BrandWorkspaceStore {
             fact_key: candidate.key.identity,
             decision: request.decision,
             status: status.to_string(),
+            resolved_at: now.clone(),
             current: after,
             knowledge_version,
             affected_artifacts,
@@ -1200,7 +1207,8 @@ fn read_candidate(
         .query_row(
             "SELECT session_id, subject, predicate, scope_json, effective_from, effective_to,
                 fact_key, value_json, normalized_value_json, unit, material_id, excerpt,
-                confidence, profile_provenance, origin, intent, status, base_version, proposed_at
+                confidence, profile_provenance, origin, intent, status, base_version, proposed_at,
+                resolved_at
          FROM knowledge_fact_candidates WHERE id = ?1 AND session_id = ?2",
             params![candidate_id, session_id],
             |row| {
@@ -1230,6 +1238,7 @@ fn read_candidate(
                     status: row.get(16)?,
                     base_version: row.get(17)?,
                     proposed_at: row.get(18)?,
+                    resolved_at: row.get(19)?,
                     current: None,
                 })
             },
@@ -1588,6 +1597,48 @@ mod tests {
                 edited_normalized_value_json: None,
             })
             .unwrap()
+    }
+
+    #[test]
+    fn decision_writes_resolved_at_and_pending_candidates_project_none() {
+        // geo-plan-normalization 票 08：交互卡片「完成时刻」的权威源——
+        // 裁决与 resolved_at 同笔事务写入，决策结果与候选投影均透传该
+        // 时刻；未裁决候选保持 None（渲染侧据两态切换，不造第二时间源）。
+        let (store, workspace) = fixture();
+        let decided = store
+            .submit_knowledge_candidate(submission(
+                &workspace,
+                key("{\"tier\":\"a\"}", None),
+                "100",
+                0,
+                "awaiting-confirmation",
+            ))
+            .unwrap();
+        let pending = store
+            .submit_knowledge_candidate(submission(
+                &workspace,
+                key("{\"tier\":\"b\"}", None),
+                "200",
+                0,
+                "awaiting-confirmation",
+            ))
+            .unwrap();
+        assert_eq!(pending.resolved_at, None);
+
+        let result = adopt(&store, &workspace, decided);
+        assert!(!result.resolved_at.is_empty());
+
+        let reread = store
+            .knowledge_candidate(&workspace.id, "session-knowledge", &result.candidate_id)
+            .unwrap();
+        assert_eq!(
+            reread.resolved_at.as_deref(),
+            Some(result.resolved_at.as_str())
+        );
+        let still_pending = store
+            .knowledge_candidate(&workspace.id, "session-knowledge", &pending.id)
+            .unwrap();
+        assert_eq!(still_pending.resolved_at, None);
     }
 
     #[test]

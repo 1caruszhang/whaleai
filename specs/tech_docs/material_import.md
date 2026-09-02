@@ -31,6 +31,8 @@ LLM 抽取可能远超转发控制面请求的 120s 代理超时，因此导入�
 
 Renderer 对处理中行每 3s 轮询 `/api/xiaojing/materials/status`（带 `materialIds`）；缺省 `materialIds` 的同一路由返回本 Session 最近材料（Rust `/api/brand-materials/list`，按 `updated_at` 倒序、上限 10），用于材料请求卡重挂载（transcript 重放）后恢复在途行与确认卡。非处理中材料在响应中携带批量确认卡投影——确认卡数据以权威候选为源重建，不依赖一次性响应存活。挂载恢复接管的在途行允许直接单材料重试：其原后台队列可能已随 Sidecar 进程消失。
 
+材料请求卡行级时间戳两态（geo-plan-normalization 票 08，与主确认卡共用 `CardStatusTime` 组件钉死同一语义）：抽取进行中（含挂载恢复接管的在途行）显示「生成中」状态词、绝不出钟点；行落定（`awaiting-confirmation` / `processed` / `failed` 都是终态）显示完成时刻。完成时刻的唯一权威源是材料投影的 `updatedAt`——Rust 在写终态的同一条 `UPDATE brand_materials` 语句里更新它，共享投影类型 `BrandMaterialProjection` 自票 08 起显式声明该字段；单材料重试把行重置回「生成中」并清除旧时刻。传输层失败行（请求未达服务端、无 materialId）不存在权威时刻，时间槽整体缺席，不用客户端钟点伪造。
+
 抽取链路（含竞品富化的联网检索）带 10 分钟硬超时信号；provider 挂起按 `model_failed` 落回 failed 终态，材料不会永远停在 processing。Renderer 传输层失败（代理超时 / IPC / 网络）显示专用 `material_request_failed`，与服务端业务错误码严格区分。
 
 ## 存量材料手动重扫（ADR-0008 T7）
@@ -41,7 +43,7 @@ Renderer 对处理中行每 3s 轮询 `/api/xiaojing/materials/status`（带 `ma
 
 ## 产品入口与 Session 归属
 
-真实用户入口全部在聊天内（ADR 0005，取代票 27 的输入区常驻形态）：上传由 agent 判断需要后经 `request_brand_material` 工具发起的**材料请求卡**承载（`MaterialRequestCard`，渲染在发起那轮助手消息内、随 transcript 持久），卡体提供粘贴文本、官网 URL 与文件选择三条路径，使用当前 Tab 的 `apiPost` 和固化 `sessionId`；聊天输入框上方的常驻导入区域已删除，零消息空态由起始建议中的材料引导语承接，显隐不存在任何 renderer 侧机械条件。会话附件（文件/图片）路线保持——附件由 Agent 经 `read_session_file` 判断后走 `import_pasted_material` 导入并停在知识裁决门；二进制附件由 Agent 调用 `request_brand_material` 转入材料请求卡。唤起标准（系统提示词硬规则）：制定计划时品牌无已确认知识或明显过薄、用户明确要求补材料、不可直读的二进制品牌材料；操作进行中缺材料佐证不唤起，按来源层级以 AI 补全行推进由用户裁决兜底；材料是否够用在制定计划时判断一次，判断结果只决定计划是否包含材料收集步骤——随计划执行的请求卡在放行后按步骤顺序发出，计划停在认可门期间不得提前出现（用户主动要求补充材料不受此限）。右侧工作台不挂任何材料面板，材料入口不出现在工作台，也不作为 GeoOperation 闸门。`BrandWorkspace` 只可由该 Tab 的 `workspacePath` 精确匹配得到，不能用全局 current workspace 补位；没有匹配品牌时材料请求卡禁用上传并说明原因。转录重放重新挂载卡片即恢复在途行与确认卡。
+真实用户入口全部在聊天内（ADR 0005，取代票 27 的输入区常驻形态）：上传由 agent 判断需要后经 `request_brand_material` 工具发起的**材料请求卡**承载（`MaterialRequestCard`，渲染在发起那轮助手消息内、随 transcript 持久），卡体提供粘贴文本、官网 URL 与文件选择三条路径，使用当前 Tab 的 `apiPost` 和固化 `sessionId`；聊天输入框上方的常驻导入区域已删除，零消息空态由起始建议中的材料引导语承接，显隐不存在任何 renderer 侧机械条件。会话附件（文件/图片）路线保持——附件由 Agent 经 `read_session_file` 判断后走 `import_pasted_material` 导入并停在知识裁决门；二进制附件由 Agent 调用 `request_brand_material` 转入材料请求卡。唤起标准（材料收集契约 `MATERIAL_COLLECTION_CONTRACT`，2026-09-02 票 03 单源化——工具描述、next-step 单表 collect-materials 条目、系统提示词材料段三处逐字同源，MCP 集成测试 `xiaojing-geo-material-contract` 断言一致）：计划放行后执行到材料收集步骤即调用，不在调用现场重新权衡品牌知识是否够用——知识充分性只在起点推导判断一次，结果由计划形状承载（计划含材料收集步骤，执行中才走到该步）；计划外的合法入口只有用户明确要求补材料、不可直读的二进制品牌材料两个；操作进行中缺材料佐证不唤起（薄知识同样），按来源层级以 AI 补全行推进由用户裁决兜底。随计划执行的请求卡在放行后按步骤顺序发出，计划停在认可门期间不得提前出现（用户主动要求补充材料不受此限）。停泊在材料收集步骤时发出的请求卡同时携带真实的「跳过材料收集」出口（二次确认防误触，geo-plan-normalization 票 07）：卡片数据锚定停泊操作的 operationId 与发出时刻 revision（`skipTarget`），确认后经 `/api/xiaojing/geo-operations/skip-material-collection` 走既有 replace-plan 计划替换剥离知识段剩余步骤，并投递决策回执信封让操作自动续接到下一步（机制与守卫见 geo_operations.md 跳过出口段）；计划外入口的卡片不携带跳过动作，三条上传路径与计划外随时补材料不受影响。右侧工作台不挂任何材料面板，材料入口不出现在工作台，也不作为 GeoOperation 闸门。`BrandWorkspace` 只可由该 Tab 的 `workspacePath` 精确匹配得到，不能用全局 current workspace 补位；没有匹配品牌时材料请求卡禁用上传并说明原因。转录重放重新挂载卡片即恢复在途行与确认卡。
 
 - 文件通过现有 Tauri OS dialog 选择；Renderer 只把路径作为结构化操作参数交给 `importBrandMaterialFiles`，不打开、不解析也不记录路径。界面只显示 basename。
 - 粘贴资料和官网 URL 分别调用 `importBrandMaterialText`、`importBrandMaterialWebsite`，不伪造用户消息来触发导入。

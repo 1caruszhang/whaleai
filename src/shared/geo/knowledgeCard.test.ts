@@ -167,6 +167,16 @@ describe('knowledge candidates card contract', () => {
     expect(projected).toEqual(expected);
   });
 
+  it('projects the candidate resolution moment for card-level completion timestamps (票 08)', () => {
+    // resolvedAt 是主确认卡「完成时刻」的唯一权威源：Rust 决策事务内写入
+    // knowledge_fact_candidates.resolved_at，投影原样透传不换算。
+    const projected = toKnowledgeCardCandidate(source({ resolvedAt: '2026-09-02T05:04:03Z' }));
+    expect(projected.resolvedAt).toBe('2026-09-02T05:04:03Z');
+    // 未裁决候选不带该字段；显式 null 原样保留（缺省而非伪值）。
+    expect(toKnowledgeCardCandidate(source()).resolvedAt).toBeUndefined();
+    expect(toKnowledgeCardCandidate(source({ resolvedAt: null })).resolvedAt).toBeNull();
+  });
+
   it('builds no card without candidates and caps large batches at the total transport bound', () => {
     expect(buildKnowledgeCandidatesCardData(null, [])).toBeNull();
     const many = Array.from({ length: KNOWLEDGE_CARD_MAX_CANDIDATES + 7 }, (_, index) =>

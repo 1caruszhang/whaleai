@@ -179,6 +179,56 @@ export async function handleXiaojingGeoOperationsRoute(
     }
   }
 
+  if (
+    pathname === '/api/xiaojing/geo-operations/skip-material-collection'
+    && request.method === 'POST'
+  ) {
+    try {
+      const payload = await request.json() as {
+        workspaceId: string;
+        sessionId: string;
+        operationId: string;
+        expectedRevision: number;
+      };
+      const runtimeSessionId = getRuntimeSessionIdForRequest();
+      const workspaceId = basename(resolve(workspacePath));
+      if (payload.workspaceId !== workspaceId
+        || payload.sessionId !== runtimeSessionId) {
+        return jsonResponse({ success: false, error: 'geo_operation_identity_mismatch' }, 403);
+      }
+      // 跳过出口（geo-plan-normalization 票 07）：材料请求卡的「跳过材料
+      // 收集」动作走既有 replace-plan 计划替换，决策回执信封唤醒 agent
+      // 从跳过后的下一步续接——与知识分支决策同一条已走通的链路。
+      const operation = await createGeoOperationService({
+        workspaceId,
+        sessionId: runtimeSessionId,
+      }).skipMaterialCollection({
+        operationId: payload.operationId,
+        expectedRevision: payload.expectedRevision,
+      });
+      const notification = await notifyGeoOperationWorkbenchEvent(
+        runtimeSessionId,
+        operation,
+        'skip-material-collection',
+        requestAccountAccessToken(request),
+      );
+      return jsonResponse({
+        success: true,
+        operation,
+        notificationQueued: notification.success,
+        ...(!notification.success && notification.error
+          ? { notificationError: notification.error }
+          : {}),
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return jsonResponse(
+        { success: false, error: message },
+        message.includes('revision_conflict') ? 409 : 400,
+      );
+    }
+  }
+
   if (pathname === '/api/xiaojing/geo-operations/confirm-step' && request.method === 'POST') {
     try {
       const payload = await request.json() as {

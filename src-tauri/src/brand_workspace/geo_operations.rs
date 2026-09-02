@@ -193,6 +193,12 @@ pub struct GeoOperationProjection {
     pub pending_confirmation: Option<GeoOperationConfirmation>,
     pub error: Option<GeoOperationError>,
     pub source_operation_id: Option<String>,
+    /// 本轮「是否更新品牌知识」的显式决策（票 #04，spec 2026-09-02）：
+    /// Some(false)=复用轮（从问题池选择开始）、Some(true)=更新轮、
+    /// None=未决（分支门未回答）/不适用（直接意图）/存量旧轮。起点推导
+    /// 读轮次时以此为准，不靠 kind 意图标签推断。历史行缺列为 None。
+    #[serde(default)]
+    pub update_knowledge: Option<bool>,
     pub revision: i64,
     pub execution_generation: i64,
     pub execution_sidecar_generation: Option<u64>,
@@ -223,6 +229,10 @@ pub struct GeoOperationCreateRequest {
     pub input_refs: Vec<GeoOperationReference>,
     pub pending_confirmation: Option<GeoOperationConfirmation>,
     pub source_operation_id: Option<String>,
+    /// 本轮是否更新品牌知识的显式决策（票 #04）：与投影同语义，
+    /// 未携带存 None。请求字段即白名单——新字段必须在这里显式声明。
+    #[serde(default)]
+    pub update_knowledge: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -251,16 +261,23 @@ pub struct GeoOperationUnfinishedStuckStep {
 }
 
 /// 跨会话未完成轮次的只读元信息（ADR-0010 Decision 3）：品牌状态摘要经
-/// 新会话的 `inspect_brand_context` 一次读取。五要素——类型、卡住步骤、
-/// 待审数量、所属会话、创建/更新时间。绝不包含草稿正文、正文路径或任何
-/// 会话聊天记录（正文隔离保留在各领域 owned-or-approved 投影）；待审数量 =
+/// 新会话的 `inspect_brand_context` 一次读取。六要素——类型、卡住步骤、
+/// 待审数量、所属会话、创建/更新时间、是否更新品牌知识（票 #04，见
+/// `update_knowledge`）。绝不包含草稿正文、正文路径或任何会话聊天记录
+/// （正文隔离保留在各领域 owned-or-approved 投影）；待审数量 =
 /// 该操作当前所有者会话名下处于 draft_ready 且未批准的文章篇数
 /// （ADR-0010 改键：接管后所有者随工作集转移）。
+///
+/// `session_id = None` 是无主轮（票 10 验收实证补全）：原会话被删除时
+/// 外键 `ON DELETE SET NULL` 保留轮次、引用置空——轮次本身仍未完成、
+/// 无所有者进程在跑，是跨会话接管的合法标的；摘要必须列出它，否则无主
+/// 轮对一切新会话不可见、永远无法推进（无主轮的待审数量按 0 报告：
+/// 没有所有者会话名下的工作集）。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct GeoOperationUnfinishedSummary {
     pub id: String,
-    pub session_id: String,
+    pub session_id: Option<String>,
     pub kind: String,
     pub goal: String,
     pub status: String,
@@ -269,6 +286,11 @@ pub struct GeoOperationUnfinishedSummary {
     pub pending_review_count: i64,
     pub created_at: String,
     pub updated_at: String,
+    /// 该轮是否更新品牌知识（票 #04）：Some(false)=复用轮、Some(true)=
+    /// 更新轮、None=未决/不适用/存量旧轮——下一个会话的起点推导直接读
+    /// 它，不靠 kind 意图标签统计推断。
+    #[serde(default)]
+    pub update_knowledge: Option<bool>,
 }
 
 /// 品牌状态摘要一次读取的未完成轮次上界：跨会话弃置的轮次只会累积，
@@ -300,6 +322,16 @@ pub struct GeoOperationMutationRequest {
     pub artifact_refs: Vec<GeoOperationReference>,
     #[serde(default)]
     pub replacement_steps: Option<Vec<GeoOperationStep>>,
+    /// replace-plan 的调用场景（票 07）：缺省 = 知识分支决策（既有唯一
+    /// 形态，守卫要求停卡在 decide-knowledge-refresh 单步）；
+    /// `material-collection-skip` = 材料收集跳过出口——守卫按该场景校验
+    /// 替换形状（只允许剥离知识段未走完步骤），不放宽成自由计划编辑。
+    #[serde(default)]
+    pub replacement_reason: Option<String>,
+    /// 仅 replace-plan 消费（票 #04）：知识分支的用户显式答案随计划替换
+    /// 一并落库；其余动作忽略。缺省 None 保持现值不变。
+    #[serde(default)]
+    pub update_knowledge: Option<bool>,
     #[serde(default)]
     pub step_progress: Option<GeoOperationStepProgress>,
     #[serde(default)]
@@ -340,7 +372,8 @@ pub struct GeoOperationTakeoverRequest {
 #[serde(rename_all = "camelCase")]
 pub struct GeoOperationTakeoverReceipt {
     pub operation: GeoOperationProjection,
-    pub previous_owner_session_id: String,
+    /// 接管前的所有者；None = 无主轮（原会话已删除，SET NULL 保留轮次）。
+    pub previous_owner_session_id: Option<String>,
     pub taken_over_at: String,
     pub transferred_article_operations: i64,
     pub transferred_question_pools: i64,
@@ -402,6 +435,9 @@ pub(super) fn ensure_schema(connection: &rusqlite::Connection) -> Result<(), Str
     )?;
     ensure_column(connection, "geo_operations", "error_json", "TEXT")?;
     ensure_column(connection, "geo_operations", "source_operation_id", "TEXT")?;
+    // 本轮「是否更新品牌知识」的显式决策（票 #04）：NULL=未决/不适用/
+    // 存量旧轮，0=不更新（复用轮），1=更新。
+    ensure_column(connection, "geo_operations", "update_knowledge", "INTEGER")?;
     ensure_column(
         connection,
         "geo_operations",
@@ -499,9 +535,10 @@ impl BrandWorkspaceStore {
                 "INSERT INTO geo_operations
                     (id, session_id, state, created_at, kind, goal, status,
                      steps_json, input_refs_json, artifact_refs_json,
-                     pending_confirmation_json, source_operation_id, revision,
+                     pending_confirmation_json, source_operation_id,
+                     update_knowledge, revision,
                      execution_generation, updated_at)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,'[]',?10,?11,1,0,?4)",
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,'[]',?10,?11,?12,1,0,?4)",
                 params![
                     operation_id,
                     request.session_id,
@@ -517,6 +554,7 @@ impl BrandWorkspaceStore {
                         "geo_operation_confirmation_invalid"
                     )?,
                     request.source_operation_id,
+                    request.update_knowledge,
                 ],
             )
             .map_err(|error| format!("create GEO operation: {error}"))?;
@@ -588,8 +626,10 @@ impl BrandWorkspaceStore {
         let workspace = self.workspace(workspace_id)?;
         let connection = open_database(&workspace)?;
         ensure_schema(&connection)?;
-        let unfinished_filter = "kind!='artifact-lineage' AND session_id IS NOT NULL \
-             AND status NOT IN ('succeeded','failed','cancelled')";
+        // 无主轮（session_id NULL，原会话删除后保留）同样非终态、同样可被
+        // 接管——不过滤（票 10 验收实证：过滤会让无主轮对一切新会话不可见）。
+        let unfinished_filter =
+            "kind!='artifact-lineage' AND status NOT IN ('succeeded','failed','cancelled')";
         let total: usize = connection
             .query_row(
                 &format!("SELECT COUNT(*) FROM geo_operations WHERE {unfinished_filter}"),
@@ -602,7 +642,8 @@ impl BrandWorkspaceStore {
         let mut statement = connection
             .prepare(&format!(
                 "SELECT id,session_id,kind,goal,status,steps_json,
-                    pending_confirmation_json,created_at,COALESCE(updated_at,created_at)
+                    pending_confirmation_json,created_at,COALESCE(updated_at,created_at),
+                    update_knowledge
                  FROM geo_operations
                  WHERE {unfinished_filter}
                  ORDER BY COALESCE(updated_at,created_at) DESC,id DESC
@@ -613,7 +654,7 @@ impl BrandWorkspaceStore {
             .query_map([UNFINISHED_GEO_OPERATION_SUMMARY_LIMIT as i64], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(1)?,
                     row.get::<_, String>(2)?,
                     row.get::<_, String>(3)?,
                     row.get::<_, String>(4)?,
@@ -621,6 +662,7 @@ impl BrandWorkspaceStore {
                     row.get::<_, Option<String>>(6)?,
                     row.get::<_, String>(7)?,
                     row.get::<_, String>(8)?,
+                    row.get::<_, Option<bool>>(9)?,
                 ))
             })
             .map_err(|error| format!("query unfinished GEO operation list: {error}"))?
@@ -639,6 +681,7 @@ impl BrandWorkspaceStore {
             confirmation_json,
             created_at,
             updated_at,
+            update_knowledge,
         ) in rows
         {
             let steps: Vec<GeoOperationStep> =
@@ -657,13 +700,17 @@ impl BrandWorkspaceStore {
                     capability: step.capability.clone(),
                     status: step.status.clone(),
                 });
-            let pending_review_count = match pending_review_by_session.get(&session_id) {
-                Some(count) => *count,
-                None => {
-                    let count = count_session_draft_ready_articles(&connection, &session_id)?;
-                    pending_review_by_session.insert(session_id.clone(), count);
-                    count
-                }
+            // 无主轮没有所有者会话名下的工作集，待审数量按 0 报告。
+            let pending_review_count = match &session_id {
+                None => 0,
+                Some(owner) => match pending_review_by_session.get(owner) {
+                    Some(count) => *count,
+                    None => {
+                        let count = count_session_draft_ready_articles(&connection, owner)?;
+                        pending_review_by_session.insert(owner.clone(), count);
+                        count
+                    }
+                },
             };
             summaries.push(GeoOperationUnfinishedSummary {
                 id,
@@ -679,6 +726,7 @@ impl BrandWorkspaceStore {
                 pending_review_count,
                 created_at,
                 updated_at,
+                update_knowledge,
             });
         }
         Ok(GeoOperationUnfinishedList {
@@ -800,8 +848,8 @@ impl BrandWorkspaceStore {
                     artifact_refs_json=?3,checkpoint_json=?4,pending_confirmation_json=?5,
                     error_json=?6,revision=?7,updated_at=?8,terminal_at=?9,
                     queue_reason=?10,queue_position=?11,execution_generation=?12,
-                    execution_sidecar_generation=?13
-                 WHERE id=?14 AND session_id=?15 AND revision=?16",
+                    execution_sidecar_generation=?13,update_knowledge=?14
+                 WHERE id=?15 AND session_id=?16 AND revision=?17",
                 params![
                     operation.status,
                     json_string(&operation.steps, "geo_operation_steps_invalid")?,
@@ -825,6 +873,7 @@ impl BrandWorkspaceStore {
                     operation.queue_position,
                     operation.execution_generation,
                     operation.execution_sidecar_generation,
+                    operation.update_knowledge,
                     request.operation_id,
                     request.session_id,
                     request.expected_revision,
@@ -887,6 +936,8 @@ impl BrandWorkspaceStore {
             error: None,
             artifact_refs: vec![request.evidence_ref],
             replacement_steps: None,
+            replacement_reason: None,
+            update_knowledge: None,
             step_progress: None,
             queue_reason: None,
             queue_position: None,
@@ -926,45 +977,70 @@ impl BrandWorkspaceStore {
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|error| format!("start GEO operation takeover: {error}"))?;
-        let operation = read_operation(&transaction, &request.workspace_id, &request.operation_id)?
-            .ok_or_else(|| "geo_operation_not_found".to_string())?;
-        if TERMINAL_STATUSES.contains(&operation.status.as_str()) {
+        // 守卫读取不走 read_operation 的整行投影：无主轮（session_id NULL，
+        // 原会话删除后保留）的 session_id 在投影里是 String，NULL 行会让
+        // 读取本身失败——无主轮恰恰是接管的合法标的（票 10 验收实证）。
+        // CAS 成功后 get_geo_operation 读到的是新属主（非 NULL），投影安全。
+        let guard = transaction
+            .query_row(
+                "SELECT session_id,status,revision,taken_over_at
+                 FROM geo_operations WHERE id=?1 AND kind!='artifact-lineage'",
+                [&request.operation_id],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|error| format!("read GEO operation takeover guard: {error}"))?;
+        let (operation_session_id, operation_status, operation_revision, operation_taken_over_at) =
+            guard.ok_or_else(|| "geo_operation_not_found".to_string())?;
+        if TERMINAL_STATUSES.contains(&operation_status.as_str()) {
             return Err(format!(
                 "geo_operation_takeover_terminal:{} (only unfinished rounds can be taken over; start a new operation instead)",
-                operation.status
+                operation_status
             ));
         }
         if matches!(
-            operation.status.as_str(),
+            operation_status.as_str(),
             "running" | "queued" | "recovering"
         ) {
             return Err(format!(
                 "geo_operation_takeover_running:{} (the owning session is still executing this round; it must pause or finish first)",
-                operation.status
+                operation_status
             ));
         }
-        if operation.session_id == request.session_id {
+        if operation_session_id.as_deref() == Some(request.session_id.as_str()) {
             return Err(
                 "geo_operation_takeover_already_owner (this session already owns this operation; continue with inspect_geo_operations)"
                     .to_string(),
             );
         }
-        if operation.revision != request.expected_revision {
-            if operation.taken_over_at.is_some() {
+        if operation_revision != request.expected_revision {
+            if operation_taken_over_at.is_some() {
                 return Err(format!(
                     "geo_operation_takeover_conflict:taken_over_by={} (another session took over this round first)",
-                    operation.session_id
+                    operation_session_id.as_deref().unwrap_or("<ownerless>")
                 ));
             }
             return Err("geo_operation_revision_conflict".to_string());
         }
-        let previous_owner_session_id = operation.session_id.clone();
+        let previous_owner_session_id = operation_session_id;
         let now = Utc::now().to_rfc3339();
+        // CAS 的属主比对必须 NULL 感知：无主轮的 previous owner 是 NULL，
+        // SQL 三值逻辑下 `session_id=NULL` 恒不成立会把合法接管误判为
+        // revision 冲突（票 10 验收实证）。
         let changed = transaction
             .execute(
                 "UPDATE geo_operations SET session_id=?1,revision=revision+1,updated_at=?2,
                     taken_over_from_session_id=?3,taken_over_at=?2
-                 WHERE id=?4 AND session_id=?3 AND revision=?5",
+                 WHERE id=?4
+                   AND ((?3 IS NULL AND session_id IS NULL) OR session_id=?3)
+                   AND revision=?5",
                 params![
                     request.session_id,
                     now,
@@ -977,16 +1053,24 @@ impl BrandWorkspaceStore {
         if changed != 1 {
             return Err("geo_operation_revision_conflict".to_string());
         }
-        let transferred_article_operations = super::articles::transfer_unapproved_article_work(
-            &transaction,
-            &previous_owner_session_id,
-            &request.session_id,
-        )?;
-        let transferred_question_pools = super::question_pools::transfer_awaiting_selection_pools(
-            &transaction,
-            &previous_owner_session_id,
-            &request.session_id,
-        )?;
+        // 无主轮没有原所有者名下的工作集，随行转移按 0 计；有主轮照旧
+        // 在同一事务内转移未批准文章与待选池。
+        let (transferred_article_operations, transferred_question_pools) =
+            match previous_owner_session_id.as_deref() {
+                None => (0, 0),
+                Some(previous_owner) => (
+                    super::articles::transfer_unapproved_article_work(
+                        &transaction,
+                        previous_owner,
+                        &request.session_id,
+                    )?,
+                    super::question_pools::transfer_awaiting_selection_pools(
+                        &transaction,
+                        previous_owner,
+                        &request.session_id,
+                    )?,
+                ),
+            };
         transaction
             .commit()
             .map_err(|error| format!("commit GEO operation takeover: {error}"))?;
@@ -1241,23 +1325,61 @@ fn apply_action(
             advance_operation(operation)?;
         }
         "replace-plan" => {
-            require_status(&operation.status, &["awaiting-confirmation"])?;
-            if operation.kind != "next-round-optimization"
-                || operation.steps.len() != 1
-                || operation.steps[0].id != "decide-knowledge-refresh"
-            {
-                return Err("geo_operation_plan_replacement_invalid".to_string());
-            }
             let replacement = request
                 .replacement_steps
                 .clone()
                 .ok_or_else(|| "geo_operation_replacement_steps_required".to_string())?;
             validate_steps(&replacement)?;
-            operation.steps = replacement;
-            operation.pending_confirmation = None;
-            operation.checkpoint = None;
-            operation.error = None;
-            normalize_first_step(operation)?;
+            match request.replacement_reason.as_deref() {
+                // 跳过出口（票 07，spec 2026-09-02 决策 5）：材料请求卡的
+                // 「跳过材料收集」经计划替换剥离知识段剩余步骤。守卫按场景
+                // 校验形状——替换步骤必须恰为「原计划剥掉未走完的知识段
+                // 步骤」，已完成/已确认步骤保留，不得夹带其他编辑；替换后
+                // 从首个未走完步骤续接（advance_operation 尊重已成功前缀，
+                // 不重停认可门）。不为该场景新增里程碑：里程碑推进器的确认
+                // 门放行够不着被前置步骤挡住的等待门。
+                Some("material-collection-skip") => {
+                    require_status(
+                        &operation.status,
+                        &["ready", "running", "awaiting-confirmation"],
+                    )?;
+                    let expected = strip_incomplete_knowledge_steps(&operation.steps);
+                    if replacement.len() == operation.steps.len() || replacement != expected {
+                        return Err("geo_operation_plan_replacement_invalid".to_string());
+                    }
+                    operation.steps = replacement;
+                    if let Some(update_knowledge) = request.update_knowledge {
+                        operation.update_knowledge = Some(update_knowledge);
+                    }
+                    operation.pending_confirmation = None;
+                    operation.checkpoint = None;
+                    operation.error = None;
+                    advance_operation(operation)?;
+                }
+                // 知识分支决策（既有唯一形态）：分支未决停卡被显式回答
+                // 替换为已决计划，首个步骤重停自己的门。
+                _ => {
+                    require_status(&operation.status, &["awaiting-confirmation"])?;
+                    if operation.kind != "next-round-optimization"
+                        || operation.steps.len() != 1
+                        || operation.steps[0].id != "decide-knowledge-refresh"
+                    {
+                        return Err("geo_operation_plan_replacement_invalid".to_string());
+                    }
+                    operation.steps = replacement;
+                    // 知识分支的用户显式答案随替换一次落库（票 #04）：携带即覆盖，
+                    // 缺省保持现值（跳过出口等后续 replace-plan 调用方不受影响）。
+                    // revision 语义不变——决策持久化不额外递增，仍是一次 mutation
+                    // 一次 CAS 递增。
+                    if let Some(update_knowledge) = request.update_knowledge {
+                        operation.update_knowledge = Some(update_knowledge);
+                    }
+                    operation.pending_confirmation = None;
+                    operation.checkpoint = None;
+                    operation.error = None;
+                    normalize_first_step(operation)?;
+                }
+            }
         }
         "pause" => {
             if let Err(error) = require_status(
@@ -1409,6 +1531,25 @@ fn operation_step_mut<'a>(
     .ok_or_else(|| "geo_operation_step_not_found".to_string())
 }
 
+/// 知识段步骤 id（与 shared policy 的 KNOWLEDGE_STEPS 同一序列，票 07）：
+/// 材料收集 / 事实提取 / 知识确认。步骤形状的 policy 在 TS，Rust 侧按 id
+/// 判定「知识段剩余步骤」，职责只是把未走完的知识段步骤从持久层计划里
+/// 剥掉——已完成（succeeded/skipped）的保留。
+const KNOWLEDGE_SEGMENT_STEP_IDS: [&str; 3] =
+    ["collect-materials", "extract-facts", "confirm-knowledge"];
+
+/// 跳过出口（票 07）的替换形状期望值：原步骤序列剥掉未走完的知识段步骤。
+fn strip_incomplete_knowledge_steps(steps: &[GeoOperationStep]) -> Vec<GeoOperationStep> {
+    steps
+        .iter()
+        .filter(|step| {
+            !KNOWLEDGE_SEGMENT_STEP_IDS.contains(&step.id.as_str())
+                || matches!(step.status.as_str(), "succeeded" | "skipped")
+        })
+        .cloned()
+        .collect()
+}
+
 fn normalize_first_step(operation: &mut GeoOperationProjection) -> Result<(), String> {
     let Some(step) = operation.steps.first_mut() else {
         return Err("geo_operation_steps_invalid".to_string());
@@ -1517,7 +1658,7 @@ fn read_operation(
         .query_row(
             "SELECT id,session_id,kind,goal,status,steps_json,input_refs_json,
                 artifact_refs_json,checkpoint_json,pending_confirmation_json,error_json,
-                source_operation_id,revision,execution_generation,
+                source_operation_id,update_knowledge,revision,execution_generation,
                 execution_sidecar_generation,queue_reason,queue_position,
                 created_at,COALESCE(updated_at,created_at),terminal_at,
                 taken_over_from_session_id,taken_over_at
@@ -1543,16 +1684,17 @@ fn read_operation(
                     confirmation_json,
                     error_json,
                     row.get::<_, Option<String>>(11)?,
-                    row.get::<_, i64>(12)?,
+                    row.get::<_, Option<bool>>(12)?,
                     row.get::<_, i64>(13)?,
-                    row.get::<_, Option<u64>>(14)?,
-                    row.get::<_, Option<String>>(15)?,
-                    row.get::<_, Option<i64>>(16)?,
-                    row.get::<_, String>(17)?,
+                    row.get::<_, i64>(14)?,
+                    row.get::<_, Option<u64>>(15)?,
+                    row.get::<_, Option<String>>(16)?,
+                    row.get::<_, Option<i64>>(17)?,
                     row.get::<_, String>(18)?,
-                    row.get::<_, Option<String>>(19)?,
+                    row.get::<_, String>(19)?,
                     row.get::<_, Option<String>>(20)?,
                     row.get::<_, Option<String>>(21)?,
+                    row.get::<_, Option<String>>(22)?,
                 ))
             },
         )
@@ -1572,6 +1714,7 @@ fn read_operation(
                 confirmation_json,
                 error_json,
                 source_operation_id,
+                update_knowledge,
                 revision,
                 execution_generation,
                 execution_sidecar_generation,
@@ -1606,6 +1749,7 @@ fn read_operation(
                     )?,
                     error: parse_optional_json(error_json, "geo_operation_error_corrupt")?,
                     source_operation_id,
+                    update_knowledge,
                     revision,
                     execution_generation,
                     execution_sidecar_generation,
@@ -2169,6 +2313,8 @@ mod tests {
             error: None,
             artifact_refs: vec![],
             replacement_steps: None,
+            replacement_reason: None,
+            update_knowledge: None,
             step_progress: None,
             queue_reason: None,
             queue_position: None,
@@ -2198,6 +2344,7 @@ mod tests {
             input_refs: vec![],
             pending_confirmation: None,
             source_operation_id: None,
+            update_knowledge: None,
         };
         let first = store.create_geo_operation(create("生成三篇文章")).unwrap();
         let second = store
@@ -2278,6 +2425,7 @@ mod tests {
                 input_refs: vec![],
                 pending_confirmation: None,
                 source_operation_id: None,
+                update_knowledge: None,
             })
             .unwrap();
         let running = store
@@ -2315,6 +2463,7 @@ mod tests {
                 input_refs: vec![],
                 pending_confirmation: None,
                 source_operation_id: None,
+                update_knowledge: None,
             })
             .unwrap();
         let mut finished = store
@@ -2379,7 +2528,7 @@ mod tests {
         assert_eq!(list.total, 1);
         let summary = &summaries[0];
         assert_eq!(summary.id, waiting.id);
-        assert_eq!(summary.session_id, "session-operation");
+        assert_eq!(summary.session_id, Some("session-operation".to_string()));
         assert_eq!(summary.kind, "full-optimization");
         assert_eq!(summary.goal, "一轮完整 GEO 优化");
         assert_eq!(summary.status, "awaiting-confirmation");
@@ -2431,6 +2580,7 @@ mod tests {
                     input_refs: vec![],
                     pending_confirmation: None,
                     source_operation_id: None,
+                    update_knowledge: None,
                 })
                 .unwrap();
         }
@@ -2443,6 +2593,501 @@ mod tests {
             UNFINISHED_GEO_OPERATION_SUMMARY_LIMIT
         );
         assert_eq!(list.total, count);
+    }
+
+    /// 票 #04（spec 2026-09-02）：「是否更新知识」进操作投影与跨会话摘要，
+    /// 创建与计划替换两条路径往返一致；起点推导读轮次不再靠意图标签推断。
+    #[test]
+    fn update_knowledge_decision_round_trips_create_replace_plan_and_summary() {
+        let (store, workspace) = fixture();
+        let branch_gate = confirmation("next-round-knowledge", "brand-workspace");
+        let selection_gate = confirmation("question-selection", "brand-workspace");
+
+        // 创建路径：显式「不更新知识」的复用轮（全链意图带该组合，fa450460
+        // 实测场景）——决策随创建落库并原样读回。
+        let reuse_round = store
+            .create_geo_operation(GeoOperationCreateRequest {
+                workspace_id: workspace.id.clone(),
+                session_id: "session-operation".into(),
+                kind: "full-optimization".into(),
+                goal: "不更新知识的复用轮".into(),
+                status: "ready".into(),
+                steps: vec![step(
+                    "select-next-question-pool",
+                    "question-opportunities",
+                    "ready",
+                    None,
+                )],
+                input_refs: vec![],
+                pending_confirmation: None,
+                source_operation_id: None,
+                update_knowledge: Some(false),
+            })
+            .unwrap();
+        assert_eq!(reuse_round.update_knowledge, Some(false));
+
+        // 未决停卡：创建时不带决策 → 投影 None（未决，不是 false）。
+        let undecided = store
+            .create_geo_operation(GeoOperationCreateRequest {
+                workspace_id: workspace.id.clone(),
+                session_id: "session-operation".into(),
+                kind: "next-round-optimization".into(),
+                goal: "下一轮优化".into(),
+                status: "awaiting-confirmation".into(),
+                steps: vec![step(
+                    "decide-knowledge-refresh",
+                    "brand-knowledge",
+                    "awaiting-confirmation",
+                    Some(branch_gate),
+                )],
+                input_refs: vec![],
+                pending_confirmation: Some(confirmation("next-round-knowledge", "brand-workspace")),
+                source_operation_id: None,
+                update_knowledge: None,
+            })
+            .unwrap();
+        assert_eq!(undecided.update_knowledge, None);
+
+        // 计划替换路径：分支答案 false 随 replace-plan 一次落库；revision
+        // 语义不变——决策持久化不额外递增，仍是一次 mutation 恰好 +1。
+        let mut replace = mutation(&workspace, &undecided, "replace-plan", None);
+        replace.replacement_steps = Some(vec![step(
+            "select-next-question-pool",
+            "question-opportunities",
+            "pending",
+            Some(selection_gate),
+        )]);
+        replace.update_knowledge = Some(false);
+        let decided = store.mutate_geo_operation(replace).unwrap();
+        assert_eq!(decided.update_knowledge, Some(false));
+        assert_eq!(decided.revision, undecided.revision + 1);
+        assert_eq!(decided.steps.len(), 1);
+        assert_eq!(
+            decided.steps[0].status, "awaiting-confirmation",
+            "replacement first step re-parks at its gate"
+        );
+        // 投影序列化用 TS 契约的 camelCase 键（票 #04）。
+        assert!(serde_json::to_string(&decided)
+            .unwrap()
+            .contains(r#""updateKnowledge":false"#));
+
+        // 跨会话摘要：未完成轮次条目携带决策；未决轮如实报 None。
+        let summaries = store.list_unfinished_geo_operations(&workspace.id).unwrap();
+        let decision_by_id: HashMap<String, Option<bool>> = summaries
+            .operations
+            .iter()
+            .map(|summary| (summary.id.clone(), summary.update_knowledge))
+            .collect();
+        assert_eq!(
+            decision_by_id.get(&reuse_round.id),
+            Some(&Some(false)),
+            "reuse round shows updateKnowledge=false in the summary"
+        );
+        assert_eq!(
+            decision_by_id.get(&decided.id),
+            Some(&Some(false)),
+            "plan-replacement decision reaches the summary"
+        );
+
+        // 替换时不带决策：保持现值（跳过出口等后续 replace-plan 调用方
+        // 不写该字段，不得把已有决策清掉）。
+        let preset = store
+            .create_geo_operation(GeoOperationCreateRequest {
+                workspace_id: workspace.id.clone(),
+                session_id: "session-operation".into(),
+                kind: "next-round-optimization".into(),
+                goal: "预置决策的停卡".into(),
+                status: "awaiting-confirmation".into(),
+                steps: vec![step(
+                    "decide-knowledge-refresh",
+                    "brand-knowledge",
+                    "awaiting-confirmation",
+                    Some(confirmation("next-round-knowledge", "brand-workspace")),
+                )],
+                input_refs: vec![],
+                pending_confirmation: Some(confirmation("next-round-knowledge", "brand-workspace")),
+                source_operation_id: None,
+                update_knowledge: Some(true),
+            })
+            .unwrap();
+        let mut keep = mutation(&workspace, &preset, "replace-plan", None);
+        keep.replacement_steps = Some(vec![step(
+            "collect-materials",
+            "brand-material-import",
+            "pending",
+            None,
+        )]);
+        let kept = store.mutate_geo_operation(keep).unwrap();
+        assert_eq!(
+            kept.update_knowledge,
+            Some(true),
+            "replace-plan without the field keeps the stored decision"
+        );
+
+        // 存量旧轮（列存在之前落库）：NULL 读回 None，摘要不臆断。
+        let connection = open_database(&workspace).unwrap();
+        connection
+            .execute(
+                "INSERT INTO geo_operations(id,session_id,state,created_at,kind,goal,
+                    status,steps_json,revision,execution_generation,updated_at)
+                 VALUES ('legacy-round-04','session-operation','paused',
+                    '2026-08-01T00:00:00Z','full-optimization','存量旧轮','paused','[]',3,0,
+                    '2026-08-01T00:00:00Z')",
+                [],
+            )
+            .unwrap();
+        drop(connection);
+        assert_eq!(
+            store
+                .get_geo_operation(&workspace.id, "legacy-round-04")
+                .unwrap()
+                .update_knowledge,
+            None
+        );
+        let summaries = store.list_unfinished_geo_operations(&workspace.id).unwrap();
+        assert_eq!(
+            summaries
+                .operations
+                .iter()
+                .find(|summary| summary.id == "legacy-round-04")
+                .unwrap()
+                .update_knowledge,
+            None
+        );
+    }
+
+    /// 全链工作步骤（票 07 测试夹具）：知识段三步 + 问题段两步，全部
+    /// pending；由 released_operation 补上前置认可门。
+    fn full_chain_work_steps() -> Vec<GeoOperationStep> {
+        vec![
+            step(
+                "collect-materials",
+                "brand-material-import",
+                "pending",
+                None,
+            ),
+            step("extract-facts", "brand-knowledge", "pending", None),
+            step(
+                "confirm-knowledge",
+                "brand-knowledge",
+                "pending",
+                Some(confirmation("knowledge-change", "knowledge-authority")),
+            ),
+            step(
+                "generate-question-pool",
+                "question-opportunities",
+                "pending",
+                None,
+            ),
+            step(
+                "confirm-question-selection",
+                "question-opportunities",
+                "pending",
+                Some(confirmation("question-selection", "brand-workspace")),
+            ),
+        ]
+    }
+
+    /// 建一个「认可门已放行」的操作：创建时整单停在 plan-ack（与 TS policy
+    /// 同形态），随后 confirm-step 放行，得到停在首个工作步骤的真实形态。
+    fn released_operation(
+        store: &BrandWorkspaceStore,
+        workspace: &BrandWorkspace,
+        kind: &str,
+        goal: &str,
+        work_steps: Vec<GeoOperationStep>,
+    ) -> GeoOperationProjection {
+        let ack_gate = confirmation("plan-ack", "geo-operation");
+        let opening_capability = work_steps
+            .first()
+            .map(|step| step.capability.clone())
+            .unwrap_or_else(|| "brand-knowledge".into());
+        let mut steps = vec![step(
+            "acknowledge-plan",
+            &opening_capability,
+            "awaiting-confirmation",
+            Some(ack_gate.clone()),
+        )];
+        steps.extend(work_steps);
+        let created = store
+            .create_geo_operation(GeoOperationCreateRequest {
+                workspace_id: workspace.id.clone(),
+                session_id: "session-operation".into(),
+                kind: kind.into(),
+                goal: goal.into(),
+                status: "awaiting-confirmation".into(),
+                steps,
+                input_refs: vec![],
+                pending_confirmation: Some(ack_gate),
+                source_operation_id: None,
+                update_knowledge: Some(true),
+            })
+            .unwrap();
+        store
+            .mutate_geo_operation(mutation(
+                workspace,
+                &created,
+                "confirm-step",
+                Some("acknowledge-plan"),
+            ))
+            .unwrap()
+    }
+
+    /// begin+complete 一个工作步骤（里程碑收尾的同款状态机路径）。
+    fn run_work_step(
+        store: &BrandWorkspaceStore,
+        workspace: &BrandWorkspace,
+        operation: &GeoOperationProjection,
+        step_id: &str,
+    ) -> GeoOperationProjection {
+        let started = store
+            .mutate_geo_operation(mutation(workspace, operation, "start-step", Some(step_id)))
+            .unwrap();
+        store
+            .mutate_geo_operation(mutation(
+                workspace,
+                &started,
+                "complete-step",
+                Some(step_id),
+            ))
+            .unwrap()
+    }
+
+    /// 票 07（spec 2026-09-02 决策 5）：材料收集跳过出口走 replace-plan
+    /// 剥离知识段剩余步骤——已完成/已确认步骤保留，替换后从首个未走完
+    /// 步骤续接，不重停计划认可门；决策随替换落库，一次 mutation 一次
+    /// revision 递增。
+    #[test]
+    fn replace_plan_material_skip_strips_remaining_knowledge_steps_and_continues() {
+        let (store, workspace) = fixture();
+        let parked = released_operation(
+            &store,
+            &workspace,
+            "full-optimization",
+            "一轮完整的 GEO 优化",
+            full_chain_work_steps(),
+        );
+        assert_eq!(parked.status, "ready");
+        assert_eq!(
+            parked
+                .steps
+                .iter()
+                .find(|step| step.id == "collect-materials")
+                .unwrap()
+                .status,
+            "ready"
+        );
+
+        let mut skip = mutation(&workspace, &parked, "replace-plan", None);
+        skip.replacement_reason = Some("material-collection-skip".into());
+        skip.replacement_steps = Some(strip_incomplete_knowledge_steps(&parked.steps));
+        skip.update_knowledge = Some(false);
+        let skipped = store.mutate_geo_operation(skip).unwrap();
+
+        // 认可门的成功状态保留，知识段三步剥离，当前步推进到问题池生成。
+        let ids: Vec<&str> = skipped.steps.iter().map(|step| step.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec![
+                "acknowledge-plan",
+                "generate-question-pool",
+                "confirm-question-selection"
+            ]
+        );
+        assert_eq!(skipped.steps[0].status, "succeeded");
+        assert_eq!(skipped.steps[1].status, "ready");
+        assert_eq!(skipped.status, "ready");
+        assert!(skipped.pending_confirmation.is_none());
+        // 跳过即本轮不更新知识：决策随替换落库，revision 恰好 +1。
+        assert_eq!(skipped.update_knowledge, Some(false));
+        assert_eq!(skipped.revision, parked.revision + 1);
+        // 跨会话摘要跟随：未完成轮次报 updateKnowledge=false。
+        let summaries = store.list_unfinished_geo_operations(&workspace.id).unwrap();
+        assert_eq!(
+            summaries
+                .operations
+                .iter()
+                .find(|summary| summary.id == skipped.id)
+                .unwrap()
+                .update_knowledge,
+            Some(false)
+        );
+    }
+
+    /// 停在知识确认门的跳过：已完成的材料收集/事实提取保留，未裁决的
+    /// 知识门剥离，pending_confirmation 清空、状态回到 ready 续接。
+    #[test]
+    fn replace_plan_material_skip_keeps_succeeded_knowledge_steps() {
+        let (store, workspace) = fixture();
+        let parked = released_operation(
+            &store,
+            &workspace,
+            "full-optimization",
+            "更新知识的轮次",
+            full_chain_work_steps(),
+        );
+        // 材料已导入：collect-materials 与 extract-facts 完成，知识门停靠。
+        let imported = run_work_step(&store, &workspace, &parked, "collect-materials");
+        let parked_at_gate = run_work_step(&store, &workspace, &imported, "extract-facts");
+        assert_eq!(parked_at_gate.status, "awaiting-confirmation");
+
+        let mut skip = mutation(&workspace, &parked_at_gate, "replace-plan", None);
+        skip.replacement_reason = Some("material-collection-skip".into());
+        skip.replacement_steps = Some(strip_incomplete_knowledge_steps(&parked_at_gate.steps));
+        skip.update_knowledge = Some(false);
+        let skipped = store.mutate_geo_operation(skip).unwrap();
+
+        let ids: Vec<&str> = skipped.steps.iter().map(|step| step.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec![
+                "acknowledge-plan",
+                "collect-materials",
+                "extract-facts",
+                "generate-question-pool",
+                "confirm-question-selection"
+            ]
+        );
+        // 已完成步骤的状态原样保留；替换后从问题池生成续接。
+        assert_eq!(skipped.steps[1].status, "succeeded");
+        assert_eq!(skipped.steps[2].status, "succeeded");
+        assert_eq!(skipped.steps[3].status, "ready");
+        assert_eq!(skipped.status, "ready");
+        assert!(skipped.pending_confirmation.is_none());
+    }
+
+    /// 知识更新单意图跳空：知识段全部剥离后无剩余工作，操作收口为
+    /// succeeded——跳过出口不制造「没有步骤却非终态」的残局。
+    #[test]
+    fn replace_plan_material_skip_closes_a_knowledge_only_round() {
+        let (store, workspace) = fixture();
+        let parked = released_operation(
+            &store,
+            &workspace,
+            "knowledge-update",
+            "更新品牌知识",
+            vec![step(
+                "collect-materials",
+                "brand-material-import",
+                "pending",
+                None,
+            )],
+        );
+
+        let mut skip = mutation(&workspace, &parked, "replace-plan", None);
+        skip.replacement_reason = Some("material-collection-skip".into());
+        skip.replacement_steps = Some(strip_incomplete_knowledge_steps(&parked.steps));
+        skip.update_knowledge = Some(false);
+        let skipped = store.mutate_geo_operation(skip).unwrap();
+
+        assert_eq!(skipped.status, "succeeded");
+        assert_eq!(skipped.steps.len(), 1);
+        assert!(skipped.terminal_at.is_some());
+    }
+
+    /// 跳过出口的形状守卫：非「剥掉未走完知识段步骤」的替换一律拒绝，
+    /// 不得把 replace-plan 放宽成自由计划编辑。
+    #[test]
+    fn replace_plan_material_skip_rejects_tampered_or_noop_replacements() {
+        let (store, workspace) = fixture();
+        let parked = released_operation(
+            &store,
+            &workspace,
+            "full-optimization",
+            "一轮完整的 GEO 优化",
+            full_chain_work_steps(),
+        );
+
+        // 夹带私改：替换步骤里混入原计划没有的步骤。
+        let mut tampered = mutation(&workspace, &parked, "replace-plan", None);
+        tampered.replacement_reason = Some("material-collection-skip".into());
+        tampered.replacement_steps = Some(vec![
+            step(
+                "acknowledge-plan",
+                "brand-knowledge",
+                "succeeded",
+                Some(confirmation("plan-ack", "geo-operation")),
+            ),
+            step("rogue-step", "brand-knowledge", "ready", None),
+        ]);
+        assert!(store
+            .mutate_geo_operation(tampered)
+            .unwrap_err()
+            .contains("geo_operation_plan_replacement_invalid"));
+
+        // 无可剥离：当前步已越过知识段，替换前后同长。
+        let imported = run_work_step(&store, &workspace, &parked, "collect-materials");
+        let extracted = run_work_step(&store, &workspace, &imported, "extract-facts");
+        let past = store
+            .mutate_geo_operation(mutation(
+                &workspace,
+                &extracted,
+                "confirm-step",
+                Some("confirm-knowledge"),
+            ))
+            .unwrap();
+        assert_eq!(past.status, "ready");
+        let mut noop = mutation(&workspace, &past, "replace-plan", None);
+        noop.replacement_reason = Some("material-collection-skip".into());
+        noop.replacement_steps = Some(strip_incomplete_knowledge_steps(&past.steps));
+        assert!(store
+            .mutate_geo_operation(noop)
+            .unwrap_err()
+            .contains("geo_operation_plan_replacement_invalid"));
+
+        // paused 轮次不允许原地跳过：先 resume 再跳，控制面纪律不被绕过。
+        // 取最新 revision（前段越序路径已推进过这单操作）。
+        let latest = store.get_geo_operation(&workspace.id, &parked.id).unwrap();
+        let paused_projection = store
+            .mutate_geo_operation(mutation(&workspace, &latest, "pause", None))
+            .unwrap();
+        let mut paused_skip = mutation(&workspace, &paused_projection, "replace-plan", None);
+        paused_skip.replacement_reason = Some("material-collection-skip".into());
+        paused_skip.replacement_steps =
+            Some(strip_incomplete_knowledge_steps(&paused_projection.steps));
+        assert!(store
+            .mutate_geo_operation(paused_skip)
+            .unwrap_err()
+            .contains("geo_operation_transition_invalid"));
+
+        // 分支决策停卡（decide-knowledge-refresh 单步）不得借用跳过场景
+        // 绕过停卡守卫：跳过场景要求真的剥离知识段步骤。
+        let branch_gate = confirmation("next-round-knowledge", "brand-workspace");
+        let undecided = store
+            .create_geo_operation(GeoOperationCreateRequest {
+                workspace_id: workspace.id.clone(),
+                session_id: "session-operation".into(),
+                kind: "next-round-optimization".into(),
+                goal: "下一轮优化".into(),
+                status: "awaiting-confirmation".into(),
+                steps: vec![step(
+                    "decide-knowledge-refresh",
+                    "brand-knowledge",
+                    "awaiting-confirmation",
+                    Some(branch_gate.clone()),
+                )],
+                input_refs: vec![],
+                pending_confirmation: Some(branch_gate),
+                source_operation_id: None,
+                update_knowledge: None,
+            })
+            .unwrap();
+        let mut borrowed = mutation(&workspace, &undecided, "replace-plan", None);
+        borrowed.replacement_reason = Some("material-collection-skip".into());
+        borrowed.replacement_steps = Some(strip_incomplete_knowledge_steps(&undecided.steps));
+        assert!(store
+            .mutate_geo_operation(borrowed)
+            .unwrap_err()
+            .contains("geo_operation_plan_replacement_invalid"));
+
+        // 原计划原样：全部被拒的跳过尝试都没有副作用（唯一的 revision
+        // 变化来自上面合法的 pause 本身）。
+        let after = store
+            .get_geo_operation(&workspace.id, &paused_projection.id)
+            .unwrap();
+        assert_eq!(after.steps.len(), paused_projection.steps.len());
+        assert_eq!(after.revision, paused_projection.revision);
+        assert_eq!(after.status, "paused");
     }
 
     #[test]
@@ -2467,6 +3112,7 @@ mod tests {
                 input_refs: vec![],
                 pending_confirmation: None,
                 source_operation_id: None,
+                update_knowledge: None,
             })
             .unwrap();
         let running = store
@@ -2547,12 +3193,15 @@ mod tests {
             }],
             "inputRefs": [{ "kind": "report", "id": "report-15", "revision": 2 }],
             "pendingConfirmation": null,
-            "sourceOperationId": "source-operation-15"
+            "sourceOperationId": "source-operation-15",
+            "updateKnowledge": false
         }))
         .unwrap();
         validate_create(&request).unwrap();
         assert_eq!(request.steps[0].capability, "geo-dashboard");
         assert_eq!(request.input_refs[0].kind, "report");
+        // 票 #04：请求白名单接受 camelCase 的 updateKnowledge（缺省 None）。
+        assert_eq!(request.update_knowledge, Some(false));
 
         let checkpoint: GeoOperationCheckpoint = serde_json::from_value(serde_json::json!({
             "activeStepId": "load-real-evidence",
@@ -2606,6 +3255,7 @@ mod tests {
                     input_refs: vec![],
                     pending_confirmation: Some(pending),
                     source_operation_id: None,
+                    update_knowledge: None,
                 })
                 .unwrap();
             assert_eq!(
@@ -2644,6 +3294,7 @@ mod tests {
                 input_refs: vec![],
                 pending_confirmation: Some(pending),
                 source_operation_id: None,
+                update_knowledge: None,
             })
             .unwrap();
 
@@ -2717,6 +3368,7 @@ mod tests {
                 input_refs: vec![],
                 pending_confirmation: None,
                 source_operation_id: None,
+                update_knowledge: None,
             })
             .unwrap();
         let running = store
@@ -2764,6 +3416,7 @@ mod tests {
                 input_refs: vec![],
                 pending_confirmation: None,
                 source_operation_id: None,
+                update_knowledge: None,
             })
             .unwrap();
         let running = store
@@ -2838,6 +3491,7 @@ mod tests {
                 input_refs: vec![],
                 pending_confirmation: None,
                 source_operation_id: None,
+                update_knowledge: None,
             })
             .unwrap();
 
@@ -2891,6 +3545,7 @@ mod tests {
                 input_refs: vec![],
                 pending_confirmation: None,
                 source_operation_id: None,
+                update_knowledge: None,
             })
             .unwrap();
         let mut queue = mutation(&workspace, &operation, "queue-step", Some("article-18"));
@@ -2944,6 +3599,7 @@ mod tests {
                 input_refs: vec![],
                 pending_confirmation: Some(gate),
                 source_operation_id: None,
+                update_knowledge: None,
             })
             .unwrap();
         assert_eq!(operation.status, "awaiting-confirmation");
@@ -3006,6 +3662,7 @@ mod tests {
                     input_refs: vec![],
                     pending_confirmation: None,
                     source_operation_id: None,
+                    update_knowledge: None,
                 })
                 .unwrap()
         };
@@ -3025,6 +3682,8 @@ mod tests {
             error: None,
             artifact_refs: vec![],
             replacement_steps: None,
+            replacement_reason: None,
+            update_knowledge: None,
             step_progress: None,
             queue_reason: None,
             queue_position: None,
@@ -3079,6 +3738,7 @@ mod tests {
                 input_refs: vec![],
                 pending_confirmation: None,
                 source_operation_id: None,
+                update_knowledge: None,
             })
             .unwrap();
         let mut start = mutation(&workspace, &operation, "start-step", Some("article-18"));
@@ -3144,6 +3804,7 @@ mod tests {
                 input_refs: vec![],
                 pending_confirmation: None,
                 source_operation_id: None,
+                update_knowledge: None,
             })
             .unwrap();
         let running = store
@@ -3296,6 +3957,7 @@ mod tests {
                 input_refs: vec![],
                 pending_confirmation: None,
                 source_operation_id: None,
+                update_knowledge: None,
             })
             .unwrap();
         let live_running = store
@@ -3343,7 +4005,10 @@ mod tests {
             receipt.operation.steps[1].status, "awaiting-confirmation",
             "接管不推进也不改写步骤序列"
         );
-        assert_eq!(receipt.previous_owner_session_id, "session-operation");
+        assert_eq!(
+            receipt.previous_owner_session_id,
+            Some("session-operation".to_string())
+        );
         assert!(!receipt.taken_over_at.is_empty());
         assert_eq!(receipt.transferred_article_operations, 1);
         assert_eq!(receipt.transferred_question_pools, 1);
@@ -3436,13 +4101,19 @@ mod tests {
             .iter()
             .find(|summary| summary.id == taken_over.id)
             .unwrap();
-        assert_eq!(summary.session_id, "session-operation-other");
+        assert_eq!(
+            summary.session_id,
+            Some("session-operation-other".to_string())
+        );
         assert_eq!(summary.pending_review_count, 4);
         let live_summary = summaries
             .iter()
             .find(|summary| summary.id == live_running.id)
             .unwrap();
-        assert_eq!(live_summary.session_id, "session-operation");
+        assert_eq!(
+            live_summary.session_id,
+            Some("session-operation".to_string())
+        );
         assert_eq!(live_summary.pending_review_count, 0);
 
         // CAS 单赢家：后来者带过期 revision 接管，收到指明赢家的明确错误。
@@ -3457,7 +4128,10 @@ mod tests {
         // 与 awaiting-selection 池继续随 operation 整体走。
         let chained = takeover("session-operation-third", taken_over.revision).unwrap();
         assert_eq!(chained.operation.session_id, "session-operation-third");
-        assert_eq!(chained.previous_owner_session_id, "session-operation-other");
+        assert_eq!(
+            chained.previous_owner_session_id,
+            Some("session-operation-other".to_string())
+        );
         assert_eq!(chained.transferred_article_operations, 2);
         assert_eq!(chained.transferred_question_pools, 1);
         let owned_by_third = store
@@ -3494,6 +4168,7 @@ mod tests {
                 input_refs: vec![],
                 pending_confirmation: None,
                 source_operation_id: None,
+                update_knowledge: None,
             })
             .unwrap();
         let finished_started = store
@@ -3544,5 +4219,105 @@ mod tests {
                 .unwrap_or_else(|error| panic!("{label} 读取失败: {error}"));
             assert_eq!(owner_override, None, "{label} 不得被接管转移");
         }
+    }
+
+    /// 无主轮（session_id NULL：原会话被删除，外键 SET NULL 保留轮次）必须
+    /// 进跨会话未完成摘要、且可被接管（票 10 验收实证：NULL 行被摘要过滤
+    /// 排除 + 接管 CAS 的 `session_id=NULL` 三值逻辑恒假，无主轮对一切新
+    /// 会话不可见也不可接管，永久搁浅——0cada786 实例）。
+    #[test]
+    fn ownerless_round_is_listed_in_summary_and_takeable() {
+        let (store, workspace) = fixture();
+        let operation = store
+            .create_geo_operation(GeoOperationCreateRequest {
+                workspace_id: workspace.id.clone(),
+                session_id: "session-operation".into(),
+                kind: "next-round-optimization".into(),
+                goal: "新一轮内容优化到发布".into(),
+                status: "ready".into(),
+                steps: vec![
+                    step("acknowledge-plan", "question-opportunities", "ready", None),
+                    step(
+                        "select-next-question-pool",
+                        "question-opportunities",
+                        "pending",
+                        Some(confirmation("question-selection", "brand-workspace")),
+                    ),
+                ],
+                input_refs: vec![],
+                pending_confirmation: None,
+                source_operation_id: None,
+                update_knowledge: Some(false),
+            })
+            .unwrap();
+        // 推进到问题确认门：认可门放行后停在 select-next-question-pool
+        //（0cada786 的真实形态：next-round + updateKnowledge=false + 问题门）。
+        let started = store
+            .mutate_geo_operation(mutation(
+                &workspace,
+                &operation,
+                "start-step",
+                Some("acknowledge-plan"),
+            ))
+            .unwrap();
+        let operation = store
+            .mutate_geo_operation(mutation(
+                &workspace,
+                &started,
+                "complete-step",
+                Some("acknowledge-plan"),
+            ))
+            .unwrap();
+        assert_eq!(operation.status, "awaiting-confirmation");
+
+        // 原会话删除：轮次保留、引用置空（brand_workspace.rs 的 SET NULL 语义）。
+        {
+            let connection = open_database(&workspace).unwrap();
+            connection
+                .execute(
+                    "DELETE FROM brand_sessions WHERE id='session-operation'",
+                    [],
+                )
+                .unwrap();
+        }
+
+        // 摘要列出无主轮：sessionId 为 null、待审 0、决策字段原样。
+        let list = store.list_unfinished_geo_operations(&workspace.id).unwrap();
+        let summary = list
+            .operations
+            .iter()
+            .find(|summary| summary.id == operation.id)
+            .expect("无主轮必须出现在未完成摘要里");
+        assert_eq!(summary.session_id, None);
+        assert_eq!(summary.pending_review_count, 0);
+        assert_eq!(summary.update_knowledge, Some(false));
+        assert_eq!(
+            summary.stuck_step.as_ref().map(|step| step.id.as_str()),
+            Some("select-next-question-pool")
+        );
+        assert_eq!(list.total, 1);
+
+        // 新会话单次接管成功：所有者落位、revision+1、无随行工作集、
+        // 留痕 previous owner 为 null。
+        let receipt = store
+            .takeover_geo_operation(GeoOperationTakeoverRequest {
+                workspace_id: workspace.id.clone(),
+                session_id: "session-operation-other".into(),
+                operation_id: operation.id.clone(),
+                expected_revision: operation.revision,
+            })
+            .unwrap();
+        assert_eq!(receipt.operation.session_id, "session-operation-other");
+        assert_eq!(receipt.operation.revision, operation.revision + 1);
+        assert_eq!(receipt.previous_owner_session_id, None);
+        assert_eq!(receipt.transferred_article_operations, 0);
+        assert_eq!(receipt.transferred_question_pools, 0);
+        // 接管后摘要条目归属新会话。
+        let list = store.list_unfinished_geo_operations(&workspace.id).unwrap();
+        let summary = list.operations.first().unwrap();
+        assert_eq!(
+            summary.session_id,
+            Some("session-operation-other".to_string())
+        );
     }
 }

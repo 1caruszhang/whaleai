@@ -39,6 +39,25 @@ export const GEO_OPERATION_STEP_STATUSES = [
 export type GeoOperationStepStatus =
   (typeof GEO_OPERATION_STEP_STATUSES)[number];
 
+/** 终态操作状态集：顺序闸、next-step 引述与跳过出口守卫的同口径判定。 */
+export const TERMINAL_GEO_OPERATION_STATUSES: ReadonlySet<GeoOperationStatus> =
+  new Set(["succeeded", "failed", "cancelled"]);
+
+/** 「当前步」口径里视为已走完的步骤状态（failed 未走完——可引述重试）。 */
+export const GEO_STEP_PAST_STATUSES: ReadonlySet<GeoOperationStepStatus> =
+  new Set(["succeeded", "skipped"]);
+
+/**
+ * 计划序上首个未走完的步骤（failed 未走完——可引述指引重试）；全走完
+ * 返回 null。顺序闸（票 #05）、next-step 引述与跳过出口（票 #07）共用
+ * 同一「当前步」口径：业务层、状态机与信封引述不分叉。
+ */
+export function currentGeoOperationStep(
+  steps: readonly GeoOperationStep[],
+): GeoOperationStep | null {
+  return steps.find((step) => !GEO_STEP_PAST_STATUSES.has(step.status)) ?? null;
+}
+
 /**
  * 运行中工作步骤的量化进度（如逐篇生成「3/5」）。只由 Sidecar 在步骤
  * running 期间上报；确认门与未开始步骤恒为 null。
@@ -183,6 +202,11 @@ export interface GeoOperationProjection {
   pendingConfirmation: GeoOperationConfirmation | null;
   error: GeoOperationError | null;
   sourceOperationId: string | null;
+  /** 本轮「是否更新品牌知识」的显式决策（票 #04，spec 2026-09-02）：
+   * false = 复用轮（不更新知识，从问题池选择开始）；true = 更新轮；
+   * null = 未决（下一轮分支门未回答）或不适用（直接意图）——起点推导
+   * 读轮次时以此为准，不靠 kind 意图标签推断。 */
+  updateKnowledge?: boolean | null;
   revision: number;
   executionGeneration: number;
   executionSidecarGeneration: number | null;
@@ -201,7 +225,9 @@ export interface GeoOperationProjection {
  * 转移的工作集计数（未批准文章操作、awaiting-selection 池）。 */
 export interface GeoOperationTakeoverReceipt {
   operation: GeoOperationProjection;
-  previousOwnerSessionId: string;
+  /** 接管前的所有者；null = 无主轮（原会话已删除，轮次被保留）——
+   * 此前无所有者工作集随行，转移计数为 0。 */
+  previousOwnerSessionId: string | null;
   takenOverAt: string;
   transferredArticleOperations: number;
   transferredQuestionPools: number;
@@ -227,14 +253,17 @@ export interface GeoOperationUnfinishedStuckStep {
 
 /**
  * 跨会话未完成轮次的只读元信息（ADR-0010 Decision 3；Rust store 投影）：
- * 五要素——类型、卡住步骤、待审数量、所属会话（= 当前所有者，接管后随之
- * 变化）、创建/更新时间。不含草稿正文与任何会话聊天记录（正文隔离保留在
- * 各领域 owned-or-approved 投影）；待审数量 = 当前所有者会话名下
- * draft_ready 未批准文章篇数。
+ * 六要素——类型、卡住步骤、待审数量、所属会话（= 当前所有者，接管后随之
+ * 变化）、创建/更新时间、是否更新品牌知识（票 #04，见 updateKnowledge）。
+ * 不含草稿正文与任何会话聊天记录（正文隔离保留在各领域 owned-or-approved
+ * 投影）；待审数量 = 当前所有者会话名下 draft_ready 未批准文章篇数。
  */
 export interface GeoOperationUnfinishedSummary {
   id: string;
-  sessionId: string;
+  /** 所属会话；null = 无主轮（原会话被删除，轮次经外键 SET NULL 保留）——
+   * 仍未完成、无所有者进程在跑，是跨会话接管的合法标的（票 10 验收实证：
+   * 此前列表过滤 NULL 行，无主轮对一切新会话不可见、永远无法推进）。 */
+  sessionId: string | null;
   kind: GeoOperationKind;
   goal: string;
   status: GeoOperationStatus;
@@ -243,6 +272,9 @@ export interface GeoOperationUnfinishedSummary {
   pendingReviewCount: number;
   createdAt: string;
   updatedAt: string;
+  /** 该轮是否更新品牌知识（票 #04）：false = 复用轮，true = 更新轮，
+   * null = 未决/不适用/存量旧轮——与操作投影同语义。 */
+  updateKnowledge?: boolean | null;
 }
 
 export interface PlanGeoOperationInput {
@@ -250,7 +282,14 @@ export interface PlanGeoOperationInput {
   goal: string;
   inputRefs?: GeoOperationReference[];
   sourceOperationId?: string;
-  /** Required only for the next-round branch. Undefined means ask first. */
+  /**
+   * 知识分支（票 02 归一，spec 2026-09-02）：`next-round-optimization`
+   * 未携带时整单停在分支决策门；显式 false 时两个全链入口
+   * （`full-optimization` 与 `next-round-optimization`）归一为同一
+   * 「不更新知识」计划形状——起点为问题段、首工作步「从问题池选择」，
+   * 不重走知识链。`full-optimization` 未携带或为真保持全链现状（既有
+   * 调用方零破坏）。
+   */
   updateKnowledge?: boolean;
   /**
    * 起点推导理由（ADR-0010 Decision 5，票 #27）：新轮次经「带推荐与理由
@@ -331,6 +370,15 @@ const KNOWLEDGE_STEPS: readonly StepDefinition[] = [
     ),
   },
 ];
+
+/**
+ * 知识段步骤 id 集（geo-plan-normalization 票 07）：材料收集 / 事实提取 /
+ * 知识确认。跳过出口的计划替换以此判定「知识段剩余步骤」——从
+ * KNOWLEDGE_STEPS 派生，知识段改形状时自动跟随。
+ */
+export const KNOWLEDGE_SEGMENT_STEP_IDS: ReadonlySet<string> = new Set(
+  KNOWLEDGE_STEPS.map((definition) => definition.id),
+);
 
 const QUESTION_STEPS: readonly StepDefinition[] = [
   {
@@ -536,6 +584,62 @@ function spanDefinitions(
       (phase) => PHASE_SEGMENTS[phase],
     ),
   ];
+}
+
+/**
+ * 「不更新知识」轮次的起点段：问题段替换为「从池选择」——已有确认池直接
+ * 复用重选（复用契约见 questionPool.ts），不重新生成池，也不重走知识链
+ * （材料收集/事实提取/知识确认都不进计划）。
+ */
+const SELECT_NEXT_QUESTION_STEP: StepDefinition = {
+  id: "select-next-question-pool",
+  title: "从问题池选择下一轮问题",
+  capability: "question-opportunities",
+  confirmation: confirmation(
+    "question-selection",
+    "brand-workspace",
+    "选择下一轮问题",
+    "本轮不更新知识，请从已有问题池明确选择后续问题。",
+  ),
+};
+
+/**
+ * 「不更新知识」轮次的计划跨度（票 02 归一的单一事实源）：起点段＝从池
+ * 选择，其余段按六阶段链序跟随；带终点时从选择步起截到终点段为止。
+ * 两个全链入口（full-optimization 显式 false 与 next-round-optimization
+ * 的同名分支）都从这里拿步骤序列，杜绝双入口漂移；跨度裁决按归一后的
+ * 起点段（questions）判下游。
+ */
+function noUpdateKnowledgeDefinitions(
+  endingPhase: GeoOperationPhaseId | undefined,
+): readonly StepDefinition[] {
+  return spanDefinitions(
+    "questions",
+    endingPhase,
+    [
+      SELECT_NEXT_QUESTION_STEP,
+      ...CONTENT_STEPS,
+      ...DISTRIBUTION_STEPS,
+      ...PUBLISH_STEPS,
+      ...MONITOR_STEPS,
+    ],
+    [SELECT_NEXT_QUESTION_STEP],
+  );
+}
+
+/**
+ * 全链跨度（知识段起步）：full-optimization 未携带/为真与
+ * next-round-optimization「更新知识」分支共用；带终点 = 截尾。
+ */
+function fullChainDefinitions(
+  endingPhase: GeoOperationPhaseId | undefined,
+): readonly StepDefinition[] {
+  return spanDefinitions(
+    "knowledge",
+    endingPhase,
+    FULL_OPTIMIZATION_STEPS,
+    KNOWLEDGE_STEPS,
+  );
 }
 
 /** 终点推导理由的归一：与起点理由同款纪律；无 endingPhase 时拒绝提供。 */
@@ -778,52 +882,24 @@ export function planGeoOperation(
       );
       break;
     case "full-optimization":
-      // 全链意图带终点 = 截尾（如「只做到文章为止」）；不带 = 完整六段。
-      definitions = spanDefinitions(
-        "knowledge",
-        input.endingPhase,
-        FULL_OPTIMIZATION_STEPS,
-        KNOWLEDGE_STEPS,
-      );
+      // 归一（票 02）：全链意图显式「不更新知识」时与下一轮优化的同名
+      // 分支完全同形——从问题池选择起步，不重走知识链；未携带或为真保持
+      // 全链现状（带终点 = 截尾，如「只做到文章为止」；不带 = 完整六段）。
+      // 注意守卫是 === false：undefined 在全链入口意味着「未表达」而非
+      // 「不更新」，必须留在全链现状。
+      definitions =
+        input.updateKnowledge === false
+          ? noUpdateKnowledgeDefinitions(input.endingPhase)
+          : fullChainDefinitions(input.endingPhase);
       break;
-    case "next-round-optimization": {
-      if (input.updateKnowledge) {
-        // 更新知识：与全链同构；带终点 = 截尾。
-        definitions = spanDefinitions(
-          "knowledge",
-          input.endingPhase,
-          FULL_OPTIMIZATION_STEPS,
-          KNOWLEDGE_STEPS,
-        );
-        break;
-      }
-      // 不更新知识：问题段替换为「从池选择」（不重新生成池），其余段按
-      // 链序跟随；带终点时从选择步起截到终点段为止。
-      const selectNextQuestion: StepDefinition = {
-        id: "select-next-question-pool",
-        title: "从问题池选择下一轮问题",
-        capability: "question-opportunities",
-        confirmation: confirmation(
-          "question-selection",
-          "brand-workspace",
-          "选择下一轮问题",
-          "本轮不更新知识，请从已有问题池明确选择后续问题。",
-        ),
-      };
-      definitions = spanDefinitions(
-        "questions",
-        input.endingPhase,
-        [
-          selectNextQuestion,
-          ...CONTENT_STEPS,
-          ...DISTRIBUTION_STEPS,
-          ...PUBLISH_STEPS,
-          ...MONITOR_STEPS,
-        ],
-        [selectNextQuestion],
-      );
+    case "next-round-optimization":
+      // 走到这里分支已决（undefined 在 switch 前停在分支决策门）：真值 =
+      // 更新知识，与全链同构（带终点 = 截尾）；假值 = 从池选择起步
+      // （与全链显式 false 同一份构造）。
+      definitions = input.updateKnowledge
+        ? fullChainDefinitions(input.endingPhase)
+        : noUpdateKnowledgeDefinitions(input.endingPhase);
       break;
-    }
   }
 
   const plannedSteps = steps([

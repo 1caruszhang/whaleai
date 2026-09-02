@@ -74,6 +74,12 @@ export interface KnowledgeCandidate {
     | "rejected";
   baseVersion: number;
   proposedAt: string;
+  /**
+   * 裁决落库时刻（geo-plan-normalization 票 08）：Rust 决策事务内与终态
+   * 同笔写入 resolved_at 的原样值；未裁决候选为 null。卡片完成时刻的
+   * 唯一权威源，Node/渲染侧不另行打点。
+   */
+  resolvedAt?: string | null;
   current?: KnowledgeCurrentFact | null;
 }
 
@@ -82,6 +88,8 @@ export interface KnowledgeDecisionResult {
   factKey: string;
   decision: KnowledgeDecision;
   status: string;
+  /** 裁决落库时刻（票 08）：与终态同笔写入的 resolved_at。 */
+  resolvedAt?: string | null;
   current?: KnowledgeCurrentFact | null;
   knowledgeVersion?: number | null;
   affectedArtifacts: GeoArtifactFreshnessProjection[];
