@@ -3,6 +3,7 @@ import { basename, resolve } from 'node:path';
 
 import type { GeoBaselineEngineId } from '../../shared/geo/baseline';
 import type { GeoDashboardEvidenceKind, GeoDashboardFilter } from '../../shared/geo/dashboard';
+import { MATERIAL_IMAGE_MAX_PER_ARTICLE } from '../../shared/geo/materialImagePlaceholder';
 import type { PublishOrderStatusEntry } from '../../shared/geo/publishScheduler';
 import { createGeoDashboardPort, GeoDashboardService } from '../geo/dashboard';
 import {
@@ -39,10 +40,12 @@ const ORDER_QUERY_BATCH = 20;
 const PUBLISH_EGRESS_MAX_HTML_BYTES = 320 * 1024;
 
 /**
- * 发布配图 egress（票 #15）：单篇配图密度上限走共享契约（≤3 张），
- * 单张字节上限与材料图片资产一致（导入时已按同一上限校验）。
+ * 发布配图 egress（票 #15）：单篇配图密度上限直接引用共享契约常量
+ * （Rust 侧 publish_image_bindings 用同一契约值放行；此处曾硬编码 3，
+ * 8 图批准稿在发布侧被确定性 400 拒绝——2026-09-01 事故根因）。单张
+ * 字节上限与材料图片资产一致（导入时已按同一上限校验）。
  */
-const PUBLISH_EGRESS_MAX_IMAGE_COUNT = 3;
+const PUBLISH_EGRESS_MAX_IMAGE_COUNT = MATERIAL_IMAGE_MAX_PER_ARTICLE;
 const PUBLISH_EGRESS_MAX_IMAGE_BYTES = 20 * 1024 * 1024;
 
 /** 配图格式白名单（ADR-0008 D4）：emf/wmf/tiff 不进 OSS。 */
