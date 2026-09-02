@@ -7,7 +7,9 @@
 export const XIAOJING_MAIN_AGENT = {
   providerId: 'deepseek',
   model: 'deepseek-v4-pro',
-  reasoningEffort: 'medium',
+  // low 是止血降档（geo-plan-normalization 票 01）：指令冲突消灭前压思考
+  // 长度，决策质量由真实场景回归验证（票 10），不合格再回调。
+  reasoningEffort: 'low',
   // 'default' 保证每个工具调用都咨询 canUseTool 终审闸门；'auto' 把部分
   // 裁决交给 CLI 自动裁量，可能绕过闸门，不得用于本产品。
   permissionMode: 'default',

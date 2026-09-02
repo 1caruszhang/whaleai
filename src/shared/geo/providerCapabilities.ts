@@ -6,6 +6,8 @@
  * non-secret catalog/status fields below.
  */
 
+import { XIAOJING_MAIN_AGENT } from "../xiaojing-main-agent-policy";
+
 export const GEO_PROVIDER_CAPABILITY_SLOTS = [
   "main-agent",
   "extraction",
@@ -83,7 +85,12 @@ export const GEO_PROVIDER_CAPABILITY_CATALOG: readonly GeoProviderCapabilitySpec
       provider: "DeepSeek",
       model: XIAOJING_GEO_PROVIDER_DEFAULTS.mainAgentModel,
       endpoint: `${XIAOJING_GEO_PROVIDER_DEFAULTS.deepseekAnthropicBaseUrl}/v1/messages`,
-      semantics: { protocol: "anthropic", reasoningEffort: "high" },
+      // 展示值直接引用策略表：主 Agent 的推理强度只允许一个来源（生效值
+      // 同表），目录不得再写第二个字面量（曾漂移为 high vs medium）。
+      semantics: {
+        protocol: "anthropic",
+        reasoningEffort: XIAOJING_MAIN_AGENT.reasoningEffort,
+      },
     },
     {
       slot: "extraction",

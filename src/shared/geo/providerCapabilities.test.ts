@@ -7,12 +7,24 @@ import {
   GEO_PROVIDER_CAPABILITY_SLOTS,
   XIAOJING_GEO_PROVIDER_DEFAULTS,
 } from "./providerCapabilities";
+import { XIAOJING_MAIN_AGENT } from "../xiaojing-main-agent-policy";
 
 describe("Xiaojing fixed GEO provider capability catalog", () => {
   it("contains exactly the eight product slots in their stable UI order", () => {
     expect(GEO_PROVIDER_CAPABILITY_CATALOG.map(({ slot }) => slot)).toEqual(
       GEO_PROVIDER_CAPABILITY_SLOTS,
     );
+  });
+
+  it("sources the main-agent display effort from the policy table, never a second literal", () => {
+    expect(
+      GEO_PROVIDER_CAPABILITY_CATALOG.find(({ slot }) => slot === "main-agent"),
+    ).toMatchObject({
+      semantics: {
+        protocol: "anthropic",
+        reasoningEffort: XIAOJING_MAIN_AGENT.reasoningEffort,
+      },
+    });
   });
 
   it("pins the js_ai dev model and endpoint semantics", () => {

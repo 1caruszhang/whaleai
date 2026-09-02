@@ -11,7 +11,9 @@ describe('Xiaojing main Agent policy', () => {
     expect(XIAOJING_MAIN_AGENT).toMatchObject({
       providerId: 'deepseek',
       model: 'deepseek-v4-pro',
-      reasoningEffort: 'medium',
+      // 止血降档（geo-plan-normalization 票 01）：low 的决策质量由真实
+      // 场景回归验证（票 10），不合格回调——改回前先看回归结论。
+      reasoningEffort: 'low',
     });
   });
 
