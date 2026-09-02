@@ -908,8 +908,10 @@ async fn brand_geo_operation_list_handler(
 #[serde(rename_all = "camelCase")]
 struct GeoOperationUnfinishedListPayload {}
 
-/// 跨会话未完成轮次的只读元信息（ADR-0010 Decision 3）：品牌状态摘要的
-/// 取数端点。按品牌列出非终态 operation 的元信息六要素，不含草稿正文与
+/// 跨会话未完成轮次的只读元信息（ADR-0010 Decision 3，2026-09-02 修订）：
+/// 点名续轮专用查询（inspect_geo_operations 的 includeUnfinishedRounds）
+/// 的取数端点，品牌状态摘要不再消费本端点。按品牌列出非终态 operation
+/// 的元信息六要素（session 为 NULL 的无主轮照列），不含草稿正文与
 /// 聊天记录；信封仍按当前 Sidecar/Session/工作区鉴权，但不按 Session
 /// 过滤——跨会话可见正是本端点的用途（metadata-only 例外）。
 async fn brand_geo_operation_unfinished_handler(

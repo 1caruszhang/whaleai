@@ -1347,13 +1347,7 @@ fn apply_action(
                     if replacement.len() == operation.steps.len() || replacement != expected {
                         return Err("geo_operation_plan_replacement_invalid".to_string());
                     }
-                    operation.steps = replacement;
-                    if let Some(update_knowledge) = request.update_knowledge {
-                        operation.update_knowledge = Some(update_knowledge);
-                    }
-                    operation.pending_confirmation = None;
-                    operation.checkpoint = None;
-                    operation.error = None;
+                    apply_plan_replacement(operation, replacement, request.update_knowledge);
                     advance_operation(operation)?;
                 }
                 // 知识分支决策（既有唯一形态）：分支未决停卡被显式回答
@@ -1366,17 +1360,7 @@ fn apply_action(
                     {
                         return Err("geo_operation_plan_replacement_invalid".to_string());
                     }
-                    operation.steps = replacement;
-                    // 知识分支的用户显式答案随替换一次落库（票 #04）：携带即覆盖，
-                    // 缺省保持现值（跳过出口等后续 replace-plan 调用方不受影响）。
-                    // revision 语义不变——决策持久化不额外递增，仍是一次 mutation
-                    // 一次 CAS 递增。
-                    if let Some(update_knowledge) = request.update_knowledge {
-                        operation.update_knowledge = Some(update_knowledge);
-                    }
-                    operation.pending_confirmation = None;
-                    operation.checkpoint = None;
-                    operation.error = None;
+                    apply_plan_replacement(operation, replacement, request.update_knowledge);
                     normalize_first_step(operation)?;
                 }
             }
@@ -1548,6 +1532,24 @@ fn strip_incomplete_knowledge_steps(steps: &[GeoOperationStep]) -> Vec<GeoOperat
         })
         .cloned()
         .collect()
+}
+
+/// 计划替换的共享尾部：换入替换步骤、落库知识分支答案（票 #04：携带即
+/// 覆盖，缺省保持现值——跳过出口等后续 replace-plan 调用方不受影响；
+/// revision 语义不变，仍是一次 mutation 一次 CAS 递增）、清空停卡三态。
+/// 场景守卫与替换后的推进方式由调用方决定。
+fn apply_plan_replacement(
+    operation: &mut GeoOperationProjection,
+    replacement: Vec<GeoOperationStep>,
+    update_knowledge: Option<bool>,
+) {
+    operation.steps = replacement;
+    if let Some(update_knowledge) = update_knowledge {
+        operation.update_knowledge = Some(update_knowledge);
+    }
+    operation.pending_confirmation = None;
+    operation.checkpoint = None;
+    operation.error = None;
 }
 
 fn normalize_first_step(operation: &mut GeoOperationProjection) -> Result<(), String> {

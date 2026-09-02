@@ -116,17 +116,12 @@ let sseBuffer = '';
 
 // 收尾信号不再驱动 waitTurn（改轮询），悬卡信息仍由 SSE 喂给 pendingAsks。
 
-function settleIfTerminal() {
-  // 保留空实现占位：SSE 状态事件只更新本地镜像与证据，不做收尾裁决。
-}
-
 function handleEvent(event, payload) {
   if (event === 'chat:init') {
     sessionId = payload.sessionId;
     sessionState = payload.sessionState;
     console.log(`[init] session=${sessionId} state=${sessionState}`);
     record('chat-init', { sessionId, sessionState });
-    settleIfTerminal();
     return;
   }
   if (event === 'chat:status') {
@@ -134,7 +129,6 @@ function handleEvent(event, payload) {
     sessionState = payload.sessionState;
     console.log(`[status] ${prev} -> ${sessionState}`);
     record('chat-status', { from: prev, to: sessionState });
-    settleIfTerminal();
     return;
   }
   if (event === 'ask-user-question:request') {
@@ -142,7 +136,6 @@ function handleEvent(event, payload) {
     console.log(`[ask] 悬卡 ${payload.requestId.slice(0, 8)}`);
     printAsks(payload.requestId);
     record('ask-request', { requestId: payload.requestId, questions: payload.questions });
-    armAskGrace();
     return;
   }
   if (event === 'chat:message-complete') {
@@ -183,10 +176,6 @@ function handleEvent(event, payload) {
     console.log(`[agent-error] ${payload.message}`);
     record('agent-error', { message: payload.message });
   }
-}
-
-function armAskGrace() {
-  // 悬卡出现的即时打印在这里完成；收尾判定由 waitTurn 轮询承担。
 }
 
 function describeBlock(b) {

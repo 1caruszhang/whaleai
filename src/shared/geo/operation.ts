@@ -138,6 +138,15 @@ export type GeoOperationConfirmationAuthority =
   | "publish-scheduler"
   | "post-publish-monitor";
 
+/** 裁决面在产品界面（Rust UI）而非聊天卡片的确认 authority：付费/外部
+ * 发布与监测激活。通用确认入口（recordConfirmedStep）拒绝它们，顺序闸的
+ * heldStep 指引按同一对区分裁决面——两处同源，防漂移。 */
+export const RUST_UI_CONFIRMATION_AUTHORITIES: ReadonlySet<GeoOperationConfirmationAuthority> =
+  new Set<GeoOperationConfirmationAuthority>([
+    "publish-scheduler",
+    "post-publish-monitor",
+  ]);
+
 export interface GeoOperationConfirmation {
   kind: GeoOperationConfirmationKind;
   authority: GeoOperationConfirmationAuthority;
