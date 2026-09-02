@@ -119,6 +119,15 @@ describe('run_question_pool reuse contract over a live MCP server', () => {
       expect(
         GEO_NEXT_STEP_GUIDES['generate-question-pool']!.guidance,
       ).toContain(QUESTION_POOL_REUSE_CONTRACT);
+
+      // 「从问题池选择」条目存在性（票 02 归一验收）：不更新知识的计划
+      // （全链或下一轮入口同形）首工作步停在这道门，决策回执信封必须引得
+      // 到——条目缺失会把 agent 卡在「计划让选池、信封不指路」的断链上；
+      // guidance 与问题池复用契约同源。
+      const selectGuide = GEO_NEXT_STEP_GUIDES['select-next-question-pool'];
+      expect(selectGuide).toBeDefined();
+      expect(selectGuide!.tool).toBe('run_question_pool');
+      expect(selectGuide!.guidance).toContain(QUESTION_POOL_REUSE_CONTRACT);
     });
   });
 

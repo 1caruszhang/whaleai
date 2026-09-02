@@ -239,6 +239,149 @@ describe("GeoOperation intent policy", () => {
     expect(withKnowledge.steps[1]?.id).toBe("collect-materials");
   });
 
+  // 归一（票 02，spec 2026-09-02）：全链意图显式携带「不更新知识」时，
+  // 计划形状与「下一轮优化 + 不更新知识」完全同形——首工作步从问题池选择，
+  // 不重走知识链。两个入口消费同一份步骤构造，快照锁形防意图与计划漂移。
+  it("gives full-optimization + updateKnowledge=false the exact next-round no-update step shape", () => {
+    const full = planGeoOperation({
+      intent: "full-optimization",
+      goal: "全链意图：这一轮不更新品牌知识",
+      updateKnowledge: false,
+    });
+    const nextRound = planGeoOperation({
+      intent: "next-round-optimization",
+      goal: "下一轮优化",
+      updateKnowledge: false,
+    });
+
+    // 形状锁定不是整对象逐字节：意图与 goal 字段必然不同。
+    expect(full.kind).toBe("full-optimization");
+    expect(nextRound.kind).toBe("next-round-optimization");
+    expect(full.goal).not.toBe(nextRound.goal);
+
+    // 步骤序列的 id/标题/能力/确认门/初始状态（含认可门文案）逐项相等。
+    expect(full.steps).toEqual(nextRound.steps);
+    expect(full.status).toBe(nextRound.status);
+    expect(full.pendingConfirmation).toEqual(nextRound.pendingConfirmation);
+
+    // 首工作步为「从问题池选择」；知识链步骤不进计划。
+    expect(full.steps[1]).toMatchObject({
+      id: "select-next-question-pool",
+      title: "从问题池选择下一轮问题",
+      capability: "question-opportunities",
+      status: "pending",
+      requiresConfirmation: true,
+      confirmation: {
+        kind: "question-selection",
+        authority: "brand-workspace",
+      },
+    });
+    for (const knowledgeStep of [
+      "collect-materials",
+      "extract-facts",
+      "confirm-knowledge",
+    ]) {
+      expect(
+        full.steps.some((step) => step.id === knowledgeStep),
+      ).toBe(false);
+    }
+    // 计划照常停靠认可门（借用首工作步 capability，落问题机会段）。
+    expect(full.steps[0]).toMatchObject({
+      id: "acknowledge-plan",
+      status: "awaiting-confirmation",
+      capability: "question-opportunities",
+    });
+    // 进度卡跨度与阶段分组从归一后的起点自然派生，不另设文案。
+    expect(formatGeoOperationSpanLabel(full.steps)).toBe(
+      "跨度：问题机会 → 监测",
+    );
+    expect(groupGeoOperationSteps(full.steps).map((group) => group.id)).toEqual(
+      ["questions", "content", "distribution", "publishing", "monitoring"],
+    );
+  });
+
+  it("keeps the two entrances shape-identical with an endingPhase too", () => {
+    const full = planGeoOperation({
+      intent: "full-optimization",
+      goal: "这轮不更新知识，做到分发为止",
+      updateKnowledge: false,
+      endingPhase: "distribution",
+    });
+    const nextRound = planGeoOperation({
+      intent: "next-round-optimization",
+      goal: "下一轮做到分发为止",
+      updateKnowledge: false,
+      endingPhase: "distribution",
+    });
+
+    expect(full.steps).toEqual(nextRound.steps);
+    expect(full.steps.map((step) => step.id)).toEqual([
+      "acknowledge-plan",
+      "select-next-question-pool",
+      "plan-topics",
+      "confirm-content-plan",
+      "generate-articles",
+      "confirm-articles",
+      "plan-distribution",
+      "confirm-distribution",
+    ]);
+  });
+
+  // 防回归：未携带该参数（或显式为真）的全链计划与现状逐项一致——
+  // 既有调用方零破坏。
+  it("keeps the plain full-optimization plan item-by-item unchanged when updateKnowledge is omitted or true", () => {
+    const currentFullChainIds = [
+      "acknowledge-plan",
+      "collect-materials",
+      "extract-facts",
+      "confirm-knowledge",
+      "generate-question-pool",
+      "confirm-question-selection",
+      "plan-topics",
+      "confirm-content-plan",
+      "generate-articles",
+      "confirm-articles",
+      "plan-distribution",
+      "confirm-distribution",
+      "prepare-publish",
+      "confirm-publish",
+      "observe-publish",
+      "configure-monitoring",
+      "confirm-monitoring",
+      "collect-monitoring-evidence",
+      "report-monitoring",
+    ];
+    for (const updateKnowledge of [undefined, true]) {
+      const plan = planGeoOperation({
+        intent: "full-optimization",
+        goal: "完整 GEO 优化",
+        ...(updateKnowledge === undefined ? {} : { updateKnowledge }),
+      });
+      expect(plan.steps.map((step) => step.id)).toEqual(currentFullChainIds);
+      expect(
+        plan.steps.filter((step) => step.requiresConfirmation),
+      ).toHaveLength(8);
+      expect(formatGeoOperationSpanLabel(plan.steps)).toBe(
+        "跨度：品牌知识 → 监测",
+      );
+    }
+  });
+
+  it("still rejects ending phases not strictly downstream of the normalized start", () => {
+    // 归一后起点段是 questions：终点等于起点（questions）或在其上游
+    // （knowledge）照旧 fail-loud——那不是跨度，是矛盾的输入。
+    for (const endingPhase of ["knowledge", "questions"] as const) {
+      expect(() =>
+        planGeoOperation({
+          intent: "full-optimization",
+          goal: "这轮不更新知识",
+          updateKnowledge: false,
+          endingPhase,
+        }),
+      ).toThrow("geo_operation_ending_phase_invalid");
+    }
+  });
+
   it("makes missing performance probes conditional instead of treating reports as an execution owner", () => {
     const plan = planGeoOperation({
       intent: "performance-inspection",

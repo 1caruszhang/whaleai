@@ -250,7 +250,14 @@ export interface PlanGeoOperationInput {
   goal: string;
   inputRefs?: GeoOperationReference[];
   sourceOperationId?: string;
-  /** Required only for the next-round branch. Undefined means ask first. */
+  /**
+   * 知识分支（票 02 归一，spec 2026-09-02）：`next-round-optimization`
+   * 未携带时整单停在分支决策门；显式 false 时两个全链入口
+   * （`full-optimization` 与 `next-round-optimization`）归一为同一
+   * 「不更新知识」计划形状——起点为问题段、首工作步「从问题池选择」，
+   * 不重走知识链。`full-optimization` 未携带或为真保持全链现状（既有
+   * 调用方零破坏）。
+   */
   updateKnowledge?: boolean;
   /**
    * 起点推导理由（ADR-0010 Decision 5，票 #27）：新轮次经「带推荐与理由
@@ -538,6 +545,62 @@ function spanDefinitions(
   ];
 }
 
+/**
+ * 「不更新知识」轮次的起点段：问题段替换为「从池选择」——已有确认池直接
+ * 复用重选（复用契约见 questionPool.ts），不重新生成池，也不重走知识链
+ * （材料收集/事实提取/知识确认都不进计划）。
+ */
+const SELECT_NEXT_QUESTION_STEP: StepDefinition = {
+  id: "select-next-question-pool",
+  title: "从问题池选择下一轮问题",
+  capability: "question-opportunities",
+  confirmation: confirmation(
+    "question-selection",
+    "brand-workspace",
+    "选择下一轮问题",
+    "本轮不更新知识，请从已有问题池明确选择后续问题。",
+  ),
+};
+
+/**
+ * 「不更新知识」轮次的计划跨度（票 02 归一的单一事实源）：起点段＝从池
+ * 选择，其余段按六阶段链序跟随；带终点时从选择步起截到终点段为止。
+ * 两个全链入口（full-optimization 显式 false 与 next-round-optimization
+ * 的同名分支）都从这里拿步骤序列，杜绝双入口漂移；跨度裁决按归一后的
+ * 起点段（questions）判下游。
+ */
+function noUpdateKnowledgeDefinitions(
+  endingPhase: GeoOperationPhaseId | undefined,
+): readonly StepDefinition[] {
+  return spanDefinitions(
+    "questions",
+    endingPhase,
+    [
+      SELECT_NEXT_QUESTION_STEP,
+      ...CONTENT_STEPS,
+      ...DISTRIBUTION_STEPS,
+      ...PUBLISH_STEPS,
+      ...MONITOR_STEPS,
+    ],
+    [SELECT_NEXT_QUESTION_STEP],
+  );
+}
+
+/**
+ * 全链跨度（知识段起步）：full-optimization 未携带/为真与
+ * next-round-optimization「更新知识」分支共用；带终点 = 截尾。
+ */
+function fullChainDefinitions(
+  endingPhase: GeoOperationPhaseId | undefined,
+): readonly StepDefinition[] {
+  return spanDefinitions(
+    "knowledge",
+    endingPhase,
+    FULL_OPTIMIZATION_STEPS,
+    KNOWLEDGE_STEPS,
+  );
+}
+
 /** 终点推导理由的归一：与起点理由同款纪律；无 endingPhase 时拒绝提供。 */
 function endingPointReasonOf(
   reason: string | undefined,
@@ -778,52 +841,24 @@ export function planGeoOperation(
       );
       break;
     case "full-optimization":
-      // 全链意图带终点 = 截尾（如「只做到文章为止」）；不带 = 完整六段。
-      definitions = spanDefinitions(
-        "knowledge",
-        input.endingPhase,
-        FULL_OPTIMIZATION_STEPS,
-        KNOWLEDGE_STEPS,
-      );
+      // 归一（票 02）：全链意图显式「不更新知识」时与下一轮优化的同名
+      // 分支完全同形——从问题池选择起步，不重走知识链；未携带或为真保持
+      // 全链现状（带终点 = 截尾，如「只做到文章为止」；不带 = 完整六段）。
+      // 注意守卫是 === false：undefined 在全链入口意味着「未表达」而非
+      // 「不更新」，必须留在全链现状。
+      definitions =
+        input.updateKnowledge === false
+          ? noUpdateKnowledgeDefinitions(input.endingPhase)
+          : fullChainDefinitions(input.endingPhase);
       break;
-    case "next-round-optimization": {
-      if (input.updateKnowledge) {
-        // 更新知识：与全链同构；带终点 = 截尾。
-        definitions = spanDefinitions(
-          "knowledge",
-          input.endingPhase,
-          FULL_OPTIMIZATION_STEPS,
-          KNOWLEDGE_STEPS,
-        );
-        break;
-      }
-      // 不更新知识：问题段替换为「从池选择」（不重新生成池），其余段按
-      // 链序跟随；带终点时从选择步起截到终点段为止。
-      const selectNextQuestion: StepDefinition = {
-        id: "select-next-question-pool",
-        title: "从问题池选择下一轮问题",
-        capability: "question-opportunities",
-        confirmation: confirmation(
-          "question-selection",
-          "brand-workspace",
-          "选择下一轮问题",
-          "本轮不更新知识，请从已有问题池明确选择后续问题。",
-        ),
-      };
-      definitions = spanDefinitions(
-        "questions",
-        input.endingPhase,
-        [
-          selectNextQuestion,
-          ...CONTENT_STEPS,
-          ...DISTRIBUTION_STEPS,
-          ...PUBLISH_STEPS,
-          ...MONITOR_STEPS,
-        ],
-        [selectNextQuestion],
-      );
+    case "next-round-optimization":
+      // 走到这里分支已决（undefined 在 switch 前停在分支决策门）：真值 =
+      // 更新知识，与全链同构（带终点 = 截尾）；假值 = 从池选择起步
+      // （与全链显式 false 同一份构造）。
+      definitions = input.updateKnowledge
+        ? fullChainDefinitions(input.endingPhase)
+        : noUpdateKnowledgeDefinitions(input.endingPhase);
       break;
-    }
   }
 
   const plannedSteps = steps([
