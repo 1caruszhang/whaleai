@@ -196,11 +196,11 @@ impl BrandWorkspaceStore {
     }
 
     pub fn list_workspaces(&self) -> Result<Vec<BrandWorkspace>, String> {
-        Ok(self.read_catalog()?.workspaces)
+        Ok(self.with_healed_catalog()?.workspaces)
     }
 
     pub fn current_workspace(&self) -> Result<Option<BrandWorkspace>, String> {
-        let catalog = self.read_catalog()?;
+        let catalog = self.with_healed_catalog()?;
         Ok(catalog.current_workspace_id.as_deref().and_then(|id| {
             catalog
                 .workspaces
@@ -766,11 +766,46 @@ impl BrandWorkspaceStore {
     }
 
     fn workspace(&self, workspace_id: &str) -> Result<BrandWorkspace, String> {
-        self.read_catalog()?
+        self.with_healed_catalog()?
             .workspaces
             .into_iter()
             .find(|workspace| workspace.id == workspace_id)
             .ok_or_else(|| "品牌工作区不存在".to_string())
+    }
+
+    /// 读路径统一经过这里（用户裁决 2026-09-01「就用叶子名」）：目录里
+    /// 存在非叶子名产品线时先治愈再返回。是否需要治愈与治愈改写共用
+    /// healed_product_lines——幂等性保证收敛，最多一跳「检查 → 锁内改
+    /// 写 → 重读」，不存在递归。
+    fn with_healed_catalog(&self) -> Result<BrandCatalog, String> {
+        let catalog = self.read_catalog()?;
+        if catalog.workspaces.iter().any(|workspace| {
+            healed_product_lines(&workspace.product_lines) != workspace.product_lines
+        }) {
+            self.heal_catalog_product_lines()?;
+            return self.read_catalog();
+        }
+        Ok(catalog)
+    }
+
+    /// 历史同步进目录的两级复合值在锁内整目录一趟改写为叶子名；合并语
+    /// 义只增不删，无法经合并自愈，故由读路径惰性触发。
+    fn heal_catalog_product_lines(&self) -> Result<(), String> {
+        let _guard = catalog_lock().lock().map_err(|error| error.to_string())?;
+        let mut catalog = self.read_catalog_unlocked()?;
+        let mut changed = false;
+        for workspace in &mut catalog.workspaces {
+            let healed = healed_product_lines(&workspace.product_lines);
+            if healed != workspace.product_lines {
+                workspace.product_lines = healed;
+                workspace.updated_at = Utc::now().to_rfc3339();
+                changed = true;
+            }
+        }
+        if changed {
+            self.write_catalog_unlocked(&catalog)?;
+        }
+        Ok(())
     }
 
     /// 方案 D（GD-11）：知识确认采纳「行业」事实后，把领域合并进品牌的
@@ -789,11 +824,12 @@ impl BrandWorkspaceStore {
             .find(|workspace| workspace.id == workspace_id)
             .ok_or_else(|| "品牌工作区不存在".to_string())?;
         let mut added = Vec::new();
-        for line in lines {
-            let line = line.trim().to_string();
-            if line.is_empty() || line.chars().count() > 80 {
+        for raw in lines {
+            // 行业事实同步进来的两级「大类/细分」值取叶子名落目录；口径
+            //（叶子 + 80 上限）与创建入口、存量治愈共用 normalize_product_line。
+            let Some(line) = normalize_product_line(&raw) else {
                 continue;
-            }
+            };
             if !workspace
                 .product_lines
                 .iter()
@@ -852,14 +888,54 @@ fn normalized_product_lines(values: Vec<String>) -> Result<Vec<String>, String> 
         if value.is_empty() {
             continue;
         }
-        if value.chars().count() > 80 {
+        // 创建入口与知识同步同口径：两级「大类/细分」值取叶子名，长度
+        // 上限按叶子判（产品线即叶子）；尾斜杠等同只写大类。纯分隔符取
+        // 不出叶子的值显式报错而不是静默丢弃——用户输入需要反馈。
+        let Some(line) = product_line_leaf(value) else {
+            return Err(format!("产品线名称无效：{value}"));
+        };
+        if line.chars().count() > 80 {
             return Err("产品线名称不能超过 80 个字符".to_string());
         }
-        if !normalized.iter().any(|existing| existing == value) {
-            normalized.push(value.to_string());
+        if !normalized.iter().any(|existing| existing == &line) {
+            normalized.push(line);
         }
     }
     Ok(normalized)
+}
+
+/// 产品线叶子名：两级「大类/细分」行业值取最后一段非空细分（兼容全角
+/// 斜杠）；空串/纯分隔符返回 None，由调用方跳过。
+fn product_line_leaf(line: &str) -> Option<String> {
+    let leaf = line
+        .split(['/', '／'])
+        .map(str::trim)
+        .rfind(|segment| !segment.is_empty())?
+        .to_string();
+    Some(leaf)
+}
+
+/// 单条产品线规范化：叶子化并施加 80 字符上限，三条写路径（创建/知识
+/// 同步/存量治愈）共用同一口径。
+fn normalize_product_line(value: &str) -> Option<String> {
+    let leaf = product_line_leaf(value)?;
+    (leaf.chars().count() <= 80).then_some(leaf)
+}
+
+/// 目录产品线批量治愈形态：逐条规范化后去重（保序）。幂等——对自身输
+/// 出再跑一次结果不变；「是否需要治愈」判定与治愈改写共用本函数，收敛
+/// 由此保证。
+fn healed_product_lines(lines: &[String]) -> Vec<String> {
+    let mut healed: Vec<String> = Vec::new();
+    for line in lines {
+        let Some(normalized) = normalize_product_line(line) else {
+            continue;
+        };
+        if !healed.contains(&normalized) {
+            healed.push(normalized);
+        }
+    }
+    healed
 }
 
 fn validate_session_id(value: &str) -> Result<(), String> {
@@ -1364,6 +1440,92 @@ mod tests {
                 "missing {relative}"
             );
         }
+    }
+
+    // 产品线叶子名治理（用户裁决 2026-09-01）：历史两级复合值/带空格值
+    // 在读路径惰性治愈为叶子名并持久化；workspace() 与 bootstrap 旁路
+    //（list_workspaces/current_workspace）同拍治愈，UI 首屏即见叶子名。
+    #[test]
+    fn legacy_compound_product_lines_heal_on_workspace_read() {
+        let root = tempdir().unwrap();
+        let store = BrandWorkspaceStore::at(root.path().join("Xiaojing"));
+        let brand = store
+            .create_workspace("品牌丙", vec!["旗舰产品".into()])
+            .unwrap();
+
+        // 模拟裁决之前的存量目录：绕过入口校验直接改写 brands.json，
+        // 注入复合值、全角斜杠、带空格值与重复叶子。
+        let catalog_path = root.path().join("Xiaojing").join("brands.json");
+        let mut catalog: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&catalog_path).unwrap()).unwrap();
+        catalog["workspaces"][0]["productLines"] = serde_json::json!([
+            "餐饮/食堂干蒸菜档口",
+            "汽车服务／音响改装",
+            "  教育培训  ",
+            "  家电维修  "
+        ]);
+        std::fs::write(
+            &catalog_path,
+            serde_json::to_string_pretty(&catalog).unwrap(),
+        )
+        .unwrap();
+
+        let healed = store.workspace(&brand.id).unwrap();
+        assert_eq!(
+            healed.product_lines,
+            vec![
+                "食堂干蒸菜档口".to_string(),
+                "音响改装".to_string(),
+                "教育培训".to_string(),
+                "家电维修".to_string()
+            ]
+        );
+        // 治愈已持久化：bootstrap 旁路与再次读取值稳定，不反复改写目录。
+        assert_eq!(
+            store.list_workspaces().unwrap()[0].product_lines,
+            healed.product_lines
+        );
+        assert_eq!(
+            store.current_workspace().unwrap().unwrap().product_lines,
+            healed.product_lines
+        );
+        assert_eq!(
+            store.workspace(&brand.id).unwrap().product_lines,
+            healed.product_lines
+        );
+    }
+
+    // 创建入口同口径：两级值落叶子名；取不出细分的值显式报错而不是静默
+    // 丢弃；长度上限按叶子判——复合全长超限但叶子合规的值可入库。
+    #[test]
+    fn creating_workspace_normalizes_leaf_and_rejects_leafless_values() {
+        let root = tempdir().unwrap();
+        let store = BrandWorkspaceStore::at(root.path().join("Xiaojing"));
+
+        let brand = store
+            .create_workspace("品牌丁", vec!["餐饮/火锅".into()])
+            .unwrap();
+        assert_eq!(brand.product_lines, vec!["火锅".to_string()]);
+
+        let long_compound = format!("{}/保洁", "超".repeat(90));
+        let long_category = store
+            .create_workspace("品牌戊", vec![long_compound])
+            .unwrap();
+        assert_eq!(long_category.product_lines, vec!["保洁".to_string()]);
+
+        // 尾斜杠等同只写大类（抽取口径允许大类-only）：叶子取大类本身。
+        let category_only = store
+            .create_workspace("品牌己", vec!["餐饮/".into()])
+            .unwrap();
+        assert_eq!(category_only.product_lines, vec!["餐饮".to_string()]);
+
+        // 纯分隔符取不出任何叶子：显式报错而不是静默丢弃。
+        assert_eq!(
+            store
+                .create_workspace("品牌庚", vec!["/".into()])
+                .unwrap_err(),
+            "产品线名称无效：/"
+        );
     }
 
     #[test]

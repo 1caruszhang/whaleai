@@ -2389,6 +2389,32 @@ mod tests {
         assert_eq!(final_workspace.product_lines.len(), 1);
     }
 
+    // 产品线叶子名（用户裁决 2026-09-01）：行业事实保持两级「大类/细分」
+    // 口径，写回目录的产品线取细分叶子名——题库等下游闸门按叶子名精确
+    // 匹配（现场「食堂干蒸菜档口」被拒即两级值整串入库所致）。
+    #[test]
+    fn adopting_two_level_industry_syncs_leaf_product_line() {
+        let (store, workspace) = fixture();
+        let candidate = store
+            .submit_knowledge_candidate(submission(
+                &workspace,
+                industry_key(),
+                "餐饮/食堂干蒸菜档口",
+                0,
+                "awaiting-confirmation",
+            ))
+            .unwrap();
+        let result = adopt(&store, &workspace, candidate);
+        assert_eq!(
+            result.product_line_sync,
+            Some(vec!["食堂干蒸菜档口".to_string()])
+        );
+        assert_eq!(
+            store.workspace(&workspace.id).unwrap().product_lines,
+            vec!["食堂干蒸菜档口".to_string()]
+        );
+    }
+
     fn revision_request(
         workspace: &BrandWorkspace,
         action: &str,
