@@ -174,6 +174,12 @@ function stageStateFrom<T>(
   return { present: true, state: project(outcome.value) };
 }
 
+/**
+ * 摘要不携带跨会话未完成轮次（2026-09-02 票 10 修订）：他轮信息在场会诱发
+ * 起点推导卡对他轮的现场取舍（17,742 字思考实测）。轮次元信息只在用户点名
+ * 续轮时经 inspect_geo_operations 的跨会话未完成轮查询按需读取——概念在场、
+ * 明细不在场。
+ */
 export interface BrandWorkspaceStateSummary {
   kind: 'brand-workspace-state';
   /** 品牌材料上下文读取失败时为 null（未知），不是空品牌。 */
@@ -187,10 +193,6 @@ export interface BrandWorkspaceStateSummary {
   articles: BrandWorkspaceStageState;
   distributionPlan: BrandWorkspaceStageState;
   publish: BrandWorkspaceStageState;
-  /** 摘要不再携带跨会话未完成轮次（2026-09-02 票 10 修订）：他轮信息
-   * 在场会诱发起点推导卡对他轮的现场取舍（17,742 字思考实测）。轮次
-   * 元信息只在用户点名续轮时经 inspect_geo_operations 的跨会话未完成轮
-   * 查询按需读取——概念在场、明细不在场。 */
 }
 
 /** 未完成轮次元信息条目（六要素 + 展示阶段）：跨会话未完成轮查询
@@ -424,10 +426,6 @@ const EMPTY_OPERATION_LIST_HINT =
 /**
  * inspect_geo_operations 的工具负载：空列表是合法的权威结果，但裸 `[]`
  * 会让模型无话可说——附上建模提示，引导它向用户解释并走创建路径。
- */
-/**
- * inspect_geo_operations 的工具负载：空列表是合法的权威结果，但裸 `[]`
- * 会让模型无话可说——附上建模提示，引导它向用户解释并走创建路径。
  * 点名模式的未完成轮查询负载（kind=geo-operation-unfinished-rounds）原样
  * 透传，不套 projection 信封——两种返回以 kind 区分。
  */
@@ -440,7 +438,12 @@ export function geoOperationProjectionPayload(
       hint?: string;
     }
   | UnfinishedGeoRoundsPayload {
-  if (result !== null && typeof result === "object" && !Array.isArray(result) && "rounds" in result) {
+  if (
+    result !== null &&
+    typeof result === "object" &&
+    !Array.isArray(result) &&
+    result.kind === "geo-operation-unfinished-rounds"
+  ) {
     return result;
   }
   return Array.isArray(result) && result.length === 0

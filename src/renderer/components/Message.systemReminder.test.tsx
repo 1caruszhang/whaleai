@@ -68,6 +68,20 @@ describe('Message 决策回执投影', () => {
     expect(screen.getByText('暂停 GEO 操作')).toBeInTheDocument();
   });
 
+  it('跳过材料收集回执渲染专属文案，不落到通用兜底', () => {
+    const reminder = buildGeoOperationEventReminder({
+      workspaceId: 'w',
+      sessionId: 's',
+      operationId: 'op-1',
+      revision: 4,
+      action: 'skip-material-collection',
+      status: 'ready',
+    });
+    render(<Message message={userMessage(reminder)} />);
+    expect(screen.getByText('跳过材料收集')).toBeInTheDocument();
+    expect(screen.queryByText('GEO 操作已更新')).not.toBeInTheDocument();
+  });
+
   it('真实用户输入不受投影影响，仍走 Markdown 气泡', () => {
     renderWithTheme(<Message message={userMessage('认可本次计划，请开始执行')} />);
     const bubble = screen.getByText(/认可本次计划，请开始执行/).closest('[data-message-role="user"]');

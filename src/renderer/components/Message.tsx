@@ -150,6 +150,7 @@ function decisionReminderLabel(reminder: ParsedDecisionReminder): string | null 
       case 'cancel': return '取消 GEO 操作';
       case 'next-round-update-knowledge': return '下一轮更新品牌知识';
       case 'next-round-keep-knowledge': return '下一轮沿用品牌知识';
+      case 'skip-material-collection': return '跳过材料收集';
       default: return 'GEO 操作已更新';
     }
   }

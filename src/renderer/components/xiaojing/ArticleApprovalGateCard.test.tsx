@@ -231,7 +231,7 @@ describe("ArticleApprovalGateCard", () => {
         origin: "generated",
         basedOnRevision: 2,
         review: {
-          policyVersion: "xiaojing-content-prompt-v7",
+          policyVersion: "xiaojing-content-prompt-v8",
           passed: false,
           issues: [
             {
@@ -279,7 +279,7 @@ describe("ArticleApprovalGateCard", () => {
         origin: "generated",
         basedOnRevision: 2,
         review: {
-          policyVersion: "xiaojing-content-prompt-v7",
+          policyVersion: "xiaojing-content-prompt-v8",
           passed: true,
           issues: [
             {
