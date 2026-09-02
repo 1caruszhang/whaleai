@@ -4,12 +4,14 @@ import { useCallback, useState } from "react";
 import {
   confirmQuestionPool,
   loadLatestQuestionPool,
+  regenerateQuestionPool,
 } from "@/api/brandQuestionPoolClient";
 import { useTabApi, useTabState } from "@/context/TabContext";
 import { isPendingSessionId } from "../../../shared/constants";
-import type {
-  QuestionPoolProjection,
-  QuestionPoolQuestion,
+import {
+  QUESTION_POOL_REUSE_OUTCOME,
+  type QuestionPoolProjection,
+  type QuestionPoolQuestion,
 } from "../../../shared/geo/questionPool";
 import { unwrapToolResultText } from "../../../shared/toolResult";
 import GateCardFooter, { GateCardSuccess } from "./GateCardFooter";
@@ -21,11 +23,19 @@ import { useGateCardRefresh } from "./useGateCardRefresh";
  * 挖掘词、勾选问题并确认；确认走与面板相同的 /question-pools/confirm
  * 端点（CAS revision），成功后 reminder 通知 agent 继续。
  *
+ * 复用契约（ADR-0011 Decision 3，2026-09-01 修订）：复用命中的已确认池
+ * 信封携带 outcome=reused-confirmed-pool——卡片进入重选模式（预勾上次的
+ * 选择），用户为本轮重选并确认；「重新生成问题池」按钮强制重新挖掘
+ * （真实 provider 花费），成功后以正常待决流程呈现新池。问题门只在用户
+ * 的卡片确认后放行。
+ *
  * 待决期间每 3s 轮询 /latest（票 38）：聊天修订（改/删/增搜索词与候选
  * 问题）按服务端胜合并——文本被改的行采信服务端值，未改行保留本地勾选。
  */
 export interface QuestionPoolGateCardData {
   kind: "question-pool";
+  /** 复用标记只认已知值：未知 outcome 按旧信封处理（只读展示）。 */
+  outcome?: typeof QUESTION_POOL_REUSE_OUTCOME;
   pool: QuestionPoolProjection;
 }
 
@@ -54,6 +64,7 @@ function parseEnvelope(value: unknown): QuestionPoolGateCardData | null {
   if (!value || typeof value !== "object") return null;
   const envelope = value as {
     kind?: unknown;
+    outcome?: unknown;
     pool?: unknown;
     content?: Array<{ type?: string; text?: string }>;
   };
@@ -62,7 +73,14 @@ function parseEnvelope(value: unknown): QuestionPoolGateCardData | null {
     return text ? parseQuestionPoolGateCard(text) : null;
   }
   if (envelope.kind === "question-pool" && isPool(envelope.pool)) {
-    return { kind: "question-pool", pool: envelope.pool };
+    return {
+      kind: "question-pool",
+      outcome:
+        envelope.outcome === QUESTION_POOL_REUSE_OUTCOME
+          ? QUESTION_POOL_REUSE_OUTCOME
+          : undefined,
+      pool: envelope.pool,
+    };
   }
   return null;
 }
@@ -96,15 +114,18 @@ export default function QuestionPoolGateCard({
   const [questions, setQuestions] = useState<QuestionPoolQuestion[]>(
     data.pool.questions,
   );
-  // 复用命中（ADR-0011 Decision 3）：服务端返回的是已确认池，卡片初始即处
-  // confirmed 态——页脚讲复用事实，不摆「确认后进入下一阶段」的待决话术。
-  // 按挂载时快照判定（此后轮询/用户确认只改 confirmed，不翻页脚）；判定只
-  // 看 status：confirmed 到达的池必然是此前确认过的，reused 标记只影响
-  // 头部徽章，不构成第二条件。用户在卡上确认（awaiting 起步）不属此类，
-  // 成功态保持原有呈现。
-  const [initiallyConfirmed] = useState(data.pool.status === "confirmed");
+  // 复用命中（ADR-0011 Decision 3，2026-09-01 修订）：confirmed 池 + 信封
+  // outcome 标记 → 重选模式，卡片预勾上次的选择等用户确认，问题门只在
+  // 卡片确认后放行。无 outcome 的 confirmed 池是旧信封，保持只读展示
+  // （不构成可操作对象）；awaiting-selection 起步走正常待决流程。
+  const [reselect, setReselect] = useState(
+    data.outcome === QUESTION_POOL_REUSE_OUTCOME && data.pool.status === "confirmed",
+  );
+  // 重生成成功后进入正常待决模式（新池 awaiting-selection，不携带复用标记）。
+  const [initiallyConfirmed] = useState(data.pool.status === "confirmed" && !reselect);
   const [confirmed, setConfirmed] = useState(initiallyConfirmed);
   const [busy, setBusy] = useState(false);
+  const [regenerating, setRegenerating] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const selectedCount = questions.filter((q) => q.selected).length;
   const hasRealSession = Boolean(sessionId && !isPendingSessionId(sessionId));
@@ -139,7 +160,7 @@ export default function QuestionPoolGateCard({
   });
 
   const confirm = useCallback(async () => {
-    if (!sessionId || !hasRealSession || busy || selectedCount === 0) return;
+    if (!sessionId || !hasRealSession || busy || regenerating || selectedCount === 0) return;
     setBusy(true);
     setError(null);
     try {
@@ -158,7 +179,33 @@ export default function QuestionPoolGateCard({
     } finally {
       setBusy(false);
     }
-  }, [apiPost, busy, hasRealSession, pool.id, pool.revision, pool.workspaceId, questions, selectedCount, sessionId]);
+  }, [apiPost, busy, hasRealSession, pool.id, pool.revision, pool.workspaceId, questions, regenerating, selectedCount, sessionId]);
+
+  // 「重新生成问题池」：跳过零成本复用、强制重新联网挖掘（真实 provider
+  // 花费）；成功后以正常待决流程呈现新池（问题选择在新卡上完成）。
+  const regenerate = useCallback(async () => {
+    if (!sessionId || !hasRealSession || regenerating || busy) return;
+    setRegenerating(true);
+    setError(null);
+    try {
+      const fresh = await regenerateQuestionPool(
+        apiPost,
+        { workspaceId: pool.workspaceId, sessionId },
+        {
+          productLine: pool.productLine,
+          targetRegion: pool.targetRegion,
+          idempotencyKey: `pool-regen-${crypto.randomUUID()}`,
+        },
+      );
+      setPool(fresh);
+      setQuestions(fresh.questions);
+      setReselect(false);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setRegenerating(false);
+    }
+  }, [apiPost, busy, hasRealSession, pool.productLine, pool.targetRegion, pool.workspaceId, regenerating, sessionId]);
 
   return (
     <section
@@ -251,9 +298,13 @@ export default function QuestionPoolGateCard({
       )}
       <GateCardFooter
         note={
-          initiallyConfirmed
-            ? "已复用此前确认的题库，无需再次确认"
-            : "确认后进入下一阶段"
+          reselect
+            ? confirmed
+              ? undefined
+              : "已复用此前确认的题库——请勾选本轮要覆盖的问题后确认"
+            : initiallyConfirmed
+              ? "已复用此前确认的题库，无需再次确认"
+              : "确认后进入下一阶段"
         }
       >
         {confirmed ? (
@@ -261,17 +312,32 @@ export default function QuestionPoolGateCard({
             <GateCardSuccess>本轮问题已确认（{selectedCount}）</GateCardSuccess>
           )
         ) : (
-          <button
-            type="button"
-            onClick={() => {
-              void confirm();
-            }}
-            disabled={busy || selectedCount === 0 || !hasRealSession}
-            className="flex items-center gap-1.5 rounded-md bg-[var(--button-primary-bg)] px-3 py-1.5 text-sm font-medium text-[var(--button-primary-text)] disabled:opacity-50"
-          >
-            {busy && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
-            确认本轮问题（{selectedCount}）
-          </button>
+          <>
+            {reselect && (
+              <button
+                type="button"
+                onClick={() => {
+                  void regenerate();
+                }}
+                disabled={regenerating || busy || !hasRealSession}
+                className="flex items-center gap-1.5 rounded-md bg-[var(--paper-inset)] px-3 py-1.5 text-sm font-medium text-[var(--ink)] disabled:opacity-50"
+              >
+                {regenerating && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+                重新生成问题池
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => {
+                void confirm();
+              }}
+              disabled={busy || regenerating || selectedCount === 0 || !hasRealSession}
+              className="flex items-center gap-1.5 rounded-md bg-[var(--button-primary-bg)] px-3 py-1.5 text-sm font-medium text-[var(--button-primary-text)] disabled:opacity-50"
+            >
+              {busy && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+              确认本轮问题（{selectedCount}）
+            </button>
+          </>
         )}
       </GateCardFooter>
     </section>

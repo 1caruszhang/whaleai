@@ -49,3 +49,27 @@ export async function confirmQuestionPool(
   }
   return response.decision;
 }
+
+/**
+ * 「重新生成问题池」按钮（复用契约 2026-09-01 修订）：跳过零成本复用、
+ * 强制重新联网挖掘（真实 provider 花费）。返回全新的 awaiting-selection
+ * 池，调用方以正常选择流程呈现。
+ */
+export async function regenerateQuestionPool(
+  apiPost: QuestionPoolApiPost,
+  identity: { workspaceId: string; sessionId: string },
+  input: {
+    productLine: string;
+    targetRegion: string;
+    idempotencyKey: string;
+  },
+): Promise<QuestionPoolProjection> {
+  const response = await apiPost<QuestionPoolResponse<QuestionPoolProjection>>(
+    "/api/xiaojing/question-pools/generate",
+    { ...identity, ...input, regenerate: true },
+  );
+  if (!response.success || !response.pool) {
+    throw new Error(response.error ?? "question_pool_regenerate_failed");
+  }
+  return response.pool;
+}

@@ -19,7 +19,7 @@ import {
   QuestionPoolService,
 } from '../geo/question-pool';
 import { createTopicPlanPort, TopicPlanService } from '../geo/topic-plan';
-import { toTopicPlanCardProjection } from '../../shared/geo/topicPlan';
+import { toTopicPlanCardProjection, TOPIC_PLAN_REUSE_OUTCOME } from '../../shared/geo/topicPlan';
 import type { TopicPlanProjection } from '../../shared/geo/topicPlan';
 import {
   createArticlePort,
@@ -1709,7 +1709,7 @@ export async function createXiaojingGeoServer() {
       ),
       tool(
         'run_question_pool',
-        `Run the question-opportunity stage for one product line (domain-level, e.g. 汽车音响改装 — not a fine-grained service item). Reuse contract: ${QUESTION_POOL_REUSE_CONTRACT}; call it as planned without judging whether to skip or rerun — when no reusable pool exists the service mines keywords online and generates candidate questions (real provider spend). Omit productLine to use the brand's first confirmed product line (synced from the industry fact at knowledge confirmation — if none exists, call request_brand_material so the user can import brand material and confirm knowledge first, then retry). When the user names a specific business within the domain (e.g. 汽车隔音), pass it as businessFocus instead of inventing a new product line. On fresh generation the result renders as the confirmation card where the user reviews the mined keywords and selects questions — never claim the pool is confirmed; the user confirms on the card (a reused confirmed pool needs no re-confirmation and says so in the result envelope). Keyword geography is bounded by the user-declared service area (服务区域): the declared scope kept at its own granularity (e.g. 新都区 stays 新都区, not the whole 成都) is both the mining anchor and the ceiling — terms never reference regions beyond it, and store addresses only anchor when no usable scope is declared. For targetRegion pass the declared scope as a plain name (e.g. 新都区 or 成都); never prose like 成都本地，辐射西南地区 and never boundless values such as 全国 — nationwide/online service mines in geo-free mode.`,
+        `Run the question-opportunity stage for one product line (domain-level, e.g. 汽车音响改装 — not a fine-grained service item). Reuse contract: ${QUESTION_POOL_REUSE_CONTRACT}; call it as planned without judging whether to skip or rerun — when no reusable pool exists the service mines keywords online and generates candidate questions (real provider spend). Omit productLine to use the brand's first confirmed product line (synced from the industry fact at knowledge confirmation — if none exists, call request_brand_material so the user can import brand material and confirm knowledge first, then retry). When the user names a specific business within the domain (e.g. 汽车隔音), pass it as businessFocus instead of inventing a new product line. On fresh generation the result renders as the confirmation card where the user reviews the mined keywords and selects questions — never claim the pool is confirmed; a reused confirmed pool arrives on the card pre-checked with the previous selection and the user re-selects this round's questions there (the card also offers a paid regenerate) — the question gate releases only on the user's card confirmation, never proceed past it on your own. Keyword geography is bounded by the user-declared service area (服务区域): the declared scope kept at its own granularity (e.g. 新都区 stays 新都区, not the whole 成都) is both the mining anchor and the ceiling — terms never reference regions beyond it, and store addresses only anchor when no usable scope is declared. For targetRegion pass the declared scope as a plain name (e.g. 新都区 or 成都); never prose like 成都本地，辐射西南地区 and never boundless values such as 全国 — nationwide/online service mines in geo-free mode.`,
         {
           productLine: z.string().min(1).max(120).optional(),
           targetRegion: z.string().min(1).max(60),
@@ -1759,15 +1759,16 @@ export async function createXiaojingGeoServer() {
             idempotencyKey: input.idempotencyKey ?? `agent-pool-${crypto.randomUUID()}`,
           });
           await recordGeoOperationMilestone(identity, 'question-pool-generated');
-          // 复用契约（ADR-0011 Decision 3 协议侧）：已确认池到达时结果信封
-          // 携带 outcome + proceed 提示，与工具描述、next-step 表同一话术——
-          // 模型不再判断「已有确认池要不要重跑」。判定与确认卡展示侧（#29）
-          // 同口径：只看 status=confirmed；reused 徽章不构成第二条件。
+          // 复用契约（ADR-0011 Decision 3，2026-09-01 修订）：已确认池到达时
+          // 卡片预勾上次的选择，由用户为本轮重选——问题门只在用户的卡片
+          // 确认（confirm 路由发 question-pool-confirmed 里程碑）后放行，
+          // 这里不自动放行。信封 outcome + proceed 提示与工具描述、next-step
+          // 表同一话术。判定与确认卡展示侧同口径：只看 status=confirmed。
           const envelope = pool.status === 'confirmed'
             ? {
                 kind: 'question-pool',
                 outcome: QUESTION_POOL_REUSE_OUTCOME,
-                proceed: `Zero-cost reuse hit — ${QUESTION_POOL_REUSE_CONTRACT}; the user does not re-confirm this pool.`,
+                proceed: `Zero-cost reuse hit — ${QUESTION_POOL_REUSE_CONTRACT}; park at the question gate and wait for the user's card confirmation, never proceed past it on your own.`,
                 pool,
               }
             : { kind: 'question-pool', pool };
@@ -1779,7 +1780,7 @@ export async function createXiaojingGeoServer() {
       ),
       tool(
         'plan_topics',
-        'Run the content-planning stage: cluster the confirmed questions semantically and produce the five-type topic/title plan (real provider spend; the service reuses the existing plan for the current pool when valid). The result renders as the confirmation card where the user approves plan items — never claim the plan is confirmed; the user confirms on the card. Requires a confirmed question pool first.',
+        'Run the content-planning stage: cluster the confirmed questions semantically and produce the five-type topic/title plan (real provider spend). Plan reuse: the service returns the existing confirmed plan for the same pool revision at zero cost — the card arrives pre-checked with the previously approved items and the user re-confirms or regenerates there (a paid regenerate); the content gate releases only on the card confirmation by the user, never proceed past it on your own. On fresh generation the result renders as the confirmation card where the user approves plan items — never claim a fresh plan is confirmed; the user confirms on the card. Requires a confirmed question pool first.',
         {
           questionPoolId: z.string().min(1).max(120).optional(),
         },
@@ -1792,12 +1793,23 @@ export async function createXiaojingGeoServer() {
             ...(input.questionPoolId ? { questionPoolId: input.questionPoolId } : {}),
           });
           await recordGeoOperationMilestone(identity, 'topic-plan-generated');
+          // 复用命中（prepare 返回同池同版本的既有 confirmed 计划，零成本）：
+          // 停卡重选（预勾上次的已批准项），用户「沿用此计划」确认或付费
+          // 重新生成——内容计划门只在用户的卡片确认后放行，这里不自动放行。
+          const envelope = plan.status === 'confirmed'
+            ? {
+                kind: 'topic-plan',
+                outcome: TOPIC_PLAN_REUSE_OUTCOME,
+                proceed: 'Zero-cost reuse hit — this confirmed plan was already approved; park at the content gate and wait for the user to re-confirm or regenerate on the card, never proceed past it on your own.',
+                plan: toTopicPlanCardProjection(plan),
+              }
+            : { kind: 'topic-plan', plan: toTopicPlanCardProjection(plan) };
           // 信封必须走卡片瘦身投影：完整投影曾达 ~81KB，超过 MCP 工具结果
           // 上限被 MCP 宿主客户端持久化成文件，tool.result 变存根、确认卡
           // 随之不渲染。瘦身后同级计划 ~29KB；plannedFacts 全量值以 SQLite
           // 为权威（saveItems 合并时服务端回填）。
           return {
-            content: [{ type: 'text' as const, text: JSON.stringify({ kind: 'topic-plan', plan: toTopicPlanCardProjection(plan) }) }],
+            content: [{ type: 'text' as const, text: JSON.stringify(envelope) }],
           };
         },
         { alwaysLoad: true },

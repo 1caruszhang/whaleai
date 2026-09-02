@@ -214,6 +214,8 @@ function providers(
   options: {
     failGenerationOnce?: boolean;
     ungroundedQuestions?: boolean;
+    /** 问题生成首轮返回不可解析输出，验证带反馈修正重试救回（用户裁决 2026-09-01 少报错）。 */
+    failQuestionParseOnce?: boolean;
   } = {},
 ) {
   const keywordSearch = {
@@ -232,14 +234,38 @@ function providers(
     ),
   } satisfies GeoKeywordSearchCapability;
   let shouldFail = options.failGenerationOnce === true;
+  let shouldFailParse = options.failQuestionParseOnce === true;
   const generation = {
     slot: "generation" as const,
-    complete: vi.fn(async () => {
-      if (shouldFail) {
-        shouldFail = false;
-        throw new Error("question_pool_provider_failed");
-      }
-      return JSON.stringify({
+    complete: vi.fn(
+      async (
+        ...args: Parameters<GeoTextCapability["complete"]>
+      ): Promise<string> => {
+        if (shouldFail) {
+          shouldFail = false;
+          throw new Error("question_pool_provider_failed");
+        }
+        if (shouldFailParse) {
+          shouldFailParse = false;
+          // 带反馈的纠正轮必须能从 prompt 里读到错误现场。
+          if (args[0].at(-1)?.content.includes("上一次输出无法解析或为空")) {
+            return JSON.stringify({
+              questions: [
+                {
+                  text: "成都汽车改装哪家好？",
+                  recommended: true,
+                  sourceKeywords: ["成都汽车改装"],
+                },
+                {
+                  text: "锦江区汽车隔音推荐哪家？",
+                  sourceKeywords: ["锦江区汽车隔音"],
+                },
+              ],
+            });
+          }
+          return "这不是 JSON";
+        }
+        return JSON.stringify({
         questions: options.ungroundedQuestions
           ? [
               { text: "缺少来源的问题？" },
@@ -476,6 +502,21 @@ describe("QuestionPoolService", () => {
     expect(provider.keywordSearch.search).not.toHaveBeenCalled();
     expect(provider.generation.complete).not.toHaveBeenCalled();
     expect(provider.embedding.embed).not.toHaveBeenCalled();
+  });
+
+  it("recovers unparseable question output with one feedback retry instead of erroring", async () => {
+    // 带反馈修正重试（用户裁决 2026-09-01 少报错）：首轮输出不是 JSON 时
+    // 带错误现场补一轮，救回后不再以裸错误打回 agent；供应商类故障（非
+    // question_pool_empty_* 编码）不吞、保持 checkpoint 断点续跑契约。
+    const persistence = new FakePersistence();
+    const setup = service(persistence, providers({ failQuestionParseOnce: true }));
+    const pool = await setup.service.generate(input);
+    expect(pool.questions.length).toBeGreaterThan(0);
+    expect(setup.provider.generation.complete).toHaveBeenCalledTimes(2);
+    const retryPrompt = setup.provider.generation.complete.mock.calls[1][0]
+      .at(-1)?.content;
+    expect(retryPrompt).toContain("上一次输出无法解析或为空");
+    expect(retryPrompt).toContain("question_pool_empty_questions");
   });
 
   it("retries only the failed stage and reuses paid checkpoints with one billing key", async () => {

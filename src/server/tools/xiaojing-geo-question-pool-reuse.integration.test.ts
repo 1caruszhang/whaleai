@@ -144,7 +144,9 @@ describe('run_question_pool reuse contract over a live MCP server', () => {
         expect(payload.kind).toBe('question-pool');
         expect(payload.outcome).toBe(QUESTION_POOL_REUSE_OUTCOME);
         expect(payload.proceed).toContain(QUESTION_POOL_REUSE_CONTRACT);
-        expect(payload.proceed).toContain('does not re-confirm');
+        // 修订口径（2026-09-01）：复用停卡重选——proceed 要求停在问题门等
+        // 用户的卡片确认，而不是「无需再确认、直接前进」。
+        expect(payload.proceed).toContain("park at the question gate");
         expect(payload.pool).toMatchObject({ id: 'pool-reuse-32', status: 'confirmed' });
         // 复用即收尾：prepare 一次后没有任何 stage claim / persist 调用。
         const poolRoutes = calls.filter(([path]) =>

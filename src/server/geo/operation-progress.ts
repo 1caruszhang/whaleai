@@ -42,71 +42,76 @@ interface MilestonePlan {
   beginSteps?: readonly string[];
   /** Plain steps to start then complete, in order. */
   completeSteps: readonly string[];
-  /** The confirmation gate this milestone satisfies (must be awaiting). */
-  confirmStep: string | null;
+  /** 同一业务事实在不同计划形态下停靠的不同 step-id（如问题选择门在
+   * 全链是 confirm-question-selection、在 next-round 不更新知识计划是
+   * select-next-question-pool）：逐个检查，放行所有处于 awaiting 的门。 */
+  confirmSteps: readonly string[];
 }
 
 const MILESTONES: Record<GeoOperationMilestone, MilestonePlan> = {
   "materials-imported": {
     completeSteps: ["collect-materials", "extract-facts"],
-    confirmStep: null,
+    confirmSteps: [],
   },
   "knowledge-confirmed": {
     completeSteps: ["collect-materials", "extract-facts"],
-    confirmStep: "confirm-knowledge",
+    confirmSteps: ["confirm-knowledge"],
   },
   "question-pool-generation-started": {
     beginSteps: ["generate-question-pool"],
     completeSteps: [],
-    confirmStep: null,
+    confirmSteps: [],
   },
   "question-pool-generated": {
     completeSteps: ["generate-question-pool"],
-    confirmStep: null,
+    confirmSteps: [],
   },
   "question-pool-confirmed": {
     completeSteps: [],
-    confirmStep: "confirm-question-selection",
+    // 复用命中（ADR-0011 Decision 3）与正常确认共用此里程碑：全链的
+    // confirm-question-selection 与 next-round 不更新知识计划的
+    // select-next-question-pool 是同一道用户门在不同计划形态下的停靠。
+    confirmSteps: ["confirm-question-selection", "select-next-question-pool"],
   },
   // The main chain no longer embeds baseline steps; a real probe only
   // advances the conditional steps of a performance-inspection operation.
   "baseline-probe-started": {
     completeSteps: [],
-    confirmStep: "confirm-missing-evidence-probe",
+    confirmSteps: ["confirm-missing-evidence-probe"],
   },
   "baseline-probe-finished": {
     completeSteps: ["probe-missing-evidence"],
-    confirmStep: null,
+    confirmSteps: [],
   },
   "topic-plan-started": {
     beginSteps: ["plan-topics"],
     completeSteps: [],
-    confirmStep: null,
+    confirmSteps: [],
   },
   "topic-plan-generated": {
     completeSteps: ["plan-topics"],
-    confirmStep: null,
+    confirmSteps: [],
   },
   "topic-plan-confirmed": {
     completeSteps: ["plan-topics"],
-    confirmStep: "confirm-content-plan",
+    confirmSteps: ["confirm-content-plan"],
   },
   "article-generation-started": {
     beginSteps: ["generate-articles"],
     completeSteps: [],
-    confirmStep: null,
+    confirmSteps: [],
   },
   "articles-generated": {
     completeSteps: ["generate-articles"],
-    confirmStep: null,
+    confirmSteps: [],
   },
   "articles-approved": {
     completeSteps: ["generate-articles"],
-    confirmStep: "confirm-articles",
+    confirmSteps: ["confirm-articles"],
   },
   "distribution-confirmed": {
     completeSteps: ["plan-distribution"],
-    confirmStep: "confirm-distribution",
+    confirmSteps: ["confirm-distribution"],
   },
 };
 
@@ -175,8 +180,10 @@ export const GEO_NEXT_STEP_GUIDES: Readonly<Record<string, GeoNextStepGuide>> = 
   },
   "select-next-question-pool": {
     tool: "run_question_pool",
-    guidance:
-      "Bring up the existing confirmed question pool via run_question_pool so the user picks this round's questions on the card.",
+    // 复用契约（ADR-0011 Decision 3，2026-09-01 修订）：与
+    // generate-question-pool 条目同源话术——按计划调用即安全；复用命中
+    // 停卡重选（预勾上次选择），只有用户的卡片确认才放行问题门。
+    guidance: `Call run_question_pool as planned without judging whether to skip — ${QUESTION_POOL_REUSE_CONTRACT}.`,
   },
   "plan-topics": {
     tool: "plan_topics",
@@ -317,9 +324,9 @@ function transitionApplicable(
   plan: MilestonePlan,
 ): boolean {
   if (TERMINAL_OPERATION.has(operation.status)) return false;
-  const confirmTarget = plan.confirmStep
-    ? operation.steps.find((step) => step.id === plan.confirmStep)
-    : undefined;
+  const confirmTargets = plan.confirmSteps
+    .map((stepId) => operation.steps.find((step) => step.id === stepId))
+    .filter((step): step is GeoOperationStep => step !== undefined);
   const actionable = [
     ...(plan.beginSteps ?? []),
     ...plan.completeSteps,
@@ -327,8 +334,11 @@ function transitionApplicable(
   const hasProgressable = actionable.some((stepId) =>
     stepProgressable(operation.steps.find((step) => step.id === stepId)),
   );
-  if (plan.confirmStep) {
-    return confirmTarget?.status === "awaiting-confirmation" || hasProgressable;
+  if (plan.confirmSteps.length > 0) {
+    return (
+      confirmTargets.some((step) => step.status === "awaiting-confirmation") ||
+      hasProgressable
+    );
   }
   return hasProgressable;
 }
@@ -460,14 +470,14 @@ export class GeoOperationProgressRecorder {
         }),
       );
     }
-    if (plan.confirmStep) {
-      const step = await this.inspect(operationId, plan.confirmStep);
-      if (step?.status !== "awaiting-confirmation") return;
+    for (const stepId of plan.confirmSteps) {
+      const step = await this.inspect(operationId, stepId);
+      if (step?.status !== "awaiting-confirmation") continue;
       await applyWithRetry(this.service, operationId, (operation) =>
         this.service.recordConfirmedStep({
           operationId,
           expectedRevision: operation.revision,
-          stepId: plan.confirmStep as string,
+          stepId,
         }),
       );
     }

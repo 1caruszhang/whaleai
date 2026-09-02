@@ -8,6 +8,7 @@ const mocks = vi.hoisted(() => ({
   apiPost: vi.fn(),
   confirm: vi.fn(),
   latest: vi.fn(),
+  regenerate: vi.fn(),
 }));
 
 vi.mock("@/context/TabContext", () => ({
@@ -18,6 +19,7 @@ vi.mock("@/context/TabContext", () => ({
 vi.mock("@/api/brandQuestionPoolClient", () => ({
   confirmQuestionPool: mocks.confirm,
   loadLatestQuestionPool: mocks.latest,
+  regenerateQuestionPool: mocks.regenerate,
 }));
 
 import QuestionPoolGateCard, {
@@ -86,6 +88,7 @@ function wrappedResult(): string {
 beforeEach(() => {
   mocks.confirm.mockReset();
   mocks.latest.mockReset();
+  mocks.regenerate.mockReset();
 });
 
 describe("QuestionPoolGateCard", () => {
@@ -146,6 +149,86 @@ describe("QuestionPoolGateCard", () => {
     expect(
       screen.queryByText("已复用此前确认的题库，无需再次确认"),
     ).not.toBeInTheDocument();
+  });
+
+  // 复用契约修订（ADR-0011 Decision 3，2026-09-01）：复用命中的 confirmed
+  // 池携带 outcome 标记 → 重选模式：预勾上次选择、可改选后确认，另提供
+  // 「重新生成问题池」付费入口；确认走同一 confirm 端点（放行问题门）。
+  it("renders the reused pool selectable with the previous selection pre-checked", async () => {
+    mocks.confirm.mockResolvedValue({ poolId: "pool-17", revision: 3 });
+    const reused = {
+      ...pool,
+      status: "confirmed",
+      reused: true,
+    } as unknown as QuestionPoolProjection;
+    render(
+      <QuestionPoolGateCard
+        data={{ kind: "question-pool", outcome: "reused-confirmed-pool", pool: reused }}
+      />,
+    );
+
+    expect(
+      screen.getByText("已复用此前确认的题库——请勾选本轮要覆盖的问题后确认"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /确认本轮问题（1）/ }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "重新生成问题池" }),
+    ).toBeInTheDocument();
+    // 预勾上次选择：q-1 勾选、q-2 未勾，且复用池不再是只读。
+    const first = screen.getByRole("checkbox", { name: "选择 成都车载音响改装哪家好？" });
+    expect(first).toBeChecked();
+    expect(
+      screen.getByRole("checkbox", { name: "选择 成都汽车隔音多少钱？" }),
+    ).not.toBeChecked();
+
+    fireEvent.click(
+      screen.getByRole("checkbox", { name: "选择 成都汽车隔音多少钱？" }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: /确认本轮问题（2）/ }));
+    await waitFor(() => expect(mocks.confirm).toHaveBeenCalledTimes(1));
+    const [, identity, input] = mocks.confirm.mock.calls[0];
+    expect(identity).toEqual({ workspaceId: "brand-17", sessionId: "session-17" });
+    expect(input.poolId).toBe("pool-17");
+    expect(input.questions.filter((q: { selected: boolean }) => q.selected)).toHaveLength(2);
+  });
+
+  it("regenerates the pool on demand and switches to the fresh pending flow", async () => {
+    const reused = {
+      ...pool,
+      status: "confirmed",
+      reused: true,
+    } as unknown as QuestionPoolProjection;
+    const fresh = {
+      ...pool,
+      id: "pool-18",
+      status: "awaiting-selection",
+      reused: false,
+      revision: 0,
+    } as unknown as QuestionPoolProjection;
+    mocks.regenerate.mockResolvedValue(fresh);
+    render(
+      <QuestionPoolGateCard
+        data={{ kind: "question-pool", outcome: "reused-confirmed-pool", pool: reused }}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "重新生成问题池" }));
+    await waitFor(() => expect(mocks.regenerate).toHaveBeenCalledTimes(1));
+    const [, identity, input] = mocks.regenerate.mock.calls[0];
+    expect(identity).toEqual({ workspaceId: "brand-17", sessionId: "session-17" });
+    expect(input.productLine).toBe("车载音响");
+    expect(input.targetRegion).toBe("成都");
+    expect(input.idempotencyKey).toMatch(/^pool-regen-/);
+    // 新池按正常待决流程呈现：待决提示回归，重生成按钮不再出现。
+    expect(await screen.findByText("确认后进入下一阶段")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "重新生成问题池" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /确认本轮问题（1）/ }),
+    ).toBeInTheDocument();
   });
 
   it("keeps the gate user-owned and surfaces CAS failures for retry", async () => {

@@ -52,7 +52,7 @@ embedding 失败语义（折中降级，用户裁决）：Provider 侧只对瞬�
 - 用户补充的问题无模型评分：中性占位分（全 0、低优先级、formula=`user-added; not scored`）+ `user-added` 证据；补充的词默认 `longtail`/`medium`，id 续 `kw-user-*`/`q-user-*`。
 - 修订不改 pool 状态、不产生 decision、不投送 reminder；确认卡（`QuestionPoolGateCard`）待决期间每 3s 轮询 `/question-pools/latest`，按问题文本指纹做服务端胜合并（被改行采信服务端、未改行保留本地勾选），确认用最新 revision CAS。
 - 复用契约协议侧（票 #32，ADR-0011 Decision 3）：`run_question_pool` 的复用契约以同一话术（`QUESTION_POOL_REUSE_CONTRACT`，shared 常量）逐字落在三处——工具描述、复用命中的结果信封（`outcome=reused-confirmed-pool` + proceed 提示）、next-step 单表的 `generate-question-pool` 条目；模型按计划调用即安全，不现场判断「已有确认池要不要重跑」。判定与展示侧同口径：只看 `status=confirmed`（待决池到达不携带 outcome，正常确认卡流程不误导）；三处一致由 MCP 集成测试（`xiaojing-geo-question-pool-reuse`）守护。
-- 复用命中（`run_question_pool` 返回已确认池）时确认卡初始即处 confirmed 态：页脚显示「已复用此前确认的题库，无需再次确认」，不显示「确认后进入下一阶段」的待决话术，也不渲染确认按钮（ADR-0011 Decision 3 展示侧）；awaiting-selection 起步的正常待决流程与用户确认后的原位成功态不受影响。
+- 复用命中的展示侧（ADR-0011 Decision 3，2026-09-01 修订：复用改停卡重选）：`run_question_pool` 返回已确认池时信封携带 `outcome=reused-confirmed-pool`，确认卡进入重选模式——预勾上次的选择、可改选后按「确认本轮问题（N）」提交（与待决池同一 `/question-pools/confirm` 端点，Rust `decide_question_pool` 接受对 confirmed 池的再次裁决且必然 revision+1，选题计划复用缓存按池版本键自然失效、下游按新选择重新规划）；另提供「重新生成问题池」按钮（generate 路由 `regenerate: true` → 服务 `forceRegenerate` → Rust `reuse_existing=false`，跳过复用强制重新挖掘，真实 provider 花费），成功后以正常待决流程呈现新池。问题门只在用户的卡片确认后放行（confirm 路由发 `question-pool-confirmed` 里程碑），工具侧不自动放行；跨会话：confirmed 池是工作区级事实，`decide_question_pool` 对非 owner 会话的重选放行（owner 闸只约束 awaiting-selection 待决池）。无 outcome 标记的 confirmed 池是旧信封，保持只读展示兼容。awaiting-selection 起步的正常待决流程与用户确认后的原位成功态不受影响。
 
 ## 测试边界
 

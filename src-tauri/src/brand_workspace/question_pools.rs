@@ -964,7 +964,11 @@ impl BrandWorkspaceStore {
             .optional()
             .map_err(|error| format!("read question pool: {error}"))?
             .ok_or_else(|| "question_pool_not_found".to_string())?;
-        if owner_session_id != request.session_id {
+        // 跨会话重选（复用停卡重选，2026-09-01）：confirmed 池是工作区级
+        // 事实——新一轮 Session 对复用池的重选裁决放行（快照与 revision CAS
+        // 仍是护栏）；owner 闸只约束 awaiting-selection 待决池（防两个
+        // Session 并发裁决同一草稿）。
+        if owner_session_id != request.session_id && status != "confirmed" {
             return Err("question_pool_identity_mismatch".to_string());
         }
         if !matches!(status.as_str(), "awaiting-selection" | "confirmed") {
@@ -1923,6 +1927,108 @@ mod tests {
                 })
                 .unwrap_err(),
             "question_pool_confirmed_immutable"
+        );
+    }
+
+    #[test]
+    fn confirmed_pool_reselection_is_workspace_scoped_across_sessions() {
+        // 复用停卡重选（2026-09-01）：confirmed 池是工作区级事实——新一轮
+        // Session 对旧会话确认过的池重选裁决放行；awaiting-selection 待决池
+        // 仍受 owner 闸约束（跨会话裁决草稿被拒）。
+        let (store, workspace) = setup();
+        let prepared = prepare(&store, &workspace, "cross-session-confirmed");
+        let attempt_id = prepared.attempt.unwrap().id;
+        for stage in ["keyword-search", "question-generation", "embedding"] {
+            complete_step(&store, &workspace, &attempt_id, stage);
+        }
+        let pool = store
+            .persist_question_pool(
+                &workspace.id,
+                "session-08",
+                QuestionPoolPersistRequest {
+                    attempt_id,
+                    keywords: serde_json::json!([
+                        {"id":"kw-1","term":"成都汽车改装","category":"core","heat":"high","platform":"doubao"}
+                    ]),
+                    questions: serde_json::json!([
+                        {"id":"q-1","text":"成都汽车改装哪家好？","selected":true},
+                        {"id":"q-2","text":"成都汽车隔音多少钱？","selected":false}
+                    ]),
+                    source_evidence: serde_json::json!([]),
+                },
+            )
+            .unwrap();
+        store
+            .decide_question_pool(QuestionPoolDecisionRequest {
+                workspace_id: workspace.id.clone(),
+                session_id: "session-08".to_string(),
+                pool_id: pool.id.clone(),
+                expected_revision: 0,
+                questions: pool.questions.clone(),
+                selected_question_ids: vec!["q-1".to_string()],
+                actor_id: "desktop-user".to_string(),
+            })
+            .unwrap();
+        // 另一会话（新一轮）对复用 confirmed 池重选：放行，决策照常推进。
+        let redecision = store
+            .decide_question_pool(QuestionPoolDecisionRequest {
+                workspace_id: workspace.id.clone(),
+                session_id: "session-other".to_string(),
+                pool_id: pool.id.clone(),
+                expected_revision: 1,
+                questions: pool.questions.clone(),
+                selected_question_ids: vec!["q-1".to_string(), "q-2".to_string()],
+                actor_id: "desktop-user".to_string(),
+            })
+            .unwrap();
+        assert_eq!(redecision.revision, 2);
+        assert_eq!(redecision.selected_question_ids.len(), 2);
+        // 反例：待决池跨会话裁决仍被拒——owner 闸只对 confirmed 放开。
+        //（同参数二次 prepare 会被复用契约命中上面的 confirmed 池，这里
+        // 显式关掉复用造一个全新的待决池。）
+        let pending_prepared = store
+            .prepare_question_pool(QuestionPoolPrepareRequest {
+                workspace_id: workspace.id.clone(),
+                session_id: "session-08".to_string(),
+                product_line: "汽车音响".to_string(),
+                target_region: "成都".to_string(),
+                generation_parameters: serde_json::json!({"policyVersion":"js-ai-dev-pred-1-v1"}),
+                idempotency_key: "cross-session-pending".to_string(),
+                reuse_existing: false,
+                retry: false,
+            })
+            .unwrap();
+        let pending_attempt = pending_prepared.attempt.unwrap().id;
+        for stage in ["keyword-search", "question-generation", "embedding"] {
+            complete_step(&store, &workspace, &pending_attempt, stage);
+        }
+        let pending = store
+            .persist_question_pool(
+                &workspace.id,
+                "session-08",
+                QuestionPoolPersistRequest {
+                    attempt_id: pending_attempt,
+                    keywords: serde_json::json!([]),
+                    questions: serde_json::json!([
+                        {"id":"q-1","text":"成都汽车改装哪家好？","selected":true}
+                    ]),
+                    source_evidence: serde_json::json!([]),
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .decide_question_pool(QuestionPoolDecisionRequest {
+                    workspace_id: workspace.id.clone(),
+                    session_id: "session-other".to_string(),
+                    pool_id: pending.id.clone(),
+                    expected_revision: 0,
+                    questions: pending.questions.clone(),
+                    selected_question_ids: vec!["q-1".to_string()],
+                    actor_id: "desktop-user".to_string(),
+                })
+                .unwrap_err(),
+            "question_pool_identity_mismatch"
         );
     }
 

@@ -64,6 +64,8 @@ export async function handleXiaojingQuestionPoolsRoute(
           recentSelectionLimit?: number;
         };
         retry?: boolean;
+        /** 卡片「重新生成问题池」按钮：跳过复用强制重新挖掘（真实花费）。 */
+        regenerate?: boolean;
       };
       const runtimeSessionId = getRuntimeSessionIdForRequest();
       const workspaceId = basename(resolve(workspacePath));
@@ -76,6 +78,7 @@ export async function handleXiaojingQuestionPoolsRoute(
       const pool = await service.generate({
         ...payload,
         ...identity,
+        forceRegenerate: payload.regenerate === true,
       }, request.signal);
       await recordGeoOperationMilestone(identity, 'question-pool-generated');
       // auto profile：问题选择是零成本可逆选择门，基线探测等硬门仍在

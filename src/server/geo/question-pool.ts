@@ -462,6 +462,9 @@ export interface QuestionPoolGenerateInput {
   businessFocus?: string;
   generationParameters?: Partial<QuestionPoolGenerationParameters>;
   retry?: boolean;
+  /** 卡片「重新生成问题池」按钮：跳过复用强制重新挖掘（真实 provider
+   * 花费）；缺省走复用契约（ADR-0011 Decision 3）。 */
+  forceRegenerate?: boolean;
 }
 
 interface ActiveAttempt {
@@ -541,6 +544,40 @@ function checkpointFromPool(
   ];
 }
 
+/**
+ * 结构化输出带反馈修正重试（用户裁决 2026-09-01 少报错）：与 topic-plan
+ * 的 structuredGeneration 同模式——解析失败/空产出（question_pool_empty_*
+ * 编码；extractJsonObject 对坏 JSON 返回 null 而非抛错，解析类失败全部
+ * 收敛为这两个编码）先带错误现场补一轮再放弃。供应商/网络故障不在此重
+ * 试：HTTP 层已有退避重试，配置类失败与 checkpoint 断点续跑契约（failed
+ * 阶段可重入）保持原样。
+ */
+const PARSE_CLASS_ERROR_RE = /^question_pool_empty_/;
+
+async function withParseRetry<T>(input: {
+  stage: string;
+  run: (extra?: string) => Promise<string>;
+  parse: (raw: string) => T;
+  retryContract: string;
+}): Promise<{ value: T; raw: string }> {
+  const raw = await input.run();
+  try {
+    return { value: input.parse(raw), raw };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (!PARSE_CLASS_ERROR_RE.test(message)) throw error;
+    console.warn(
+      `[question-pool] ${input.stage} 解析失败（${message}），带反馈重试一次`,
+    );
+    // checkpoint 阶段产出保持 { raw, ... } 原形状：raw 是断点续跑留痕的
+    // 模型原始输出，重试救回时留最终成功那一轮的。
+    const retryRaw = await input.run(
+      `\n上一次输出无法解析或为空（${message}）。${input.retryContract}不要 markdown 代码块或任何说明文字。`,
+    );
+    return { value: input.parse(retryRaw), raw: retryRaw };
+  }
+}
+
 export class QuestionPoolService {
   private readonly activeByKey = new Map<string, ActiveAttempt>();
   private readonly inFlight = new Map<
@@ -610,7 +647,9 @@ export class QuestionPoolService {
       targetRegion,
       generationParameters: parameters,
       idempotencyKey: input.idempotencyKey,
-      reuseExisting: true,
+      // 卡片「重新生成问题池」按钮（真实 provider 花费）显式跳过复用、
+      // 强制重新挖掘；缺省走复用契约（ADR-0011 Decision 3）。
+      reuseExisting: input.forceRegenerate !== true,
       retry: input.retry === true,
     });
     // targetRegion 越界校验（票 #31 / ADR-0011 增量校验）：声明口径存在时
@@ -692,19 +731,24 @@ export class QuestionPoolService {
         },
         signal,
         async () => {
-          const raw = await this.keywordSearch.search(keywordPrompt, {
-            signal,
-            maxTokens: 4096,
-            system: KEYWORD_MINING_SYSTEM_PROMPT,
+          const { value: keywords, raw } = await withParseRetry({
+            stage: "keyword-search",
+            run: (extra) =>
+              this.keywordSearch.search(keywordPrompt + (extra ?? ""), {
+                signal,
+                maxTokens: 4096,
+                system: KEYWORD_MINING_SYSTEM_PROMPT,
+              }),
+            retryContract:
+              '只返回一个 JSON 对象：{"core":[{"term":"...","heat":"high|medium|low"}],"scene":[...],"longtail":[...]}。',
+            parse: (raw) =>
+              parseMinedKeywords(raw, generationContext.brandNames, {
+                existingTerms: preparation.context.keywordLibrary.map(
+                  (keyword) => keyword.term,
+                ),
+              }),
           });
-          return {
-            raw,
-            keywords: parseMinedKeywords(raw, generationContext.brandNames, {
-              existingTerms: preparation.context.keywordLibrary.map(
-                (keyword) => keyword.term,
-              ),
-            }),
-          };
+          return { raw, keywords };
         },
       );
       const keywords = (keywordOutput as { keywords: MinedKeyword[] }).keywords;
@@ -725,23 +769,32 @@ export class QuestionPoolService {
         { prompt: questionPrompt, keywordHash: hash(keywords) },
         signal,
         async () => {
-          const raw = await this.generation.complete(
-            [
-              {
-                role: "system",
-                content: QUESTION_GENERATION_SYSTEM_PROMPT,
-              },
-              { role: "user", content: questionPrompt },
-            ],
-            { signal, maxTokens: 4096 },
-          );
-          const candidates = parseQuestionCandidates(
-            raw,
-            keywords,
-            parameters.candidateLimit,
-          );
-          if (candidates.length === 0)
-            throw new Error("question_pool_empty_questions");
+          const { value: candidates, raw } = await withParseRetry({
+            stage: "question-generation",
+            run: (extra) =>
+              this.generation.complete(
+                [
+                  {
+                    role: "system",
+                    content: QUESTION_GENERATION_SYSTEM_PROMPT,
+                  },
+                  { role: "user", content: questionPrompt + (extra ?? "") },
+                ],
+                { signal, maxTokens: 4096 },
+              ),
+            retryContract:
+              '只返回 JSON：{"questions":[{"text":"...","recommended":false,"sourceKeywords":["逐字引用词库原词"]}]}，sourceKeywords 必须逐字引用词库中的原词。',
+            parse: (raw) => {
+              const parsed = parseQuestionCandidates(
+                raw,
+                keywords,
+                parameters.candidateLimit,
+              );
+              if (parsed.length === 0)
+                throw new Error("question_pool_empty_questions");
+              return parsed;
+            },
+          });
           return { raw, candidates };
         },
       );

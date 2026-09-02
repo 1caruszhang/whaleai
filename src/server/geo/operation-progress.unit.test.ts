@@ -411,6 +411,32 @@ describe("GeoOperationProgressRecorder", () => {
     ]);
   });
 
+  it("question-pool-confirmed also releases the next-round select-next-question-pool gate (reuse hit)", async () => {
+    // 复用命中（ADR-0011 Decision 3）：next-round 不更新知识的计划里问题
+    // 选择门停靠在 select-next-question-pool——run_question_pool 复用分支
+    // 发出的 question-pool-confirmed 里程碑必须放行这道门并解锁后续步骤。
+    const plan = planGeoOperation({
+      intent: "next-round-optimization",
+      goal: "下一轮不更新知识",
+      updateKnowledge: false,
+    });
+    const operation = projectionOf("op-next", plan, "awaiting-confirmation", null);
+    operation.steps[0]!.status = "succeeded"; // plan-ack released
+    operation.steps[1]!.status = "awaiting-confirmation"; // select-next-question-pool
+    const service = new FakeService();
+    service.operations = [operation];
+
+    await new GeoOperationProgressRecorder(service).record(identity, "question-pool-confirmed");
+
+    expect(service.calls.map(([action, stepId]) => `${action}:${stepId}`)).toEqual([
+      "confirm:select-next-question-pool",
+    ]);
+    const released = service.operations[0];
+    expect(released.steps.find((step) => step.id === "select-next-question-pool")?.status)
+      .toBe("succeeded");
+    expect(released.steps.find((step) => step.id === "plan-topics")?.status).toBe("ready");
+  });
+
   // 计划认可门未放行时，业务里程碑不能替用户推进任何步骤：
   // begin/confirm 全部按状态机规则被拒并安全跳过。
   it("keeps milestones inert while the plan acknowledgement gate is unreleased", async () => {
