@@ -4,6 +4,8 @@
 
 唤起标准写入系统提示词硬规则：① 制定计划时品牌无已确认知识或明显过薄；③ 用户带来二进制附件、受限读取无法处理；④ 用户明确要求补材料。标准②（操作中途闸门缺材料佐证）**刻意排除**：中途不打断，按来源层级以「AI 补全」行推进、用户裁决兜底；材料充分性只在计划时点判断一次。
 
+> **2026-09-02 修订（geo-plan-normalization 票 03）**：标准①的知识状态限定词删除，触发收敛为材料收集契约 `MATERIAL_COLLECTION_CONTRACT`——计划放行后执行到材料收集步骤即调用，不在调用现场重新权衡知识是否够用（知识充分性只在起点推导判断一次，由计划形状承载）。契约话术在工具描述、next-step 单表 `collect-materials` 条目、系统提示词材料段三处逐字同源，MCP 集成测试断言一致；动机与现行口径见 `specs/tech_docs/material_import.md`。标准③④与②的刻意排除不变。
+
 ## Considered Options
 
 - **操作闸门 confirmation kind（plan-ack 模板）**：被否决。闸门寄生操作生命周期，覆盖不了操作外场景；要改 TS union 与 Rust `CONFIRMATION_KINDS` 双侧枚举；且 `GeoOperationGatePanels` 对 `brand-material-import` 刻意返回 null——票 27 已把导入发起从操作闸门搬出过，走此路等于两头翻旧决定。

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import { buildSystemPrompt } from './system-prompt';
 import { buildSessionFilesReminder } from '../shared/systemReminder';
+import { MATERIAL_COLLECTION_CONTRACT } from '../shared/geo/materialRequestCard';
 
 /**
  * system_prompt_architecture.md：修改 prompt 必须同步单测，且不得扩大能力面。
@@ -246,15 +247,22 @@ describe('session-files reminder copy stays in sync with the system prompt', () 
     expect(prompt).toContain('不要停在开放式提问');
   });
 
-  // ADR 0005 回归：材料请求卡的唤起标准是提示词硬规则，含标准②的刻意
-  // 排除——操作中途缺材料佐证不得打断，按来源层级推进交用户裁决。
-  it('pins the material-request invocation criteria and the mid-operation exclusion', () => {
-    expect(prompt).toContain('只在你判断需要新材料时调用');
-    expect(prompt).toContain('制定计划时品牌还没有已确认知识');
+  // ADR 0005 回归（票 03 修订口径）：材料请求卡的触发收敛为材料收集契约
+  // （计划放行后执行到材料收集步骤即调用），知识状态限定词不再出现在调用
+  // 现场；标准②的刻意排除保持——操作中途缺材料佐证不得打断，按来源层级
+  // 推进交用户裁决。
+  it('pins the material-collection contract, the plan-external entries and the mid-operation exclusion', () => {
+    expect(prompt).toContain('材料收集契约');
+    expect(prompt).toContain(MATERIAL_COLLECTION_CONTRACT);
+    expect(prompt).toContain('计划外的合法入口只有两个');
     expect(prompt).toContain('用户明确表示要补充品牌材料');
     expect(prompt).toContain('不可直读的二进制品牌材料');
     expect(prompt).toContain('操作进行中不得因某个确认门缺材料佐证而调用');
-    expect(prompt).toContain('材料是否够用只在制定计划时判断一次');
+    expect(prompt).toContain('按来源层级以 AI 补全行推进');
+    // 知识状态限定词不得回归（票 03：不在调用现场重判知识是否够用）。
+    expect(prompt).not.toContain('制定计划时品牌还没有已确认知识');
+    expect(prompt).not.toContain('明显撑不起本次目标');
+    expect(prompt).not.toContain('材料是否够用只在制定计划时判断一次');
   });
 
   // 认可门是唯一入口：放行前不得开始执行任何计划步骤，
@@ -264,7 +272,8 @@ describe('session-files reminder copy stays in sync with the system prompt', () 
     expect(prompt).toContain('一律等放行后按计划顺序执行');
     expect(prompt).toContain('先做什么取决于计划的第一步');
     expect(prompt).toContain('不得在放行前提前发出');
-    expect(prompt).toContain('随计划执行的请求卡等放行后执行到该步骤才发出');
+    // 契约首句承载「放行后执行到该步骤才发出」的时序语义。
+    expect(prompt).toContain('计划放行后执行到材料收集步骤即调用材料请求卡');
     // 旧错误规则（与计划卡同回合发卡）不得回归。
     expect(prompt).not.toContain('必须在创建操作的同一回合调用 request_brand_material');
   });

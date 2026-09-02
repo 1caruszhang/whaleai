@@ -66,7 +66,10 @@ import {
   type GeoOperationCreateInput,
 } from '../geo/operation';
 import { buildKnowledgeCandidatesCardData } from '../../shared/geo/knowledgeCard';
-import { buildMaterialRequestCardData } from '../../shared/geo/materialRequestCard';
+import {
+  buildMaterialRequestCardData,
+  MATERIAL_COLLECTION_CONTRACT,
+} from '../../shared/geo/materialRequestCard';
 import {
   dispatchGateRevision,
   GATE_REVISION_GATE_TYPES,
@@ -1512,7 +1515,7 @@ export async function createXiaojingGeoServer() {
       ),
       tool(
         'request_brand_material',
-        "Surface the brand-material request card in chat where the user uploads materials (file picker, pasted text or official-site URL; PDF/Office are parsed there). Call it exactly when: (1) a released plan's material-collection step runs and the brand has no confirmed knowledge, or the confirmed knowledge is clearly too thin for the goal — judge sufficiency once at planning time, but never emit this card before the plan is released; (2) the user explicitly asks to add brand material; (3) the user attached a binary file that read_session_file cannot parse and it is brand material. Never call it mid-operation just because a gate lacks material evidence — proceed with AI-completion rows and let the user adjudicate on that card. reason is one plain-language line shown on the card header. After calling it, tell the user to upload on the card and end your turn; the knowledge confirmation card follows the import automatically.",
+        `Surface the brand-material request card in chat where the user uploads materials (file picker, pasted text or official-site URL; PDF/Office are parsed there). Call it exactly when: (1) material-collection contract: ${MATERIAL_COLLECTION_CONTRACT}; (2) the user explicitly asks to add brand material; (3) the user attached a binary file that read_session_file cannot parse and it is brand material. Never call it mid-operation just because a gate lacks material evidence — proceed with AI-completion rows and let the user adjudicate on that card. reason is one plain-language line shown on the card header. After calling it, tell the user to upload on the card and end your turn; the knowledge confirmation card follows the import automatically.`,
         { reason: z.string().min(1).max(300).describe('One plain-language line telling the user why material is needed now.') },
         async (input) => ({
           content: [

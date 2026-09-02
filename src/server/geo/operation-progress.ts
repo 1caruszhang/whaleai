@@ -4,6 +4,7 @@ import type {
   GeoOperationStep,
   GeoOperationStepProgress,
 } from "../../shared/geo/operation";
+import { MATERIAL_COLLECTION_CONTRACT } from "../../shared/geo/materialRequestCard";
 import { QUESTION_POOL_REUSE_CONTRACT } from "../../shared/geo/questionPool";
 import type { NextStepReminderInput } from "../../shared/systemReminder";
 import { createGeoOperationService } from "./operation";
@@ -164,8 +165,10 @@ export interface GeoNextStepGuide {
 export const GEO_NEXT_STEP_GUIDES: Readonly<Record<string, GeoNextStepGuide>> = {
   "collect-materials": {
     tool: "request_brand_material",
-    guidance:
-      "Request brand material on the chat material-request card (paste, URL or upload) and wait there; pasted text goes through import_pasted_material.",
+    // 材料收集契约（票 03）：话术与工具描述、系统提示词材料段逐字同源
+    //（MATERIAL_COLLECTION_CONTRACT）——引述里就说清按计划调用即安全，
+    // 不在调用现场重新权衡品牌知识是否够用。
+    guidance: `Request brand material on the chat material-request card and wait there — ${MATERIAL_COLLECTION_CONTRACT}; pasted text goes through import_pasted_material.`,
   },
   "decide-knowledge-refresh": {
     tool: "choose_next_round_knowledge",
