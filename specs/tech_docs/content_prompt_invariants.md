@@ -48,6 +48,7 @@
 8. 关键词融入（js_ai 已裁决语义回迁，v2）：全局基线约每 300 字 1 次；guide 每 500 字 1 次、news 每 300 字 1 次、news_light 每 200 字 1 次且密度 2%–5%；guide/ranking 首段嵌入 1–2 个关键词；地域/核心关键词首次出现及关键论据处加粗，单一加粗实体（品牌名与 ranking 维度名除外）≤3 次，H2 不加粗。
 9. ranking 编排细则（js_ai 已裁决语义回迁，v2；维度来源 2026-09-01 改骨架注入）：维度由生成前维度选定小调用现选（lite 路由 `purpose: "dimension-planning"`，每篇现选、重试重发，解析校验 fail-loud）并字面注入正文 prompt，六家逐字共用；标题数字=正文陈列项数；全文倒数第三段选型建议（隐性条件式点首位，数字与陈列位 1 对账）；目标品牌最强维度置首、竞品两三条专精优势加一两条客观局限。
 10. 配图契约（ADR-0008 T4，v6；配额 2026-08-31 按类型修订，裁剪 2026-09-01 ADR-0009）：候选池非空时正文 prompt 注入材料图片候选清单（图片 id + 描述 + 类型标签 + 来源材料名的纯文字清单，模型不看图片本体，注入上限 50）与配图纪律（类型配额 `ARTICLE_IMAGE_QUOTA_BY_TYPE`：guide/showcase 8、news/news_light 3、ranking 1，按候选池弹性取小、宁缺毋滥、只在语义相关处插图、alt 文本由模型撰写）；正文以标准 Markdown 图片语法输出 `![alt](material-image://<图片id>)` 占位符。`parseGeneratedArticleBody` 放行该受控 scheme 的图片语法，scheme 逃逸用法（裸文本/普通链接/坏 id）拒绝（`article_generation_image_placeholder_invalid`），【】禁令不变；生成路径超配额按序裁掉多余占位符（宁裁不拒），确定性审核门对占位符语法违例与超类型配额阻断（覆盖人工编辑路径）。候选池空或读取失败降级为零配图继续生成。
+11. 内容可信度与结构化表达纪律（v8，D19）：正文 system prompt 恒注入「经验/专业/权威/可信」四信号与「实体-关系-属性」表达纪律——EEAT 与知识图谱原则的写作纪律转写，prompt 不出现两组原字样；权威信号的竞品表述限定对比清单类型（与其余类型的竞品禁令不冲突）；纯提示词层尽力约束——不新增 blocking/advisory 审核项、不新增 reflection 维度或 LLM 调用。
 
 ## 合法偏离登记表（相对 js_ai）
 
@@ -76,6 +77,7 @@
 | D16 | 正文配图 | 纯文字正文，无配图约定 | 材料图片候选清单注入正文 prompt（纯文字清单，模型不看图本体）+ 配图纪律（类型配额：guide/showcase 8、news 两类 3、ranking 1，按池弹性取小、宁缺毋滥、语义相关处插图、alt 由模型撰写）；正文输出 `material-image://` markdown 图片占位符，发布期由 Rust 替换为真实 URL（#15）；占位符语法/校验用例共享 materialImagePlaceholderContractCases.json（TS/Rust 同构，先例 rankingCompetitorContractCases.json）。正文段 policyVersion v5→v6 | ADR-0008 Decision 3（2026-08-31） |
 | D17 | 品牌加粗执行方式 | 无对应机制（prompt 纪律 + 门拦截） | 加粗从模型纪律降格为管线保证：parse 后 `autoBoldBrandMentions` 自动补粗（盲区：标题行、围栏代码块、图片语法、链接 URL），身份块 prompt 删加粗纪律（简称白名单保留）；配图超配额按序裁剪（宁裁不拒）；生成期全类型确定性预检 + 一次有界修复 pass（`buildArticleRepairMessages`，修复稿过同一 parse/审核门，modelAudit 记 `repairUsed`）；审核门加粗检查保留为断言并对人工编辑路径仍 blocking；批准卡 blocking/advisory 分区；新增审核失败遥测 `/api/brand-articles/review/stats`。正文段 policyVersion v6→v7 | ADR-0009 Decision 1/3/4/5/6/7（2026-09-01） |
 | D18 | ranking 六维来源 | prompt 要求模型自选并保持六家同序，门逐字符同序验收 | 维度骨架注入：生成前维度选定小调用（lite 路由 `purpose: "dimension-planning"`）现选 6 维字面注入 prompt，六家逐字共用；清单随稿落库（`geo_articles.ranking_dimensions_json`）；门改集合相等（顺序不敏感，对照注入清单，存量稿回退第一家比对）。契约措辞从「自选」改为「逐字使用注入清单」。v7 覆盖 | ADR-0009 Decision 2（2026-09-01） |
+| D19 | 正文可信度与结构化表达 | 无显式 EEAT / 知识图谱纪律 | system prompt 恒注入「经验/专业/权威/可信」四信号与「实体-关系-属性」表达纪律（EEAT 与知识图谱原则转写，不出现两组原字样；权威信号的竞品表述限定对比清单类型）；纯提示词层尽力约束，不新增 blocking/advisory 审核项、不新增 reflection 维度、不改动格式契约、无新增 LLM 调用。正文段 policyVersion v7→v8 | 用户裁决 2026-09-02 |
 
 ## 显式延后（下一批裁决）
 

@@ -1109,6 +1109,36 @@ describe("buildArticleGenerationMessages style layer", () => {
   });
 });
 
+describe("content trustworthiness and structured expression discipline (D19, v8)", () => {
+  const messages = buildArticleGenerationMessages({
+    brandName: "小鲸",
+    productLine: "知识服务",
+    targetRegion: "中国",
+    contentType: "guide",
+    topic: "企业知识库指南",
+    requestedTitle: "企业知识库指南",
+    constraints: "",
+    plannedFacts: facts,
+  });
+
+  it("injects the four signals and entity-relation-expression rules", () => {
+    expect(messages.system).toContain("【内容可信度与结构化表达纪律】");
+    expect(messages.system).toContain("经验信号");
+    expect(messages.system).toContain("专业信号");
+    expect(messages.system).toContain("权威信号");
+    expect(messages.system).toContain("可信信号");
+    expect(messages.system).toContain("实体-关系-属性表达");
+    expect(messages.system).toContain("可被清晰抽取");
+    // 竞品表述限定对比清单类型，不与非 ranking 类型的竞品禁令冲突。
+    expect(messages.system).toContain("若本篇为对比清单且涉及竞品对比");
+  });
+
+  it("never leaks the EEAT or knowledge-graph labels", () => {
+    expect(messages.system).not.toContain("EEAT");
+    expect(messages.system).not.toContain("知识图谱");
+  });
+});
+
 describe("deterministic format-contract additions", () => {
   const identityFacts = [
     {
