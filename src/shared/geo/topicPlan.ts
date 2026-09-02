@@ -12,6 +12,15 @@ export const TOPIC_PLAN_MAX_CONFIRMED_ITEMS = 20;
 export const TOPIC_PLAN_TITLE_BATCH_SIZE = 3;
 export const TOPIC_PLAN_TITLE_DUPLICATE_THRESHOLD = 0.92;
 
+/**
+ * 内容计划复用标记（与题库 QUESTION_POOL_REUSE_OUTCOME 同构）：plan_topics
+ * 复用命中既有 confirmed 计划时，结果信封携带本 outcome——卡片进入重选
+ * 模式（预勾上次的已批准项，可收窄），「沿用此计划」走同一 confirm 端点
+ *（Rust 允许对 confirmed 计划再确认，条目子集仍须 ⊆ 已批准项），另提供
+ * 「重新生成内容计划」付费入口；内容计划门只在用户的卡片确认后放行。
+ */
+export const TOPIC_PLAN_REUSE_OUTCOME = "reused-confirmed-plan";
+
 export const TOPIC_PLAN_SEARCH_INTENTS = [
   "informational",
   "commercial-investigation",
@@ -632,6 +641,19 @@ export function titleStructureSignature(title: string): string {
   return parts.join("-") || "plain";
 }
 
+/**
+ * ranking 标题品牌禁令句式（用户裁决 2026-09-01）：禁一切品牌名——目标品牌
+ * 全称/简称、竞品、关联品牌（代理/经销、非竞品）。单一来源，
+ * buildTitlePlanningPrompt 与 buildDirectTitleMessages 同口径复用，两侧
+ * 提示词不再各自漂移。
+ */
+export function rankingBrandBanRule(relatedBrands?: readonly string[]): string {
+  const examples = relatedBrands?.length
+    ? `（如：${relatedBrands.join("、")}）`
+    : "";
+  return `ranking 标题绝对不带任何品牌名——目标品牌全称/简称、竞品、关联品牌${examples}都不行，保持客观。`;
+}
+
 export function buildTitlePlanningPrompt(input: {
   itemId: string;
   topic: TopicPlanTopic;
@@ -641,6 +663,8 @@ export function buildTitlePlanningPrompt(input: {
   brandName: string;
   shortName?: string;
   competitors: readonly string[];
+  /** 关联品牌（代理/经销、非竞品）：ranking 标题品牌禁令覆盖范围。 */
+  relatedBrands?: readonly string[];
   industry: string;
   /** 品牌已确认业务词汇（产品 + 衍生关键词）；标题业务词锚集来源之一。 */
   businessTerms?: readonly string[];
@@ -655,7 +679,7 @@ export function buildTitlePlanningPrompt(input: {
     input.contentType === "showcase"
       ? `showcase 标题必须包含目标品牌「${input.shortName || input.brandName}」。`
       : input.contentType === "ranking"
-        ? "ranking 标题绝对不带目标品牌全称或简称，保持客观。"
+        ? rankingBrandBanRule(input.relatedBrands)
         : "是否带目标品牌取决于标题角度；品牌能力/动作可带，客观盘点不带。";
   const yearRule =
     input.contentType === "ranking"
@@ -761,31 +785,60 @@ const FORBIDDEN_TITLE_TERMS = [
 ] as const;
 
 /**
+ * 锚源值分隔符（用户裁决 2026-09-01）：复合写法（「医美/轻医美」）按分隔符
+ * 静默拆 token，不升级报错。安全性：require 类规则（业务词/地域）是 OR 语
+ * 义——拆分只放宽通过面；forbid 类规则（竞品）按 token 各自禁——拆分只收
+ * 紧禁令。拆分不改变任何规则的方向。
+ */
+const ANCHOR_VALUE_SEPARATORS = /[/／,，、;；\s]+/;
+
+export function splitAnchorTokens(value: string): string[] {
+  return value
+    .split(ANCHOR_VALUE_SEPARATORS)
+    .map((token) => token.trim())
+    .filter(Boolean);
+}
+
+/**
+ * 锚源复合值巡检（用户裁决 2026-09-01）：返回按分隔符会拆出 >1 token 的
+ * [字段, 原值] 对。shared 不打日志，WARN 留痕由服务端调用方负责——复合
+ * 写法说明知识登记口径有歧义，运营侧可据此回头清理事实。
+ */
+export function compoundAnchorValueEntries(
+  fields: ReadonlyArray<readonly [field: string, value: string]>,
+): Array<[field: string, value: string]> {
+  return fields.filter(([, value]) => splitAnchorTokens(value).length > 1) as Array<
+    [field: string, value: string]
+  >;
+}
+
+/**
  * 标题业务词锚集（用户裁决 2026-08-19 修正）：标题必须逐字包含一个业务词。
  * 锚来源：①行业词的全部 ≥4 字后缀（「汽车音响改装」→ 含「音响改装」，丢
  * 品类前缀但保业务动作）；②品牌已确认业务词汇（产品 + 衍生关键词），并附
  * 去前导数字/符号噪声的变体（「360°全景影像」→「全景影像」）。命中任一锚
  * 即合格——「无损改装」「音响改装升级」「全景影像改装」都是合法业务替换；
- * 「汽车音响店」这类丢了业务动作的写法不合格。
+ * 「汽车音响店」这类丢了业务动作的写法不合格。复合值（含分隔符）先拆
+ * token 再逐 token 造锚——带分隔符的字符串永远不可能被自然标题逐字命中。
  */
 export function titleBusinessAnchors(input: {
   industry: string;
   businessTerms?: readonly string[];
 }): string[] {
   const anchors = new Set<string>();
-  const industry = input.industry.trim();
-  if (industry) {
-    const minLength = Math.min(4, industry.length);
-    for (let start = 0; start <= industry.length - minLength; start += 1) {
-      anchors.add(industry.slice(start));
+  for (const token of splitAnchorTokens(input.industry)) {
+    const minLength = Math.min(4, token.length);
+    for (let start = 0; start <= token.length - minLength; start += 1) {
+      anchors.add(token.slice(start));
     }
   }
   for (const term of input.businessTerms ?? []) {
-    const trimmed = term.trim();
-    if (trimmed.length < 3) continue;
-    anchors.add(trimmed);
-    const stripped = trimmed.replace(/^[0-9０-９°·.．\s]+/, "");
-    if (stripped.length >= 3) anchors.add(stripped);
+    for (const trimmed of splitAnchorTokens(term)) {
+      if (trimmed.length < 3) continue;
+      anchors.add(trimmed);
+      const stripped = trimmed.replace(/^[0-9０-９°·.．\s]+/, "");
+      if (stripped.length >= 3) anchors.add(stripped);
+    }
     if (anchors.size > 120) break;
   }
   return [...anchors];
@@ -795,11 +848,17 @@ export function titleBusinessAnchors(input: {
  * 标题候选不足（validateTitleCandidates）：拒因计数以结构化字段透出，
  * 调用方（服务端纠正重试）直接读 rejectionCounts，不再从 message 反解。
  * message 保持 `错误码:reason=count,...` 形态供统一日志现场定位。
+ * validCandidates 携带通过校验的幸存候选（用户裁决 2026-09-01 少报错）：
+ * 服务端降级路径（重试后 ≥1 条即放行）需要它们，不必重算。
  */
 export class TopicPlanTitleCandidatesError extends Error {
   readonly rejectionCounts: ReadonlyMap<string, number>;
+  readonly validCandidates: readonly string[];
 
-  constructor(rejectionCounts: ReadonlyMap<string, number>) {
+  constructor(
+    rejectionCounts: ReadonlyMap<string, number>,
+    validCandidates: readonly string[] = [],
+  ) {
     const breakdown = [...rejectionCounts.entries()]
       .map(([reason, count]) => `${reason}=${count}`)
       .join(",");
@@ -810,6 +869,7 @@ export class TopicPlanTitleCandidatesError extends Error {
     );
     this.name = "TopicPlanTitleCandidatesError";
     this.rejectionCounts = rejectionCounts;
+    this.validCandidates = validCandidates;
   }
 }
 
@@ -821,6 +881,11 @@ export function validateTitleCandidates(input: {
   /** 品牌已确认业务词汇（产品 + 衍生关键词）；缺省只用行业词后缀锚。 */
   businessTerms?: readonly string[];
   brandNames: readonly string[];
+  /**
+   * 关联品牌（代理/经销等业务关联、非竞品）：ranking 标题禁一切品牌名
+   * （用户裁决 2026-09-01），关联品牌与目标品牌、竞品同列禁用源。
+   */
+  relatedBrands?: readonly string[];
   competitors: readonly string[];
   currentYear: number;
 }): string[] {
@@ -829,6 +894,26 @@ export function validateTitleCandidates(input: {
       input.contentType
     ];
   const targetBrand = input.brandNames.find((brand) => brand.trim())?.trim();
+  // 逐字比对源同口径拆 token（用户裁决 2026-09-01）：require 类命中任一
+  // token 即合格，forbid 类命中任一 token 即拦截——复合写法不再造出永不
+  // 命中的死串（「华熙/爱美客」整串 includes 永假 → 竞品名漏放进标题）。
+  // forbid 类清单源（竞品/关联品牌/目标品牌）只收 ≥2 字 token：单字 token
+  // 会把含该字的任何正常标题全拦（「丝」拦「丝绸之旅」），禁令粒度以此
+  // 为限，单字名的拦截交给人工口径；目标品牌 require 侧（showcase）不设
+  // 门槛——OR 语义只放宽通过面，且名称是已确认身份事实。
+  const regionTokens = splitAnchorTokens(input.targetRegion);
+  const competitorTokens = input.competitors
+    .flatMap((competitor) => splitAnchorTokens(competitor))
+    .filter((token) => token.length >= 2);
+  const brandTokens = input.brandNames
+    .flatMap((brand) => splitAnchorTokens(brand))
+    .filter(Boolean);
+  const rankingForbiddenBrandTokens = brandTokens.filter(
+    (token) => token.length >= 2,
+  );
+  const relatedBrandTokens = (input.relatedBrands ?? [])
+    .flatMap((brand) => splitAnchorTokens(brand))
+    .filter((token) => token.length >= 2);
   const anchors = titleBusinessAnchors({
     industry: input.industry,
     businessTerms: input.businessTerms,
@@ -856,11 +941,11 @@ export function validateTitleCandidates(input: {
       reject("forbidden-term");
       return false;
     }
-    if (input.competitors.some((competitor) => competitor && title.includes(competitor))) {
+    if (competitorTokens.some((competitor) => title.includes(competitor))) {
       reject("competitor");
       return false;
     }
-    if (input.targetRegion && !title.includes(input.targetRegion)) {
+    if (regionTokens.length > 0 && !regionTokens.some((region) => title.includes(region))) {
       reject("region");
       return false;
     }
@@ -871,11 +956,17 @@ export function validateTitleCandidates(input: {
       reject("industry");
       return false;
     }
-    if (input.contentType === "showcase" && targetBrand && !input.brandNames.some((brand) => brand && title.includes(brand))) {
+    if (input.contentType === "showcase" && targetBrand && !brandTokens.some((brand) => title.includes(brand))) {
       reject("showcase-brand");
       return false;
     }
-    if (input.contentType === "ranking" && input.brandNames.some((brand) => brand && title.includes(brand))) {
+    // ranking 禁一切品牌名（用户裁决 2026-09-01）：目标品牌（全称/简称）与
+    // 关联品牌（代理/经销）都算——盘点点名是正文 roster 的事，标题保持客观。
+    if (
+      input.contentType === "ranking" &&
+      (rankingForbiddenBrandTokens.some((brand) => title.includes(brand)) ||
+        relatedBrandTokens.some((brand) => title.includes(brand)))
+    ) {
       reject("ranking-brand");
       return false;
     }
@@ -887,8 +978,9 @@ export function validateTitleCandidates(input: {
     return true;
   });
   if (valid.length < GEO_PORT_CONTRACT.promptStructures.titleGeneration.candidates[0]) {
-    // 拒因计数（不含标题内容）随错误透出，现场即可定位是哪条规则杀的。
-    throw new TopicPlanTitleCandidatesError(rejected);
+    // 拒因计数（不含标题内容）随错误透出，现场即可定位是哪条规则杀的；
+    // 幸存候选一并携带，供服务端降级路径直接采用。
+    throw new TopicPlanTitleCandidatesError(rejected, valid);
   }
   return valid.slice(0, GEO_PORT_CONTRACT.promptStructures.titleGeneration.candidates[1]);
 }
@@ -911,7 +1003,7 @@ export function selectDistinctTitles(input: {
     evidence: TopicPlanDeduplicationEvidence;
   }> = [];
   for (const item of input.items) {
-    const passing: Array<{
+    const scored: Array<{
       candidate: string;
       maxSimilarity: number;
       comparedItemIds: string[];
@@ -931,26 +1023,35 @@ export function selectDistinctTitles(input: {
         comparisons.length === 0
           ? 0
           : Math.max(...comparisons.map((comparison) => comparison.similarity));
-      if (maxSimilarity < threshold) {
-        passing.push({
-          candidate,
-          maxSimilarity,
-          comparedItemIds: comparisons.map((comparison) => comparison.itemId),
-        });
-      }
+      scored.push({
+        candidate,
+        maxSimilarity,
+        comparedItemIds: comparisons.map((comparison) => comparison.itemId),
+      });
     }
-    if (passing.length === 0)
-      throw new Error("topic_plan_title_diversity_insufficient");
+    if (scored.length === 0) throw new Error("topic_plan_title_diversity_insufficient");
+    // 越阈降级（用户裁决 2026-09-01 少报错）：全部候选与已选标题越阈时选
+    // 相似度最低者继续——evidence 的 maxSimilarity ≥ threshold 自证越阈，
+    // 用户在批准门可见可改；不再让单个条目杀掉整批。
+    const passing = scored.filter((entry) => entry.maxSimilarity < threshold);
+    const pool =
+      passing.length > 0
+        ? passing
+        : [
+            scored.reduce((least, entry) =>
+              entry.maxSimilarity < least.maxSimilarity ? entry : least,
+            ),
+          ];
     // 结构错开（2026-08-18 裁定）：优先选结构指纹未被同批已选标题占用的
     // 候选；全部同构时退回首个通过项，不因结构硬失败。
     const usedSignatures = new Set(
       selected.map((previous) => titleStructureSignature(previous.title)),
     );
     const choice =
-      passing.find(
+      pool.find(
         (entry) =>
           !usedSignatures.has(titleStructureSignature(entry.candidate)),
-      ) ?? passing[0];
+      ) ?? pool[0];
     selected.push({ itemId: item.itemId, title: choice.candidate });
     output.push({
       itemId: item.itemId,

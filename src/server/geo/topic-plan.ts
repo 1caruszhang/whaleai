@@ -12,6 +12,7 @@ import {
   mergeRegeneratedTopicPlanItems,
   parseAndEnforceTypeRecommendations,
   parseTitlePlan,
+  type ParsedTitlePlan,
   parseTopicClusters,
   selectDistinctTitles,
   selectContentTypePlannedFacts,
@@ -38,6 +39,7 @@ import {
   resolveBrandName,
 } from "../../shared/geo/profileInjection";
 import { managementApi } from "../utils/management-api-client";
+import { warnCompoundAnchorValues } from "./anchor-patrol";
 import type { GeoBillingPermitPort } from "./billing-permit";
 import { embedWithDegradation } from "./embedding-fallback";
 import type {
@@ -69,7 +71,10 @@ export interface TopicPlanPreparation {
 export interface TopicPlanPersistencePort {
   latest(status?: "confirmed"): Promise<TopicPlanProjection | null>;
   get(planId: string): Promise<TopicPlanProjection | null>;
-  prepare(questionPoolId?: string): Promise<TopicPlanPreparation>;
+  prepare(
+    questionPoolId?: string,
+    forceRegenerate?: boolean,
+  ): Promise<TopicPlanPreparation>;
   create(input: {
     questionPoolId: string;
     questionPoolRevision: number;
@@ -80,6 +85,9 @@ export interface TopicPlanPersistencePort {
     modelAudit: TopicPlanProjection["modelAudit"];
     providerSnapshot: TopicPlanProjection["providerSnapshot"];
     modelAttempts: TopicPlanModelAttempt[];
+    /** 「重新生成内容计划」：跳过 create 复用查找、允许同一 source
+     * identity 落第二代计划（与 prepare 的 forceRegenerate 同源）。 */
+    forceRegenerate?: boolean;
   }): Promise<TopicPlanProjection>;
   mutate(input: {
     planId: string;
@@ -140,10 +148,16 @@ export class RustTopicPlanPort implements TopicPlanPersistencePort {
     return this.post("/api/brand-topic-plans/get", { planId }, "plan");
   }
 
-  prepare(questionPoolId?: string): Promise<TopicPlanPreparation> {
+  prepare(
+    questionPoolId?: string,
+    forceRegenerate?: boolean,
+  ): Promise<TopicPlanPreparation> {
     return this.post(
       "/api/brand-topic-plans/prepare",
-      { questionPoolId },
+      {
+        ...(questionPoolId !== undefined ? { questionPoolId } : {}),
+        forceRegenerate: forceRegenerate === true,
+      },
       "preparation",
     );
   }
@@ -207,6 +221,32 @@ function deriveProfile(context: TopicPlanContext) {
   const industry = valuesFor(".industry")[0];
   if (!industry) throw new Error("topic_plan_industry_required");
   const projected = projectBrandProfile(context.facts);
+  const competitors = [
+    ...valuesFor(".competitors"),
+    ...valuesFor(".potentialcompetitors"),
+  ];
+  const relatedBrands = valuesFor(".relatedbrands");
+  const businessTerms = [
+    ...new Set([
+      ...(projected.products ?? []),
+      ...(projected.derivedKeywords ?? []),
+    ]),
+  ].slice(0, 60);
+  // 地域锚（ADR-0006 修正四）：声明服务范围优先于池上透传的 targetRegion，
+  // 原始 serviceArea 脏文本不再进入标题提示词与校验。
+  const region =
+    deriveServiceScope(projectBrandProfile(context.facts))?.primary ??
+    context.targetRegion;
+  // 复合值静默拆分（用户裁决 2026-09-01）：不再拦截、不打扰用户，但服务端
+  // WARN 留痕（region 锚源同巡）——复合写法说明知识登记口径有歧义，运营侧
+  // 可据此回头清理事实。
+  warnCompoundAnchorValues("topic-plan", [
+    ["industry", industry],
+    ["region", region],
+    ...businessTerms.map((term) => ["businessTerm", term] as const),
+    ...competitors.map((term) => ["competitor", term] as const),
+    ...relatedBrands.map((term) => ["relatedBrand", term] as const),
+  ]);
   return {
     // 品牌名裁决（与正文/标题同一口径）：知识库身份事实 fullName →
     // shortNames 优先，workspace 名仅无身份事实时兜底。
@@ -214,23 +254,14 @@ function deriveProfile(context: TopicPlanContext) {
     shortNames: valuesFor(".shortNames"),
     // 标题红线名单含两层竞品（ADR-0007）：排行 roster 潜在层会补位进正文，
     // 标题里同样禁止出现它们的真实品牌名。
-    competitors: [
-      ...valuesFor(".competitors"),
-      ...valuesFor(".potentialcompetitors"),
-    ],
+    competitors,
     industry,
+    // 关联品牌（代理/经销、非竞品）：正文 roster 会排除它（不当中立盘点成
+    // 员），ranking 标题品牌禁令覆盖它（用户裁决 2026-09-01）。
+    relatedBrands,
     // 业务词锚集来源（用户裁决 2026-08-19 修正）：品牌已确认产品与衍生关键词。
-    businessTerms: [
-      ...new Set([
-        ...(projected.products ?? []),
-        ...(projected.derivedKeywords ?? []),
-      ]),
-    ].slice(0, 60),
-    // 地域锚（ADR-0006 修正四）：声明服务范围优先于池上透传的 targetRegion，
-    // 原始 serviceArea 脏文本不再进入标题提示词与校验。
-    region:
-      deriveServiceScope(projectBrandProfile(context.facts))?.primary ??
-      context.targetRegion,
+    businessTerms,
+    region,
   };
 }
 
@@ -249,6 +280,39 @@ async function providerCall<T>(execute: () => Promise<T>): Promise<T> {
     const message = error instanceof Error ? error.message : String(error);
     if (message.startsWith("topic_plan_")) throw error;
     throw new Error(`topic_plan_provider_unavailable:${message}`);
+  }
+}
+
+/**
+ * 结构化输出带反馈修正重试（用户裁决 2026-09-01 少报错）：解析失败先带
+ * 错误现场补一轮再放弃——结构化输出的质量问题绝大多数一轮反馈即可纠正，
+ * 裸抛会让整次调用在离故障最远的地方以难懂的编码失败。第二轮仍失败则
+ * 维持原样抛出（聚类/类型推荐没有条目级降级空间，全批失败是真实语义）。
+ */
+async function structuredGeneration<T>(input: {
+  stage: string;
+  messages: Parameters<GeoTextCapability["complete"]>[0];
+  parse: (raw: string) => T;
+  retryContract: string;
+}, complete: GeoTextCapability["complete"]): Promise<T> {
+  const raw = await providerCall(() => complete(input.messages));
+  try {
+    return input.parse(raw);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.warn(
+      `[topic-plan] ${input.stage} 结构化解析失败（${message}），带反馈重试一次`,
+    );
+    const retryRaw = await providerCall(() =>
+      complete([
+        ...input.messages,
+        {
+          role: "user",
+          content: `上一次输出无法解析（${message}）。${input.retryContract}不要 markdown 代码块或任何说明文字。`,
+        },
+      ]),
+    );
+    return input.parse(retryRaw);
   }
 }
 
@@ -421,6 +485,31 @@ interface GeneratedTitleSeed {
   plannedFacts: TopicPlanKnowledgeFact[];
 }
 
+/** 单条目标题生成结果：正常/降级产出候选集，或两轮未过审被剔除。 */
+type TitleSeedOutcome =
+  | {
+      dropped: false;
+      itemId: string;
+      candidates: string[];
+      rationale: TopicPlanItem["titleRationale"];
+    }
+  | { dropped: true; itemId: string; reason: string };
+
+/**
+ * 全灭如实重抛（用户裁决 2026-09-01 少报错）：条目级降级的边界——全部
+ * 条目都被剔除时本次没有任何可交付物，沉默的空成功比错误更误导，重抛
+ * 末次拒因。generate（全计划）与 runRegeneration（局部重生成）共用。
+ */
+function assertNotAllDropped(
+  dropped: ReadonlyArray<{ itemId: string; reason: string }>,
+  total: number,
+  fallback: string,
+): void {
+  if (total > 0 && dropped.length === total) {
+    throw new Error(dropped.at(-1)?.reason ?? fallback);
+  }
+}
+
 export class TopicPlanService {
   private readonly generationInFlight = new Map<
     string,
@@ -459,12 +548,15 @@ export class TopicPlanService {
     workspaceId: string;
     sessionId: string;
     questionPoolId?: string;
+    /** 卡片「重新生成内容计划」按钮：跳过既有计划复用、强制重新规划
+     *（真实 provider 花费）；缺省走复用。 */
+    forceRegenerate?: boolean;
   }): Promise<TopicPlanProjection> {
     this.assertIdentity(input);
     const key = input.questionPoolId ?? "latest-confirmed";
     const existing = this.generationInFlight.get(key);
     if (existing) return existing;
-    const work = this.generateInitial(input.questionPoolId).finally(() => {
+    const work = this.generateInitial(input.questionPoolId, input.forceRegenerate).finally(() => {
       this.generationInFlight.delete(key);
     });
     this.generationInFlight.set(key, work);
@@ -473,14 +565,16 @@ export class TopicPlanService {
 
   private async generateInitial(
     questionPoolId?: string,
+    forceRegenerate?: boolean,
   ): Promise<TopicPlanProjection> {
-    const preparation = await this.persistence.prepare(questionPoolId);
+    const preparation = await this.persistence.prepare(questionPoolId, forceRegenerate);
     if (preparation.existing) return preparation.existing;
     const { context } = preparation;
     // 计费（票 07）：主题规划初次 20 点/次。permitId 绑定源快照（问题池 +
     // 知识版本）：崩溃/网络重试后重跑同一快照重放同一 permit，不二次预扣；
     // 快照变化即新操作。existing 复用（缓存）已在上面提前返回，不扣点。
-    if (!this.permits) return this.runInitialGeneration(context);
+    // force_regenerate 是用户显式要求的重规划，同样计费。
+    if (!this.permits) return this.runInitialGeneration(context, forceRegenerate);
     const permitId = `topic:${context.questionPoolId}:${context.questionPoolRevision}:${context.knowledgeVersion}`;
     await this.permits.apply({
       permitId,
@@ -488,7 +582,7 @@ export class TopicPlanService {
       units: 1,
     });
     try {
-      const plan = await this.runInitialGeneration(context);
+      const plan = await this.runInitialGeneration(context, forceRegenerate);
       await this.permits.reportUnit(permitId, 0, "success").catch(
         () => undefined,
       );
@@ -503,6 +597,7 @@ export class TopicPlanService {
 
   private async runInitialGeneration(
     context: TopicPlanContext,
+    forceRegenerate?: boolean,
   ): Promise<TopicPlanProjection> {
     if (context.questions.length === 0) {
       throw new Error("topic_plan_confirmed_questions_required");
@@ -531,28 +626,33 @@ export class TopicPlanService {
       context.questions,
       questionVectors,
     );
-    const clusterRaw = await providerCall(() =>
-      this.generation.complete(
-        [
-          {
-            role: "system",
-            content: "只进行语义聚类与主题命名，严格输出结构化 JSON。",
-          },
-          {
-            role: "user",
-            content: buildTopicClusteringPrompt({
-              brandName: profile.brandName,
-              industry: profile.industry,
-              productLine: context.productLine,
-              targetRegion: profile.region,
-              questions: context.questions,
-              semanticHints,
-            }),
-          },
-        ],
-      ),
+    const clusterMessages = [
+      {
+        role: "system",
+        content: "只进行语义聚类与主题命名，严格输出结构化 JSON。",
+      },
+      {
+        role: "user",
+        content: buildTopicClusteringPrompt({
+          brandName: profile.brandName,
+          industry: profile.industry,
+          productLine: context.productLine,
+          targetRegion: profile.region,
+          questions: context.questions,
+          semanticHints,
+        }),
+      },
+    ] as const;
+    const topics = await structuredGeneration(
+      {
+        stage: "topic-clustering",
+        messages: clusterMessages,
+        parse: (raw) => parseTopicClusters(raw, context.questions),
+        retryContract:
+          '只返回 JSON 数组：[{"questionIds":["q1"],"name":"简洁主题名","summary":"综合主题句","searchIntent":"informational","reason":"聚类和命名原因"}]，questionIds 必须恰好覆盖全部输入问题、不重不漏。',
+      },
+      (messages) => this.generation.complete(messages),
     );
-    const topics = parseTopicClusters(clusterRaw, context.questions);
     modelAttempts.push({
       stage: "topic-clustering",
       provider: "volcengine",
@@ -560,25 +660,32 @@ export class TopicPlanService {
       model: XIAOJING_GEO_PROVIDER_DEFAULTS.generationModel,
       status: "success",
     });
-    const typeRaw = await providerCall(() =>
-      this.generation.complete([
-        {
-          role: "system",
-          content: "只推荐已定义的五类 GEO 内容类型，严格输出结构化 JSON。",
-        },
-        {
-          role: "user",
-          content: buildTypeRecommendationPrompt({
-            brandName: profile.brandName,
-            industry: profile.industry,
-            productLine: context.productLine,
-            targetRegion: profile.region,
-            topics,
-          }),
-        },
-      ]),
+    const typeMessages = [
+      {
+        role: "system",
+        content: "只推荐已定义的五类 GEO 内容类型，严格输出结构化 JSON。",
+      },
+      {
+        role: "user",
+        content: buildTypeRecommendationPrompt({
+          brandName: profile.brandName,
+          industry: profile.industry,
+          productLine: context.productLine,
+          targetRegion: profile.region,
+          topics,
+        }),
+      },
+    ] as const;
+    const recommendations = await structuredGeneration(
+      {
+        stage: "type-recommendation",
+        messages: typeMessages,
+        parse: (raw) => parseAndEnforceTypeRecommendations(raw, topics),
+        retryContract:
+          '只返回 JSON 数组：[{"topicId":"topic-1","recommendations":[{"type":"guide","reason":"为什么适合该主题"}]}]，必须覆盖全部主题，type 只能取 guide/showcase/ranking/news/news_light。',
+      },
+      (messages) => this.generation.complete(messages),
     );
-    const recommendations = parseAndEnforceTypeRecommendations(typeRaw, topics);
     modelAttempts.push({
       stage: "type-recommendation",
       provider: "volcengine",
@@ -646,30 +753,44 @@ export class TopicPlanService {
       [],
     );
     modelAttempts.push(...titleGeneration.modelAttempts);
-    const items: TopicPlanItem[] = cappedSeeds.map((seed) => {
+    // 丢弃条目直接从计划剔除（WARN 已留痕，用户在批准门看到的是少一条的
+    // 计划而非整批失败）；全部条目被丢弃是模型完全不可用，如实重抛末次
+    // 拒因——没有任何可交付物时沉默成功比错误更误导。
+    const items: TopicPlanItem[] = cappedSeeds.flatMap((seed) => {
       const generated = titleGeneration.plans.get(seed.itemId);
-      if (!generated) throw new Error("topic_plan_title_item_missing");
-      return {
-        id: seed.itemId,
-        topicId: seed.topic.id,
-        sourceQuestionIds: seed.sourceQuestionIds,
-        contentType: seed.contentType,
-        typeSelectionReason: seed.typeSelectionReason,
-        title: generated.title,
-        titleCandidates: generated.candidates,
-        titleRationale: generated.rationale,
-        plannedFacts: seed.plannedFacts,
-        deduplication: generated.evidence,
-        userEdited: false,
-        approvalStatus: "draft",
-        origin: "model",
-      };
+      if (!generated) return [];
+      return [
+        {
+          id: seed.itemId,
+          topicId: seed.topic.id,
+          sourceQuestionIds: seed.sourceQuestionIds,
+          contentType: seed.contentType,
+          typeSelectionReason: seed.typeSelectionReason,
+          title: generated.title,
+          titleCandidates: generated.candidates,
+          titleRationale: generated.rationale,
+          plannedFacts: seed.plannedFacts,
+          deduplication: generated.evidence,
+          userEdited: false,
+          approvalStatus: "draft",
+          origin: "model",
+        },
+      ];
     });
+    // 丢弃条目直接从计划剔除（WARN 已留痕，用户在批准门看到的是少一条的
+    // 计划而非整批失败）；全部条目被丢弃是模型完全不可用，如实重抛末次
+    // 拒因——没有任何可交付物时沉默成功比错误更误导。
+    assertNotAllDropped(
+      titleGeneration.dropped,
+      cappedSeeds.length,
+      "topic_plan_title_generation_failed",
+    );
     return this.persistence.create({
       questionPoolId: context.questionPoolId,
       questionPoolRevision: context.questionPoolRevision,
       knowledgeVersion: context.knowledgeVersion,
       policyVersion: TOPIC_PLAN_POLICY_VERSION,
+      forceRegenerate: forceRegenerate === true,
       topics,
       items,
       modelAudit: {
@@ -718,6 +839,8 @@ export class TopicPlanService {
       }
     >;
     modelAttempts: TopicPlanModelAttempt[];
+    /** 两轮（初试 + 带反馈修正）都未产出合格候选而被剔除的条目。 */
+    dropped: ReadonlyArray<{ itemId: string; reason: string }>;
   }> {
     const generated: Array<{
       itemId: string;
@@ -725,13 +848,15 @@ export class TopicPlanService {
       rationale: TopicPlanItem["titleRationale"];
     }> = [];
     const modelAttempts: TopicPlanModelAttempt[] = [];
+    const dropped: Array<{ itemId: string; reason: string }> = [];
     const priorTitles = protectedItems.map((item) => item.title);
     // 结构种子批内洗牌发牌（2026-08-18 裁定：每批标题句式不得同构）。
     const structureSeeds = dealTitleStructureSeeds(seeds.length);
     for (let offset = 0; offset < seeds.length; offset += TOPIC_PLAN_TITLE_BATCH_SIZE) {
       const batch = seeds.slice(offset, offset + TOPIC_PLAN_TITLE_BATCH_SIZE);
       const results = await Promise.all(
-        batch.map(async (seed, indexInBatch) => {
+        batch.map(
+          async (seed, indexInBatch): Promise<TitleSeedOutcome> => {
           // 校验不足下限时补一次纠正重试（2026-08-19：业务词锚集下偶发
           // 全灭不再整批失败；corrective 明示必须命中的锚词）。
           const anchors = titleBusinessAnchors({
@@ -758,6 +883,11 @@ export class TopicPlanService {
           ]
             .filter(Boolean)
             .join("");
+          const parseCorrective =
+            "上一次响应不是合法的结构化结果。只返回 JSON："
+            + `{"itemId":"${seed.itemId}","candidates":["标题1","标题2","标题3"],`
+            + '"rationale":{"questionCoverage":"...","searchIntent":"...","differentiation":"...","brandFit":"...","chinaMarketExpression":"..."}'
+            + "}，不要 markdown 代码块或任何说明文字。";
           const complete = async (extra?: string) =>
             providerCall(() =>
               this.generation.complete(
@@ -781,6 +911,7 @@ export class TopicPlanService {
                         brandName: profile.brandName,
                         shortName: profile.shortNames[0],
                         competitors: profile.competitors,
+                        relatedBrands: profile.relatedBrands,
                         industry: profile.industry,
                         businessTerms: profile.businessTerms,
                         targetRegion: profile.region,
@@ -796,8 +927,6 @@ export class TopicPlanService {
                 { purpose: "title-planning", maxTokens: 2048 },
               ),
             );
-          let raw = await complete();
-          let parsed = parseTitlePlan(raw, seed.itemId);
           const validate = (candidates: string[]) =>
             validateTitleCandidates({
               candidates,
@@ -806,39 +935,148 @@ export class TopicPlanService {
               industry: profile.industry,
               businessTerms: profile.businessTerms,
               brandNames: [profile.brandName, ...profile.shortNames],
+              relatedBrands: profile.relatedBrands,
               competitors: profile.competitors,
               currentYear: this.now().getFullYear(),
             });
-          try {
-            return { ...parsed, candidates: validate(parsed.candidates) };
-          } catch (error) {
-            if (!(error instanceof TopicPlanTitleCandidatesError)) {
-              throw error;
+          // 两轮统一策略（用户裁决 2026-09-01 少报错）：解析失败与校验失败
+          // 共用一次带反馈修正重试；重试后仍有 ≥1 条合格候选即降级放行
+          // （不足 3 条下限不再杀整批），一条都没有才丢弃该条目——单条目
+          // 的模型质量波动不该作废其他条目的成果。
+          type RoundOutcome =
+            | {
+                kind: "valid";
+                candidates: string[];
+                rationale: TopicPlanItem["titleRationale"];
+              }
+            | {
+                kind: "candidates-error";
+                error: TopicPlanTitleCandidatesError;
+                parsedCandidates: readonly string[];
+                rationale: TopicPlanItem["titleRationale"];
+              }
+            | { kind: "parse-error"; error: unknown };
+          const runRound = async (extra?: string): Promise<RoundOutcome> => {
+            let parsed: ParsedTitlePlan;
+            try {
+              parsed = parseTitlePlan(await complete(extra), seed.itemId);
+            } catch (error) {
+              return { kind: "parse-error", error };
             }
-            // 把拒因与被拒候选回灌：corrective 只覆盖通用硬规则，模型看
-            // 不到自己哪里挂了（如超长重复×2）时重试只是盲重试。拒因计数
-            // 直接读结构化字段（TopicPlanTitleCandidatesError），不反解
-            // message——message 只为统一日志保留编码形态。
-            const rejectionSummary = [...error.rejectionCounts.entries()]
-              .map(([reason, count]) => {
-                const label = TITLE_REJECTION_REASON_LABELS[reason] ?? reason;
-                return count ? `${label}×${count}` : label;
-              })
-              .join("；");
-            raw = await complete(
-              corrective
-                + `上一轮被拒原因：${rejectionSummary || "未通过确定性校验"}。`
-                + `上一轮候选：${parsed.candidates.join("／") || "无"}。`
-                + "针对被拒原因重写，不要原样复述上一轮候选。",
-            );
-            parsed = parseTitlePlan(raw, seed.itemId);
-            return { ...parsed, candidates: validate(parsed.candidates) };
+            try {
+              return {
+                kind: "valid",
+                candidates: validate(parsed.candidates),
+                rationale: parsed.rationale,
+              };
+            } catch (error) {
+              // validate 只会抛 TopicPlanTitleCandidatesError（规则拒是计
+              // 数不是异常）；其他异常原样上抛。
+              if (!(error instanceof TopicPlanTitleCandidatesError)) throw error;
+              return {
+                kind: "candidates-error",
+                error,
+                parsedCandidates: parsed.candidates,
+                rationale: parsed.rationale,
+              };
+            }
+          };
+          const first = await runRound();
+          if (first.kind === "valid") {
+            return {
+              dropped: false,
+              itemId: seed.itemId,
+              candidates: first.candidates,
+              rationale: first.rationale,
+            };
           }
+          // 把拒因与被拒候选回灌：corrective 只覆盖通用硬规则，模型看
+          // 不到自己哪里挂了（如超长重复×2）时重试只是盲重试。拒因计数
+          // 直接读结构化字段（TopicPlanTitleCandidatesError），不反解
+          // message——message 只为统一日志保留编码形态。解析失败走
+          // parseCorrective（结构要求 + 具体解析错误）。
+          const rejectionSummary =
+            first.kind === "candidates-error"
+              ? [...first.error.rejectionCounts.entries()]
+                  .map(([reason, count]) => {
+                    const label = TITLE_REJECTION_REASON_LABELS[reason] ?? reason;
+                    return count ? `${label}×${count}` : label;
+                  })
+                  .join("；")
+              : "";
+          const feedback =
+            first.kind === "candidates-error"
+              ? corrective
+                + `上一轮被拒原因：${rejectionSummary || "未通过确定性校验"}。`
+                + `上一轮候选：${first.parsedCandidates.join("／") || "无"}。`
+                + "针对被拒原因重写，不要原样复述上一轮候选。"
+              : parseCorrective
+                + `上一次解析失败（${
+                    first.error instanceof Error ? first.error.message : String(first.error)
+                  }）。`;
+          const second = await runRound(feedback);
+          if (second.kind === "valid") {
+            return {
+              dropped: false,
+              itemId: seed.itemId,
+              candidates: second.candidates,
+              rationale: second.rationale,
+            };
+          }
+          // 两轮降级的幸存集裁决（用户裁决 2026-09-01「重试后仍有 ≥1 条
+          // 合格候选即降级放行」的完整读法）：幸存 = 两轮中任一轮的
+          // validCandidates 非空——第二轮优先（重试产出携最新拒因上下文），
+          // 第二轮更差时退回首轮（重试劣化不该反杀已有合格候选）。两轮
+          // 幸存集都空才剔除该条目。
+          const rescue =
+            second.kind === "candidates-error" &&
+            second.error.validCandidates.length > 0
+              ? {
+                  candidates: second.error.validCandidates,
+                  rationale: second.rationale,
+                  origin: "重试后",
+                }
+              : first.kind === "candidates-error" &&
+                  first.error.validCandidates.length > 0
+                ? {
+                    candidates: first.error.validCandidates,
+                    rationale: first.rationale,
+                    origin: "退回首轮",
+                  }
+                : null;
+          if (rescue) {
+            console.warn(
+              `[topic-plan] 条目 ${seed.itemId} 标题校验两轮不足下限（${rescue.origin} ${rescue.candidates.length} 条合格），按降级候选集继续`,
+            );
+            return {
+              dropped: false,
+              itemId: seed.itemId,
+              candidates: [...rescue.candidates],
+              rationale: rescue.rationale,
+            };
+          }
+          const dropReason =
+            second.kind === "candidates-error"
+              ? second.error.message
+              : second.error instanceof Error
+                ? second.error.message
+                : String(second.error);
+          console.warn(
+            `[topic-plan] 条目 ${seed.itemId} 两轮标题生成未产出合格候选（${dropReason}），剔除该条目继续`,
+          );
+          return { dropped: true, itemId: seed.itemId, reason: dropReason };
         }),
       );
-      generated.push(...results);
+      // 条目级降级落点（用户裁决 2026-09-01 少报错）：丢弃的条目不进生成
+      // 集、不记 modelAttempts（审计走 WARN 日志），其余条目照常进入去重。
+      const okResults = results.flatMap((result) =>
+        result.dropped === false
+          ? [{ itemId: result.itemId, candidates: result.candidates, rationale: result.rationale }]
+          : [],
+      );
+      generated.push(...okResults);
       modelAttempts.push(
-        ...results.map((result) => ({
+        ...okResults.map((result) => ({
           stage: "title-generation" as const,
           provider: "volcengine" as const,
           capabilitySlot: "generation" as const,
@@ -847,6 +1085,11 @@ export class TopicPlanService {
           itemId: result.itemId,
         })),
       );
+      for (const result of results) {
+        if (result.dropped) {
+          dropped.push({ itemId: result.itemId, reason: result.reason });
+        }
+      }
     }
     const embeddingEntries = [
       ...protectedItems.map((item) => ({
@@ -907,7 +1150,7 @@ export class TopicPlanService {
         ];
       }),
     );
-    return { plans, modelAttempts };
+    return { plans, modelAttempts, dropped };
   }
 
   async saveItems(input: {
@@ -998,6 +1241,7 @@ export class TopicPlanService {
   ): Promise<TopicPlanMutationResult> {
     let replacements: TopicPlanItem[] = [];
     let regenerationAttempts: TopicPlanModelAttempt[] = [];
+    let replacedItemIds: ReadonlySet<string> | null = null;
     if (eligible.length > 0) {
       const preparation = await this.persistence.prepare(plan.questionPoolId);
       if (
@@ -1026,25 +1270,45 @@ export class TopicPlanService {
         protectedForDedup,
       );
       regenerationAttempts = generated.modelAttempts;
-      replacements = eligible.map((item) => {
+      // 条目级降级（用户裁决 2026-09-01 少报错）：两轮未过审的条目保留原
+      // 标题与原批准态（不替换、不重置）；全部条目被丢弃 = 这次重生成没有
+      // 任何可交付物，如实重抛末次拒因——沉默的空成功比错误更误导。
+      replacements = eligible.flatMap((item) => {
         const title = generated.plans.get(item.id);
-        if (!title) throw new Error("topic_plan_title_item_missing");
-        return {
-          ...item,
-          title: title.title,
-          titleCandidates: title.candidates,
-          titleRationale: title.rationale,
-          deduplication: title.evidence,
-          userEdited: false,
-          approvalStatus: "draft",
-          origin: "model",
-        };
+        if (!title) return [];
+        return [
+          {
+            ...item,
+            title: title.title,
+            titleCandidates: title.candidates,
+            titleRationale: title.rationale,
+            deduplication: title.evidence,
+            userEdited: false,
+            approvalStatus: "draft",
+            origin: "model" as const,
+          },
+        ];
       });
+      // 条目级降级（用户裁决 2026-09-01 少报错）：两轮未过审的条目保留原
+      // 标题与原批准态（不替换、不重置）；全部条目被丢弃 = 这次重生成没有
+      // 任何可交付物，如实重抛末次拒因——沉默的空成功比错误更误导。
+      assertNotAllDropped(
+        generated.dropped,
+        eligible.length,
+        "topic_plan_title_regeneration_failed",
+      );
+      replacedItemIds = new Set(replacements.map((item) => item.id));
     }
     const merged = mergeRegeneratedTopicPlanItems({
       currentItems: plan.items,
       replacements,
-      targetItemIds: targetIds,
+      // merge 只认「有替换件或受保护」的目标：被丢弃的目标从 merge 目标集
+      // 剔除（条目保持原样通过），完整请求集仍随 mutation 的 targetItemIds
+      // 留审计。
+      targetItemIds: targetIds.filter(
+        (id) =>
+          replacedItemIds?.has(id) || preserved.some((item) => item.id === id),
+      ),
     });
     return this.persistence.mutate({
       planId: plan.id,

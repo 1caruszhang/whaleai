@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   TOPIC_PLAN_TITLE_DUPLICATE_THRESHOLD,
+  TopicPlanTitleCandidatesError,
   buildTitlePlanningPrompt,
   buildTopicSemanticHints,
   isTopicPlanItemProtected,
@@ -11,6 +12,8 @@ import {
   parseTopicClusters,
   selectContentTypePlannedFacts,
   selectDistinctTitles,
+  splitAnchorTokens,
+  titleBusinessAnchors,
   validateTitleCandidates,
   type TopicPlanItem,
   type TopicPlanTopic,
@@ -284,6 +287,218 @@ describe("topic/type/title shared contract", () => {
         currentYear: 2026,
       }),
     ).toThrow("topic_plan_title_candidates_insufficient:industry=3");
+  });
+
+  it("splits compound anchor-source values on separators instead of producing dead anchors", () => {
+    // 复合值静默拆分（用户裁决 2026-09-01）：「医美/轻医美」曾让所有锚点带
+    // 斜杠、正常标题永远无法逐字命中（industry 全灭事故）。拆分后锚集只剩
+    // 干净 token 的后缀，自然标题可命中任一 token。
+    expect(splitAnchorTokens("医美/轻医美")).toEqual(["医美", "轻医美"]);
+    expect(splitAnchorTokens("华熙生物、爱美客")).toEqual([
+      "华熙生物",
+      "爱美客",
+    ]);
+    expect(splitAnchorTokens("轻医美")).toEqual(["轻医美"]);
+
+    const anchors = titleBusinessAnchors({ industry: "医美/轻医美" });
+    expect(anchors).toContain("医美");
+    expect(anchors).toContain("轻医美");
+    expect(anchors.every((anchor) => !/[/／,，、;；\s]/.test(anchor))).toBe(
+      true,
+    );
+
+    // 事故复现：复合行业 + 自然标题，不再 industry 全灭。
+    expect(
+      validateTitleCandidates({
+        candidates: [
+          "杭州轻医美机构怎么选",
+          "杭州轻医美价格解析",
+          "杭州医美避坑指南",
+        ],
+        contentType: "guide",
+        targetRegion: "杭州",
+        industry: "医美/轻医美",
+        brandNames: [],
+        competitors: [],
+        currentYear: 2026,
+      }),
+    ).toHaveLength(3);
+  });
+
+  it("forbids each competitor token and accepts any region token from compound values", () => {
+    // forbid 类按 token 各自拦截：「华熙生物/爱美客」整串 includes 永假会让竞品
+    // 名漏放进标题。被拦候选取真实泄漏形态——品牌点名的盘点式对比是排行榜
+    // 正文（六品牌 roster）的事，标题任何类型都不得点名竞品；模型把这种写法
+    // 带进 guide 槽位正是该规则要拦的场景。require 类（地域）命中任一 token
+    // 即合格。
+    expect(() =>
+      validateTitleCandidates({
+        candidates: [
+          "杭州轻医美机构怎么选",
+          "杭州轻医美价格解析",
+          "杭州轻医美品牌对比：鲸跃、爱美客、华熙生物怎么选",
+        ],
+        contentType: "guide",
+        targetRegion: "杭州",
+        industry: "轻医美",
+        brandNames: ["鲸跃"],
+        competitors: ["华熙生物/爱美客"],
+        currentYear: 2026,
+      }),
+    ).toThrow("topic_plan_title_candidates_insufficient:competitor=1");
+
+    expect(
+      validateTitleCandidates({
+        candidates: [
+          "杭州轻医美机构怎么选",
+          "宁波轻医美价格解析",
+          "杭州轻医美避坑指南",
+        ],
+        contentType: "guide",
+        targetRegion: "杭州/宁波",
+        industry: "轻医美",
+        brandNames: [],
+        competitors: [],
+        currentYear: 2026,
+      }),
+    ).toHaveLength(3);
+  });
+
+  it("ranking titles forbid every brand name, including agency/distributed related brands", () => {
+    // ranking 标题禁一切品牌名（用户裁决 2026-09-01）：目标品牌与竞品原本就在
+    // 禁用源里，本用例补第三层——关联品牌（代理/经销、非竞品，正文 roster 会
+    // 排除它，但标题同样不得点名）。被拦候选是真实泄漏形态：模型把六品牌
+    // 盘点的 roster 写法带进标题。
+    expect(() =>
+      validateTitleCandidates({
+        candidates: [
+          "2026杭州轻医美机构盘点",
+          "2026杭州轻医美怎么选",
+          "2026杭州轻医美盘点：润百颜等六家怎么选",
+        ],
+        contentType: "ranking",
+        targetRegion: "杭州",
+        industry: "轻医美",
+        brandNames: ["鲸跃"],
+        relatedBrands: ["润百颜"],
+        competitors: [],
+        currentYear: 2026,
+      }),
+    ).toThrow("topic_plan_title_candidates_insufficient:ranking-brand=1");
+
+    // 裁决范围是 ranking：guide 标题暂不受关联品牌禁令约束（提示词红线仍
+    // 建议只带目标品牌，但确定性校验未扩大到全类型）。
+    expect(
+      validateTitleCandidates({
+        candidates: [
+          "杭州轻医美机构怎么选",
+          "杭州轻医美价格解析",
+          "杭州轻医美盘点：润百颜等六家怎么选",
+        ],
+        contentType: "guide",
+        targetRegion: "杭州",
+        industry: "轻医美",
+        brandNames: ["鲸跃"],
+        relatedBrands: ["润百颜"],
+        competitors: [],
+        currentYear: 2026,
+      }),
+    ).toHaveLength(3);
+  });
+
+  it("ranking brand forbid ignores single-character brand tokens", () => {
+    // forbid 类清单 ≥2 字为限（用户裁决 2026-09-01）：单字简称 token（「鲸跃/
+    // 跃」拆出的「跃」）会把含该字的任何正常标题全拦，禁令粒度以此为限；
+    // ≥2 字 token（「鲸跃」）仍逐 token 禁。showcase require 侧不受影响
+    // （单字 token 的 OR 命中只放宽通过面）。
+    expect(
+      validateTitleCandidates({
+        candidates: [
+          "2026杭州轻医美机构盘点",
+          "2026杭州轻医美怎么选",
+          "2026杭州轻医美价格解析",
+        ],
+        contentType: "ranking",
+        targetRegion: "杭州",
+        industry: "轻医美",
+        brandNames: ["鲸跃/跃"],
+        competitors: [],
+        currentYear: 2026,
+      }),
+    ).toHaveLength(3);
+
+    expect(() =>
+      validateTitleCandidates({
+        candidates: [
+          "2026杭州轻医美机构盘点",
+          "2026杭州轻医美怎么选",
+          "2026杭州轻医美盘点：鲸跃等六家怎么选",
+        ],
+        contentType: "ranking",
+        targetRegion: "杭州",
+        industry: "轻医美",
+        brandNames: ["鲸跃/跃"],
+        competitors: [],
+        currentYear: 2026,
+      }),
+    ).toThrow("topic_plan_title_candidates_insufficient:ranking-brand=1");
+  });
+
+  it("degrades to the least-similar candidate when every candidate crosses the duplicate threshold", () => {
+    // 越阈降级（用户裁决 2026-09-01 少报错）：全部候选与已选标题越阈时选相
+    // 似度最低者并自证越阈（evidence.maxSimilarity ≥ threshold），不再抛
+    // diversity_insufficient 杀掉整批。
+    const result = selectDistinctTitles({
+      protectedSelections: [{ itemId: "protected", title: "旧标题" }],
+      items: [
+        {
+          itemId: "new",
+          candidates: ["近义标题甲", "近义标题乙"],
+        },
+      ],
+      vectors: {
+        "protected:旧标题": [1, 0],
+        "new:近义标题甲": [1, 0.05],
+        "new:近义标题乙": [1, 0.2],
+      },
+    });
+    expect(result).toHaveLength(1);
+    // 两候选均越阈（相似度 ≥ 0.92），降级选相似度较低的「乙」。
+    expect(result[0].title).toBe("近义标题乙");
+    expect(result[0].evidence.maxSimilarity).toBeGreaterThanOrEqual(
+      TOPIC_PLAN_TITLE_DUPLICATE_THRESHOLD,
+    );
+  });
+
+  it("carries surviving candidates on the insufficient error for server-side degradation", () => {
+    // 幸存候选（用户裁决 2026-09-01 少报错）：错误除了拒因计数还携带通过
+    // 校验的候选，服务端降级路径（重试后 ≥1 条即放行）直接采用。
+    let captured: InstanceType<
+      typeof TopicPlanTitleCandidatesError
+    > | null = null;
+    try {
+      validateTitleCandidates({
+        candidates: [
+          "杭州轻医美机构怎么选",
+          "杭州轻医美价格解析",
+          "杭州洗车店盘点",
+        ],
+        contentType: "guide",
+        targetRegion: "杭州",
+        industry: "轻医美",
+        brandNames: [],
+        competitors: [],
+        currentYear: 2026,
+      });
+    } catch (error) {
+      if (error instanceof TopicPlanTitleCandidatesError) captured = error;
+    }
+    expect(captured).not.toBeNull();
+    expect(captured!.rejectionCounts.get("industry")).toBe(1);
+    expect(captured!.validCandidates).toEqual([
+      "杭州轻医美机构怎么选",
+      "杭州轻医美价格解析",
+    ]);
   });
 
   it("records embedding-based semantic dedup and chooses a non-duplicate candidate", () => {

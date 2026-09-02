@@ -107,6 +107,7 @@ class FakePersistence implements TopicPlanPersistencePort {
   readonly mutationInputs: Array<Parameters<TopicPlanPersistencePort["mutate"]>[0]> = [];
   readonly confirmationInputs: Array<Parameters<TopicPlanPersistencePort["confirm"]>[0]> = [];
   readonly getIds: string[] = [];
+  readonly prepareForceFlags: Array<boolean | undefined> = [];
 
   async latest(): Promise<TopicPlanProjection | null> {
     return this.plan;
@@ -117,11 +118,13 @@ class FakePersistence implements TopicPlanPersistencePort {
     return this.plan?.id === planId ? this.plan : null;
   }
 
-  async prepare(questionPoolId?: string) {
+  async prepare(questionPoolId?: string, forceRegenerate?: boolean) {
+    this.prepareForceFlags.push(forceRegenerate);
     if (questionPoolId && questionPoolId !== "pool-08") {
       throw new Error("topic_plan_question_pool_not_found");
     }
-    return { context: context(), existing: this.plan };
+    // force 跳过复用（与 Rust prepare 的 force_regenerate 同语义）。
+    return { context: context(), existing: forceRegenerate ? null : this.plan };
   }
 
   async create(input: Parameters<TopicPlanPersistencePort["create"]>[0]) {
@@ -445,6 +448,27 @@ describe("TopicPlanService", () => {
     ).toBe(true);
   });
 
+  it("threads forceRegenerate from generate through prepare and create", async () => {
+    // 回归（2026-09-01 复用改停卡重选）：「重新生成内容计划」的 force 标记
+    // 必须贯通到 create 落库——此前只传到 prepare，Rust create 侧的复用
+    // 查找会把付费重新规划的产物丢弃、返回旧 confirmed 计划。
+    const persistence = new FakePersistence();
+    const generation = new DeterministicGeneration();
+    await service(persistence, generation).generate({
+      ...identity,
+      questionPoolId: "pool-08",
+    });
+    expect(persistence.prepareForceFlags).toEqual([undefined]);
+    expect(persistence.createInputs[0].forceRegenerate).toBe(false);
+    await service(persistence, generation).generate({
+      ...identity,
+      questionPoolId: "pool-08",
+      forceRegenerate: true,
+    });
+    expect(persistence.prepareForceFlags).toEqual([undefined, true]);
+    expect(persistence.createInputs.at(-1)?.forceRegenerate).toBe(true);
+  });
+
   it("fails explicitly on Provider/parse failure and never persists a template or mock plan", async () => {
     const persistence = new FakePersistence();
     const generation: GeoTextCapability = {
@@ -493,6 +517,248 @@ describe("TopicPlanService", () => {
     expect(corrective).toContain("上一轮候选：");
     expect(corrective).toMatch(/每条标题不超过 \d+ 个字符/);
     expect(corrective).toContain("候选彼此不得重复或高度同义");
+  });
+
+  it("drops only the item that fails both rounds instead of failing the whole plan", async () => {
+    // 条目级降级（用户裁决 2026-09-01 少报错）：一个条目两轮（初试 + 带
+    // 反馈纠正）都全灭时剔除该条目、其余条目照常成计划——单条目的模型
+    // 质量波动不再作废整批成果，也不再把错误抛给用户。
+    const persistence = new FakePersistence();
+    const poisonedItemId = "item-topic-1-guide";
+    const generation = new (class extends DeterministicGeneration {
+      async complete(
+        messages: Parameters<GeoTextCapability["complete"]>[0],
+        options?: Parameters<GeoTextCapability["complete"]>[1],
+      ): Promise<string> {
+        const prompt = messages.at(-1)?.content ?? "";
+        const itemId = prompt.match(/itemId：(item-[^\n]+)/)?.[1];
+        // 指定条目两轮都返回跑题候选（0 条过审，无降级幸存者）。
+        if (
+          itemId === poisonedItemId &&
+          options?.purpose === "title-planning"
+        ) {
+          return JSON.stringify({
+            itemId,
+            candidates: ["成都洗车店盘点", "成都贴膜哪家快", "成都打蜡避坑"],
+            rationale: {
+              questionCoverage: "跑题",
+              searchIntent: "跑题",
+              differentiation: "跑题",
+              brandFit: "跑题",
+              chinaMarketExpression: "跑题",
+            },
+          });
+        }
+        return super.complete(messages, options);
+      }
+    })();
+    const plan = await service(persistence, generation).generate({
+      ...identity,
+      questionPoolId: "pool-08",
+    });
+    expect(plan.items.length).toBeGreaterThan(0);
+    expect(plan.items.some((item) => item.id === poisonedItemId)).toBe(false);
+    // modelAttempts 只记产出候选的条目（与 items 一一对应）。
+    expect(
+      plan.modelAttempts.filter((attempt) => attempt.stage === "title-generation"),
+    ).toHaveLength(plan.items.length);
+  });
+
+  it("degrades to the surviving candidates when both rounds stay below the candidate floor", async () => {
+    // 两轮降级幸存集（用户裁决 2026-09-01「重试后仍有 ≥1 条合格候选即
+    // 降级放行」）：两轮都只有 1 条过审（不足 3 条下限）时按幸存候选集
+    // 继续，条目不剔除；重试比首轮更差时退回首轮幸存集——重试劣化不该
+    // 反杀已有合格候选。
+    const survivor = "成都汽车音响改装售后质保要点甲";
+    const partial = (itemId: string) =>
+      JSON.stringify({
+        itemId,
+        candidates: [survivor, "成都洗车须知", "成都打蜡避坑"],
+        rationale: {
+          questionCoverage: "覆盖来源问题核心诉求",
+          searchIntent: "匹配主题搜索意图",
+          differentiation: "与已有标题采用不同表达",
+          brandFit: "遵守品牌边界",
+          chinaMarketExpression: "使用自然中国市场搜索表达",
+        },
+      });
+    const allRejected = (itemId: string) =>
+      JSON.stringify({
+        itemId,
+        candidates: ["成都洗车须知", "成都贴膜哪家快", "成都打蜡避坑"],
+        rationale: {
+          questionCoverage: "跑题",
+          searchIntent: "跑题",
+          differentiation: "跑题",
+          brandFit: "跑题",
+          chinaMarketExpression: "跑题",
+        },
+      });
+    const planFor = (retryWorse: boolean) => {
+      const generation = new (class extends DeterministicGeneration {
+        async complete(
+          messages: Parameters<GeoTextCapability["complete"]>[0],
+          options?: Parameters<GeoTextCapability["complete"]>[1],
+        ): Promise<string> {
+          const prompt = messages.at(-1)?.content ?? "";
+          const itemId = prompt.match(/itemId：(item-[^\n]+)/)?.[1];
+          if (itemId === "item-topic-1-guide" && options?.purpose === "title-planning") {
+            // retryWorse：重试轮（带拒因反馈）比首轮更差（全灭），验证退回
+            // 首轮幸存集；否则两轮都保持 1 条幸存。
+            const isRetry = prompt.includes("上一轮被拒原因");
+            return !isRetry || !retryWorse
+              ? partial(itemId)
+              : allRejected(itemId);
+          }
+          return super.complete(messages, options);
+        }
+      })();
+      return service(new FakePersistence(), generation).generate({
+        ...identity,
+        questionPoolId: "pool-08",
+      });
+    };
+    // 两轮都 1 条幸存：条目保留，候选集降级为那 1 条。
+    const degraded = await planFor(false);
+    const degradedItem = degraded.items.find((item) => item.id === "item-topic-1-guide");
+    expect(degradedItem).toMatchObject({
+      title: survivor,
+      titleCandidates: [survivor],
+    });
+    // 重试比首轮更差（第二轮全灭）：退回首轮幸存集，同样降级放行。
+    const fellBack = await planFor(true);
+    const fellBackItem = fellBack.items.find((item) => item.id === "item-topic-1-guide");
+    expect(fellBackItem).toMatchObject({
+      title: survivor,
+      titleCandidates: [survivor],
+    });
+  });
+
+  it("keeps dropped regeneration targets untouched while replacing the rest", async () => {
+    // 条目级降级（重生成路径，用户裁决 2026-09-01 少报错）：局部重生成里
+    // 一个目标条目两轮全灭被剔除时，它保留原标题与原批准态原样通过，
+    // 其余目标照常替换；merge 目标集只含「有替换件或受保护」的目标。
+    const persistence = new FakePersistence();
+    const generation = new DeterministicGeneration();
+    const planner = service(persistence, generation);
+    const initial = await planner.generate({ ...identity });
+    const [droppedTarget, replacedTarget] = initial.items;
+    const poisoned = new (class extends DeterministicGeneration {
+      async complete(
+        messages: Parameters<GeoTextCapability["complete"]>[0],
+        options?: Parameters<GeoTextCapability["complete"]>[1],
+      ): Promise<string> {
+        const prompt = messages.at(-1)?.content ?? "";
+        const itemId = prompt.match(/itemId：(item-[^\n]+)/)?.[1];
+        if (itemId === droppedTarget.id && options?.purpose === "title-planning") {
+          return JSON.stringify({
+            itemId,
+            candidates: ["成都洗车店盘点", "成都贴膜哪家快", "成都打蜡避坑"],
+            rationale: {
+              questionCoverage: "跑题",
+              searchIntent: "跑题",
+              differentiation: "跑题",
+              brandFit: "跑题",
+              chinaMarketExpression: "跑题",
+            },
+          });
+        }
+        return super.complete(messages, options);
+      }
+    })();
+
+    const result = await service(persistence, poisoned).regenerate({
+      ...identity,
+      planId: initial.id,
+      expectedRevision: initial.revision,
+      itemIds: [droppedTarget.id, replacedTarget.id],
+    });
+
+    // 被剔除目标：与初始计划逐字节一致（标题、批准态都不动）。
+    expect(result.plan.items.find((item) => item.id === droppedTarget.id)).toEqual(
+      droppedTarget,
+    );
+    // mutation 的 targetItemIds 保持完整请求集留审计（过滤只发生在
+    // merge 层），preservedItemIds 为空（两个目标都是可重生成条目）。
+    expect(persistence.mutationInputs.at(-1)).toMatchObject({
+      targetItemIds: [droppedTarget.id, replacedTarget.id],
+      preservedItemIds: [],
+    });
+    // 重生成 modelAttempts 只记产出候选的条目（被丢弃条目不记）。
+    const regenAttempts = persistence.mutationInputs
+      .at(-1)!.modelAttempts.filter(
+        (attempt) => attempt.stage === "title-generation",
+      );
+    expect(regenAttempts.some((attempt) => attempt.itemId === droppedTarget.id)).toBe(
+      false,
+    );
+    expect(regenAttempts.some((attempt) => attempt.itemId === replacedTarget.id)).toBe(
+      true,
+    );
+    expect(result.plan.items).toHaveLength(initial.items.length);
+  });
+
+  it("recovers an unparseable clustering output with one feedback retry instead of failing", async () => {
+    // structuredGeneration（用户裁决 2026-09-01 少报错）：聚类解析失败先带
+    // 错误现场补一轮；第二轮仍失败才维持显式失败（聚类没有条目级降级
+    // 空间，全批失败是真实语义）。重试是在原 messages 后追加一条反馈
+    // user 消息，mock 需按「任一消息含聚类提示」识别调用。
+    const persistence = new FakePersistence();
+    const generation = new (class extends DeterministicGeneration {
+      private clusterCalls = 0;
+      readonly clusterPrompts: string[] = [];
+      async complete(
+        messages: Parameters<GeoTextCapability["complete"]>[0],
+        options?: Parameters<GeoTextCapability["complete"]>[1],
+      ): Promise<string> {
+        const isClusterCall = messages.some((message) =>
+          message.content.includes("Embedding 近邻提示"),
+        );
+        if (isClusterCall) {
+          this.clusterPrompts.push(messages.at(-1)?.content ?? "");
+          this.clusterCalls += 1;
+          if (this.clusterCalls === 1) return "not-json";
+          return super.complete(
+            messages.filter((message) =>
+              message.content.includes("Embedding 近邻提示"),
+            ),
+            options,
+          );
+        }
+        return super.complete(messages, options);
+      }
+    })();
+    const plan = await service(persistence, generation).generate({
+      ...identity,
+      questionPoolId: "pool-08",
+    });
+    expect(plan.items.length).toBeGreaterThan(0);
+    expect(generation.clusterPrompts).toHaveLength(2);
+    expect(generation.clusterPrompts[1]).toContain("上一次输出无法解析");
+    expect(generation.clusterPrompts[1]).toContain("只返回 JSON 数组");
+
+    const alwaysBad = new (class extends DeterministicGeneration {
+      clusterCalls = 0;
+      async complete(
+        messages: Parameters<GeoTextCapability["complete"]>[0],
+        options?: Parameters<GeoTextCapability["complete"]>[1],
+      ): Promise<string> {
+        if (
+          messages.some((message) => message.content.includes("Embedding 近邻提示"))
+        ) {
+          this.clusterCalls += 1;
+          return "not-json";
+        }
+        return super.complete(messages, options);
+      }
+    })();
+    await expect(
+      service(new FakePersistence(), alwaysBad).generate({
+        ...identity,
+        questionPoolId: "pool-08",
+      }),
+    ).rejects.toThrow();
+    expect(alwaysBad.clusterCalls).toBe(2);
   });
 
   it("uses exact plan/revision CAS and preserves edited or approved targets during partial regeneration", async () => {

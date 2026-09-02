@@ -4,14 +4,16 @@ import { useCallback, useMemo, useState } from "react";
 import {
   confirmTopicPlan,
   loadLatestTopicPlan,
+  regenerateTopicPlan,
   saveTopicPlanItems,
 } from "@/api/topicPlanClient";
 import { useTabApi, useTabState } from "@/context/TabContext";
 import { isPendingSessionId } from "../../../shared/constants";
-import type {
-  TopicPlanCardProjection,
-  TopicPlanItem,
-  TopicPlanProjection,
+import {
+  TOPIC_PLAN_REUSE_OUTCOME,
+  type TopicPlanCardProjection,
+  type TopicPlanItem,
+  type TopicPlanProjection,
 } from "../../../shared/geo/topicPlan";
 import { unwrapToolResultText } from "../../../shared/toolResult";
 import GateCardFooter, { GateCardSuccess } from "./GateCardFooter";
@@ -29,6 +31,11 @@ import { useGateCardRefresh } from "./useGateCardRefresh";
  */
 export interface TopicPlanGateCardData {
   kind: "topic-plan";
+  /** 复用命中信封携带（TOPIC_PLAN_REUSE_OUTCOME）：confirmed 计划 +
+   * 本标记 → 重选模式（预勾上次的已批准项，可收窄），用户沿用确认或
+   * 付费重新生成；内容计划门只在用户的卡片确认后放行。未知 outcome
+   * 按旧信封处理（只读展示）。 */
+  outcome?: typeof TOPIC_PLAN_REUSE_OUTCOME;
   /** plan_topics 信封携带瘦身投影（审计字段与事实详情已剔除，防超限
    * 被 MCP 宿主客户端持久化成文件导致卡片不渲染）；/latest 轮询返回的
    * 完整投影结构兼容（字段只多不少）。 */
@@ -60,6 +67,7 @@ function parseEnvelope(value: unknown): TopicPlanGateCardData | null {
   if (!value || typeof value !== "object") return null;
   const envelope = value as {
     kind?: unknown;
+    outcome?: unknown;
     plan?: unknown;
     content?: Array<{ type?: string; text?: string }>;
   };
@@ -68,7 +76,14 @@ function parseEnvelope(value: unknown): TopicPlanGateCardData | null {
     return text ? parseTopicPlanGateCard(text) : null;
   }
   if (envelope.kind === "topic-plan" && isPlan(envelope.plan)) {
-    return { kind: "topic-plan", plan: envelope.plan };
+    return {
+      kind: "topic-plan",
+      outcome:
+        envelope.outcome === TOPIC_PLAN_REUSE_OUTCOME
+          ? TOPIC_PLAN_REUSE_OUTCOME
+          : undefined,
+      plan: envelope.plan,
+    };
   }
   return null;
 }
@@ -111,8 +126,19 @@ export default function TopicPlanGateCard({
           .map((item) => item.id),
       ),
   );
-  const [confirmed, setConfirmed] = useState(data.plan.status === "confirmed");
+  // 复用命中（TOPIC_PLAN_REUSE_OUTCOME）：confirmed 计划停卡重选——预勾
+  // 上次的已批准项、可收窄（未批准项在冻结计划上不可新勾），「沿用此计划」
+  // 走同一 confirm 端点（Rust 允许对 confirmed 计划再确认）；无 outcome 的
+  // confirmed 计划是旧信封，保持只读成功态兼容。
+  const [reselect, setReselect] = useState(
+    data.outcome === TOPIC_PLAN_REUSE_OUTCOME && data.plan.status === "confirmed",
+  );
+  const [initiallyConfirmed] = useState(
+    data.plan.status === "confirmed" && data.outcome !== TOPIC_PLAN_REUSE_OUTCOME,
+  );
+  const [confirmed, setConfirmed] = useState(initiallyConfirmed);
   const [busy, setBusy] = useState(false);
+  const [regenerating, setRegenerating] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const hasRealSession = Boolean(sessionId && !isPendingSessionId(sessionId));
 
@@ -161,7 +187,7 @@ export default function TopicPlanGateCard({
   });
 
   const confirm = async () => {
-    if (!sessionId || !hasRealSession || busy || approvedIds.size === 0) return;
+    if (!sessionId || !hasRealSession || busy || regenerating || approvedIds.size === 0) return;
     setBusy(true);
     setError(null);
     try {
@@ -208,6 +234,30 @@ export default function TopicPlanGateCard({
     }
   };
 
+  // 「重新生成内容计划」：跳过零成本复用、强制重新规划（真实 provider
+  // 花费）；成功后以正常待决流程呈现新计划。
+  const regenerate = async () => {
+    if (!sessionId || !hasRealSession || regenerating || busy) return;
+    setRegenerating(true);
+    setError(null);
+    try {
+      const fresh = await regenerateTopicPlan(
+        apiPost,
+        { workspaceId: plan.workspaceId, sessionId },
+        {},
+      );
+      setPlan(fresh);
+      setApprovedIds(
+        new Set(fresh.items.filter((item) => item.approvalStatus === "approved").map((item) => item.id)),
+      );
+      setReselect(false);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setRegenerating(false);
+    }
+  };
+
   return (
     <section
       aria-label="内容计划确认"
@@ -241,6 +291,9 @@ export default function TopicPlanGateCard({
                     type="checkbox"
                     aria-label={`批准 ${item.title}`}
                     checked={checked}
+                    // 重选模式：冻结计划只允许收窄（取消已批准项），未批准
+                    // 项不可新勾（改内容须走「重新生成内容计划」）。
+                    disabled={reselect && item.approvalStatus !== "approved"}
                     onChange={(event) =>
                       setApprovedIds((current) => {
                         const next = new Set(current);
@@ -277,21 +330,44 @@ export default function TopicPlanGateCard({
           {error}
         </p>
       )}
-      <GateCardFooter note="确认后进入文章生成">
+      <GateCardFooter
+        note={
+          confirmed
+            ? undefined
+            : reselect
+              ? "已复用此前确认的内容计划——预勾上次的已批准项，可收窄后沿用"
+              : "确认后进入文章生成"
+        }
+      >
         {confirmed ? (
           <GateCardSuccess>内容计划已确认（{approvedIds.size}）</GateCardSuccess>
         ) : (
-          <button
-            type="button"
-            onClick={() => {
-              void confirm();
-            }}
-            disabled={busy || approvedIds.size === 0 || !hasRealSession}
-            className="flex items-center gap-1.5 rounded-md bg-[var(--button-primary-bg)] px-3 py-1.5 text-sm font-medium text-[var(--button-primary-text)] disabled:opacity-50"
-          >
-            {busy && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
-            确认内容计划（{approvedIds.size}）
-          </button>
+          <>
+            {reselect && (
+              <button
+                type="button"
+                onClick={() => {
+                  void regenerate();
+                }}
+                disabled={regenerating || busy || !hasRealSession}
+                className="flex items-center gap-1.5 rounded-md bg-[var(--paper-inset)] px-3 py-1.5 text-sm font-medium text-[var(--ink)] disabled:opacity-50"
+              >
+                {regenerating && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+                重新生成内容计划
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => {
+                void confirm();
+              }}
+              disabled={busy || regenerating || approvedIds.size === 0 || !hasRealSession}
+              className="flex items-center gap-1.5 rounded-md bg-[var(--button-primary-bg)] px-3 py-1.5 text-sm font-medium text-[var(--button-primary-text)] disabled:opacity-50"
+            >
+              {busy && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+              {reselect ? `沿用此计划（${approvedIds.size}）` : `确认内容计划（${approvedIds.size}）`}
+            </button>
+          </>
         )}
       </GateCardFooter>
     </section>

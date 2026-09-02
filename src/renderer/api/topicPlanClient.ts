@@ -60,6 +60,25 @@ export async function saveTopicPlanItems(
   return response.result;
 }
 
+/**
+ * 「重新生成内容计划」按钮（复用停卡重选）：跳过既有计划复用、强制重新
+ * 规划（真实 provider 花费）；返回的待决计划按正常流程呈现与确认。
+ */
+export async function regenerateTopicPlan(
+  apiPost: TopicPlanApiPost,
+  identity: { workspaceId: string; sessionId: string },
+  input: { questionPoolId?: string },
+): Promise<TopicPlanCardProjection> {
+  const response = await apiPost<TopicPlanResponse>(
+    "/api/xiaojing/topic-plans/generate",
+    { ...identity, ...input, regenerate: true },
+  );
+  if (!response.success || !response.plan) {
+    throw new Error(response.error ?? "topic_plan_regenerate_failed");
+  }
+  return response.plan;
+}
+
 export async function confirmTopicPlan(
   apiPost: TopicPlanApiPost,
   identity: { workspaceId: string; sessionId: string },

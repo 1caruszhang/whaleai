@@ -78,6 +78,8 @@ export async function handleXiaojingContentPipelineRoute(
         workspaceId: string;
         sessionId: string;
         questionPoolId?: string;
+        /** 卡片「重新生成内容计划」按钮：跳过复用强制重规划（真实花费）。 */
+        regenerate?: boolean;
       };
       const runtimeSessionId = getRuntimeSessionIdForRequest();
       const workspaceId = basename(resolve(workspacePath));
@@ -94,6 +96,7 @@ export async function handleXiaojingContentPipelineRoute(
       const plan = await getXiaojingTopicPlanService(identity).generate({
         ...payload,
         ...identity,
+        forceRegenerate: payload.regenerate === true,
       });
       return jsonResponse({ success: true, plan });
     } catch (error) {

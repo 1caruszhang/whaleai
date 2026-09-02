@@ -85,6 +85,10 @@ pub struct TopicPlanGetRequest {
 #[serde(rename_all = "camelCase")]
 pub struct TopicPlanPrepareRequest {
     pub question_pool_id: Option<String>,
+    /// 「重新生成内容计划」按钮：跳过既有计划复用（confirmed 或本会话
+    /// 草稿），强制重新规划（真实 provider 花费）；缺省走复用。
+    #[serde(default)]
+    pub force_regenerate: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -99,6 +103,11 @@ pub struct TopicPlanCreateRequest {
     pub model_audit: Value,
     pub provider_snapshot: Value,
     pub model_attempts: Value,
+    /// 「重新生成内容计划」：与 prepare 的 force_regenerate 同源——跳过
+    /// create 事务内的复用查找，允许同一 source identity 落第二代计划
+    /// （旧 confirmed 计划保留为历史）；缺省仍复用既有计划。
+    #[serde(default)]
+    pub force_regenerate: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -174,7 +183,7 @@ pub(super) fn ensure_schema(connection: &Connection) -> Result<(), String> {
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
              );
-             CREATE UNIQUE INDEX IF NOT EXISTS geo_topic_plan_source_identity
+             CREATE INDEX IF NOT EXISTS geo_topic_plan_source_identity
                 ON geo_topic_plans(question_pool_id, question_pool_revision, knowledge_version, policy_version);
              CREATE INDEX IF NOT EXISTS geo_topic_plan_latest
                 ON geo_topic_plans(updated_at DESC, id DESC);
@@ -204,6 +213,28 @@ pub(super) fn ensure_schema(connection: &Connection) -> Result<(), String> {
              );",
         )
         .map_err(|error| format!("initialize topic plan schema: {error}"))?;
+    // 2026-09-01 复用改停卡重选：force_regenerate 允许同一 source identity
+    // 落第二代计划（旧 confirmed 计划保留为历史，latest 按更新时间取新代）；
+    // 「非强制路径至多一代」由 create 事务内复用查找保证，存量库的 UNIQUE
+    // 索引降级为普通索引（复用查找仍走同一键）。
+    let source_identity_index: Option<String> = connection
+        .query_row(
+            "SELECT sql FROM sqlite_master
+             WHERE type = 'index' AND name = 'geo_topic_plan_source_identity'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| format!("inspect topic plan source identity index: {error}"))?;
+    if source_identity_index.is_some_and(|sql| sql.to_ascii_uppercase().contains("UNIQUE")) {
+        connection
+            .execute_batch(
+                "DROP INDEX geo_topic_plan_source_identity;
+                 CREATE INDEX geo_topic_plan_source_identity
+                    ON geo_topic_plans(question_pool_id, question_pool_revision, knowledge_version, policy_version);",
+            )
+            .map_err(|error| format!("downgrade topic plan source identity index: {error}"))?;
+    }
     super::ensure_column(connection, "geo_topic_plan_mutations", "reason", "TEXT")?;
     super::drop_brand_sessions_foreign_keys(
         connection,
@@ -285,24 +316,28 @@ impl BrandWorkspaceStore {
         require_topic_plan_session(&connection, session_id)?;
         let context =
             read_topic_plan_context(&connection, &workspace, request.question_pool_id.as_deref())?;
-        let existing_id: Option<String> = connection
-            .query_row(
-                "SELECT id FROM geo_topic_plans
-                 WHERE question_pool_id=?1 AND question_pool_revision=?2
-                   AND knowledge_version=?3 AND policy_version=?4
-                   AND (status='confirmed' OR created_by_session_id=?5)
-                 ORDER BY CASE status WHEN 'confirmed' THEN 0 ELSE 1 END, updated_at DESC LIMIT 1",
-                params![
-                    context.question_pool_id,
-                    context.question_pool_revision,
-                    context.knowledge_version,
-                    POLICY_VERSION,
-                    session_id
-                ],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(|error| format!("find reusable topic plan: {error}"))?;
+        let existing_id: Option<String> = if request.force_regenerate {
+            None
+        } else {
+            connection
+                .query_row(
+                    "SELECT id FROM geo_topic_plans
+                     WHERE question_pool_id=?1 AND question_pool_revision=?2
+                       AND knowledge_version=?3 AND policy_version=?4
+                       AND (status='confirmed' OR created_by_session_id=?5)
+                     ORDER BY CASE status WHEN 'confirmed' THEN 0 ELSE 1 END, updated_at DESC LIMIT 1",
+                    params![
+                        context.question_pool_id,
+                        context.question_pool_revision,
+                        context.knowledge_version,
+                        POLICY_VERSION,
+                        session_id
+                    ],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(|error| format!("find reusable topic plan: {error}"))?
+        };
         let existing = existing_id
             .map(|id| read_topic_plan(&connection, workspace_id, &id, true))
             .transpose()?;
@@ -340,24 +375,28 @@ impl BrandWorkspaceStore {
         }
         validate_topic_question_coverage(&request.topics, &context.questions)?;
         validate_fixed_fact_keys(&transaction, request.knowledge_version, &request.items)?;
-        let existing_id: Option<String> = transaction
-            .query_row(
-                "SELECT id FROM geo_topic_plans
-                 WHERE question_pool_id=?1 AND question_pool_revision=?2
-                   AND knowledge_version=?3 AND policy_version=?4
-                   AND (status='confirmed' OR created_by_session_id=?5)
-                 LIMIT 1",
-                params![
-                    request.question_pool_id,
-                    request.question_pool_revision,
-                    request.knowledge_version,
-                    request.policy_version,
-                    session_id
-                ],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(|error| format!("inspect existing topic plan: {error}"))?;
+        let existing_id: Option<String> = if request.force_regenerate {
+            None
+        } else {
+            transaction
+                .query_row(
+                    "SELECT id FROM geo_topic_plans
+                     WHERE question_pool_id=?1 AND question_pool_revision=?2
+                       AND knowledge_version=?3 AND policy_version=?4
+                       AND (status='confirmed' OR created_by_session_id=?5)
+                     LIMIT 1",
+                    params![
+                        request.question_pool_id,
+                        request.question_pool_revision,
+                        request.knowledge_version,
+                        request.policy_version,
+                        session_id
+                    ],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(|error| format!("inspect existing topic plan: {error}"))?
+        };
         if let Some(existing_id) = existing_id {
             transaction
                 .commit()
@@ -595,11 +634,18 @@ impl BrandWorkspaceStore {
             .optional()
             .map_err(|error| format!("read topic plan for confirmation: {error}"))?
             .ok_or_else(|| "topic_plan_not_found".to_string())?;
-        if created_by_session_id != session_id {
+        // 跨会话重选（复用停卡重选，2026-09-01）：confirmed 计划是工作区级
+        // 事实——新一轮 Session 对复用计划的沿用/收窄确认放行（源快照与
+        // revision CAS 仍是护栏）；owner 闸只约束待决计划（草稿编辑冲突）。
+        // 再确认（镜像题库 decide_question_pool 对 confirmed 池的再次裁决）：
+        // 计划内容仍冻结（编辑走 requireMutablePlan 的 immutable 闸），这里
+        // 只允许换本轮的已批准条目子集；源快照校验（下方池版本/知识版本）
+        // 保证复用计划仍锚定当前池状态。
+        if created_by_session_id != session_id && status != "confirmed" {
             return Err("topic_plan_draft_session_mismatch".to_string());
         }
-        if status == "confirmed" {
-            return Err("topic_plan_confirmed_immutable".to_string());
+        if !matches!(status.as_str(), "awaiting-confirmation" | "confirmed") {
+            return Err("topic_plan_status_not_confirmable".to_string());
         }
         if revision != request.expected_revision {
             return Err("topic_plan_revision_conflict".to_string());
@@ -625,16 +671,32 @@ impl BrandWorkspaceStore {
         {
             return Err("topic_plan_source_snapshot_changed".to_string());
         }
-        let decision_id = Uuid::new_v4().to_string();
         let next_revision = revision + 1;
         let selected_json = canonical_json(&request.selected_item_ids)?;
         let now = Utc::now().to_rfc3339();
+        // 决策表对 plan_id 有 UNIQUE 约束（每计划一条决策）：再确认（计划
+        // 已 confirmed）更新既有决策行为本轮最新选择；首次确认才插入。
+        let decision_id: String = transaction
+            .query_row(
+                "SELECT id FROM geo_topic_plan_decisions WHERE plan_id=?1",
+                [&request.plan_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|error| format!("read existing topic plan decision: {error}"))?
+            .unwrap_or_else(|| Uuid::new_v4().to_string());
         transaction
             .execute(
                 "INSERT INTO geo_topic_plan_decisions
                     (id, plan_id, session_id, expected_revision, revision,
                      selected_item_ids_json, actor_id, decided_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                 ON CONFLICT(plan_id) DO UPDATE SET
+                    expected_revision=excluded.expected_revision,
+                    revision=excluded.revision,
+                    selected_item_ids_json=excluded.selected_item_ids_json,
+                    actor_id=excluded.actor_id,
+                    decided_at=excluded.decided_at",
                 params![
                     decision_id,
                     request.plan_id,
@@ -651,7 +713,8 @@ impl BrandWorkspaceStore {
             .execute(
                 "UPDATE geo_topic_plans SET status='confirmed', revision=?2,
                      selected_item_ids_json=?3, updated_at=?4
-                 WHERE id=?1 AND revision=?5 AND status='awaiting-confirmation'",
+                 WHERE id=?1 AND revision=?5
+                   AND status IN ('awaiting-confirmation','confirmed')",
                 params![request.plan_id, next_revision, selected_json, now, revision],
             )
             .map_err(|error| format!("confirm topic plan: {error}"))?;
@@ -1240,13 +1303,18 @@ mod tests {
         })
     }
 
-    fn create_plan(store: &BrandWorkspaceStore, workspace: &BrandWorkspace) -> TopicPlanProjection {
+    fn create_plan(
+        store: &BrandWorkspaceStore,
+        workspace: &BrandWorkspace,
+        force_regenerate: bool,
+    ) -> TopicPlanProjection {
         store.create_topic_plan(&workspace.id, "session-10", TopicPlanCreateRequest {
             question_pool_id:"pool-10".to_string(), question_pool_revision:1, knowledge_version:1,
             policy_version:POLICY_VERSION.to_string(), topics:topics(), items:serde_json::json!([item("editable","原标题",false,false),item("protected","用户标题",true,false),item("approved","批准标题",false,true)]),
             model_audit:serde_json::json!({"clustering":"embedding+generation-llm"}),
             provider_snapshot:serde_json::json!({"generation":{"model":"doubao-seed-2-0-pro-260215"},"titlePlanning":{"model":"doubao-seed-2-0-mini-260428"},"embedding":{"modelFamily":"doubao-embedding-vision"}}),
             model_attempts:serde_json::json!([{"stage":"topic-clustering","status":"success"}]),
+            force_regenerate,
         }).unwrap()
     }
 
@@ -1259,12 +1327,13 @@ mod tests {
                 "session-10",
                 TopicPlanPrepareRequest {
                     question_pool_id: Some("pool-10".to_string()),
+                    force_regenerate: false,
                 },
             )
             .unwrap();
         assert_eq!(prepared.context.question_pool_revision, 1);
         assert_eq!(prepared.context.questions[0].id, "q1");
-        let plan = create_plan(&store, &workspace);
+        let plan = create_plan(&store, &workspace, false);
         assert_eq!(plan.status, "awaiting-confirmation");
         assert_eq!(
             store
@@ -1312,6 +1381,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(confirmed.selected_item_ids, vec!["approved"]);
+
         assert_eq!(
             store
                 .get_topic_plan(
@@ -1348,9 +1418,246 @@ mod tests {
     }
 
     #[test]
+    fn confirmed_plan_can_be_reconfirmed_for_a_new_round() {
+        // 再确认（镜像题库 confirmed 池再裁决）：复用停卡重选的「沿用此
+        // 计划」按钮走同一 confirm 端点——内容仍不可编辑，条目子集换选
+        // 仍须 ⊆ 已批准项；决策与 revision 照常推进。
+        let (store, workspace) = setup();
+        let plan = create_plan(&store, &workspace, false);
+        store
+            .confirm_topic_plan(
+                &workspace.id,
+                "session-10",
+                TopicPlanConfirmRequest {
+                    plan_id: plan.id.clone(),
+                    expected_revision: 0,
+                    selected_item_ids: vec!["approved".to_string()],
+                    actor_id: "desktop-user".to_string(),
+                },
+            )
+            .unwrap();
+        let reconfirmed = store
+            .confirm_topic_plan(
+                &workspace.id,
+                "session-10",
+                TopicPlanConfirmRequest {
+                    plan_id: plan.id.clone(),
+                    expected_revision: 1,
+                    selected_item_ids: vec!["approved".to_string()],
+                    actor_id: "desktop-user".to_string(),
+                },
+            )
+            .unwrap();
+        assert_eq!(reconfirmed.revision, 2);
+        let latest = store
+            .latest_topic_plan(
+                &workspace.id,
+                "session-10",
+                TopicPlanLatestRequest {
+                    status: Some("confirmed".to_string()),
+                },
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(latest.revision, 2);
+        assert_eq!(latest.selected_item_ids, vec!["approved"]);
+        // 未批准项进子集仍被拒（与首次确认同一校验）。
+        assert_eq!(
+            store
+                .confirm_topic_plan(
+                    &workspace.id,
+                    "session-10",
+                    TopicPlanConfirmRequest {
+                        plan_id: plan.id.clone(),
+                        expected_revision: 2,
+                        selected_item_ids: vec!["editable".to_string()],
+                        actor_id: "desktop-user".to_string(),
+                    },
+                )
+                .unwrap_err(),
+            "topic_plan_approved_selection_required"
+        );
+    }
+
+    #[test]
+    fn confirmed_plan_reconfirmation_is_workspace_scoped_across_sessions() {
+        // 复用停卡重选（2026-09-01）：confirmed 计划是工作区级事实——另一
+        // 会话对复用计划的沿用确认放行；待决计划跨会话确认仍被拒。
+        let (store, workspace) = setup();
+        let plan = create_plan(&store, &workspace, false);
+        // 反例先行（create 对同会话草稿去重，确认后再 create 拿不到新草稿）：
+        // 待决计划跨会话确认被拒——owner 闸只对 confirmed 放开。
+        assert_eq!(
+            store
+                .confirm_topic_plan(
+                    &workspace.id,
+                    "session-other",
+                    TopicPlanConfirmRequest {
+                        plan_id: plan.id.clone(),
+                        expected_revision: 0,
+                        selected_item_ids: vec!["approved".to_string()],
+                        actor_id: "desktop-user".to_string(),
+                    },
+                )
+                .unwrap_err(),
+            "topic_plan_draft_session_mismatch"
+        );
+        store
+            .confirm_topic_plan(
+                &workspace.id,
+                "session-10",
+                TopicPlanConfirmRequest {
+                    plan_id: plan.id.clone(),
+                    expected_revision: 0,
+                    selected_item_ids: vec!["approved".to_string()],
+                    actor_id: "desktop-user".to_string(),
+                },
+            )
+            .unwrap();
+        // 另一会话（新一轮）对复用 confirmed 计划沿用确认：放行。
+        let cross = store
+            .confirm_topic_plan(
+                &workspace.id,
+                "session-other",
+                TopicPlanConfirmRequest {
+                    plan_id: plan.id.clone(),
+                    expected_revision: 1,
+                    selected_item_ids: vec!["approved".to_string()],
+                    actor_id: "desktop-user".to_string(),
+                },
+            )
+            .unwrap();
+        assert_eq!(cross.revision, 2);
+    }
+
+    #[test]
+    fn prepare_force_regenerate_skips_reusable_plans() {
+        // 「重新生成内容计划」按钮：跳过既有 confirmed 计划复用，强制
+        // 重新规划；缺省（force=false）仍按复用契约返回既有计划。
+        let (store, workspace) = setup();
+        let plan = create_plan(&store, &workspace, false);
+        store
+            .confirm_topic_plan(
+                &workspace.id,
+                "session-10",
+                TopicPlanConfirmRequest {
+                    plan_id: plan.id.clone(),
+                    expected_revision: 0,
+                    selected_item_ids: vec!["approved".to_string()],
+                    actor_id: "desktop-user".to_string(),
+                },
+            )
+            .unwrap();
+        let reuse = store
+            .prepare_topic_plan(
+                &workspace.id,
+                "session-10",
+                TopicPlanPrepareRequest {
+                    question_pool_id: None,
+                    force_regenerate: false,
+                },
+            )
+            .unwrap();
+        assert_eq!(reuse.existing.map(|plan| plan.id), Some(plan.id.clone()));
+        let forced = store
+            .prepare_topic_plan(
+                &workspace.id,
+                "session-10",
+                TopicPlanPrepareRequest {
+                    question_pool_id: None,
+                    force_regenerate: true,
+                },
+            )
+            .unwrap();
+        assert!(forced.existing.is_none());
+    }
+
+    #[test]
+    fn create_force_regenerate_supersedes_confirmed_plan_on_same_source() {
+        // 回归（2026-09-01 复用改停卡重选）：create 的复用查找必须与
+        // prepare 同受 force_regenerate 约束——否则真实 provider 重新规划
+        // 的产物被 create 复用分支丢弃，卡片拿到旧 confirmed 计划且无
+        // outcome 标记，渲染成只读而非正常待决流程。
+        let (store, workspace) = setup();
+        let first = create_plan(&store, &workspace, false);
+        store
+            .confirm_topic_plan(
+                &workspace.id,
+                "session-10",
+                TopicPlanConfirmRequest {
+                    plan_id: first.id.clone(),
+                    expected_revision: 0,
+                    selected_item_ids: vec!["approved".to_string()],
+                    actor_id: "desktop-user".to_string(),
+                },
+            )
+            .unwrap();
+        // 缺省 create 仍复用既有 confirmed 计划。
+        assert_eq!(
+            create_plan(&store, &workspace, false).id,
+            first.id,
+            "non-force create must keep reusing the confirmed plan"
+        );
+        // force create 落第二代 awaiting 计划（同一 source identity），
+        // 旧 confirmed 计划保留为历史、latest 按更新时间取新代。
+        let second = create_plan(&store, &workspace, true);
+        assert_ne!(second.id, first.id);
+        assert_eq!(second.status, "awaiting-confirmation");
+        assert_eq!(second.revision, 0);
+        let latest = store
+            .latest_topic_plan(
+                &workspace.id,
+                "session-10",
+                TopicPlanLatestRequest { status: None },
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(latest.id, second.id);
+        let old = store
+            .get_topic_plan(
+                &workspace.id,
+                "session-10",
+                TopicPlanGetRequest {
+                    plan_id: first.id.clone(),
+                },
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            old.status, "confirmed",
+            "old confirmed plan stays as history"
+        );
+        // 第二代计划走正常待决确认流程。
+        let confirmation = store
+            .confirm_topic_plan(
+                &workspace.id,
+                "session-10",
+                TopicPlanConfirmRequest {
+                    plan_id: second.id.clone(),
+                    expected_revision: 0,
+                    selected_item_ids: vec!["approved".to_string()],
+                    actor_id: "desktop-user".to_string(),
+                },
+            )
+            .unwrap();
+        assert_eq!(confirmation.revision, 1);
+        let confirmed_latest = store
+            .latest_topic_plan(
+                &workspace.id,
+                "session-10",
+                TopicPlanLatestRequest {
+                    status: Some("confirmed".to_string()),
+                },
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(confirmed_latest.id, second.id);
+    }
+
+    #[test]
     fn partial_regeneration_cannot_overwrite_user_edited_or_approved_items() {
         let (store, workspace) = setup();
-        let plan = create_plan(&store, &workspace);
+        let plan = create_plan(&store, &workspace, false);
         let unchanged = serde_json::json!([
             item("editable", "原标题", false, false),
             item("protected", "用户标题", true, false),
