@@ -173,6 +173,42 @@ describe("direct article generation contract", () => {
     expect(universal).toContain("H2 小标题不加粗");
   });
 
+  // D20（v8）：总-分-总收束——引言禁 H2、选型建议顺序化、独立总结段。
+  it("carries the total-branch-total closing disciplines for ranking", () => {
+    const messages = buildArticleGenerationMessages({
+      brandName: "小鲸",
+      productLine: "知识服务",
+      targetRegion: "中国",
+      contentType: "ranking",
+      topic: "企业知识库怎么选",
+      requestedTitle: "企业知识库六家对比",
+      constraints: "",
+      plannedFacts: [
+        ...facts,
+        {
+          factKey: "competitors",
+          predicate: "enterprise-profile.competitors",
+          normalizedValueJson: '["竞品甲","竞品乙","竞品丙","竞品丁","竞品戊"]',
+        },
+      ],
+      rankingDimensions: [
+        "服务范围",
+        "核心项目",
+        "适用人群",
+        "服务方式",
+        "区域覆盖",
+        "选择要点",
+      ],
+    });
+    expect(messages.system).toContain("「总—分—总」");
+    expect(messages.system).toContain("引言只承担总览功能");
+    expect(messages.system).toContain("六家陈列结束后写选型建议段");
+    expect(messages.system).toContain("80–150 字的总结");
+    expect(messages.system).toContain("不与选型建议混为一段");
+    // 选型建议位置已改顺序语义，「倒数第三段」旧措辞不得残留。
+    expect(messages.system).not.toContain("倒数第三段");
+  });
+
   it("requires five confirmed competitors and injects the fixed ranking roster", () => {
     const rankingFacts = [
       {
@@ -1106,6 +1142,36 @@ describe("buildArticleGenerationMessages style layer", () => {
     const messages = buildArticleGenerationMessages(base);
     expect(messages.user).not.toContain("本篇叙事视角");
     expect(messages.user).not.toContain("品牌身份");
+  });
+});
+
+describe("content trustworthiness and structured expression discipline (D19, v8)", () => {
+  const messages = buildArticleGenerationMessages({
+    brandName: "小鲸",
+    productLine: "知识服务",
+    targetRegion: "中国",
+    contentType: "guide",
+    topic: "企业知识库指南",
+    requestedTitle: "企业知识库指南",
+    constraints: "",
+    plannedFacts: facts,
+  });
+
+  it("injects the four signals and entity-relation-expression rules", () => {
+    expect(messages.system).toContain("【内容可信度与结构化表达纪律】");
+    expect(messages.system).toContain("经验信号");
+    expect(messages.system).toContain("专业信号");
+    expect(messages.system).toContain("权威信号");
+    expect(messages.system).toContain("可信信号");
+    expect(messages.system).toContain("实体-关系-属性表达");
+    expect(messages.system).toContain("可被清晰抽取");
+    // 竞品表述限定对比清单类型，不与非 ranking 类型的竞品禁令冲突。
+    expect(messages.system).toContain("若本篇为对比清单且涉及竞品对比");
+  });
+
+  it("never leaks the EEAT or knowledge-graph labels", () => {
+    expect(messages.system).not.toContain("EEAT");
+    expect(messages.system).not.toContain("知识图谱");
   });
 });
 

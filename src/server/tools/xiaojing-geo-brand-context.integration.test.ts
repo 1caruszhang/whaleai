@@ -335,7 +335,7 @@ describe('generate_articles latest-confirmed-plan fallback over a live MCP serve
           topicPlanId: null,
           topicPlanRevision: null,
           knowledgeVersion: 3,
-          policyVersion: 'xiaojing-content-prompt-v7',
+          policyVersion: 'xiaojing-content-prompt-v8',
           status: 'running',
           articles: [],
           createdAt: '2026-09-01T00:00:00Z',
