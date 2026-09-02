@@ -267,11 +267,17 @@ pub struct GeoOperationUnfinishedStuckStep {
 /// （正文隔离保留在各领域 owned-or-approved 投影）；待审数量 =
 /// 该操作当前所有者会话名下处于 draft_ready 且未批准的文章篇数
 /// （ADR-0010 改键：接管后所有者随工作集转移）。
+///
+/// `session_id = None` 是无主轮（票 10 验收实证补全）：原会话被删除时
+/// 外键 `ON DELETE SET NULL` 保留轮次、引用置空——轮次本身仍未完成、
+/// 无所有者进程在跑，是跨会话接管的合法标的；摘要必须列出它，否则无主
+/// 轮对一切新会话不可见、永远无法推进（无主轮的待审数量按 0 报告：
+/// 没有所有者会话名下的工作集）。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct GeoOperationUnfinishedSummary {
     pub id: String,
-    pub session_id: String,
+    pub session_id: Option<String>,
     pub kind: String,
     pub goal: String,
     pub status: String,
@@ -366,7 +372,8 @@ pub struct GeoOperationTakeoverRequest {
 #[serde(rename_all = "camelCase")]
 pub struct GeoOperationTakeoverReceipt {
     pub operation: GeoOperationProjection,
-    pub previous_owner_session_id: String,
+    /// 接管前的所有者；None = 无主轮（原会话已删除，SET NULL 保留轮次）。
+    pub previous_owner_session_id: Option<String>,
     pub taken_over_at: String,
     pub transferred_article_operations: i64,
     pub transferred_question_pools: i64,
@@ -619,8 +626,10 @@ impl BrandWorkspaceStore {
         let workspace = self.workspace(workspace_id)?;
         let connection = open_database(&workspace)?;
         ensure_schema(&connection)?;
-        let unfinished_filter = "kind!='artifact-lineage' AND session_id IS NOT NULL \
-             AND status NOT IN ('succeeded','failed','cancelled')";
+        // 无主轮（session_id NULL，原会话删除后保留）同样非终态、同样可被
+        // 接管——不过滤（票 10 验收实证：过滤会让无主轮对一切新会话不可见）。
+        let unfinished_filter =
+            "kind!='artifact-lineage' AND status NOT IN ('succeeded','failed','cancelled')";
         let total: usize = connection
             .query_row(
                 &format!("SELECT COUNT(*) FROM geo_operations WHERE {unfinished_filter}"),
@@ -645,7 +654,7 @@ impl BrandWorkspaceStore {
             .query_map([UNFINISHED_GEO_OPERATION_SUMMARY_LIMIT as i64], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(1)?,
                     row.get::<_, String>(2)?,
                     row.get::<_, String>(3)?,
                     row.get::<_, String>(4)?,
@@ -691,13 +700,17 @@ impl BrandWorkspaceStore {
                     capability: step.capability.clone(),
                     status: step.status.clone(),
                 });
-            let pending_review_count = match pending_review_by_session.get(&session_id) {
-                Some(count) => *count,
-                None => {
-                    let count = count_session_draft_ready_articles(&connection, &session_id)?;
-                    pending_review_by_session.insert(session_id.clone(), count);
-                    count
-                }
+            // 无主轮没有所有者会话名下的工作集，待审数量按 0 报告。
+            let pending_review_count = match &session_id {
+                None => 0,
+                Some(owner) => match pending_review_by_session.get(owner) {
+                    Some(count) => *count,
+                    None => {
+                        let count = count_session_draft_ready_articles(&connection, owner)?;
+                        pending_review_by_session.insert(owner.clone(), count);
+                        count
+                    }
+                },
             };
             summaries.push(GeoOperationUnfinishedSummary {
                 id,
@@ -964,45 +977,70 @@ impl BrandWorkspaceStore {
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|error| format!("start GEO operation takeover: {error}"))?;
-        let operation = read_operation(&transaction, &request.workspace_id, &request.operation_id)?
-            .ok_or_else(|| "geo_operation_not_found".to_string())?;
-        if TERMINAL_STATUSES.contains(&operation.status.as_str()) {
+        // 守卫读取不走 read_operation 的整行投影：无主轮（session_id NULL，
+        // 原会话删除后保留）的 session_id 在投影里是 String，NULL 行会让
+        // 读取本身失败——无主轮恰恰是接管的合法标的（票 10 验收实证）。
+        // CAS 成功后 get_geo_operation 读到的是新属主（非 NULL），投影安全。
+        let guard = transaction
+            .query_row(
+                "SELECT session_id,status,revision,taken_over_at
+                 FROM geo_operations WHERE id=?1 AND kind!='artifact-lineage'",
+                [&request.operation_id],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|error| format!("read GEO operation takeover guard: {error}"))?;
+        let (operation_session_id, operation_status, operation_revision, operation_taken_over_at) =
+            guard.ok_or_else(|| "geo_operation_not_found".to_string())?;
+        if TERMINAL_STATUSES.contains(&operation_status.as_str()) {
             return Err(format!(
                 "geo_operation_takeover_terminal:{} (only unfinished rounds can be taken over; start a new operation instead)",
-                operation.status
+                operation_status
             ));
         }
         if matches!(
-            operation.status.as_str(),
+            operation_status.as_str(),
             "running" | "queued" | "recovering"
         ) {
             return Err(format!(
                 "geo_operation_takeover_running:{} (the owning session is still executing this round; it must pause or finish first)",
-                operation.status
+                operation_status
             ));
         }
-        if operation.session_id == request.session_id {
+        if operation_session_id.as_deref() == Some(request.session_id.as_str()) {
             return Err(
                 "geo_operation_takeover_already_owner (this session already owns this operation; continue with inspect_geo_operations)"
                     .to_string(),
             );
         }
-        if operation.revision != request.expected_revision {
-            if operation.taken_over_at.is_some() {
+        if operation_revision != request.expected_revision {
+            if operation_taken_over_at.is_some() {
                 return Err(format!(
                     "geo_operation_takeover_conflict:taken_over_by={} (another session took over this round first)",
-                    operation.session_id
+                    operation_session_id.as_deref().unwrap_or("<ownerless>")
                 ));
             }
             return Err("geo_operation_revision_conflict".to_string());
         }
-        let previous_owner_session_id = operation.session_id.clone();
+        let previous_owner_session_id = operation_session_id;
         let now = Utc::now().to_rfc3339();
+        // CAS 的属主比对必须 NULL 感知：无主轮的 previous owner 是 NULL，
+        // SQL 三值逻辑下 `session_id=NULL` 恒不成立会把合法接管误判为
+        // revision 冲突（票 10 验收实证）。
         let changed = transaction
             .execute(
                 "UPDATE geo_operations SET session_id=?1,revision=revision+1,updated_at=?2,
                     taken_over_from_session_id=?3,taken_over_at=?2
-                 WHERE id=?4 AND session_id=?3 AND revision=?5",
+                 WHERE id=?4
+                   AND ((?3 IS NULL AND session_id IS NULL) OR session_id=?3)
+                   AND revision=?5",
                 params![
                     request.session_id,
                     now,
@@ -1015,16 +1053,24 @@ impl BrandWorkspaceStore {
         if changed != 1 {
             return Err("geo_operation_revision_conflict".to_string());
         }
-        let transferred_article_operations = super::articles::transfer_unapproved_article_work(
-            &transaction,
-            &previous_owner_session_id,
-            &request.session_id,
-        )?;
-        let transferred_question_pools = super::question_pools::transfer_awaiting_selection_pools(
-            &transaction,
-            &previous_owner_session_id,
-            &request.session_id,
-        )?;
+        // 无主轮没有原所有者名下的工作集，随行转移按 0 计；有主轮照旧
+        // 在同一事务内转移未批准文章与待选池。
+        let (transferred_article_operations, transferred_question_pools) =
+            match previous_owner_session_id.as_deref() {
+                None => (0, 0),
+                Some(previous_owner) => (
+                    super::articles::transfer_unapproved_article_work(
+                        &transaction,
+                        previous_owner,
+                        &request.session_id,
+                    )?,
+                    super::question_pools::transfer_awaiting_selection_pools(
+                        &transaction,
+                        previous_owner,
+                        &request.session_id,
+                    )?,
+                ),
+            };
         transaction
             .commit()
             .map_err(|error| format!("commit GEO operation takeover: {error}"))?;
@@ -2482,7 +2528,7 @@ mod tests {
         assert_eq!(list.total, 1);
         let summary = &summaries[0];
         assert_eq!(summary.id, waiting.id);
-        assert_eq!(summary.session_id, "session-operation");
+        assert_eq!(summary.session_id, Some("session-operation".to_string()));
         assert_eq!(summary.kind, "full-optimization");
         assert_eq!(summary.goal, "一轮完整 GEO 优化");
         assert_eq!(summary.status, "awaiting-confirmation");
@@ -3959,7 +4005,10 @@ mod tests {
             receipt.operation.steps[1].status, "awaiting-confirmation",
             "接管不推进也不改写步骤序列"
         );
-        assert_eq!(receipt.previous_owner_session_id, "session-operation");
+        assert_eq!(
+            receipt.previous_owner_session_id,
+            Some("session-operation".to_string())
+        );
         assert!(!receipt.taken_over_at.is_empty());
         assert_eq!(receipt.transferred_article_operations, 1);
         assert_eq!(receipt.transferred_question_pools, 1);
@@ -4052,13 +4101,19 @@ mod tests {
             .iter()
             .find(|summary| summary.id == taken_over.id)
             .unwrap();
-        assert_eq!(summary.session_id, "session-operation-other");
+        assert_eq!(
+            summary.session_id,
+            Some("session-operation-other".to_string())
+        );
         assert_eq!(summary.pending_review_count, 4);
         let live_summary = summaries
             .iter()
             .find(|summary| summary.id == live_running.id)
             .unwrap();
-        assert_eq!(live_summary.session_id, "session-operation");
+        assert_eq!(
+            live_summary.session_id,
+            Some("session-operation".to_string())
+        );
         assert_eq!(live_summary.pending_review_count, 0);
 
         // CAS 单赢家：后来者带过期 revision 接管，收到指明赢家的明确错误。
@@ -4073,7 +4128,10 @@ mod tests {
         // 与 awaiting-selection 池继续随 operation 整体走。
         let chained = takeover("session-operation-third", taken_over.revision).unwrap();
         assert_eq!(chained.operation.session_id, "session-operation-third");
-        assert_eq!(chained.previous_owner_session_id, "session-operation-other");
+        assert_eq!(
+            chained.previous_owner_session_id,
+            Some("session-operation-other".to_string())
+        );
         assert_eq!(chained.transferred_article_operations, 2);
         assert_eq!(chained.transferred_question_pools, 1);
         let owned_by_third = store
@@ -4161,5 +4219,105 @@ mod tests {
                 .unwrap_or_else(|error| panic!("{label} 读取失败: {error}"));
             assert_eq!(owner_override, None, "{label} 不得被接管转移");
         }
+    }
+
+    /// 无主轮（session_id NULL：原会话被删除，外键 SET NULL 保留轮次）必须
+    /// 进跨会话未完成摘要、且可被接管（票 10 验收实证：NULL 行被摘要过滤
+    /// 排除 + 接管 CAS 的 `session_id=NULL` 三值逻辑恒假，无主轮对一切新
+    /// 会话不可见也不可接管，永久搁浅——0cada786 实例）。
+    #[test]
+    fn ownerless_round_is_listed_in_summary_and_takeable() {
+        let (store, workspace) = fixture();
+        let operation = store
+            .create_geo_operation(GeoOperationCreateRequest {
+                workspace_id: workspace.id.clone(),
+                session_id: "session-operation".into(),
+                kind: "next-round-optimization".into(),
+                goal: "新一轮内容优化到发布".into(),
+                status: "ready".into(),
+                steps: vec![
+                    step("acknowledge-plan", "question-opportunities", "ready", None),
+                    step(
+                        "select-next-question-pool",
+                        "question-opportunities",
+                        "pending",
+                        Some(confirmation("question-selection", "brand-workspace")),
+                    ),
+                ],
+                input_refs: vec![],
+                pending_confirmation: None,
+                source_operation_id: None,
+                update_knowledge: Some(false),
+            })
+            .unwrap();
+        // 推进到问题确认门：认可门放行后停在 select-next-question-pool
+        //（0cada786 的真实形态：next-round + updateKnowledge=false + 问题门）。
+        let started = store
+            .mutate_geo_operation(mutation(
+                &workspace,
+                &operation,
+                "start-step",
+                Some("acknowledge-plan"),
+            ))
+            .unwrap();
+        let operation = store
+            .mutate_geo_operation(mutation(
+                &workspace,
+                &started,
+                "complete-step",
+                Some("acknowledge-plan"),
+            ))
+            .unwrap();
+        assert_eq!(operation.status, "awaiting-confirmation");
+
+        // 原会话删除：轮次保留、引用置空（brand_workspace.rs 的 SET NULL 语义）。
+        {
+            let connection = open_database(&workspace).unwrap();
+            connection
+                .execute(
+                    "DELETE FROM brand_sessions WHERE id='session-operation'",
+                    [],
+                )
+                .unwrap();
+        }
+
+        // 摘要列出无主轮：sessionId 为 null、待审 0、决策字段原样。
+        let list = store.list_unfinished_geo_operations(&workspace.id).unwrap();
+        let summary = list
+            .operations
+            .iter()
+            .find(|summary| summary.id == operation.id)
+            .expect("无主轮必须出现在未完成摘要里");
+        assert_eq!(summary.session_id, None);
+        assert_eq!(summary.pending_review_count, 0);
+        assert_eq!(summary.update_knowledge, Some(false));
+        assert_eq!(
+            summary.stuck_step.as_ref().map(|step| step.id.as_str()),
+            Some("select-next-question-pool")
+        );
+        assert_eq!(list.total, 1);
+
+        // 新会话单次接管成功：所有者落位、revision+1、无随行工作集、
+        // 留痕 previous owner 为 null。
+        let receipt = store
+            .takeover_geo_operation(GeoOperationTakeoverRequest {
+                workspace_id: workspace.id.clone(),
+                session_id: "session-operation-other".into(),
+                operation_id: operation.id.clone(),
+                expected_revision: operation.revision,
+            })
+            .unwrap();
+        assert_eq!(receipt.operation.session_id, "session-operation-other");
+        assert_eq!(receipt.operation.revision, operation.revision + 1);
+        assert_eq!(receipt.previous_owner_session_id, None);
+        assert_eq!(receipt.transferred_article_operations, 0);
+        assert_eq!(receipt.transferred_question_pools, 0);
+        // 接管后摘要条目归属新会话。
+        let list = store.list_unfinished_geo_operations(&workspace.id).unwrap();
+        let summary = list.operations.first().unwrap();
+        assert_eq!(
+            summary.session_id,
+            Some("session-operation-other".to_string())
+        );
     }
 }

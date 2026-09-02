@@ -225,7 +225,9 @@ export interface GeoOperationProjection {
  * 转移的工作集计数（未批准文章操作、awaiting-selection 池）。 */
 export interface GeoOperationTakeoverReceipt {
   operation: GeoOperationProjection;
-  previousOwnerSessionId: string;
+  /** 接管前的所有者；null = 无主轮（原会话已删除，轮次被保留）——
+   * 此前无所有者工作集随行，转移计数为 0。 */
+  previousOwnerSessionId: string | null;
   takenOverAt: string;
   transferredArticleOperations: number;
   transferredQuestionPools: number;
@@ -258,7 +260,10 @@ export interface GeoOperationUnfinishedStuckStep {
  */
 export interface GeoOperationUnfinishedSummary {
   id: string;
-  sessionId: string;
+  /** 所属会话；null = 无主轮（原会话被删除，轮次经外键 SET NULL 保留）——
+   * 仍未完成、无所有者进程在跑，是跨会话接管的合法标的（票 10 验收实证：
+   * 此前列表过滤 NULL 行，无主轮对一切新会话不可见、永远无法推进）。 */
+  sessionId: string | null;
   kind: GeoOperationKind;
   goal: string;
   status: GeoOperationStatus;

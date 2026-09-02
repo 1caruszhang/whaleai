@@ -40,13 +40,14 @@ describe('starting-point pick → action mapping over a live MCP server', () => 
       expect(startDescription).toBeDefined();
       expect(takeoverDescription).toBeDefined();
 
-      // 创建侧不再把 continue last round 列进随创建带理由的推导枚举，
-      // 并显式把该选择指离本工具（改调接管）。
+      // 创建侧把点名续轮显式指离本工具（票 #10 修订：入口从推导选项
+      // 改为点名续轮路径——查→选择卡→接管）。
       expect(startDescription).not.toContain('continue last round /');
       expect(startDescription).toContain(
-        'Never call this tool for the continue-last-round pick',
+        'Never call this tool for a continue-a-prior-round request',
       );
-      expect(startDescription).toContain('call takeover_geo_operation instead');
+      expect(startDescription).toContain('includeUnfinishedRounds');
+      expect(startDescription).toContain('takeover_geo_operation');
       // 开新一轮的首选路径：创建显式带 updateKnowledge=false，答案不得省略。
       expect(startDescription).toContain("pass updateKnowledge=false explicitly");
       expect(startDescription).toContain('the preferred path');
@@ -54,12 +55,15 @@ describe('starting-point pick → action mapping over a live MCP server', () => 
       // 与票 02 归一零矛盾：描述承认两入口同形（归一兜底）。
       expect(startDescription).toContain('identical step shape');
 
-      // 接管侧：起点推导的继续上轮选项就是那次整卡确认，选定即调本工具。
+      // 接管侧（票 #10 修订）：永不主动提供；唯一入口是点名续轮——查询、
+      // 一张选择卡、选定即整卡确认、单次调用。
+      expect(takeoverDescription).toContain('takeover is NEVER proactively offered');
+      expect(takeoverDescription).toContain('includeUnfinishedRounds');
       expect(takeoverDescription).toContain(
-        'The continue-last-round option in the starting-point derivation question IS that one whole-card confirmation',
+        "the user's pick on that card IS the one whole-card confirmation",
       );
       expect(takeoverDescription).toContain(
-        'routing that pick into start_geo_operation (creating a new round) is the wrong action',
+        "routing the user's continue-a-prior-round request into start_geo_operation (creating a new round) is the wrong action",
       );
     } finally {
       await client.close();
@@ -72,7 +76,9 @@ describe('starting-point pick → action mapping over a live MCP server', () => 
   // 现场排序——三方关键约束同屏锁定。
   it('keeps the prompt side consistent with both tool descriptions on the exclusive mapping', () => {
     const prompt = buildSystemPrompt();
-    expect(prompt).toContain('接管信号，不是新开轮次信号');
+    // 票 #10 修订：点名续轮是唯一接管入口（查→选择卡→单次接管）。
+    expect(prompt).toContain('点名续轮是唯一例外');
+    expect(prompt).toContain('单次调用 takeover_geo_operation');
     expect(prompt).toContain('新建操作是错误动作');
     expect(prompt).toContain('updateKnowledge 传 false');
     expect(prompt).toContain('首选非强制');

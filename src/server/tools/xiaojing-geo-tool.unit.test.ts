@@ -13,6 +13,7 @@ import {
   accountTokenCacheFingerprint,
   articleOperationSourceFromGenerateInput,
   brandWorkspaceStateSummary,
+  listUnfinishedGeoRounds,
   configureXiaojingGeo,
   confirmRankingCompetitors,
   distributionPlanCardProjection,
@@ -274,6 +275,7 @@ describe('geoOperationProjectionPayload', () => {
   it('attaches a modeling hint exactly when the session list is empty', () => {
     const empty = geoOperationProjectionPayload([]);
     expect(empty.kind).toBe('geo-operation-projection');
+    if (empty.kind !== 'geo-operation-projection') throw new Error('projection envelope expected');
     expect(empty.result).toEqual([]);
     expect(typeof empty.hint).toBe('string');
     expect(empty.hint).toContain('start_geo_operation');
@@ -281,10 +283,12 @@ describe('geoOperationProjectionPayload', () => {
 
   it('keeps non-empty lists and single-operation reads hint-free', () => {
     const listed = geoOperationProjectionPayload([operation()]);
+    if (listed.kind !== 'geo-operation-projection') throw new Error('projection envelope expected');
     expect(listed.hint).toBeUndefined();
     expect(listed.result).toHaveLength(1);
 
     const single = geoOperationProjectionPayload(operation({ id: 'op-2' }));
+    if (single.kind !== 'geo-operation-projection') throw new Error('projection envelope expected');
     expect(single.hint).toBeUndefined();
     expect(single.result).toMatchObject({ id: 'op-2' });
   });
@@ -713,15 +717,67 @@ describe('brandWorkspaceStateSummary', () => {
     });
   });
 
-  it('surfaces cross-session unfinished operation metadata and degrades read failures to absent', async () => {
+  it('no longer consumes the cross-session unfinished list (ticket #10 revision)', async () => {
     configureXiaojingGeo({}, {
       sessionId: 'summary-session',
+      workspace: 'C:/ws/brand-a',
+    });
+    const calls: string[] = [];
+    api.mockImplementation(async (path: string): Promise<Record<string, unknown>> => {
+      calls.push(path);
+      if (path === '/api/brand-materials/context') {
+        return { ok: true, context: { workspaceId: 'brand-a', brandName: '目标品牌', productLines: [] } };
+      }
+      return { ok: false, error: `unrouted:${path}` };
+    });
+
+    const summary = await brandWorkspaceStateSummary();
+
+    // 摘要不携带未完成轮次：他轮信息在场会诱发起点推导的现场取舍
+    // （17,742 字思考实测）。轮次元信息只经点名续轮查询按需读取。
+    expect(summary && 'unfinishedOperations' in summary).toBe(false);
+    expect(calls).not.toContain('/api/brand-geo-operations/unfinished');
+  });
+});
+
+describe('listUnfinishedGeoRounds (票 #10 点名续轮专用查询)', () => {
+  const api = vi.mocked(managementApi);
+  let previousSidecarId: string | undefined;
+
+  beforeEach(() => {
+    previousSidecarId = process.env.XIAOJING_SIDECAR_ID;
+    process.env.XIAOJING_SIDECAR_ID = 'sidecar-named-rounds';
+  });
+
+  afterEach(() => {
+    if (previousSidecarId === undefined) {
+      delete process.env.XIAOJING_SIDECAR_ID;
+    } else {
+      process.env.XIAOJING_SIDECAR_ID = previousSidecarId;
+    }
+    vi.clearAllMocks();
+  });
+
+  function routeBrandWorkspace(
+    responses: Record<string, unknown>,
+  ): void {
+    api.mockImplementation(async (path: string): Promise<Record<string, unknown>> => {
+      const response = responses[path] as Record<string, unknown> | undefined;
+      if (response === undefined) {
+        return { ok: false, error: `unrouted:${path}` };
+      }
+      return response;
+    });
+  }
+  it('maps the unfinished metadata entries with display phase and degrades nothing', async () => {
+    configureXiaojingGeo({}, {
+      sessionId: 'named-session',
       workspace: 'C:/ws/brand-a',
     });
     routeBrandWorkspace({
       '/api/brand-geo-operations/unfinished': {
         ok: true,
-        total: 1,
+        total: 2,
         operations: [
           {
             id: 'op-prior-round',
@@ -745,59 +801,88 @@ describe('brandWorkspaceStateSummary', () => {
             createdAt: '2026-08-29T09:00:00Z',
             updatedAt: '2026-08-30T18:00:00Z',
           },
-        ],
-      },
-    });
-
-    const summary = await brandWorkspaceStateSummary();
-
-    // 元信息六要素 + 展示阶段；无正文字段进入摘要。total=1、条目 1：
-    // 未超上界时无截断。mock 未带 updateKnowledge（存量旧轮）→ null，
-    // 不臆断成 false（票 #04）。
-    expect(summary?.unfinishedOperations).toEqual({
-      present: true,
-      state: {
-        operations: [
           {
-            operationId: 'op-prior-round',
-            sessionId: 'session-prior',
-            kind: 'full-optimization',
-            goal: '上一轮优化',
+            // 无主轮（票 10 验收实证）：sessionId null 必须原样透传。
+            id: 'op-ownerless',
+            sessionId: null,
+            kind: 'next-round-optimization',
+            goal: '新一轮内容优化到发布',
             status: 'awaiting-confirmation',
             stuckStep: {
-              id: 'confirm-articles',
-              title: '批准文章',
-              capability: 'content-production',
+              id: 'select-next-question-pool',
+              title: '从问题池选择',
+              capability: 'question-opportunities',
               status: 'awaiting-confirmation',
-              phase: { id: 'content', title: '内容生产' },
             },
-            pendingConfirmation: { kind: 'article-approval', title: '批准文章' },
-            pendingReviewCount: 2,
+            pendingConfirmation: null,
+            pendingReviewCount: 0,
             createdAt: '2026-08-29T09:00:00Z',
             updatedAt: '2026-08-30T18:00:00Z',
-            updateKnowledge: null,
+            updateKnowledge: false,
           },
         ],
-        total: 1,
-        truncatedCount: 0,
       },
     });
 
-    // 读取失败（未路由）按 absent 降级，不阻断摘要。
-    routeBrandWorkspace({});
-    const degraded = await brandWorkspaceStateSummary();
-    expect(degraded?.unfinishedOperations).toEqual({ present: false });
+    const payload = await listUnfinishedGeoRounds();
+
+    // 元信息六要素 + 展示阶段；无正文字段。updateKnowledge 缺省 → null
+    // 不臆断（票 #04），显式 false → 复用轮。
+    expect(payload).toEqual({
+      kind: 'geo-operation-unfinished-rounds',
+      total: 2,
+      truncatedCount: 0,
+      rounds: [
+        {
+          operationId: 'op-prior-round',
+          sessionId: 'session-prior',
+          kind: 'full-optimization',
+          goal: '上一轮优化',
+          status: 'awaiting-confirmation',
+          stuckStep: {
+            id: 'confirm-articles',
+            title: '批准文章',
+            capability: 'content-production',
+            status: 'awaiting-confirmation',
+            phase: { id: 'content', title: '内容生产' },
+          },
+          pendingConfirmation: { kind: 'article-approval', title: '批准文章' },
+          pendingReviewCount: 2,
+          createdAt: '2026-08-29T09:00:00Z',
+          updatedAt: '2026-08-30T18:00:00Z',
+          updateKnowledge: null,
+        },
+        {
+          operationId: 'op-ownerless',
+          sessionId: null,
+          kind: 'next-round-optimization',
+          goal: '新一轮内容优化到发布',
+          status: 'awaiting-confirmation',
+          stuckStep: {
+            id: 'select-next-question-pool',
+            title: '从问题池选择',
+            capability: 'question-opportunities',
+            status: 'awaiting-confirmation',
+            phase: { id: 'questions', title: '问题机会' },
+          },
+          pendingConfirmation: null,
+          pendingReviewCount: 0,
+          createdAt: '2026-08-29T09:00:00Z',
+          updatedAt: '2026-08-30T18:00:00Z',
+          updateKnowledge: false,
+        },
+      ],
+    });
   });
 
   it('derives truncatedCount when the unfinished list is capped below the total', async () => {
     configureXiaojingGeo({}, {
-      sessionId: 'summary-session',
+      sessionId: 'named-session',
       workspace: 'C:/ws/brand-a',
     });
     routeBrandWorkspace({
       '/api/brand-geo-operations/unfinished': {
         ok: true,
-        // Rust 侧 LIMIT 截断后的响应：只回最新 1 条，但 total 报全量 7。
         operations: [
           {
             id: 'op-newest',
@@ -816,36 +901,11 @@ describe('brandWorkspaceStateSummary', () => {
       },
     });
 
-    const summary = await brandWorkspaceStateSummary();
+    const payload = await listUnfinishedGeoRounds();
 
-    // 摘要如实报告截断：truncatedCount = total - 条目数，模型据此知道
-    // 还有更旧的未完成轮次未列出，而不是当作不存在。
-    const unfinished = summary?.unfinishedOperations;
-    expect(unfinished?.present).toBe(true);
-    if (unfinished?.present) {
-      expect(unfinished.state.operations).toHaveLength(1);
-      expect(unfinished.state.total).toBe(7);
-      expect(unfinished.state.truncatedCount).toBe(6);
-    }
-  });
-
-  it('treats a missing total as a contract error and degrades the stage to absent', async () => {
-    configureXiaojingGeo({}, {
-      sessionId: 'summary-session',
-      workspace: 'C:/ws/brand-a',
-    });
-    // 对端 Rust 版本落后于契约：有 operations 没有 total。静默降级会谎报
-    // truncatedCount=0，端口层必须拒绝；摘要按既有单阶段失败语义降级。
-    routeBrandWorkspace({
-      '/api/brand-geo-operations/unfinished': {
-        ok: true,
-        operations: [],
-      },
-    });
-
-    const summary = await brandWorkspaceStateSummary();
-
-    expect(summary?.unfinishedOperations).toEqual({ present: false });
+    expect(payload.rounds).toHaveLength(1);
+    expect(payload.total).toBe(7);
+    expect(payload.truncatedCount).toBe(6);
   });
 });
 

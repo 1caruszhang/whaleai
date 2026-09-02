@@ -187,16 +187,19 @@ export interface BrandWorkspaceStateSummary {
   articles: BrandWorkspaceStageState;
   distributionPlan: BrandWorkspaceStageState;
   publish: BrandWorkspaceStageState;
-  /** 跨会话未完成轮次的元信息（ADR-0010 Decision 3，只读 tracer）：
-   * state = { operations: BrandWorkspaceUnfinishedOperationEntry[] }；
-   * 读取失败降级为 absent。不含草稿正文与任何会话聊天记录。 */
-  unfinishedOperations: BrandWorkspaceStageState;
+  /** 摘要不再携带跨会话未完成轮次（2026-09-02 票 10 修订）：他轮信息
+   * 在场会诱发起点推导卡对他轮的现场取舍（17,742 字思考实测）。轮次
+   * 元信息只在用户点名续轮时经 inspect_geo_operations 的跨会话未完成轮
+   * 查询按需读取——概念在场、明细不在场。 */
 }
 
-/** 摘要中一条未完成轮目的元信息条目（六要素 + 展示阶段）。 */
+/** 未完成轮次元信息条目（六要素 + 展示阶段）：跨会话未完成轮查询
+ * （inspect_geo_operations 的点名模式）的返回条目。 */
 export interface BrandWorkspaceUnfinishedOperationEntry {
   operationId: string;
-  sessionId: string;
+  /** 所属会话；null = 无主轮（原会话已删除，轮次保留）——仍未完成、
+   * 无所有者进程在跑，是点命续轮的合法接管标的（票 10 验收实证补全）。 */
+  sessionId: string | null;
   kind: string;
   goal: string;
   status: string;
@@ -213,8 +216,7 @@ export interface BrandWorkspaceUnfinishedOperationEntry {
   createdAt: string;
   updatedAt: string;
   /** 该轮是否更新品牌知识（票 #04）：false = 复用轮（不更新知识，从
-   * 问题池选择开始）——起点推导描述该轮时如实按复用轮呈现；true =
-   * 更新轮；null = 未决/不适用/存量旧轮，不臆断。 */
+   * 问题池选择开始）；true = 更新轮；null = 未决/不适用/存量旧轮，不臆断。 */
   updateKnowledge: boolean | null;
 }
 
@@ -229,8 +231,8 @@ function unfinishedOperationPhase(
 }
 
 /**
- * Rust 未完成元信息 → 摘要条目：只做词汇映射（补展示阶段、瘦确认门），
- * 不添加任何正文性字段——跨会话正文隔离不因摘要破口。
+ * Rust 未完成元信息 → 查询条目：只做词汇映射（补展示阶段、瘦确认门），
+ * 不添加任何正文性字段——跨会话正文隔离不因查询破口。
  */
 function brandWorkspaceUnfinishedOperationEntry(
   summary: GeoOperationUnfinishedSummary,
@@ -264,6 +266,32 @@ function brandWorkspaceUnfinishedOperationEntry(
 }
 
 /**
+ * 跨会话未完成轮查询结果（点名续轮专用，票 10 修订）：最新
+ * UNFINISHED_GEO_OPERATION_SUMMARY_LIMIT 条 + 全量计数与截断数。
+ */
+export interface UnfinishedGeoRoundsPayload {
+  kind: 'geo-operation-unfinished-rounds';
+  rounds: BrandWorkspaceUnfinishedOperationEntry[];
+  total: number;
+  truncatedCount: number;
+}
+
+/**
+ * 用户点名续轮时的轮次查询：品牌内全部非终态轮（含他轮与无主轮）的
+ * 元信息。仅由 inspect_geo_operations 的点名模式消费——起点推导与一切
+ * 主动推荐不得调用。
+ */
+export async function listUnfinishedGeoRounds(): Promise<UnfinishedGeoRoundsPayload> {
+  const { operations, total } = await geoOperationService().listUnfinished();
+  return {
+    kind: 'geo-operation-unfinished-rounds',
+    rounds: operations.map(brandWorkspaceUnfinishedOperationEntry),
+    total,
+    truncatedCount: Math.max(0, total - operations.length),
+  };
+}
+
+/**
  * 跨 Session 只读的品牌工作台状态摘要：BrandWorkspace 是权威 owner，各阶段
  * 产物经 Rust `latest` 端点读取，与右侧工作台投影同源。Agent 在新 Session
  * 里先读这里再决定是否向用户要信息；单阶段读取失败只降级为 absent，
@@ -281,7 +309,7 @@ export async function brandWorkspaceStateSummary(): Promise<BrandWorkspaceStateS
       return Promise.reject(error);
     }
   };
-  const [brandContext, pools, plans, articleOperations, distributions, publishes, unfinished] =
+  const [brandContext, pools, plans, articleOperations, distributions, publishes] =
     await Promise.allSettled([
       safe(() => brandMaterialPort().context()),
       safe(() => createQuestionPoolPort(identity).latest()),
@@ -289,7 +317,6 @@ export async function brandWorkspaceStateSummary(): Promise<BrandWorkspaceStateS
       safe(() => createArticlePort(identity).latest()),
       safe(() => createDistributionPlanPort(identity).latest()),
       safe(() => createPublishSchedulerPort(identity).latest()),
-      safe(() => geoOperationService().listUnfinished()),
     ]);
   const contextResult =
     brandContext.status === 'fulfilled' ? brandContext.value : null;
@@ -346,13 +373,6 @@ export async function brandWorkspaceStateSummary(): Promise<BrandWorkspaceStateS
       publishStartAt: execution.publishStartAt,
       updatedAt: execution.updatedAt,
     })),
-    unfinishedOperations: stageStateFrom(unfinished, ({ operations, total }) => ({
-      operations: operations.map(brandWorkspaceUnfinishedOperationEntry),
-      // 上界换算：total 是品牌内非终态轮次全量数，列表只带最新 5 条；
-      // truncatedCount > 0 时按最新优先继续推进，不把未列出的当作不存在。
-      total,
-      truncatedCount: Math.max(0, total - operations.length),
-    })),
   };
 }
 
@@ -384,7 +404,11 @@ export async function startGeoOperation(input: GeoOperationCreateInput) {
 export async function inspectGeoOperations(input: {
   operationId?: string;
   limit?: number;
+  includeUnfinishedRounds?: boolean;
 }) {
+  if (input.includeUnfinishedRounds) {
+    return listUnfinishedGeoRounds();
+  }
   const service = geoOperationService();
   return input.operationId
     ? service.get(input.operationId)
@@ -401,13 +425,24 @@ const EMPTY_OPERATION_LIST_HINT =
  * inspect_geo_operations 的工具负载：空列表是合法的权威结果，但裸 `[]`
  * 会让模型无话可说——附上建模提示，引导它向用户解释并走创建路径。
  */
+/**
+ * inspect_geo_operations 的工具负载：空列表是合法的权威结果，但裸 `[]`
+ * 会让模型无话可说——附上建模提示，引导它向用户解释并走创建路径。
+ * 点名模式的未完成轮查询负载（kind=geo-operation-unfinished-rounds）原样
+ * 透传，不套 projection 信封——两种返回以 kind 区分。
+ */
 export function geoOperationProjectionPayload(
   result: Awaited<ReturnType<typeof inspectGeoOperations>>,
-): {
-  kind: "geo-operation-projection";
-  result: unknown;
-  hint?: string;
-} {
+):
+  | {
+      kind: "geo-operation-projection";
+      result: unknown;
+      hint?: string;
+    }
+  | UnfinishedGeoRoundsPayload {
+  if (result !== null && typeof result === "object" && !Array.isArray(result) && "rounds" in result) {
+    return result;
+  }
   return Array.isArray(result) && result.length === 0
     ? { kind: "geo-operation-projection", result, hint: EMPTY_OPERATION_LIST_HINT }
     : { kind: "geo-operation-projection", result };
@@ -1180,7 +1215,7 @@ export async function createXiaojingGeoServer() {
     tools: [
       tool(
         'inspect_brand_context',
-        "Read the current Xiaojing brand/session identity and the cross-session BrandWorkspace state summary (brand name, product lines, confirmed ranking competitors, and the latest persisted artifact status per stage: question pool, topic plan, articles, distribution plan, publish execution). The summary also lists this brand's unfinished GEO operation rounds from any prior session as read-only metadata (kind, goal, the stuck step and its display phase, pending review count, owning session, created/updated times, and updateKnowledge — whether that round updates brand knowledge: false means a reuse round that keeps confirmed knowledge and starts from question-pool selection, true means a knowledge-update round; describe each round accordingly instead of guessing from its kind) — use it to recognize an interrupted round and offer to continue it; only the 5 most recently updated rounds are listed, truncatedCount names how many older ones exist, and draft bodies and chat transcripts are never included. Call this once early in a session, before proposing a GEO action and before asking the user for any brand facts — prior sessions' confirmed knowledge and approved artifacts are already persisted here; only ask the user when this summary or inspect_brand_fact shows the fact is missing. Do not re-read speculatively: while the persisted state is unchanged, a re-read returns only the slim {kind:'brand-workspace-state-unchanged'} marker — reuse your previous full read; re-read after your own writes (material import, knowledge confirmation, takeover) or when the user reports another session's activity.",
+        "Read the current Xiaojing brand/session identity and the cross-session BrandWorkspace state summary (brand name, product lines, confirmed ranking competitors, and the latest persisted artifact status per stage: question pool, topic plan, articles, distribution plan, publish execution). The summary covers brand-level confirmed assets only — it never lists other sessions' unfinished rounds; continuing a prior round is a separate named flow (inspect_geo_operations with includeUnfinishedRounds when the user explicitly asks to). Call this once early in a session, before proposing a GEO action and before asking the user for any brand facts — prior sessions' confirmed knowledge and approved artifacts are already persisted here; only ask the user when this summary or inspect_brand_fact shows the fact is missing. Do not re-read speculatively: while the persisted state is unchanged, a re-read returns only the slim {kind:'brand-workspace-state-unchanged'} marker — reuse your previous full read; re-read after your own writes (material import, knowledge confirmation, takeover) or when the user reports another session's activity.",
         { reason: z.string().max(200).optional().describe('Why the current GEO context is needed.') },
         async () => {
           const payload = {
@@ -1211,7 +1246,7 @@ export async function createXiaojingGeoServer() {
       ),
       tool(
         'start_geo_operation',
-        "Create the one BrandWorkspace GeoOperation that matches the user's intent. Use the direct intent when the user names a specific stage; when the user states a GEO goal without naming a stage, create full-optimization instead of asking which intent to pick. The starting-point derivation question also settles where the round ENDS: pass the user-picked end as endingPhase (with a one-sentence endingPointReason) so one operation spans start to end — never create a follow-up operation to continue the same chain inside the round; a new operation or takeover only happens when the user changes the plan mid-round. Keep goal a short plain-language phrase (e.g. 一轮完整的 GEO 优化) — the chat progress card broadcasts the full stage and step plan, so never restate every step in prose; report only the stage and the confirmation gate the operation currently stops at. When the starting point was derived from the brand-state summary and the user just picked it in your recommended-option question (start a new round without a knowledge update / start over from knowledge), pass that derived starting point and its reason as startingPointReason in one plain sentence — the plan acknowledgement gate then shows where this round starts and why, so the user confirms the starting point, not just the start. When the user picked 'start a new round' (reuse the pool, no knowledge update), also pass updateKnowledge=false explicitly — the preferred path: the plan then starts directly at pool selection, matching the pick; the answer must not be omitted (an omitted full-chain plan starts at the knowledge chain and contradicts the pick), though the server already normalizes full-optimization + updateKnowledge=false and next-round-optimization + updateKnowledge=false into the identical step shape. Never call this tool for the continue-last-round pick: that option is the single whole-card takeover confirmation of the listed unfinished round — call takeover_geo_operation instead; creating a new round here would abandon the round (its progress and pending work set) the user chose to continue. Every new operation first parks at the plan acknowledgement gate: after creating it, briefly state the goal and the opening stage, tell the user to review and release the plan on the progress card, then end your turn — do not start any stage before the operation event reminder tells you the plan was released. For next-round-optimization whose knowledge branch the user has not answered yet, omit updateKnowledge first so the operation stops and asks, then record the user's answer with choose_next_round_knowledge; the explicit answer releases the replaced plan, which starts directly at its first work step (still stopping at that stage's confirmation gate); if the user already answered the knowledge branch explicitly while picking the starting point, pass that answer here instead of re-asking. When reporting to the user, use natural, professional Simplified Chinese and keep your own thinking in Simplified Chinese; never surface internal enum values, operation IDs, UUIDs, revision numbers, tool names, or endpoint names — describe the operation by its goal and stages in plain language.",
+        "Create the one BrandWorkspace GeoOperation that matches the user's intent. Use the direct intent when the user names a specific stage; when the user states a GEO goal without naming a stage, create full-optimization instead of asking which intent to pick. The starting-point derivation question also settles where the round ENDS: pass the user-picked end as endingPhase (with a one-sentence endingPointReason) so one operation spans start to end — never create a follow-up operation to continue the same chain inside the round; a new operation or takeover only happens when the user changes the plan mid-round. Keep goal a short plain-language phrase (e.g. 一轮完整的 GEO 优化) — the chat progress card broadcasts the full stage and step plan, so never restate every step in prose; report only the stage and the confirmation gate the operation currently stops at. When the starting point was derived from the brand-state summary and the user just picked it in your recommended-option question (start a new round without a knowledge update / start over from knowledge), pass that derived starting point and its reason as startingPointReason in one plain sentence — the plan acknowledgement gate then shows where this round starts and why, so the user confirms the starting point, not just the start. When the user picked 'start a new round' (reuse the pool, no knowledge update), also pass updateKnowledge=false explicitly — the preferred path: the plan then starts directly at pool selection, matching the pick; the answer must not be omitted (an omitted full-chain plan starts at the knowledge chain and contradicts the pick), though the server already normalizes full-optimization + updateKnowledge=false and next-round-optimization + updateKnowledge=false into the identical step shape. Never call this tool for a continue-a-prior-round request: when the user explicitly asks to continue a previous round, that goes through the named flow (inspect_geo_operations with includeUnfinishedRounds → one selection card → takeover_geo_operation) — creating a new round here would abandon the round (its progress and pending work set) the user chose to continue. Every new operation first parks at the plan acknowledgement gate: after creating it, briefly state the goal and the opening stage, tell the user to review and release the plan on the progress card, then end your turn — do not start any stage before the operation event reminder tells you the plan was released. For next-round-optimization whose knowledge branch the user has not answered yet, omit updateKnowledge first so the operation stops and asks, then record the user's answer with choose_next_round_knowledge; the explicit answer releases the replaced plan, which starts directly at its first work step (still stopping at that stage's confirmation gate); if the user already answered the knowledge branch explicitly while picking the starting point, pass that answer here instead of re-asking. When reporting to the user, use natural, professional Simplified Chinese and keep your own thinking in Simplified Chinese; never surface internal enum values, operation IDs, UUIDs, revision numbers, tool names, or endpoint names — describe the operation by its goal and stages in plain language.",
         {
           intent: z.enum(GEO_OPERATION_KINDS),
           goal: z.string().min(1).max(500),
@@ -1272,7 +1307,7 @@ export async function createXiaojingGeoServer() {
       ),
       tool(
         'inspect_geo_operations',
-        'Read one exact GeoOperation, or list operations owned by the current Session. Execution context is never shared across Sessions.',
+        "Read one exact GeoOperation by id, list operations owned by the current Session, or — only when the user explicitly asks to continue a prior round (点名续轮) — list the brand's unfinished rounds from any session with includeUnfinishedRounds=true (kind, goal, the stuck step, pending review count, owning session or ownerless, times, updateKnowledge; ownerless means its original session was deleted while the round is preserved). Default reads never cross Sessions; the unfinished-rounds mode is the ONLY cross-session read and exists solely for the named-continuation flow: query once, then present the found rounds as ONE AskUserQuestion selection card (each option carries its round's goal and stuck point, list every round found even if there is only one), the user's pick on that card IS the single whole-card takeover confirmation — call takeover_geo_operation once immediately after; never use this mode speculatively, never offer rounds from it in the starting-point derivation question or any other proactive recommendation, and when it returns no rounds tell the user plainly and stop.",
         {
           operationId: z
             .string()
@@ -1281,6 +1316,7 @@ export async function createXiaojingGeoServer() {
             .regex(/^[A-Za-z0-9_.-]+$/)
             .optional(),
           limit: z.number().int().min(1).max(200).optional(),
+          includeUnfinishedRounds: z.boolean().optional(),
         },
         async (input) => ({
           content: [
@@ -1357,7 +1393,7 @@ export async function createXiaojingGeoServer() {
       ),
       tool(
         'takeover_geo_operation',
-        "Take over an unfinished GEO round owned by another session (ADR-0010): one CAS mutation transfers its ownership — plus the owning session's unapproved article drafts and awaiting-selection question pools, which move with the round as a whole — to the current session, which can then continue from the stuck step exactly where the round stopped. Gate discipline: the takeover confirmation is exactly ONE whole-card confirmation on the chat gate card — after inspect_brand_context lists the unfinished round, present its goal, stuck stage, pending review count and owning session with your recommendation, let the user confirm once on the card, then call this tool a single time; never call it speculatively, never re-ask after the user already confirmed, and never create a second confirmation entry. The continue-last-round option in the starting-point derivation question IS that one whole-card confirmation — its description already carries the round's goal and stuck point, so once the user picks it, call this tool a single time immediately; routing that pick into start_geo_operation (creating a new round) is the wrong action and abandons the round the user chose to continue. Rejections return structured relayable results: a running round must pause or finish first (closing the old window auto-pauses); a round already taken over names the winning session; a terminal round means there is nothing to continue. On success report what transferred (drafts and pending pools follow the round) and continue the round with inspect_geo_operations.",
+        "Take over an unfinished GEO round owned by another session or ownerless (its original session was deleted; ADR-0010): one CAS mutation transfers its ownership — plus the owning session's unapproved article drafts and awaiting-selection question pools, which move with the round as a whole (an ownerless round brings no work set, transfer counts arrive 0) — to the current session, which can then continue from the stuck step exactly where the round stopped. Entry point (2026-09-02 revision): takeover is NEVER proactively offered — not in the starting-point derivation question, not in any recommendation. The only entry is the user explicitly asking to continue a prior round: query the unfinished rounds with inspect_geo_operations (includeUnfinishedRounds), present the found rounds as ONE selection card (goal, stuck stage, pending review count, owning session or ownerless per option — list every round found even if there is only one), and the user's pick on that card IS the one whole-card confirmation; call this tool a single time immediately after the pick. Never call it speculatively, never re-ask after the user already picked, and never create a second confirmation entry; routing the user's continue-a-prior-round request into start_geo_operation (creating a new round) is the wrong action and abandons the round the user chose to continue. Rejections return structured relayable results: a running round must pause or finish first (closing the old window auto-pauses); a round already taken over names the winning session; a terminal round means there is nothing to continue. On success report what transferred (drafts and pending pools follow the round) and continue the round with inspect_geo_operations.",
         {
           operationId: z
             .string()

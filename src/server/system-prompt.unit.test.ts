@@ -131,13 +131,13 @@ describe('starting-point derivation asks with a recommended option (ADR-0010, ti
     expect(prompt).toContain('计划认可门');
   });
 
-  // AC3：摘要含未完成轮次时，「继续上轮」选项附卡点描述（用户故事 17）。
-  it('requires the continue-last-round option to carry the stuck-point description', () => {
-    expect(prompt).toContain('未完成轮次');
-    expect(prompt).toContain('继续上轮');
-    expect(prompt).toContain('附卡点');
+  // AC3（票 #10 修订）：他轮不再进推导卡；卡点描述移到点名续轮的选择卡。
+  it('requires the named-continuation selection card to carry the stuck-point description', () => {
+    expect(prompt).toContain('未完成轮');
+    expect(prompt).toContain('选择卡');
+    expect(prompt).toContain('每个选项带该轮目标与卡点');
     expect(prompt).toContain('待审数量');
-    expect(prompt).toContain('所属会话');
+    expect(prompt).toContain('所属会话或无主');
   });
 
   // AC4：接管被拒不裸报错，转述为用户可行动的下一步（用户故事 19）。
@@ -225,14 +225,12 @@ describe('maps the starting-point picks to creation/takeover without contradicti
     expect(prompt).toContain('不得省略答案');
   });
 
-  // 「继续上轮」→ 接管：唯一后续动作，不得改走 start_geo_operation 新建。
-  it('maps the continue-last-round pick to takeover as its only follow-up action', () => {
-    expect(prompt).toContain('接管信号，不是新开轮次信号');
-    expect(prompt).toContain('唯一的后续动作');
-    expect(prompt).toContain('takeover_geo_operation');
+  // 「继续上轮」→ 接管：票 #10 修订后入口从推导选项改为点名续轮路径
+  // （查→选择卡→单次接管），新建仍是错误动作。
+  it('maps the named continue-a-prior-round request to takeover as its only follow-up action', () => {
+    expect(prompt).toContain('点名续轮是唯一例外');
+    expect(prompt).toContain('唯一的后续动作就是单次调用 takeover_geo_operation');
     expect(prompt).toContain('新建操作是错误动作');
-    // 既有约束不变：该选项仅在摘要列有未完成轮次时提供。
-    expect(prompt).toContain('“继续上轮”仅在摘要列有未完成轮次时提供');
   });
 
   // 通信条款显式例外化：起点推导询问不按「阻塞且无安全默认」衡量，
@@ -242,6 +240,48 @@ describe('maps the starting-point picks to creation/takeover without contradicti
     expect(prompt).toContain('显式例外');
     expect(prompt).toContain('不受「阻塞且无安全默认」门槛约束');
     expect(prompt).toContain('不得援引该例外');
+  });
+});
+
+/**
+ * geo-plan-normalization 票 #10 修订（2026-09-02 方向变更，用户裁决）：
+ * 起点推导卡不再枚举任何其他会话的轮次——新会话只复用最新品牌资产，
+ * 他轮的发现与接管全部收敛到「点名续轮」专用路径（查→选择卡→单次
+ * 接管）。背景实测：摘要携带 4 个未完成轮时，选项构造与 4 选项上限
+ * 数学冲突，effort 降档后仍有 17,742 字思考全花在「怎么取舍选项」上；
+ * 消除裁量靠把信息撤出场，不靠禁令。派生席位按已确认产物链查表填空。
+ */
+describe('keeps other sessions\' rounds out of the derivation card (geo-plan-normalization, ticket #10 revision)', () => {
+  const prompt = buildSystemPrompt();
+
+  // 推导卡席位：固定两席（开新一轮/全量重来）+ 派生两席（查表填空）。
+  it('fills derivation options by fixed slots with no on-the-spot trade-offs', () => {
+    expect(prompt).toContain('起点题的选项按固定席位查表填空，不现场取舍、不展开备选方案权衡');
+    expect(prompt).toContain('「开新一轮」（从已有问题池选择开始、不更新品牌知识）与「全量重来」（从知识更新开始）必须始终在列');
+    expect(prompt).toContain('沿品牌级已确认产物链取最深下游入口与次深入口');
+    expect(prompt).toContain('无已确认产物时不设派生席位，推荐「开新一轮」');
+  });
+
+  // 硬边界：派生选项只引用品牌级已确认产物；他轮待审工作集属接管语义。
+  it('forbids deriving options from other sessions\' pending work', () => {
+    expect(prompt).toContain('派生选项只引用品牌级已确认产物，绝不引用其他会话轮次的待审工作集');
+    expect(prompt).toContain('起点推导不得考虑、提及或推荐任何其他会话的轮次');
+    expect(prompt).toContain('新会话默认只复用最新的品牌资产（含最新知识版本）');
+  });
+
+  // 点名续轮路径：查→选择卡（哪怕单轮也列卡）→选定即整卡确认→单次接管。
+  it('routes named continuation through query, one selection card, and a single takeover', () => {
+    expect(prompt).toContain('includeUnfinishedRounds');
+    expect(prompt).toContain('把查得的轮次（哪怕只有一轮）列成一张 AskUserQuestion 选择卡');
+    expect(prompt).toContain('用户在卡上选定某轮即完成整卡一次确认');
+    expect(prompt).toContain('单次调用 takeover_geo_operation');
+    expect(prompt).toContain('查无未完成轮时如实告知并停，不创建任何东西');
+  });
+
+  // 旧机制防回归：推导选项即接管确认、按轮次分列的措辞不得回潮。
+  it('does not regress to derivation-card takeover options', () => {
+    expect(prompt).not.toContain('继续上轮');
+    expect(prompt).not.toContain('接管信号');
   });
 });
 
