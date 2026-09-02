@@ -154,17 +154,20 @@ describe('starting-point derivation asks with a recommended option (ADR-0010, ti
     expect(prompt).toContain('不移动任何确认门的位置');
   });
 
-  // 起止推导（endingPhase）：起点询问同时裁决终点，一个轮次一张计划卡。
-  it('settles the round end in the same starting-point question and never re-asks mid-round', () => {
-    expect(prompt).toContain('起止推导');
-    expect(prompt).toContain('到哪里结束');
+  // 终点不问（票 #11 修订）：起点卡只裁决起点，终点默认发布完成、点名照带。
+  it('defaults the round end to publishing without asking, and honors a user-named end', () => {
+    expect(prompt).toContain('终点不问');
+    expect(prompt).toContain('默认做到发布完成为止');
     expect(prompt).toContain('endingPhase');
     expect(prompt).toContain('endingPointReason');
+    expect(prompt).toContain('用户明确点名终点');
+    expect(prompt).toContain('监测段只在用户点名时进入');
     // 终点之后不新起操作、不重复征询「接下来做什么」。
     expect(prompt).toContain('一个轮次从起点到终点只用一个操作');
     expect(prompt).toContain('不在轮内重复征询');
-    // 用户目标已点名终点时不问，直接带上。
-    expect(prompt).toContain('不问终点，直接带上');
+    // 起点卡同时追问终点的旧机制（起止推导）不得回潮。
+    expect(prompt).not.toContain('起止推导');
+    expect(prompt).not.toContain('完整做到监测收尾');
   });
 });
 
@@ -244,29 +247,37 @@ describe('maps the starting-point picks to creation/takeover without contradicti
 });
 
 /**
- * geo-plan-normalization 票 #10 修订（2026-09-02 方向变更，用户裁决）：
- * 起点推导卡不再枚举任何其他会话的轮次——新会话只复用最新品牌资产，
- * 他轮的发现与接管全部收敛到「点名续轮」专用路径（查→选择卡→单次
- * 接管）。背景实测：摘要携带 4 个未完成轮时，选项构造与 4 选项上限
- * 数学冲突，effort 降档后仍有 17,742 字思考全花在「怎么取舍选项」上；
- * 消除裁量靠把信息撤出场，不靠禁令。派生席位按已确认产物链查表填空。
+ * geo-plan-normalization 票 #11 修订（2026-09-02 用户裁决终版）：起点卡收敛
+ * 为两席（开新一轮/全量重来）——复用边界定为知识与问题池，内容计划/文章/
+ * 分发/发布不跨轮复用（文章每轮重新生成），派生席位整体取消；终点不再
+ * 追问，默认发布完成、点名照带。他轮排除与点名续轮路径沿用票 #10 修订。
  */
-describe('keeps other sessions\' rounds out of the derivation card (geo-plan-normalization, ticket #10 revision)', () => {
+describe('collapses the derivation card to two seats with knowledge-and-pool reuse only (geo-plan-normalization, ticket #11)', () => {
   const prompt = buildSystemPrompt();
 
-  // 推导卡席位：固定两席（开新一轮/全量重来）+ 派生两席（查表填空）。
-  it('fills derivation options by fixed slots with no on-the-spot trade-offs', () => {
-    expect(prompt).toContain('起点题的选项按固定席位查表填空，不现场取舍、不展开备选方案权衡');
-    expect(prompt).toContain('「开新一轮」（从已有问题池选择开始、不更新品牌知识）与「全量重来」（从知识更新开始）必须始终在列');
-    expect(prompt).toContain('沿品牌级已确认产物链取最深下游入口与次深入口');
-    expect(prompt).toContain('无已确认产物时不设派生席位，推荐「开新一轮」');
+  // 三行查表：品牌全新直接建；有更新知识意愿直接从知识更新开始；其余两席卡。
+  it('branches by a three-row lookup: brand-new direct, update-intent direct, otherwise a two-option card', () => {
+    expect(prompt).toContain('按品牌状态查表三行，不现场取舍、不展开备选方案权衡');
+    expect(prompt).toContain('品牌全新（摘要读不到任何已确认知识、问题池或产物）时不问，直接按意图决策表创建全链');
+    expect(prompt).toContain('用户话语里已有更新品牌知识的意愿（点名更新知识、带来新材料、说明品牌信息变了）时不问，直接创建从知识更新开始的轮次');
+    expect(prompt).toContain('「开新一轮」（复用品牌知识与问题池，不更新知识，从问题池开始）与「全量重来」（从知识更新开始）');
+    expect(prompt).toContain('推荐项放第一个并写明推荐理由');
+    expect(prompt).toContain('语义模糊的表述一律按无更新意愿处理');
   });
 
-  // 硬边界：派生选项只引用品牌级已确认产物；他轮待审工作集属接管语义。
-  it('forbids deriving options from other sessions\' pending work', () => {
-    expect(prompt).toContain('派生选项只引用品牌级已确认产物，绝不引用其他会话轮次的待审工作集');
+  // 复用边界：只有知识与问题池跨轮复用；派生席位不得回潮。
+  it('scopes reuse to knowledge and question pool only, with no derived seats', () => {
+    expect(prompt).toContain('可复用的品牌资产只有知识与问题池');
+    expect(prompt).toContain('文章每轮重新生成');
+    expect(prompt).not.toContain('派生席位');
+    expect(prompt).not.toContain('固定席位');
+    expect(prompt).not.toContain('沿品牌级已确认产物链');
+  });
+
+  // 硬边界沿用票 #10：他轮不进推导；新会话只复用品牌级资产。
+  it('keeps other sessions\' rounds out of the derivation card', () => {
     expect(prompt).toContain('起点推导不得考虑、提及或推荐任何其他会话的轮次');
-    expect(prompt).toContain('新会话默认只复用最新的品牌资产（含最新知识版本）');
+    expect(prompt).toContain('新会话只复用品牌级资产');
   });
 
   // 点名续轮路径：查→选择卡（哪怕单轮也列卡）→选定即整卡确认→单次接管。
