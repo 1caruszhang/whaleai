@@ -206,6 +206,46 @@ describe('keeps goal wording consistent with the structural span (ADR-0011, tick
 });
 
 /**
+ * geo-plan-normalization 票 #06 回归：起点推导到创建/接管的映射与通信
+ * 例外——提示词与归一后的服务端行为（票 02）零矛盾。「继续上轮」选项是
+ * 接管语义（f74ce69e 实证断裂：选项是接管语义、模型却新建了操作），映射
+ * 措辞强化到「唯一后续动作 + 新建是错误动作」；起点推导询问在「通信默认
+ * 告知」条款中显式例外化，消除两条规则的现场优先级排序。
+ */
+describe('maps the starting-point picks to creation/takeover without contradiction (geo-plan-normalization, ticket #06)', () => {
+  const prompt = buildSystemPrompt();
+
+  // 决策表：选定「开新一轮」→ 创建首选显式带 updateKnowledge=false；
+  // 归一兜底（首选非强制），但答案不得省略——省略与用户选择矛盾。
+  it('states the preferred path for the start-new-round pick: carry updateKnowledge=false at creation', () => {
+    expect(prompt).toContain('选定「开新一轮」');
+    expect(prompt).toContain('updateKnowledge 传 false');
+    expect(prompt).toContain('首选非强制');
+    expect(prompt).toContain('归一为同一计划形状');
+    expect(prompt).toContain('不得省略答案');
+  });
+
+  // 「继续上轮」→ 接管：唯一后续动作，不得改走 start_geo_operation 新建。
+  it('maps the continue-last-round pick to takeover as its only follow-up action', () => {
+    expect(prompt).toContain('接管信号，不是新开轮次信号');
+    expect(prompt).toContain('唯一的后续动作');
+    expect(prompt).toContain('takeover_geo_operation');
+    expect(prompt).toContain('新建操作是错误动作');
+    // 既有约束不变：该选项仅在摘要列有未完成轮次时提供。
+    expect(prompt).toContain('“继续上轮”仅在摘要列有未完成轮次时提供');
+  });
+
+  // 通信条款显式例外化：起点推导询问不按「阻塞且无安全默认」衡量，
+  // 例外不得延伸到其他场合。
+  it('lists the starting-point derivation question as an explicit exception in the communication clause', () => {
+    expect(prompt).toContain('通信默认是告知');
+    expect(prompt).toContain('显式例外');
+    expect(prompt).toContain('不受「阻塞且无安全默认」门槛约束');
+    expect(prompt).toContain('不得援引该例外');
+  });
+});
+
+/**
  * GD-8③ 回归：XIAOJING_SESSION_FILES 提醒（systemReminder.ts，随消息投送）
  * 与主系统提示词里的会话文件规则（system-prompt.ts）是同一契约的两份文案，
  * system_reminder_protocol.md 要求两处必须同步修改。这里按"规则 token"而非
