@@ -7,6 +7,7 @@ import { scanMaterialImagePlaceholders } from "./materialImagePlaceholder";
 import { removeSpans } from "./textSpans";
 import { projectBrandProfile, resolveBrandName } from "./profileInjection";
 import {
+  rankingBrandBanRule,
   TITLE_STYLE_DEFINITIONS,
   titleBusinessAnchors,
   type TopicPlanKnowledgeFact,
@@ -1394,6 +1395,8 @@ export function buildDirectTitleMessages(input: {
   brandName: string;
   shortName?: string;
   competitors: readonly string[];
+  /** 关联品牌（代理/经销、非竞品）：ranking 标题品牌禁令覆盖范围。 */
+  relatedBrands?: readonly string[];
   industry: string;
   /** 品牌已确认业务词汇（产品 + 衍生关键词）；标题业务词锚集来源之一。 */
   businessTerms?: readonly string[];
@@ -1406,7 +1409,7 @@ export function buildDirectTitleMessages(input: {
     input.contentType === "showcase"
       ? `showcase 标题必须包含目标品牌「${input.shortName || input.brandName}」。`
       : input.contentType === "ranking"
-        ? "ranking 标题绝对不带目标品牌全称或简称，保持客观。"
+        ? rankingBrandBanRule(input.relatedBrands)
         : "是否带目标品牌取决于标题角度；品牌能力/动作可带，客观盘点不带。";
   const yearRule =
     input.contentType === "ranking"

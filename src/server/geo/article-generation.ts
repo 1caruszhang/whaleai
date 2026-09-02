@@ -43,6 +43,7 @@ import { XIAOJING_GEO_PROVIDER_DEFAULTS } from "../../shared/geo/providerCapabil
 /** 反思 LLM 审核开关：用户裁定（2026-08-18）先只审格式，暂停语义反思。 */
 const REFLECTION_REVIEW_ENABLED = false;
 import { managementApi } from "../utils/management-api-client";
+import { warnCompoundAnchorValues } from "./anchor-patrol";
 import type { GeoBillingPermitPort } from "./billing-permit";
 import type { GeoTextCapability } from "./provider-capabilities";
 
@@ -493,12 +494,25 @@ export class ArticleGenerationService {
       ]),
     ].slice(0, 60);
     const currentYear = new Date().getFullYear();
+    // 复合值静默拆分 WARN 留痕（用户裁决 2026-09-01，与 topic-plan 的
+    // deriveProfile 同口径）：本路径消费同一批锚源值，region 锚源同巡，
+    // 巡检不留盲区。
+    warnCompoundAnchorValues("article-generation", [
+      ["industry", industry],
+      ["region", region],
+      ...businessTerms.map((term) => ["businessTerm", term] as const),
+      ...(profile.competitors ?? []).map((term) => ["competitor", term] as const),
+      ...(profile.relatedBrands ?? []).map(
+        (term) => ["relatedBrand", term] as const,
+      ),
+    ]);
     const messages = buildDirectTitleMessages({
       theme: context.article.topic,
       contentType: context.article.contentType,
       brandName,
       ...(profile.shortNames?.[0] ? { shortName: profile.shortNames[0] } : {}),
       competitors: profile.competitors ?? [],
+      relatedBrands: profile.relatedBrands ?? [],
       industry,
       businessTerms,
       targetRegion: isGenericTargetRegion(region) ? "" : region,
@@ -519,6 +533,7 @@ export class ArticleGenerationService {
       businessTerms,
       // 校验集合 = 裁决名 + 已确认简称；无身份事实时裁决名即 workspace 兜底名。
       brandNames: [brandName, ...(profile.shortNames ?? [])].filter(Boolean),
+      relatedBrands: profile.relatedBrands ?? [],
       competitors: profile.competitors ?? [],
       currentYear,
     });
