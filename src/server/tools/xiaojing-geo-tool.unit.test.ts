@@ -751,8 +751,9 @@ describe('brandWorkspaceStateSummary', () => {
 
     const summary = await brandWorkspaceStateSummary();
 
-    // 元信息五要素 + 展示阶段；无正文字段进入摘要。total=1、条目 1：
-    // 未超上界时无截断。
+    // 元信息六要素 + 展示阶段；无正文字段进入摘要。total=1、条目 1：
+    // 未超上界时无截断。mock 未带 updateKnowledge（存量旧轮）→ null，
+    // 不臆断成 false（票 #04）。
     expect(summary?.unfinishedOperations).toEqual({
       present: true,
       state: {
@@ -774,6 +775,7 @@ describe('brandWorkspaceStateSummary', () => {
             pendingReviewCount: 2,
             createdAt: '2026-08-29T09:00:00Z',
             updatedAt: '2026-08-30T18:00:00Z',
+            updateKnowledge: null,
           },
         ],
         total: 1,

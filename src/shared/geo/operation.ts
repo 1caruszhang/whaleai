@@ -183,6 +183,11 @@ export interface GeoOperationProjection {
   pendingConfirmation: GeoOperationConfirmation | null;
   error: GeoOperationError | null;
   sourceOperationId: string | null;
+  /** 本轮「是否更新品牌知识」的显式决策（票 #04，spec 2026-09-02）：
+   * false = 复用轮（不更新知识，从问题池选择开始）；true = 更新轮；
+   * null = 未决（下一轮分支门未回答）或不适用（直接意图）——起点推导
+   * 读轮次时以此为准，不靠 kind 意图标签推断。 */
+  updateKnowledge?: boolean | null;
   revision: number;
   executionGeneration: number;
   executionSidecarGeneration: number | null;
@@ -227,10 +232,10 @@ export interface GeoOperationUnfinishedStuckStep {
 
 /**
  * 跨会话未完成轮次的只读元信息（ADR-0010 Decision 3；Rust store 投影）：
- * 五要素——类型、卡住步骤、待审数量、所属会话（= 当前所有者，接管后随之
- * 变化）、创建/更新时间。不含草稿正文与任何会话聊天记录（正文隔离保留在
- * 各领域 owned-or-approved 投影）；待审数量 = 当前所有者会话名下
- * draft_ready 未批准文章篇数。
+ * 六要素——类型、卡住步骤、待审数量、所属会话（= 当前所有者，接管后随之
+ * 变化）、创建/更新时间、是否更新品牌知识（票 #04，见 updateKnowledge）。
+ * 不含草稿正文与任何会话聊天记录（正文隔离保留在各领域 owned-or-approved
+ * 投影）；待审数量 = 当前所有者会话名下 draft_ready 未批准文章篇数。
  */
 export interface GeoOperationUnfinishedSummary {
   id: string;
@@ -243,6 +248,9 @@ export interface GeoOperationUnfinishedSummary {
   pendingReviewCount: number;
   createdAt: string;
   updatedAt: string;
+  /** 该轮是否更新品牌知识（票 #04）：false = 复用轮，true = 更新轮，
+   * null = 未决/不适用/存量旧轮——与操作投影同语义。 */
+  updateKnowledge?: boolean | null;
 }
 
 export interface PlanGeoOperationInput {

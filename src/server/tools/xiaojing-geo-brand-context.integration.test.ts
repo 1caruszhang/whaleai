@@ -18,7 +18,7 @@ import {
  * 跨 Session 状态盲区回归（MCP 协议级）：新 Session 的 agent 第一个动作
  * 是经真实 MCP server 调用 inspect_brand_context，必须一次拿到 Rust 持久的
  * 品牌状态摘要（含第一轮已确认的 5 家竞品），而不是向用户重新征集；
- * 另一用例覆盖 ADR-0010 Decision 3 的跨会话未完成轮次元信息（五要素，
+ * 另一用例覆盖 ADR-0010 Decision 3 的跨会话未完成轮次元信息（六要素，
  * 只读，不含草稿正文与聊天记录）。Rust 端点以 managementApi mock 模拟，
  * 无真实网络。
  */
@@ -172,6 +172,8 @@ describe('inspect_brand_context over a live MCP server', () => {
                 pendingReviewCount: 3,
                 createdAt: '2026-08-30T09:00:00Z',
                 updatedAt: '2026-08-31T18:00:00Z',
+                // 票 #04：该轮不更新品牌知识——摘要必须如实呈现复用轮。
+                updateKnowledge: false,
               },
             ],
           },
@@ -201,8 +203,10 @@ describe('inspect_brand_context over a live MCP server', () => {
         };
       };
 
-      // 元信息五要素一次到手：类型、卡住步骤/阶段、待审数量、所属会话、时间。
-      // total/truncatedCount 是上界语义：未超上界时无截断。
+      // 元信息六要素一次到手：类型、卡住步骤/阶段、待审数量、所属会话、时间、
+      // 是否更新品牌知识。
+      // updateKnowledge=false 如实呈现为复用轮（票 #04）——起点推导不靠
+      // kind 意图标签推断。total/truncatedCount 是上界语义：未超上界时无截断。
       expect(payload.workspaceState.unfinishedOperations).toEqual({
         present: true,
         state: {
@@ -224,6 +228,7 @@ describe('inspect_brand_context over a live MCP server', () => {
               pendingReviewCount: 3,
               createdAt: '2026-08-30T09:00:00Z',
               updatedAt: '2026-08-31T18:00:00Z',
+              updateKnowledge: false,
             },
           ],
           total: 1,

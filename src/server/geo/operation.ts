@@ -73,6 +73,9 @@ interface GeoOperationCreateRequest {
   inputRefs: GeoOperationReference[];
   pendingConfirmation: GeoOperationPlan["pendingConfirmation"];
   sourceOperationId?: string;
+  /** 本轮「是否更新品牌知识」的显式决策（票 #04）：随创建持久化到投影；
+   * 未携带归一为 null（未决/不适用），不靠 kind 意图标签回推。 */
+  updateKnowledge?: boolean | null;
 }
 
 interface GeoOperationMutationRequest {
@@ -86,6 +89,9 @@ interface GeoOperationMutationRequest {
   error?: GeoOperationError;
   artifactRefs?: GeoOperationReference[];
   replacementSteps?: GeoOperationStep[];
+  /** 仅 replace-plan 消费（票 #04）：知识分支的用户显式答案随计划替换
+   * 一并落库；其他动作忽略，避免散落第二条写入路径。 */
+  updateKnowledge?: boolean;
   stepProgress?: GeoOperationStepProgress;
   queueReason?: string;
   queuePosition?: number;
@@ -224,6 +230,7 @@ export class GeoOperationService {
       inputRefs: plan.inputRefs,
       pendingConfirmation: plan.pendingConfirmation,
       sourceOperationId: plan.sourceOperationId,
+      updateKnowledge: input.updateKnowledge ?? null,
     });
   }
 
@@ -297,6 +304,9 @@ export class GeoOperationService {
       expectedRevision: input.expectedRevision,
       action: "replace-plan",
       replacementSteps: releasedSteps,
+      // 决策随替换一次落库（票 #04）：一次 mutation 一次 revision 递增，
+      // 不为持久化分支答案另开写入路径。
+      updateKnowledge: input.updateKnowledge,
     });
   }
 

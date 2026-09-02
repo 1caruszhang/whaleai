@@ -104,6 +104,33 @@ describe("GeoOperationService", () => {
     );
   });
 
+  it("persists the explicit update-knowledge decision with the round (ticket 04)", async () => {
+    const port = persistence();
+    const service = new GeoOperationService(
+      { workspaceId: "brand-16", sessionId: "session-16" },
+      port,
+    );
+
+    // 显式「不更新知识」：随创建落库，起点推导读轮次不靠意图标签推断。
+    await service.create({
+      intent: "next-round-optimization",
+      goal: "下一轮优化",
+      updateKnowledge: false,
+    });
+    expect(port.create).toHaveBeenLastCalledWith(
+      expect.objectContaining({ updateKnowledge: false }),
+    );
+
+    // 未携带：归一为 null（未决/不适用），绝不臆断成 false。
+    await service.create({
+      intent: "article-generation",
+      goal: "生成三篇文章",
+    });
+    expect(port.create).toHaveBeenLastCalledWith(
+      expect.objectContaining({ updateKnowledge: null }),
+    );
+  });
+
   it("replaces only the undecided next-round plan after the user answers", async () => {
     const undecided = await new GeoOperationService(
       { workspaceId: "brand-16", sessionId: "session-16" },
@@ -128,6 +155,9 @@ describe("GeoOperationService", () => {
       expect.objectContaining({
         action: "replace-plan",
         operationId: undecided.id,
+        // 分支答案随计划替换一并落库（票 #04）：一次 mutation 一次 revision
+        // 递增，决策持久化不另开写入路径。
+        updateKnowledge: false,
         replacementSteps: expect.arrayContaining([
           expect.objectContaining({ id: "select-next-question-pool" }),
         ]),

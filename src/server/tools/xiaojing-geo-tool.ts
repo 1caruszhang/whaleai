@@ -190,7 +190,7 @@ export interface BrandWorkspaceStateSummary {
   unfinishedOperations: BrandWorkspaceStageState;
 }
 
-/** 摘要中一条未完成轮目的元信息条目（五要素 + 展示阶段）。 */
+/** 摘要中一条未完成轮目的元信息条目（六要素 + 展示阶段）。 */
 export interface BrandWorkspaceUnfinishedOperationEntry {
   operationId: string;
   sessionId: string;
@@ -209,6 +209,10 @@ export interface BrandWorkspaceUnfinishedOperationEntry {
   pendingReviewCount: number;
   createdAt: string;
   updatedAt: string;
+  /** 该轮是否更新品牌知识（票 #04）：false = 复用轮（不更新知识，从
+   * 问题池选择开始）——起点推导描述该轮时如实按复用轮呈现；true =
+   * 更新轮；null = 未决/不适用/存量旧轮，不臆断。 */
+  updateKnowledge: boolean | null;
 }
 
 /** 卡住步骤的展示阶段：capability → 六阶段（与聊天进度卡/工作台同一词汇）。 */
@@ -252,6 +256,7 @@ function brandWorkspaceUnfinishedOperationEntry(
     pendingReviewCount: summary.pendingReviewCount,
     createdAt: summary.createdAt,
     updatedAt: summary.updatedAt,
+    updateKnowledge: summary.updateKnowledge ?? null,
   };
 }
 
@@ -1126,7 +1131,7 @@ export async function createXiaojingGeoServer() {
     tools: [
       tool(
         'inspect_brand_context',
-        "Read the current Xiaojing brand/session identity and the cross-session BrandWorkspace state summary (brand name, product lines, confirmed ranking competitors, and the latest persisted artifact status per stage: question pool, topic plan, articles, distribution plan, publish execution). The summary also lists this brand's unfinished GEO operation rounds from any prior session as read-only metadata (kind, goal, the stuck step and its display phase, pending review count, owning session, created/updated times) — use it to recognize an interrupted round and offer to continue it; only the 5 most recently updated rounds are listed, truncatedCount names how many older ones exist, and draft bodies and chat transcripts are never included. Call this once early in a session, before proposing a GEO action and before asking the user for any brand facts — prior sessions' confirmed knowledge and approved artifacts are already persisted here; only ask the user when this summary or inspect_brand_fact shows the fact is missing. Do not re-read speculatively: while the persisted state is unchanged, a re-read returns only the slim {kind:'brand-workspace-state-unchanged'} marker — reuse your previous full read; re-read after your own writes (material import, knowledge confirmation, takeover) or when the user reports another session's activity.",
+        "Read the current Xiaojing brand/session identity and the cross-session BrandWorkspace state summary (brand name, product lines, confirmed ranking competitors, and the latest persisted artifact status per stage: question pool, topic plan, articles, distribution plan, publish execution). The summary also lists this brand's unfinished GEO operation rounds from any prior session as read-only metadata (kind, goal, the stuck step and its display phase, pending review count, owning session, created/updated times, and updateKnowledge — whether that round updates brand knowledge: false means a reuse round that keeps confirmed knowledge and starts from question-pool selection, true means a knowledge-update round; describe each round accordingly instead of guessing from its kind) — use it to recognize an interrupted round and offer to continue it; only the 5 most recently updated rounds are listed, truncatedCount names how many older ones exist, and draft bodies and chat transcripts are never included. Call this once early in a session, before proposing a GEO action and before asking the user for any brand facts — prior sessions' confirmed knowledge and approved artifacts are already persisted here; only ask the user when this summary or inspect_brand_fact shows the fact is missing. Do not re-read speculatively: while the persisted state is unchanged, a re-read returns only the slim {kind:'brand-workspace-state-unchanged'} marker — reuse your previous full read; re-read after your own writes (material import, knowledge confirmation, takeover) or when the user reports another session's activity.",
         { reason: z.string().max(200).optional().describe('Why the current GEO context is needed.') },
         async () => {
           const payload = {
