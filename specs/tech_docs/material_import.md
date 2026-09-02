@@ -31,6 +31,8 @@ LLM 抽取可能远超转发控制面请求的 120s 代理超时，因此导入�
 
 Renderer 对处理中行每 3s 轮询 `/api/xiaojing/materials/status`（带 `materialIds`）；缺省 `materialIds` 的同一路由返回本 Session 最近材料（Rust `/api/brand-materials/list`，按 `updated_at` 倒序、上限 10），用于材料请求卡重挂载（transcript 重放）后恢复在途行与确认卡。非处理中材料在响应中携带批量确认卡投影——确认卡数据以权威候选为源重建，不依赖一次性响应存活。挂载恢复接管的在途行允许直接单材料重试：其原后台队列可能已随 Sidecar 进程消失。
 
+材料请求卡行级时间戳两态（geo-plan-normalization 票 08，与主确认卡共用 `CardStatusTime` 组件钉死同一语义）：抽取进行中（含挂载恢复接管的在途行）显示「生成中」状态词、绝不出钟点；行落定（`awaiting-confirmation` / `processed` / `failed` 都是终态）显示完成时刻。完成时刻的唯一权威源是材料投影的 `updatedAt`——Rust 在写终态的同一条 `UPDATE brand_materials` 语句里更新它，共享投影类型 `BrandMaterialProjection` 自票 08 起显式声明该字段；单材料重试把行重置回「生成中」并清除旧时刻。传输层失败行（请求未达服务端、无 materialId）不存在权威时刻，时间槽整体缺席，不用客户端钟点伪造。
+
 抽取链路（含竞品富化的联网检索）带 10 分钟硬超时信号；provider 挂起按 `model_failed` 落回 failed 终态，材料不会永远停在 processing。Renderer 传输层失败（代理超时 / IPC / 网络）显示专用 `material_request_failed`，与服务端业务错误码严格区分。
 
 ## 存量材料手动重扫（ADR-0008 T7）

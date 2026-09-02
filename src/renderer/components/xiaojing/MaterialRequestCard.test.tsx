@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { BrandMaterialProcessResult, TabApiPost } from '@/api/brandMaterialClient';
 import type { MaterialRescanResult } from '../../../shared/geo/materials';
 import MaterialRequestCard from './MaterialRequestCard';
+import { formatCardCompletionTime } from './CardStatusTime';
 
 const mocks = vi.hoisted(() => ({
   sessionId: 'session-07',
@@ -87,6 +88,8 @@ function statusEntry(input: {
   lastErrorCode?: string;
   candidateCount?: number;
   fileExt?: string;
+  /** 材料投影的 updated_at：终态行的「完成时刻」权威源（票 08）。 */
+  updatedAt?: string;
 }) {
   const candidates = Array.from({ length: input.candidateCount ?? 0 }, (_unused, index) => ({
     id: `candidate-${input.id}-${index}`,
@@ -123,6 +126,7 @@ function statusEntry(input: {
       status: input.status,
       attemptCount: 1,
       ...(input.lastErrorCode ? { lastErrorCode: input.lastErrorCode } : {}),
+      ...(input.updatedAt ? { updatedAt: input.updatedAt } : {}),
     },
     card: input.status === 'awaiting-confirmation' && candidates.length > 0
       ? {
@@ -756,6 +760,109 @@ describe('MaterialRequestCard', () => {
       fireEvent.click(screen.getByRole('button', { name: '跳过材料收集' }));
       expect(screen.queryByRole('alertdialog', { name: '确认跳过材料收集' })).not.toBeInTheDocument();
       expect(mocks.skipMaterialCollection).not.toHaveBeenCalled();
+    });
+  });
+
+  // 卡片时间戳两态（geo-plan-normalization 票 08）：进行中（抽取在后台
+  // 生成待确认事实）显示「生成中」状态词、绝不出钟点；行落定（成功或
+  // 失败都是终态）显示完成时刻，时刻唯一来源是材料投影的 updated_at——
+  // Rust 在写终态的同一条 UPDATE 里更新它，不造第二时间源。
+  describe('card timestamp semantics (ticket 08)', () => {
+    it('shows the generating state without any clock time while extracting, then the completion moment on success', async () => {
+      vi.useFakeTimers();
+      mocks.importText.mockResolvedValue([started('material-ts', 'pasted-text')]);
+      renderRequestCard();
+
+      fireEvent.change(screen.getByPlaceholderText('粘贴企业介绍、产品资料或品牌事实'), {
+        target: { value: '公司全称：鲸跃科技' },
+      });
+      fireEvent.click(screen.getByRole('button', { name: '保存并抽取粘贴资料' }));
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+
+      let results = screen.getByRole('region', { name: '材料处理结果' });
+      // 进行中：状态词「生成中」，没有任何钟点时间。
+      expect(within(results).getByText('生成中')).toBeInTheDocument();
+      expect(results.querySelector('[data-card-timestamp="settled"]')).toBeNull();
+
+      mocks.fetchStatuses.mockResolvedValue([
+        statusEntry({
+          id: 'material-ts',
+          status: 'awaiting-confirmation',
+          candidateCount: 2,
+          updatedAt: '2026-09-02T05:04:03Z',
+        }),
+      ]);
+      await act(async () => { await vi.advanceTimersByTimeAsync(3000); });
+
+      results = screen.getByRole('region', { name: '材料处理结果' });
+      // 落定：状态词消失，完成时刻出现（原样 ISO 可追溯 + 同口径格式化）。
+      expect(within(results).queryByText('生成中')).not.toBeInTheDocument();
+      const stamp = results.querySelector('[data-card-timestamp="settled"]');
+      expect(stamp).not.toBeNull();
+      expect(stamp).toHaveAttribute('data-completed-at', '2026-09-02T05:04:03Z');
+      expect(stamp).toHaveTextContent(`完成于 ${formatCardCompletionTime('2026-09-02T05:04:03Z')}`);
+    });
+
+    it('marks a settled failure with its completion moment, and retry returns the row to the generating state', async () => {
+      vi.useFakeTimers();
+      mocks.open.mockResolvedValue(['C:\\selected\\价格.docx']);
+      mocks.importFiles.mockResolvedValue([started('material-cycle', 'file')]);
+      renderRequestCard();
+
+      fireEvent.click(screen.getByRole('button', { name: '选择文件' }));
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+
+      // 失败同样是落定：完成时刻来自材料投影的 updated_at。
+      mocks.fetchStatuses.mockResolvedValue([
+        statusEntry({
+          id: 'material-cycle',
+          status: 'failed',
+          lastErrorCode: 'model_failed',
+          updatedAt: '2026-09-02T06:00:00Z',
+        }),
+      ]);
+      await act(async () => { await vi.advanceTimersByTimeAsync(3000); });
+      let results = screen.getByRole('region', { name: '材料处理结果' });
+      expect(
+        results.querySelector('[data-card-timestamp="settled"]'),
+      ).toHaveAttribute('data-completed-at', '2026-09-02T06:00:00Z');
+
+      // 仅重试此项：行回到生成中，旧完成时刻必须消失（不再误导）。
+      mocks.retry.mockResolvedValue([started('material-cycle', 'file')]);
+      fireEvent.click(within(results).getByRole('button', { name: '仅重试 价格.docx' }));
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      results = screen.getByRole('region', { name: '材料处理结果' });
+      expect(within(results).getByText('生成中')).toBeInTheDocument();
+      expect(results.querySelector('[data-card-timestamp="settled"]')).toBeNull();
+
+      // 重试后再次落定：显示新的完成时刻，而不是重试前的旧时刻。
+      mocks.fetchStatuses.mockResolvedValue([
+        statusEntry({
+          id: 'material-cycle',
+          status: 'processed',
+          updatedAt: '2026-09-02T07:30:00Z',
+        }),
+      ]);
+      await act(async () => { await vi.advanceTimersByTimeAsync(3000); });
+      expect(
+        screen.getByRole('region', { name: '材料处理结果' }).querySelector('[data-card-timestamp="settled"]'),
+      ).toHaveAttribute('data-completed-at', '2026-09-02T07:30:00Z');
+    });
+
+    it('renders no timestamp slot for transport failures that never reached a material projection', async () => {
+      mocks.importText.mockRejectedValue(new Error('proxy timeout'));
+      renderRequestCard();
+
+      fireEvent.change(screen.getByPlaceholderText('粘贴企业介绍、产品资料或品牌事实'), {
+        target: { value: '公司全称：鲸跃科技' },
+      });
+      fireEvent.click(screen.getByRole('button', { name: '保存并抽取粘贴资料' }));
+
+      // 传输层失败没有到达服务端，不存在权威完成时刻：时间槽整体缺席，
+      // 不用客户端钟点伪造。
+      const results = await screen.findByRole('region', { name: '材料处理结果' });
+      expect(within(results).getByText('处理失败：material_request_failed')).toBeInTheDocument();
+      expect(results.querySelector('[data-card-timestamp]')).toBeNull();
     });
   });
 });

@@ -31,6 +31,7 @@ import type { KnowledgeCandidatesCardData } from '../../../shared/geo/knowledgeC
 import { isMaterialImageExtension, MATERIAL_IMAGE_EXTENSIONS } from '../../../shared/geo/materialImages';
 import type { MaterialRescanResult } from '../../../shared/geo/materials';
 import { parseMaterialRequestCard, type MaterialRequestCardData } from '../../../shared/geo/materialRequestCard';
+import CardStatusTime from './CardStatusTime';
 import KnowledgeBatchCard from './KnowledgeBatchCard';
 import MaterialImageCandidatesBar from './MaterialImageCandidatesBar';
 
@@ -47,6 +48,12 @@ interface MaterialRow {
   materialId?: string;
   candidateCount?: number;
   errorCode?: string;
+  /**
+   * 行落定（success/failed）的完成时刻（票 08）：材料投影的
+   * updated_at——Rust 在写终态的同一条 UPDATE 里更新它，是唯一权威源；
+   * processing 行不带（显示「生成中」态），重试重置回 processing 时清除。
+   */
+  settledAt?: string;
   /** 独立图片材料行：文案走配图候选池口径而非「待确认事实」口径。 */
   image?: boolean;
   /**
@@ -104,7 +111,13 @@ function rowPatchFromStatus(entry: BrandMaterialStatusEntry): Partial<MaterialRo
   const { material, card } = entry;
   const image = isMaterialImageExtension(material.fileExt);
   if (material.status === 'failed') {
-    return { status: 'failed', image, errorCode: material.lastErrorCode ?? 'material_processing_failed' };
+    return {
+      status: 'failed',
+      image,
+      errorCode: material.lastErrorCode ?? 'material_processing_failed',
+      // 失败也是落定：完成时刻与成功行同源（终态 UPDATE 的 updated_at）。
+      settledAt: material.updatedAt,
+    };
   }
   if (material.status === 'awaiting-confirmation' || material.status === 'processed') {
     return {
@@ -113,6 +126,7 @@ function rowPatchFromStatus(entry: BrandMaterialStatusEntry): Partial<MaterialRo
       image,
       candidateCount: card?.candidates.length ?? 0,
       errorCode: undefined,
+      settledAt: material.updatedAt,
     };
   }
   return {};
@@ -347,7 +361,9 @@ export default memo(function MaterialRequestCard({ data }: MaterialRequestCardPr
 
   const retryOne = useCallback(async (row: MaterialRow) => {
     if (!canSubmit || !identity || !row.materialId) return;
-    replaceRow(row.key, { status: 'processing', errorCode: undefined, recoverable: false });
+    // 重试重置回「生成中」：旧完成时刻必须清除，避免与新一次抽取的时刻
+    // 打架（票 08：时间槽要么状态词要么当前这次落定的时刻）。
+    replaceRow(row.key, { status: 'processing', errorCode: undefined, recoverable: false, settledAt: undefined });
     try {
       const [entry] = await retryBrandMaterial(
         apiPost,
@@ -690,6 +706,13 @@ export default memo(function MaterialRequestCard({ data }: MaterialRequestCardPr
                     </p>
                   )}
                 </div>
+                {/* 时间戳两态（票 08）：抽取进行中 → 「生成中」；行落定 →
+                    完成时刻（updatedAt）。无服务端材料的传输失败行整个
+                    时间槽缺席——不存在权威时刻，不用客户端钟点伪造。 */}
+                <CardStatusTime
+                  state={row.status === 'processing' ? 'generating' : 'settled'}
+                  completedAt={row.settledAt}
+                />
                 {(row.status === 'failed' || (row.status === 'processing' && row.recoverable))
                   && row.materialId && (
                     <button

@@ -17,6 +17,7 @@ import {
   type KnowledgeFieldRow,
 } from '../../../shared/geo/knowledgeCard';
 import GateCardFooter, { GateCardSuccess } from './GateCardFooter';
+import CardStatusTime from './CardStatusTime';
 
 /** 通知右侧工作台"品牌知识·当前权威"面板刷新（同一 renderer 内的事件）。 */
 export const KNOWLEDGE_DECIDED_EVENT = 'xiaojing:knowledge-decided';
@@ -66,6 +67,12 @@ interface CandidateState {
   editedValue?: unknown;
   outcome: 'pending' | 'settled' | 'failed';
   settledStatus?: string;
+  /**
+   * 该候选裁决落库时刻（票 08）：实时路径取 decide-batch 结果的
+   * settledAt，水合路径取候选投影的 resolvedAt。卡片完成时刻的本地
+   * 暂存，与权威投影同源。
+   */
+  settledAt?: string;
   error?: string;
 }
 
@@ -269,7 +276,12 @@ export default function KnowledgeBatchCard({ data, onDecided }: KnowledgeBatchCa
             if (candidate.status === 'awaiting-confirmation' || candidate.status === 'conflict') return;
             const local = requested[index];
             if (local) {
-              next[local.id] = { ...defaultStateOf(local), outcome: 'settled', settledStatus: candidate.status };
+              next[local.id] = {
+                ...defaultStateOf(local),
+                outcome: 'settled',
+                settledStatus: candidate.status,
+                settledAt: candidate.resolvedAt ?? undefined,
+              };
             }
           });
           return next;
@@ -319,6 +331,22 @@ export default function KnowledgeBatchCard({ data, onDecided }: KnowledgeBatchCa
   ).length;
   const allSettled = activeCandidates.length === 0;
   const canSubmit = activeCandidates.length > 0 && unresolvedConflictCount === 0 && !busy;
+
+  // 整卡完成时刻（票 08）：全部候选落定后，取各候选裁决时刻（实时提交的
+  // settledAt / 水合与投影的 resolvedAt）的最大值——即最后一次裁决落库的
+  // 时刻。RFC3339 字典序可比；缺权威时刻（旧投影未带）时为 null，时间槽
+  // 整体缺席而不是显示客户端钟点。
+  const cardSettledAt = useMemo(() => {
+    if (!allSettled) return null;
+    let latest: string | null = null;
+    for (const candidate of candidates) {
+      const state = stateOf(candidate);
+      if (state.outcome !== 'settled') continue;
+      const iso = state.settledAt ?? candidate.resolvedAt ?? null;
+      if (iso && (latest === null || iso > latest)) latest = iso;
+    }
+    return latest;
+  }, [allSettled, candidates, stateOf]);
 
   // 按类分格（GD 反馈演进）：每类字段一格，格内已就绪（材料原文/用户补充）与
   // 待确认（推断/冲突/失败）候选并存；含待确认内容的类排网格前部（组内保持
@@ -422,6 +450,7 @@ export default function KnowledgeBatchCard({ data, onDecided }: KnowledgeBatchCa
               ...(current[result.candidateId] ?? defaultStateOf(local)),
               outcome: 'settled',
               settledStatus: result.status,
+              settledAt: result.settledAt ?? undefined,
               error: undefined,
             };
           } else {
@@ -545,9 +574,17 @@ export default function KnowledgeBatchCard({ data, onDecided }: KnowledgeBatchCa
       )}
 
       {/* 整卡确认固定页脚右下（闸门卡统一规范）：卡片折叠时页脚仍在，
-          主操作不因收起候选列表而消失；确认后原位变成功态。 */}
+          主操作不因收起候选列表而消失；确认后原位变成功态。页脚同时是
+          卡片时间戳两态（票 08）的锚位——裁决线未收口显示「生成中」状态
+          词（绝不出钟点），全部落定显示完成时刻。 */}
       <div className="px-4 pb-3">
         <GateCardFooter>
+          <CardStatusTime
+            state={allSettled ? 'settled' : 'generating'}
+            completedAt={cardSettledAt}
+            generatingLabel={t('knowledgeCard.generatingState')}
+            completedLabel={(time) => t('knowledgeCard.completedAt', { time })}
+          />
           {allSettled ? (
             <GateCardSuccess>{t('knowledgeCard.allSettledNote')}</GateCardSuccess>
           ) : (

@@ -226,7 +226,15 @@ export async function handleXiaojingKnowledgeRoute(
         return jsonResponse({ success: false, error: 'knowledge_decisions_invalid' }, 400);
       }
       const authority = createKnowledgeAuthority({ workspaceId, sessionId: runtimeSessionId });
-      const results: Array<{ candidateId: string; ok: boolean; status?: string; error?: string }> = [];
+      // 逐条结果与共享契约 KnowledgeBatchDecisionItemResult 同形：settledAt
+      // 是卡片「完成时刻」的权威源（票 08），从 Rust 决策结果原样透传。
+      const results: Array<{
+        candidateId: string;
+        ok: boolean;
+        status?: string;
+        error?: string;
+        settledAt?: string | null;
+      }> = [];
       const reminders: KnowledgeDecisionReminderInput[] = [];
       for (const item of payload.decisions) {
         try {
@@ -237,7 +245,13 @@ export async function handleXiaojingKnowledgeRoute(
             actorId: 'desktop-user',
             editedValue: item.editedValue,
           });
-          results.push({ candidateId: item.candidateId, ok: true, status: result.status });
+          results.push({
+            candidateId: item.candidateId,
+            ok: true,
+            status: result.status,
+            // 完成时刻随裁决结果原样透传（票 08）：卡片时间戳的唯一权威源。
+            settledAt: result.resolvedAt ?? null,
+          });
           reminders.push({
             candidateId: item.candidateId,
             decision: item.decision,

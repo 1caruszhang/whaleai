@@ -96,6 +96,8 @@
     "overflowHint": "该字段另有 {{count}} 条未展示",
     "partialFailure": "部分候选裁决失败，可重试失败的条目。",
     "allSettledNote": "全部候选已裁决，权威结果可在右侧品牌知识面板查看",
+    "generatingState": "生成中",
+    "completedAt": "完成于 {{time}}",
     "impactLabel": "操作影响：",
     "impactNote": "确认后全部候选写入权威品牌知识并生成审计记录；后续所有 GEO 内容只使用确认过的事实。",
     "excerptLabel": "依据：{{excerpt}}",

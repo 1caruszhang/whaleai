@@ -61,6 +61,17 @@ normalized 值重复的原始 `valueJson`——卡片 JSON 是工具结果正文
 切换器与六阶段骨架之间，工作台组成见 `geo_operations.md`），Agent 通过一条聚合
 `XIAOJING_KNOWLEDGE_DECISION` reminder 得到全部结果。
 
+卡片时间戳两态（geo-plan-normalization 票 08，与材料请求卡共用 `CardStatusTime`
+组件钉死同一语义）：裁决线未收口（仍有候选待确认/冲突未选/失败待重试）时页脚显示
+「生成中」状态词、绝不出钟点；全部候选落定后显示完成时刻 = 各候选裁决落库时刻
+（`resolvedAt`）的最大值（最后一次裁决的时刻）。`resolvedAt` 的唯一权威源是 Rust
+决策事务内与终态同笔写入的 `knowledge_fact_candidates.resolved_at`（聊天 delete 终结
+同样写入）：`KnowledgeCandidate` 投影与 `KnowledgeDecisionResult` 均透传该字段，
+`decide-batch` 路由将其原样映射为结果项的 `settledAt`（实时路径），水合端点经
+`toKnowledgeCardCandidate` 投影 `resolvedAt`（重挂载路径）。渲染侧不另行打点、
+不造第二时间源；落定但拿不到权威时刻（旧投影未带）时时间槽整体缺席，不用客户端
+钟点伪造。
+
 字段行的分组键与展示标签按 `knowledgeFieldKeyOfPredicate` 大小写不敏感归一为规范
 camelCase 字段 token（`canonicalEnterpriseProfileField`）：identity 入库时 predicate
 被统一小写（如 `enterprise-profile.servicearea`），展示侧必须还原成 `serviceArea`
