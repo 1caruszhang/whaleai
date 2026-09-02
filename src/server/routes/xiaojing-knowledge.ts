@@ -22,8 +22,8 @@ import {
 } from '../geo/material-import';
 import { recordGeoOperationMilestone, quoteGeoNextStepForGateKind } from '../geo/operation-progress';
 import {
-  getXiaojingGeoBillingPermitChannel,
-  getXiaojingGeoProviderCapabilities,
+  getXiaojingGeoBillingPermitChannelForRequest,
+  getXiaojingGeoProviderCapabilitiesForRequest,
 } from '../geo/provider-runtime';
 import { jsonResponse } from '../utils/http';
 import { sendXiaojingMessage } from '../xiaojing-reminder-send';
@@ -48,7 +48,9 @@ function logMaterial(input: Parameters<typeof materialLogProjection>[0]): void {
 /**
  * 每 Session 一条串行后台抽取队列：LLM 处理不再挂在转发请求的 120s 代理
  * 超时后面，也不让批量导入并行打满 provider。队列只活在 Sidecar 进程内；
- * 材料与 attempt 状态由 Rust 持久化，进程重启后通过 retry 恢复。
+ * 材料与 attempt 状态由 Rust 持久化，进程重启后通过 retry 恢复。任务使用
+ * 入队请求携带的账号 token（见 runBackgroundProcessing），不用启动时的
+ * env token 单例。
  */
 const sessionProcessingQueues = new Map<string, Promise<void>>();
 
@@ -68,9 +70,14 @@ function enqueueSessionProcessing(
 async function runBackgroundProcessing(input: {
   identity: MaterialIdentity;
   materialIds: string[];
+  /** 入队请求携带的账号 token（Rust 代理附带，临期已在 Rust 侧刷新）。
+   * 后台任务脱离请求上下文执行，必须在入队时捕获：sidecar 启动时注入的
+   * env token 约 15 分钟过期，长会话的面板导入/重试会全部落 401
+   * token_expired → material_billing_failed。 */
+  accountToken?: string;
 }): Promise<void> {
-  const { identity, materialIds } = input;
-  const capabilities = getXiaojingGeoProviderCapabilities();
+  const { identity, materialIds, accountToken } = input;
+  const capabilities = getXiaojingGeoProviderCapabilitiesForRequest(accountToken);
   const service = new MaterialImportService(
     identity,
     createBrandMaterialPort(identity),
@@ -79,7 +86,7 @@ async function runBackgroundProcessing(input: {
     {},
     capabilities.keywordSearch,
     undefined,
-    getXiaojingGeoBillingPermitChannel(),
+    getXiaojingGeoBillingPermitChannelForRequest(accountToken),
   );
   for (const materialId of materialIds) {
     const result = await service.process(materialId);
@@ -425,7 +432,11 @@ export async function handleXiaojingKnowledgeRoute(
         .filter((entry): entry is { ok: true; material: BrandMaterial } => entry.ok)
         .map((entry) => entry.material.id);
       if (materialIds.length > 0) {
-        enqueueSessionProcessing(identity, () => runBackgroundProcessing({ identity, materialIds }));
+        enqueueSessionProcessing(identity, () => runBackgroundProcessing({
+          identity,
+          materialIds,
+          accountToken: requestAccountAccessToken(request),
+        }));
       }
       return jsonResponse({ success: true, result: { entries } });
     } catch {
@@ -513,6 +524,7 @@ export async function handleXiaojingKnowledgeRoute(
       enqueueSessionProcessing(identity, () => runBackgroundProcessing({
         identity,
         materialIds: [material.id],
+        accountToken: requestAccountAccessToken(request),
       }));
       return jsonResponse({ success: true, result: { entries: [{ ok: true, material }] } });
     } catch (error) {
@@ -573,7 +585,11 @@ export async function handleXiaojingKnowledgeRoute(
         return jsonResponse({ success: false, error: 'material_identity_mismatch' }, 403);
       }
       const identity = { workspaceId, sessionId: runtimeSessionId };
-      const capabilities = getXiaojingGeoProviderCapabilities();
+      // 同后台队列口径：extraction 走网关也带账号 token，env 单例过期后
+      // 重扫同样会 401，必须用本请求的新鲜 token。
+      const capabilities = getXiaojingGeoProviderCapabilitiesForRequest(
+        requestAccountAccessToken(request),
+      );
       logMaterial({
         operation: 'rescan-images', workspaceId, sessionId: runtimeSessionId,
         status: 'started',
