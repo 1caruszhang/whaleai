@@ -1124,6 +1124,210 @@ describe("embedding 错误分类与透出", () => {
     expect(alwaysDown).toHaveBeenCalledTimes(3);
   });
 
+  describe("chat 流式传输（2026-09-02 非流式 120s 死线误杀修复）", () => {
+    const encoder = new TextEncoder();
+
+    /**
+     * SSE 形态的 ReadableStream。stallAfter 有值时发完第 stallAfter 个
+     * chunk 后不 close（模拟连接挂死），并监听 fetch signal 的 abort——
+     * 真实 undici 在 abort 时以 signal.reason 拒绝 pending read，mock 用
+     * controller.error(reason) 复刻同一语义（对持锁流调 cancel 会被拒绝
+     * 且 pending read 永不返回，测不出断流）。
+     */
+    const sseStream = (
+      chunks: readonly string[],
+      opts?: { stallAfter?: number; signal?: AbortSignal },
+    ): ReadableStream<Uint8Array> =>
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          chunks.forEach((chunk, index) => {
+            if (opts?.stallAfter !== undefined && index > opts.stallAfter) {
+              return;
+            }
+            controller.enqueue(encoder.encode(chunk));
+          });
+          if (opts?.stallAfter === undefined) {
+            controller.close();
+            return;
+          }
+          opts?.signal?.addEventListener(
+            "abort",
+            () => {
+              const signal = opts.signal as AbortSignal;
+              try {
+                controller.error(
+                  signal.reason ??
+                    new DOMException("This operation was aborted", "AbortError"),
+                );
+              } catch {
+                // 流已关闭（abort 晚于正常读完）：无需处理。
+              }
+            },
+            { once: true },
+          );
+        },
+      });
+
+    const sseResponse = (stream: ReadableStream<Uint8Array>) =>
+      new Response(stream, {
+        status: 200,
+        headers: { "Content-Type": "text/event-stream" },
+      });
+
+    const fastChatTimeouts = { idleMs: 30, totalMs: 5_000 };
+
+    it("SSE 分块跨 JSON 行边界仍完整拼接，且请求体带 stream:true", async () => {
+      const bodies: unknown[] = [];
+      const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+        bodies.push(JSON.parse(String(init?.body)));
+        return sseResponse(
+          sseStream([
+            'data: {"choices":[{"delta":{"cont',
+            'ent":"你好"}}]}\n\nda',
+            'ta: {"choices":[{"delta":{"content":"，世界"}}]}\n\n',
+            "data: [DONE]\n\n",
+          ]),
+        );
+      });
+      const capabilities = createGeoProviderCapabilities(directSecrets, {
+        fetch: fetchMock as unknown as typeof fetch,
+        sleep: silentSleep(),
+      });
+
+      const content = await capabilities.generation.complete([
+        { role: "user", content: "g" },
+      ]);
+
+      expect(content).toBe("你好，世界");
+      expect(bodies).toHaveLength(1);
+      expect(bodies[0]).toMatchObject({ stream: true });
+    });
+
+    it("上游对 stream 请求整包返回 JSON（网关缓冲/无 content-type）时按信封兜底", async () => {
+      const fetchMock = vi.fn(async () =>
+        // 无 Content-Type 头：判形必须靠文本嗅探而非仅看 header。
+        new Response(
+          JSON.stringify({ choices: [{ message: { content: "兜底" } }] }),
+          { status: 200 },
+        ),
+      );
+      const capabilities = createGeoProviderCapabilities(directSecrets, {
+        fetch: fetchMock as unknown as typeof fetch,
+        sleep: silentSleep(),
+      });
+
+      const content = await capabilities.generation.complete([
+        { role: "user", content: "g" },
+      ]);
+
+      expect(content).toBe("兜底");
+    });
+
+    it("断流触发空闲超时重试，且重试不拼接上一次的半截正文", async () => {
+      let calls = 0;
+      const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+        calls += 1;
+        if (calls === 1) {
+          // 只发一个 delta 后挂死：空闲计时器到点必须中断并整次重来。
+          return sseResponse(
+            sseStream(
+              ['data: {"choices":[{"delta":{"content":"半截"}}]}\n\n'],
+              { stallAfter: 0, signal: init?.signal as AbortSignal },
+            ),
+          );
+        }
+        return sseResponse(
+          sseStream([
+            'data: {"choices":[{"delta":{"content":"完整正文"}}]}\n\n',
+            "data: [DONE]\n\n",
+          ]),
+        );
+      });
+      const capabilities = createGeoProviderCapabilities(directSecrets, {
+        fetch: fetchMock as unknown as typeof fetch,
+        sleep: silentSleep(),
+        chatTimeouts: fastChatTimeouts,
+      });
+
+      const content = await capabilities.generation.complete([
+        { role: "user", content: "g" },
+      ]);
+
+      expect(content).toBe("完整正文");
+      expect(calls).toBe(2);
+    });
+
+    it("持续断流耗尽重试后以可读超时文案失败（不再裸 This operation was aborted）", async () => {
+      const fetchMock = vi.fn(async (url: string, init?: RequestInit) =>
+        sseResponse(
+          sseStream(['data: {"choices":[{"delta":{"content":"x"}}]}\n\n'], {
+            stallAfter: 0,
+            signal: init?.signal as AbortSignal,
+          }),
+        ),
+      );
+      const capabilities = createGeoProviderCapabilities(directSecrets, {
+        fetch: fetchMock as unknown as typeof fetch,
+        sleep: silentSleep(),
+        chatTimeouts: fastChatTimeouts,
+      });
+
+      const failure = await capabilities.generation
+        .complete([{ role: "user", content: "g" }])
+        .catch((e) => e);
+
+      expect(failure.message).toContain("空闲超时");
+      expect(failure.message).not.toContain("This operation was aborted");
+      expect(fetchMock).toHaveBeenCalledTimes(3);
+    });
+
+    it("SSE 流无任何 delta 内容判无效响应且不重试", async () => {
+      const fetchMock = vi.fn(async () =>
+        sseResponse(sseStream(["data: [DONE]\n\n"])),
+      );
+      const capabilities = createGeoProviderCapabilities(directSecrets, {
+        fetch: fetchMock as unknown as typeof fetch,
+        sleep: silentSleep(),
+      });
+
+      const failure = await capabilities.generation
+        .complete([{ role: "user", content: "g" }])
+        .catch((e) => e);
+
+      expect(failure.message).toContain("返回了无效响应");
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    it("调用方取消不重试，AbortError 文案经脱敏层原样保留", async () => {
+      const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+        // undici 对已中止 signal 的 fetch 立即拒绝，mock 对齐该行为。
+        if (init?.signal?.aborted) {
+          throw new DOMException("This operation was aborted", "AbortError");
+        }
+        return sseResponse(
+          sseStream(['data: {"choices":[{"delta":{"content":"正文"}}]}\n\n']),
+        );
+      });
+      const capabilities = createGeoProviderCapabilities(directSecrets, {
+        fetch: fetchMock as unknown as typeof fetch,
+        sleep: silentSleep(),
+      });
+      const controller = new AbortController();
+      controller.abort();
+
+      const failure = await capabilities.generation
+        .complete([{ role: "user", content: "g" }], {
+          signal: controller.signal,
+        })
+        .catch((e) => e);
+
+      // sanitizeGeoProviderError 按普通 Error 重建（name 不保留），断言
+      // 落在文案与「只调一次」上。
+      expect(failure.message).toContain("This operation was aborted");
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+  });
+
   it("透出的上游错误体先脱敏密钥", async () => {
     const failFetch = vi.fn(async () =>
       jsonResponse({ error: { message: "bad key ark-test leaked" } }, 400),

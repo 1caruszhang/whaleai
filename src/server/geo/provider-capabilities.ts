@@ -325,6 +325,11 @@ export interface GeoProviderCapabilityDependencies {
   fetch?: typeof fetch;
   sleep?: (ms: number) => Promise<void>;
   now?: () => Date;
+  /**
+   * openAiChat 流式超时覆盖（测试注入）：idleMs = 相邻 chunk 最长静默，
+   * totalMs = 单次补全总时长兜底。缺省用生产常量（120s / 15min）。
+   */
+  chatTimeouts?: { idleMs?: number; totalMs?: number };
 }
 
 const secretTransportEnvNames = [
@@ -592,10 +597,25 @@ async function upstreamHttpFailure(
   return fallback;
 }
 
-/** openAiChat 请求级超时：挂死连接（曾出现 2 分 12 秒才断）到期中断重试。 */
-const OPENAI_CHAT_TIMEOUT_MS = 120_000;
+/**
+ * openAiChat 空闲超时：相邻 chunk 之间的最长静默。挂死连接（曾出现
+ * 2 分 12 秒才断）到点中断重试；模型持续吐字的正常长文生成不触发。
+ */
+const OPENAI_CHAT_IDLE_TIMEOUT_MS = 120_000;
+/**
+ * openAiChat 总时长兜底：防「涓流挂死」——空闲计时器被零星字节不断
+ * 重置但永远等不到完整响应。正常生成远不会触碰（单次补全历史最长
+ * 约 2 分钟；文章级多腿管线最长约 6 分钟）。
+ */
+const OPENAI_CHAT_TOTAL_TIMEOUT_MS = 15 * 60_000;
 /** 网络层/429/5xx 重试退避（2026-08-27 排查结论：无重试放大瞬时抖动）。 */
 const OPENAI_CHAT_RETRY_DELAYS_MS: readonly number[] = [500, 1_500];
+
+/** openAiChat 超时参数（测试经 GeoProviderCapabilityDependencies.chatTimeouts 注入）。 */
+interface OpenAiChatTimeouts {
+  idleMs: number;
+  totalMs: number;
+}
 
 async function openAiChat(
   fetchImpl: typeof fetch,
@@ -611,11 +631,21 @@ async function openAiChat(
     topP?: number;
     webSearch?: boolean;
   },
+  timeouts: OpenAiChatTimeouts = {
+    idleMs: OPENAI_CHAT_IDLE_TIMEOUT_MS,
+    totalMs: OPENAI_CHAT_TOTAL_TIMEOUT_MS,
+  },
 ): Promise<string> {
+  // 流式请求（2026-09-02 排查结论）：非流式长文生成期间零字节到达，与
+  // 挂死连接无法区分，固定 120 秒死线把正常生成误杀成裸文案
+  // "This operation was aborted"（3 次尝试 × 120s + 退避 ≈ 362s 后整篇
+  // 落 generation_failed）。改流式后超时语义换轨为「空闲」——只要持续
+  // 吐字就不中断；网关/代理若把 SSE 整包缓冲成 JSON 返回（wire shape
+  // 兼容场景），readChatCompletionBody 按文本形态兜底解析。
   const body = JSON.stringify({
     model,
     messages,
-    stream: false,
+    stream: true,
     ...(options?.webSearch ? { enable_search: true } : {}),
     ...(options?.maxTokens !== undefined
       ? { max_tokens: options.maxTokens }
@@ -637,7 +667,29 @@ async function openAiChat(
       );
     }
     const timeout = new AbortController();
-    const timer = setTimeout(() => timeout.abort(), OPENAI_CHAT_TIMEOUT_MS);
+    // abort 携带可读 reason：undici 把 reason 原样抛给调用方，超时不再
+    // 以裸 "This operation was aborted" 文案漏进文章失败原因。
+    const idleTimeoutError = new Error(
+      `${slot} 上游响应空闲超时：${timeouts.idleMs / 1000} 秒未收到新数据`,
+    );
+    const totalTimeoutError = new Error(
+      `${slot} 上游响应总时长超时：超过 ${timeouts.totalMs / 60_000} 分钟`,
+    );
+    const armIdle = () => {
+      clearTimeout(idleTimer);
+      idleTimer = setTimeout(
+        () => timeout.abort(idleTimeoutError),
+        timeouts.idleMs,
+      );
+    };
+    let idleTimer = setTimeout(
+      () => timeout.abort(idleTimeoutError),
+      timeouts.idleMs,
+    );
+    const totalTimer = setTimeout(
+      () => timeout.abort(totalTimeoutError),
+      timeouts.totalMs,
+    );
     const signal =
       options?.signal && "any" in AbortSignal
         ? AbortSignal.any([options.signal, timeout.signal])
@@ -653,14 +705,9 @@ async function openAiChat(
         signal,
       });
       if (response.ok) {
-        const payload = (await response.json()) as {
-          choices?: Array<{ message?: { content?: string } }>;
-        };
-        const content = payload.choices?.[0]?.message?.content;
-        if (typeof content !== "string" || content.length === 0) {
-          throw new Error(`${slot} 返回了无效响应`);
-        }
-        return content;
+        // 累积缓冲是本 attempt 的局部量：断流重试天然从空串重来，
+        // 不会把上一次尝试的半截正文拼进重试结果。
+        return await readChatCompletionBody(slot, response, armIdle);
       }
       const failure = safeUpstreamFailure(slot, response.status);
       const retryable = response.status === 429 || response.status >= 500;
@@ -673,21 +720,88 @@ async function openAiChat(
         throw error;
       }
       const isAbort = error instanceof Error && error.name === "AbortError";
-      // 调用方主动取消不重试；本层超时触发的中断与网络层错误（undici 的
-      // TypeError: fetch failed）可重试。
+      // 调用方主动取消不重试；本层超时触发的中断（自定义 reason 的
+      // Error，或个别路径仍以 AbortError 形态抛出）与网络层错误（undici
+      // 的 TypeError: fetch failed）可重试。
       const callerCancelled = isAbort && options?.signal?.aborted === true;
+      const ownTimeout = timeout.signal.aborted && !callerCancelled;
       const retryable =
-        !callerCancelled &&
-        (error instanceof TypeError || (isAbort && timeout.signal.aborted));
+        !callerCancelled && (error instanceof TypeError || ownTimeout);
       if (!retryable || attempt === OPENAI_CHAT_RETRY_DELAYS_MS.length) {
+        if (ownTimeout && isAbort) {
+          const reason = timeout.signal.reason;
+          throw reason instanceof Error ? reason : error;
+        }
         throw error;
       }
       lastError = error;
     } finally {
-      clearTimeout(timer);
+      clearTimeout(idleTimer);
+      clearTimeout(totalTimer);
     }
   }
   throw lastError;
+}
+
+/**
+ * 读取 chat/completions 响应体：增量读字节（每读到数据即重置空闲计时
+ * 器），读完后按文本形态二选一解析——SSE（含 `data:` 行）累积 delta；
+ * 否则按非流式 JSON 信封取 content，覆盖网关整包缓冲与无 content-type
+ * 的兼容实现。两类形态共用同一套有效性校验（空 content 即无效响应）。
+ */
+async function readChatCompletionBody(
+  slot: "extraction" | "generation" | "reflection",
+  response: Response,
+  onData: () => void,
+): Promise<string> {
+  let text = "";
+  if (response.body) {
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      onData();
+      text += decoder.decode(value, { stream: true });
+    }
+    text += decoder.decode();
+  } else {
+    text = await response.text();
+  }
+  const contentType = response.headers.get("content-type") ?? "";
+  if (contentType.includes("application/json") || !/(^|\n)[ \t]*data:/.test(text)) {
+    const payload = JSON.parse(text) as {
+      choices?: Array<{ message?: { content?: string } }>;
+    };
+    const content = payload.choices?.[0]?.message?.content;
+    if (typeof content !== "string" || content.length === 0) {
+      throw new Error(`${slot} 返回了无效响应`);
+    }
+    return content;
+  }
+  let accumulated = "";
+  for (const rawLine of text.split("\n")) {
+    const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
+    if (!line.startsWith("data:")) continue;
+    const data = line.slice("data:".length).trimStart();
+    if (!data || data === "[DONE]") continue;
+    try {
+      const chunk = JSON.parse(data) as {
+        choices?: Array<{ delta?: { content?: string } }>;
+      };
+      const delta = chunk.choices?.[0]?.delta?.content;
+      if (typeof delta === "string" && delta.length > 0) {
+        accumulated += delta;
+      }
+    } catch {
+      // 跨块残片已由整文本解析消除，此处只剩心跳类非 JSON data 行：
+      // 跳过单个坏行，不因它报废整次补全。
+    }
+  }
+  if (accumulated.length === 0) {
+    throw new Error(`${slot} 返回了无效响应`);
+  }
+  return accumulated;
 }
 
 function encodeObjectKey(objectKey: string): string {
@@ -716,6 +830,10 @@ export function createGeoProviderCapabilities(
     deps.sleep ??
     ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
   const now = deps.now ?? (() => new Date());
+  const chatTimeouts = {
+    idleMs: deps.chatTimeouts?.idleMs ?? OPENAI_CHAT_IDLE_TIMEOUT_MS,
+    totalMs: deps.chatTimeouts?.totalMs ?? OPENAI_CHAT_TOTAL_TIMEOUT_MS,
+  };
   // 网关模式（票 07）：账号 admission 注入网关基地址 + 账号 token 后，
   // 全部 Provider 端点改投 /gw/* 代理（票 05 路由：网关路径 = 上游路径，
   // 根路径替换），鉴权一律换账号 token；业务层与 wire shape 零改动。
@@ -785,6 +903,7 @@ export function createGeoProviderCapabilities(
             : model,
           messages,
           options,
+          chatTimeouts,
         );
       } catch (error) {
         throw sanitizeGeoProviderError(error, secrets);
