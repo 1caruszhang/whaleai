@@ -3,6 +3,7 @@ import {
   GEO_STEP_PAST_STATUSES,
   KNOWLEDGE_SEGMENT_STEP_IDS,
   planGeoOperation,
+  RUST_UI_CONFIRMATION_AUTHORITIES,
   TERMINAL_GEO_OPERATION_STATUSES,
   type GeoOperationCheckpoint,
   type GeoOperationError,
@@ -448,10 +449,7 @@ export class GeoOperationService {
     if (!step?.confirmation) {
       throw new Error("geo_operation_confirmation_step_invalid");
     }
-    if (
-      step.confirmation.authority === "publish-scheduler" ||
-      step.confirmation.authority === "post-publish-monitor"
-    ) {
+    if (RUST_UI_CONFIRMATION_AUTHORITIES.has(step.confirmation.authority)) {
       throw new Error("geo_operation_confirmation_requires_rust_ui_authority");
     }
     return this.mutate({ ...input, action: "confirm-step" });

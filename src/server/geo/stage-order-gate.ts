@@ -1,4 +1,5 @@
 import type { GeoOperationProjection } from "../../shared/geo/operation";
+import { RUST_UI_CONFIRMATION_AUTHORITIES } from "../../shared/geo/operation";
 import { createGeoOperationService } from "./operation";
 import {
   currentGeoOperationStep,
@@ -24,13 +25,6 @@ export const GEO_STAGE_ORDER_GATED_TOOLS = [
 ] as const;
 
 export type GeoStageOrderGatedTool = (typeof GEO_STAGE_ORDER_GATED_TOOLS)[number];
-
-/** 与 operation.ts::recordConfirmedStep 同一对 Rust UI 确认 authority：付费/
- * 外部发布与监测激活的裁决面在产品界面，不在聊天卡片。 */
-const RUST_UI_CONFIRMATION_AUTHORITIES = new Set([
-  "publish-scheduler",
-  "post-publish-monitor",
-]);
 
 /** 当前步不是 agent 工具步时的所停步骤：用户门等放行，或由其他通道推进。 */
 export interface GeoStageOrderHeldStep {
