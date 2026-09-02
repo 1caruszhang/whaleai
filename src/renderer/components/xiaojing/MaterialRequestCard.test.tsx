@@ -859,9 +859,14 @@ describe('MaterialRequestCard', () => {
       fireEvent.click(screen.getByRole('button', { name: '保存并抽取粘贴资料' }));
 
       // 传输层失败没有到达服务端，不存在权威完成时刻：时间槽整体缺席，
-      // 不用客户端钟点伪造。
-      const results = await screen.findByRole('region', { name: '材料处理结果' });
-      expect(within(results).getByText('处理失败：material_request_failed')).toBeInTheDocument();
+      // 不用客户端钟点伪造。失败文案必须等待式断言——结果 region 在
+      // processing 中间态即渲染，同步查询会与 importText rejection 的
+      // 状态更新竞态（全量并发下间歇失败）；文案落定后行不再变化，
+      // 时间槽断言随之稳定。
+      expect(
+        await screen.findByText('处理失败：material_request_failed'),
+      ).toBeInTheDocument();
+      const results = screen.getByRole('region', { name: '材料处理结果' });
       expect(results.querySelector('[data-card-timestamp]')).toBeNull();
     });
   });
