@@ -23,7 +23,10 @@ const POLICY_VERSION: &str = "js-ai-dev-deterministic-publish-v1";
 const MAX_BODY_BYTES: usize = 256 * 1024;
 const CLAIM_LEASE_MS: i64 = 5 * 60 * 1_000;
 const BACKGROUND_INTERVAL: Duration = Duration::from_secs(30);
-const RETRY_BACKOFF_MS: [i64; 3] = [60_000, 300_000, 900_000];
+/// 自动重试 2 次、间隔 3 秒（产品语义 2026-09-01）：瞬时故障快速自愈，
+/// 耗尽即落终态 failed-nonretryable 跳过，队列不再长时间等待退避；
+/// 深度恢复交由用户驱动的「重新发布」按钮。
+const RETRY_BACKOFF_MS: [i64; 2] = [3_000, 3_000];
 /// 未登录时认领到的执行单推迟到下一轮再试的间隔：不消耗重试次数，
 /// 登录恢复后指纹自然匹配、自动继续执行。
 const LOGIN_RESUME_DEFER_MS: i64 = 5 * 60 * 1_000;
@@ -57,6 +60,16 @@ pub struct PublishRetryRequest {
     pub execution_id: String,
     pub item_id: String,
     pub expected_item_revision: i64,
+}
+
+/// 取消发布（2026-09 产品语义）：在途单（uploading/submitting）跑完本次
+/// 尝试，其余未完结条目转 cancelled 不再发出。WebView 专属 UI 命令入参，
+/// 与 confirm/start 同款 revision CAS。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PublishCancelRequest {
+    pub execution_id: String,
+    pub expected_revision: i64,
 }
 
 /// 聊天修订（ADR 0003，票 38）：仅作用于 awaiting-confirmation 执行的
@@ -202,7 +215,7 @@ pub(crate) fn ensure_schema(connection: &Connection) -> Result<(), String> {
                 status TEXT NOT NULL CHECK(status IN (
                     'awaiting-confirmation','confirmed','running','scheduled',
                     'partially-succeeded','succeeded','failed','reconciliation-required'
-                    ,'superseded'
+                    ,'superseded','cancelled'
                 )),
                 revision INTEGER NOT NULL,
                 budget_cny REAL NOT NULL,
@@ -234,7 +247,8 @@ pub(crate) fn ensure_schema(connection: &Connection) -> Result<(), String> {
                 scheduled_at_ms INTEGER NOT NULL,
                 status TEXT NOT NULL CHECK(status IN (
                     'pending','uploading','uploaded','submitting','submitted',
-                    'failed-retryable','failed-nonretryable','reconciliation-required'
+                    'failed-retryable','failed-nonretryable','reconciliation-required',
+                    'cancelled'
                 )),
                 idempotency_key TEXT NOT NULL UNIQUE,
                 external_request_sn TEXT NOT NULL,
@@ -281,7 +295,105 @@ pub(crate) fn ensure_schema(connection: &Connection) -> Result<(), String> {
         "geo_publish_items",
         "external_request_sn",
         "TEXT",
-    )
+    )?;
+    extend_publish_status_checks(connection)
+}
+
+/// 存量库迁移（取消功能）：geo_publish_executions / geo_publish_items 的
+/// status CHECK 约束不含 'cancelled' 时按 sqlite_master 原文重建——与
+/// articles.rs 的 extend_geo_articles_status_check 及 drop_brand_sessions_
+/// foreign_keys 同一先例（foreign_keys=OFF 包裹、索引随 DROP 消失后按原文
+/// 重建）。SQLite 的 CHECK 在 UPDATE 上同样强制，无法绕开重建。
+fn extend_publish_status_checks(connection: &Connection) -> Result<(), String> {
+    const STATUS_CHECK_TABLES: [(&str, &str, &str); 2] = [
+        (
+            "geo_publish_executions",
+            ",'superseded'",
+            ",'superseded','cancelled'",
+        ),
+        (
+            "geo_publish_items",
+            "'reconciliation-required'",
+            "'reconciliation-required','cancelled'",
+        ),
+    ];
+    for (table, check_without, check_with) in STATUS_CHECK_TABLES {
+        let existing: Option<String> = connection
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                [table],
+                |row| row.get(0),
+            )
+            .map_err(|error| format!("inspect {table} status check: {error}"))?;
+        let Some(existing_sql) = existing else {
+            continue;
+        };
+        if !existing_sql.contains("status TEXT NOT NULL CHECK")
+            || existing_sql.contains("'cancelled'")
+        {
+            continue;
+        }
+        let rebuilt_sql = existing_sql.replace(check_without, check_with);
+        if rebuilt_sql == existing_sql {
+            // 非预期形态（历史 schema 措辞不同）：fail loud，取消路径会因
+            // CHECK 拒绝而显式报错，不会被误认为已迁移。
+            return Err(format!("{table} status check migration target missing"));
+        }
+        let renamed_sql = super::rename_table_in_ddl(
+            &rebuilt_sql,
+            table,
+            &format!("{table}__status_check_extended"),
+        )?;
+
+        let mut index_ddls: Vec<String> = Vec::new();
+        {
+            let mut statement = connection
+                .prepare(
+                    "SELECT sql FROM sqlite_master
+                     WHERE type = 'index' AND tbl_name = ?1 AND sql IS NOT NULL",
+                )
+                .map_err(|error| format!("list {table} indexes: {error}"))?;
+            let mut rows = statement
+                .query([table])
+                .map_err(|error| format!("read {table} indexes: {error}"))?;
+            while let Some(row) = rows
+                .next()
+                .map_err(|error| format!("advance {table} index cursor: {error}"))?
+            {
+                index_ddls.push(
+                    row.get(0)
+                        .map_err(|error| format!("read {table} index ddl: {error}"))?,
+                );
+            }
+        }
+
+        connection
+            .execute_batch("PRAGMA foreign_keys = OFF;")
+            .map_err(|error| format!("unlock {table} status check rebuild: {error}"))?;
+        let rebuild = connection.execute_batch(&format!(
+            "BEGIN IMMEDIATE;
+             {renamed_sql};
+             INSERT INTO {table}__status_check_extended SELECT * FROM {table};
+             DROP TABLE {table};
+             ALTER TABLE {table}__status_check_extended RENAME TO {table};
+             {}
+             COMMIT;",
+            index_ddls
+                .iter()
+                .map(|ddl| format!("{ddl};"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        ));
+        let restored = connection.execute_batch("PRAGMA foreign_keys = ON;");
+        match (rebuild, restored) {
+            (Ok(()), Ok(())) => Ok(()),
+            (rebuild, _) => {
+                let _ = connection.execute_batch("ROLLBACK;");
+                rebuild.map_err(|error| format!("rebuild {table} status check: {error}"))
+            }
+        }?;
+    }
+    Ok(())
 }
 
 fn sha256_hex(value: impl AsRef<[u8]>) -> String {
@@ -1568,6 +1680,14 @@ impl BrandWorkspaceStore {
         read_execution(&connection, workspace_id, &request.execution_id)
     }
 
+    /// 「重新发布」通道（2026-09 产品语义）：failed-retryable 清退避立即
+    /// 重试（原行为不变）；failed-nonretryable / cancelled（以及取消执行里
+    /// 卡在 uploaded 的孤儿在途单）整单重置回 pending（计数清零、清失败
+    /// 字段与 finished_at，保留 object_url——已上传过的直接由认领逻辑分到
+    /// 下单阶段）。执行侧：cancelled 复活为 scheduled；终态
+    /// （partially-succeeded/failed）清 finished_at 并由 refresh 重算回活跃。
+    /// reconciliation-required 不并入（对账语义归 resume_reconciled_execution
+    /// 通道）。
     pub fn retry_publish_item(
         &self,
         workspace_id: &str,
@@ -1591,36 +1711,189 @@ impl BrandWorkspaceStore {
             .optional()
             .map_err(|error| format!("read publish retry target: {error}"))?
             .ok_or_else(|| "publish_item_not_found".to_string())?;
+        let execution_status: String = transaction
+            .query_row(
+                "SELECT status FROM geo_publish_executions WHERE id=?1",
+                params![request.execution_id],
+                |row| row.get(0),
+            )
+            .map_err(|error| format!("read publish retry execution: {error}"))?;
         if revision != request.expected_item_revision {
             return Err("publish_item_revision_conflict".to_string());
         }
-        if status != "failed-retryable" || attempts > RETRY_BACKOFF_MS.len() as i64 {
-            return Err("publish_item_not_safely_retryable".to_string());
-        }
-        let changed = transaction
-            .execute(
-                "UPDATE geo_publish_items SET next_attempt_at_ms=?3, revision=revision+1,
-                 failure_code=NULL, failure_reason=NULL
-                 WHERE id=?1 AND execution_id=?2 AND revision=?4 AND status='failed-retryable'",
-                params![request.item_id, request.execution_id, now_ms, revision],
-            )
-            .map_err(|error| format!("schedule publish item retry: {error}"))?;
-        if changed != 1 {
-            return Err("publish_item_revision_conflict".to_string());
+        // 「uploaded 仅在执行已取消时可复活」：活跃执行里的 uploaded 是
+        // 管线中段（等待下单认领），不是失败；只有取消执行里它才成了
+        // 孤儿（在途上传在取消后才落库，永远等不到下单认领）。
+        let reset_eligible = matches!(status.as_str(), "failed-nonretryable" | "cancelled")
+            || (status.as_str() == "uploaded" && execution_status == "cancelled");
+        match status.as_str() {
+            "failed-retryable" => {
+                if attempts > RETRY_BACKOFF_MS.len() as i64 {
+                    return Err("publish_item_not_safely_retryable".to_string());
+                }
+                let changed = transaction
+                    .execute(
+                        "UPDATE geo_publish_items SET next_attempt_at_ms=?3, revision=revision+1,
+                         failure_code=NULL, failure_reason=NULL
+                         WHERE id=?1 AND execution_id=?2 AND revision=?4 AND status='failed-retryable'",
+                        params![request.item_id, request.execution_id, now_ms, revision],
+                    )
+                    .map_err(|error| format!("schedule publish item retry: {error}"))?;
+                if changed != 1 {
+                    return Err("publish_item_revision_conflict".to_string());
+                }
+            }
+            "failed-nonretryable" | "cancelled" | "uploaded" if reset_eligible => {
+                let changed = transaction
+                    .execute(
+                        "UPDATE geo_publish_items SET status='pending', attempts=0,
+                         upload_attempts=0, next_attempt_at_ms=?3, revision=revision+1,
+                         failure_code=NULL, failure_reason=NULL, finished_at=NULL,
+                         claim_token=NULL, lease_until_ms=NULL
+                         WHERE id=?1 AND execution_id=?2 AND revision=?4
+                           AND status IN ('failed-nonretryable','cancelled','uploaded')",
+                        params![request.item_id, request.execution_id, now_ms, revision],
+                    )
+                    .map_err(|error| format!("republish publish item: {error}"))?;
+                if changed != 1 {
+                    return Err("publish_item_revision_conflict".to_string());
+                }
+            }
+            _ => return Err("publish_item_not_safely_retryable".to_string()),
         }
         let now = now_iso(now_ms);
+        // 执行级联动：取消态复活为 scheduled；终态执行清 finished_at（状态
+        // 标签由提交后的 refresh 重算回活跃）。
+        let revived = transaction
+            .execute(
+                "UPDATE geo_publish_executions SET status='scheduled', revision=revision+1,
+                 finished_at=NULL, updated_at=?2
+                 WHERE id=?1 AND status='cancelled'",
+                params![request.execution_id, now],
+            )
+            .map_err(|error| format!("revive cancelled publish execution: {error}"))?;
+        if revived == 1 {
+            insert_audit(
+                &transaction,
+                &request.execution_id,
+                None,
+                "execution-revived",
+                Some(session_id),
+                &json!({"itemId": request.item_id}),
+                &now,
+            )?;
+            transaction
+                .execute(
+                    "UPDATE geo_operations SET state='publish-scheduled' WHERE id=(
+                        SELECT operation_id FROM geo_publish_executions WHERE id=?1)",
+                    params![request.execution_id],
+                )
+                .map_err(|error| format!("mirror revived publish operation: {error}"))?;
+        }
+        transaction
+            .execute(
+                "UPDATE geo_publish_executions SET finished_at=NULL
+                 WHERE id=?1 AND finished_at IS NOT NULL
+                   AND status IN ('partially-succeeded','failed')",
+                params![request.execution_id],
+            )
+            .map_err(|error| format!("clear finished publish execution: {error}"))?;
         insert_audit(
             &transaction,
             &request.execution_id,
             Some(&request.item_id),
-            "safe-retry-requested",
+            "republish-requested",
             Some(session_id),
-            &json!({"attempts": attempts}),
+            &json!({"fromStatus": status, "attempts": attempts}),
             &now,
         )?;
         transaction
             .commit()
             .map_err(|error| format!("commit publish item retry: {error}"))?;
+        refresh_execution_status(&workspace, &request.execution_id, now_ms)?;
+        read_execution(&connection, workspace_id, &request.execution_id)
+    }
+
+    /// 取消发布：把执行置为终态 cancelled，未完结条目（pending/
+    /// failed-retryable/failed-nonretryable/uploaded）批量转 cancelled 不再
+    /// 发出；在途条目（uploading/submitting，持有 claim_token）不动——其
+    /// settle 的 UPDATE 带 claim_token 守卫照常落库，本次尝试可能产生一笔
+    /// 真实订单（与用户确认的取消语义一致）。refresh_execution_status 对
+    /// cancelled 执行跳过重算（选择 SQL 与 UPDATE 守卫均排除），在途单
+    /// settle 后不会把取消态倒灌回 running。
+    pub fn cancel_publish_execution(
+        &self,
+        workspace_id: &str,
+        session_id: &str,
+        request: PublishCancelRequest,
+        now_ms: i64,
+    ) -> Result<PublishExecutionProjection, String> {
+        let workspace = self.workspace(workspace_id)?;
+        let mut connection = open_database(&workspace)?;
+        require_session(&connection, session_id)?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| format!("cancel publish execution transaction: {error}"))?;
+        let (revision, status): (i64, String) = transaction
+            .query_row(
+                "SELECT revision, status FROM geo_publish_executions WHERE id=?1",
+                [&request.execution_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(|error| format!("read cancel publish execution: {error}"))?
+            .ok_or_else(|| "publish_execution_not_found".to_string())?;
+        if revision != request.expected_revision {
+            return Err("publish_execution_revision_conflict".to_string());
+        }
+        if !matches!(
+            status.as_str(),
+            "running" | "scheduled" | "partially-succeeded" | "failed"
+        ) {
+            return Err("publish_execution_not_cancellable".to_string());
+        }
+        let cancelled_items = transaction
+            .execute(
+                "UPDATE geo_publish_items SET status='cancelled', revision=revision+1,
+                 next_attempt_at_ms=NULL, claim_token=NULL, lease_until_ms=NULL,
+                 failure_code=NULL, failure_reason=NULL, finished_at=?2
+                 WHERE execution_id=?1
+                   AND status IN ('pending','failed-retryable','failed-nonretryable','uploaded')",
+                params![request.execution_id, now_iso(now_ms)],
+            )
+            .map_err(|error| format!("cancel publish items: {error}"))?;
+        let changed = transaction
+            .execute(
+                "UPDATE geo_publish_executions SET status='cancelled', revision=revision+1,
+                 finished_at=?2, updated_at=?2
+                 WHERE id=?1 AND revision=?3
+                   AND status IN ('running','scheduled','partially-succeeded','failed')",
+                params![request.execution_id, now_iso(now_ms), revision],
+            )
+            .map_err(|error| format!("cancel publish execution: {error}"))?;
+        if changed != 1 {
+            return Err("publish_execution_revision_conflict".to_string());
+        }
+        let now = now_iso(now_ms);
+        transaction
+            .execute(
+                "UPDATE geo_operations SET state='publish-cancelled' WHERE id=(
+                    SELECT operation_id FROM geo_publish_executions WHERE id=?1)",
+                params![request.execution_id],
+            )
+            .map_err(|error| format!("mirror cancelled publish operation: {error}"))?;
+        insert_audit(
+            &transaction,
+            &request.execution_id,
+            None,
+            "execution-cancelled",
+            Some(session_id),
+            &json!({"cancelledItems": cancelled_items}),
+            &now,
+        )?;
+        transaction
+            .commit()
+            .map_err(|error| format!("commit publish execution cancel: {error}"))?;
         read_execution(&connection, workspace_id, &request.execution_id)
     }
 
@@ -2125,9 +2398,19 @@ async fn post_egress_envelope(
         .await
         .map_err(|error| SidecarCallFailure::Indeterminate(bounded_reason(error.to_string())))?;
     if !status.is_success() || envelope.get("success").and_then(Value::as_bool) != Some(true) {
+        // 响应体的 error 码（如 publish_egress_upload_images_too_many）是
+        // 排障的第一信号：载荷校验类确定性 400 若只报 HTTP 状态，会被当成
+        // 传输故障无限退避重试（2026-09-01 事故里排障只能靠翻三层代码）。
+        let detail = envelope
+            .get("error")
+            .and_then(Value::as_str)
+            .filter(|code| !code.trim().is_empty())
+            .map(|code| format!("，{code}"))
+            .unwrap_or_default();
         return Err(SidecarCallFailure::Indeterminate(bounded_reason(format!(
-            "Sidecar 控制面响应失败（HTTP {}）",
-            status.as_u16()
+            "Sidecar 控制面响应失败（HTTP {}{}）",
+            status.as_u16(),
+            detail
         ))));
     }
     envelope
@@ -3166,6 +3449,13 @@ fn claim_next_item(
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|error| format!("claim publish item transaction: {error}"))?;
+    // 队首门只挡「在途」前序 item（pending/uploading/uploaded/submitting）。
+    // failed-retryable 在退避停车等下次尝试，不阻塞后续 item 继续：各 item
+    // 独立（自有对象键、幂等 sn 与计费），执行循环本身串行，不引入并发
+    // 出口；停车单重试到期后凭更小 sequence 仍在 ORDER BY 队首，顺序语义
+    // 自洽。否则一个失败单的退避窗口会让整队干等——2026-09-01 事故中
+    // 8 图文章的确定性 400 把后面 11 单全部卡住（彼时退避表更长；现行
+    // 退避为 3s×2 后终态停车）。
     let row = transaction
         .query_row(
             "SELECT item.id, item.execution_id, item.status, item.article_json,
@@ -3190,7 +3480,7 @@ fn claim_next_item(
                     SELECT 1 FROM geo_publish_items previous
                     WHERE previous.execution_id=item.execution_id
                       AND previous.sequence<item.sequence
-                      AND previous.status IN ('pending','uploading','uploaded','submitting','failed-retryable')
+                      AND previous.status IN ('pending','uploading','uploaded','submitting')
                )
              ORDER BY item.scheduled_at_ms ASC, item.sequence ASC LIMIT 1",
             [now_ms],
@@ -3827,7 +4117,7 @@ fn refresh_all_execution_statuses(workspace: &BrandWorkspace, now_ms: i64) -> Re
         let mut statement = connection
             .prepare(
                 "SELECT id FROM geo_publish_executions WHERE execution_started_at IS NOT NULL
-                 AND status NOT IN ('succeeded','reconciliation-required')",
+                 AND status NOT IN ('succeeded','reconciliation-required','cancelled')",
             )
             .map_err(|error| format!("prepare publish status refresh: {error}"))?;
         let rows = statement
@@ -3898,7 +4188,7 @@ fn refresh_execution_status(
         .execute(
             "UPDATE geo_publish_executions SET status=?2, revision=revision+1,
              finished_at=CASE WHEN ?3 THEN COALESCE(finished_at, ?4) ELSE finished_at END,
-             updated_at=?4 WHERE id=?1 AND status!=?2",
+             updated_at=?4 WHERE id=?1 AND status!=?2 AND status!='cancelled'",
             params![execution_id, status, finished, now],
         )
         .map_err(|error| format!("refresh publish execution: {error}"))?;
@@ -4047,6 +4337,26 @@ pub async fn cmd_publish_item_retry_ui(
     if let Some(scheduler) = production_publish_scheduler() {
         scheduler.wake();
     }
+    Ok(execution)
+}
+
+#[tauri::command]
+#[allow(non_snake_case)]
+pub async fn cmd_publish_execution_cancel_ui(
+    workspaceId: String,
+    sessionId: String,
+    input: PublishCancelRequest,
+) -> Result<PublishExecutionProjection, String> {
+    let execution = tauri::async_runtime::spawn_blocking(move || {
+        super::production_store()?.cancel_publish_execution(
+            &workspaceId,
+            &sessionId,
+            input,
+            Utc::now().timestamp_millis(),
+        )
+    })
+    .await
+    .map_err(|error| format!("publish cancel task failed: {error}"))??;
     Ok(execution)
 }
 
@@ -4652,6 +4962,302 @@ mod tests {
             done.items[0].external_order_id.as_deref(),
             Some("order-first")
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn parked_backoff_item_does_not_block_later_sequence_items() {
+        let _lock = ENV_LOCK.lock().await;
+        let _env = TestEnvironment::configured();
+        let fixture = setup_fixture(2, 0);
+        let started = confirm_start(&fixture, &preview(&fixture));
+        // 手工复现 2026-09-01 事故落库形态：sequence=1 的 item 上传失败
+        // 进入退避停车（next_attempt 在 21 分钟后）。
+        let parked_until = fixture.now_ms + 21 * 60_000;
+        let connection = open_database(&fixture.workspace).unwrap();
+        connection
+            .execute(
+                "UPDATE geo_publish_items SET status='failed-retryable',
+                 upload_attempts=1, next_attempt_at_ms=?2,
+                 failure_code='object-storage-sidecar-transport',
+                 failure_reason='Sidecar 控制面响应失败（HTTP 400）'
+                 WHERE execution_id=?1 AND sequence=1",
+                params![started.id, parked_until],
+            )
+            .unwrap();
+        drop(connection);
+
+        let provider = Arc::new(MockProvider::default());
+        let clock = Arc::new(AtomicI64::new(fixture.now_ms));
+        // 退避窗口内：后续 sequence=2 不被停车的前序阻塞，照常上传+下单。
+        scheduler(&fixture, provider.clone(), clock.clone())
+            .tick_workspace(&fixture.workspace)
+            .await
+            .unwrap();
+        assert_eq!(provider.counts(), (1, 1));
+        let progressing = fixture
+            .store
+            .get_publish_execution(&fixture.workspace.id, "session-13", &started.id)
+            .unwrap();
+        assert_eq!(progressing.items[0].status, "failed-retryable");
+        assert_eq!(progressing.items[1].status, "submitted");
+
+        // 退避到期：停车单凭更小 sequence 回到队首被重试，执行最终收尾。
+        clock.store(parked_until, Ordering::SeqCst);
+        scheduler(&fixture, provider.clone(), clock)
+            .tick_workspace(&fixture.workspace)
+            .await
+            .unwrap();
+        assert_eq!(provider.counts(), (2, 2));
+        let done = fixture
+            .store
+            .get_publish_execution(&fixture.workspace.id, "session-13", &started.id)
+            .unwrap();
+        assert_eq!(done.status, "succeeded");
+        assert_eq!(done.items[0].status, "submitted");
+    }
+
+    /// 取消语义（2026-09）：在途单的当前阶段跑完（上传落 uploaded、不再
+    /// 下单），其余未完结条目转 cancelled；在途 settle 后 refresh 不把
+    /// cancelled 执行倒灌回 running；「重新发布」可复活取消执行里的条目
+    /// （含卡在 uploaded 的孤儿在途单，凭保留的 object_url 直接补下单）。
+    #[tokio::test(flavor = "current_thread")]
+    async fn cancel_parks_unfinished_items_and_lets_inflight_attempt_finish() {
+        let _lock = ENV_LOCK.lock().await;
+        let _env = TestEnvironment::configured();
+        let fixture = setup_fixture(2, 0);
+        let started = confirm_start(&fixture, &preview(&fixture));
+
+        // 在途窗口：upload 阻塞到显式放行，制造「取消时恰有一单正在
+        // 上传」的真实竞态。
+        let gate = Arc::new(tokio::sync::Notify::new());
+        let upload_entered = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        struct BlockingUploadProvider {
+            gate: Arc<tokio::sync::Notify>,
+            entered: Arc<std::sync::atomic::AtomicBool>,
+        }
+        impl PublishProvider for BlockingUploadProvider {
+            fn upload<'a>(
+                &'a self,
+                request: PublishUploadRequest,
+            ) -> ProviderFuture<'a, PublishUploadReceipt> {
+                Box::pin(async move {
+                    self.entered.store(true, Ordering::SeqCst);
+                    self.gate.notified().await;
+                    PublishProviderOutcome::Success(PublishUploadReceipt {
+                        object_url: format!("https://cdn.example.test/{}", request.object_key),
+                        external_content_id: request.object_key.clone(),
+                    })
+                })
+            }
+            fn upload_images<'a>(
+                &'a self,
+                request: PublishImageUploadRequest,
+            ) -> ProviderFuture<'a, PublishImageUploadReceipt> {
+                Box::pin(async move {
+                    let urls = request
+                        .images
+                        .iter()
+                        .map(|image| {
+                            (
+                                image.image_id.clone(),
+                                format!("https://cdn.example.test/images/{}", image.sha256),
+                            )
+                        })
+                        .collect();
+                    PublishProviderOutcome::Success(PublishImageUploadReceipt { urls })
+                })
+            }
+            fn submit<'a>(
+                &'a self,
+                request: PublishOrderRequest,
+            ) -> ProviderFuture<'a, PublishOrderReceipt> {
+                Box::pin(async move {
+                    let _ = request;
+                    PublishProviderOutcome::Success(PublishOrderReceipt {
+                        external_order_id: "order-after-cancel-race".to_string(),
+                    })
+                })
+            }
+        }
+
+        let clock = Arc::new(AtomicI64::new(fixture.now_ms));
+        let runner = PublishScheduler::new(
+            fixture.store.clone(),
+            Arc::new(BlockingUploadProvider {
+                gate: gate.clone(),
+                entered: upload_entered.clone(),
+            }),
+            Arc::new(move || clock.load(Ordering::SeqCst)),
+        );
+        let workspace = fixture.workspace.clone();
+        let tick = tokio::spawn(async move { runner.tick_workspace(&workspace).await });
+        while !upload_entered.load(Ordering::SeqCst) {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+
+        // 取消时 seq=1 在途（uploading），seq=2 pending。
+        let cancelled = fixture
+            .store
+            .cancel_publish_execution(
+                &fixture.workspace.id,
+                "session-13",
+                PublishCancelRequest {
+                    execution_id: started.id.clone(),
+                    expected_revision: started.revision,
+                },
+                fixture.now_ms,
+            )
+            .unwrap();
+        assert_eq!(cancelled.status, "cancelled");
+        assert_eq!(cancelled.items[0].status, "uploading");
+        assert_eq!(cancelled.items[1].status, "cancelled");
+
+        // 放行在途上传：settle 落库为 uploaded；执行保持 cancelled，后续
+        // tick 不再认领（下单永不发生）。
+        gate.notify_one();
+        tick.await.unwrap().unwrap();
+        let parked = fixture
+            .store
+            .get_publish_execution(&fixture.workspace.id, "session-13", &started.id)
+            .unwrap();
+        assert_eq!(parked.status, "cancelled");
+        assert_eq!(parked.items[0].status, "uploaded");
+        assert_eq!(parked.items[1].status, "cancelled");
+
+        // 重新发布复活在途孤儿（uploaded 保留 object_url，直接补下单）。
+        let revived = fixture
+            .store
+            .retry_publish_item(
+                &fixture.workspace.id,
+                "session-13",
+                PublishRetryRequest {
+                    execution_id: started.id.clone(),
+                    item_id: parked.items[0].id.clone(),
+                    expected_item_revision: parked.items[0].revision,
+                },
+                fixture.now_ms + 1_000,
+            )
+            .unwrap();
+        assert_eq!(revived.status, "running");
+        assert_eq!(revived.items[0].status, "pending");
+        assert_eq!(revived.items[1].status, "cancelled");
+
+        let provider = Arc::new(MockProvider::default());
+        let clock = Arc::new(AtomicI64::new(fixture.now_ms + 2_000));
+        scheduler(&fixture, provider.clone(), clock)
+            .tick_workspace(&fixture.workspace)
+            .await
+            .unwrap();
+        assert_eq!(provider.counts(), (0, 1));
+        let finished = fixture
+            .store
+            .get_publish_execution(&fixture.workspace.id, "session-13", &started.id)
+            .unwrap();
+        assert_eq!(finished.items[0].status, "submitted");
+        assert_eq!(finished.items[1].status, "cancelled");
+    }
+
+    /// 非重试失败（如余额不足）落终态后，「重新发布」清零重试计数复活，
+    /// 执行从 failed 终态回到调度并最终成功。
+    #[tokio::test(flavor = "current_thread")]
+    async fn republish_revives_failed_nonretryable_item() {
+        let _lock = ENV_LOCK.lock().await;
+        let _env = TestEnvironment::configured();
+        let fixture = setup_fixture(1, 0);
+        let started = confirm_start(&fixture, &preview(&fixture));
+        let provider = Arc::new(MockProvider::with_submit_outcomes(vec![
+            PublishProviderOutcome::NonRetryable {
+                code: "distribution-insufficient-balance".to_string(),
+                reason: "余额不足".to_string(),
+            },
+        ]));
+        let clock = Arc::new(AtomicI64::new(fixture.now_ms));
+        scheduler(&fixture, provider.clone(), clock.clone())
+            .tick_workspace(&fixture.workspace)
+            .await
+            .unwrap();
+        assert_eq!(provider.counts(), (1, 1));
+        let failed = fixture
+            .store
+            .get_publish_execution(&fixture.workspace.id, "session-13", &started.id)
+            .unwrap();
+        assert_eq!(failed.status, "failed");
+        assert_eq!(failed.items[0].status, "failed-nonretryable");
+
+        let revived = fixture
+            .store
+            .retry_publish_item(
+                &fixture.workspace.id,
+                "session-13",
+                PublishRetryRequest {
+                    execution_id: started.id.clone(),
+                    item_id: failed.items[0].id.clone(),
+                    expected_item_revision: failed.items[0].revision,
+                },
+                fixture.now_ms + 1_000,
+            )
+            .unwrap();
+        assert_eq!(revived.items[0].status, "pending");
+        assert_eq!(revived.items[0].attempts, 0);
+        assert!(revived.items[0].finished_at.is_none());
+
+        let provider = Arc::new(MockProvider::default());
+        let clock = Arc::new(AtomicI64::new(fixture.now_ms + 2_000));
+        scheduler(&fixture, provider, clock)
+            .tick_workspace(&fixture.workspace)
+            .await
+            .unwrap();
+        let done = fixture
+            .store
+            .get_publish_execution(&fixture.workspace.id, "session-13", &started.id)
+            .unwrap();
+        assert_eq!(done.status, "succeeded");
+        assert_eq!(done.items[0].status, "submitted");
+    }
+
+    /// 存量库迁移：CHECK 约束不含 'cancelled' 的两张表按原文重建后可写
+    /// cancelled；已含 cancelled 的 DDL 幂等跳过。
+    #[test]
+    fn publish_status_check_migration_extends_legacy_tables() {
+        let connection = rusqlite::Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE geo_publish_executions (
+                    id TEXT PRIMARY KEY,
+                    status TEXT NOT NULL CHECK(status IN (
+                        'awaiting-confirmation','confirmed','running','scheduled',
+                        'partially-succeeded','succeeded','failed','reconciliation-required'
+                        ,'superseded'
+                    )),
+                    revision INTEGER NOT NULL
+                 );
+                 CREATE TABLE geo_publish_items (
+                    id TEXT PRIMARY KEY,
+                    status TEXT NOT NULL CHECK(status IN (
+                        'pending','uploading','uploaded','submitting','submitted',
+                        'failed-retryable','failed-nonretryable','reconciliation-required'
+                    )),
+                    revision INTEGER NOT NULL
+                 );
+                 INSERT INTO geo_publish_executions VALUES ('e1','scheduled',1);
+                 INSERT INTO geo_publish_items VALUES ('i1','pending',1);",
+            )
+            .unwrap();
+        extend_publish_status_checks(&connection).unwrap();
+        connection
+            .execute(
+                "UPDATE geo_publish_executions SET status='cancelled' WHERE id='e1'",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "UPDATE geo_publish_items SET status='cancelled' WHERE id='i1'",
+                [],
+            )
+            .unwrap();
+        // 幂等：迁移后的 DDL 已含 'cancelled'，再次执行直接跳过。
+        extend_publish_status_checks(&connection).unwrap();
     }
 
     #[tokio::test(flavor = "current_thread")]

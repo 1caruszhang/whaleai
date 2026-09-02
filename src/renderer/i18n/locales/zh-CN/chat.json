@@ -227,6 +227,14 @@
       }
     }
   },
+  "publishRetry": {
+    "button": "重新发布",
+    "busy": "重新发布中…"
+  },
+  "publishCancel": {
+    "button": "取消发布",
+    "busy": "取消中…"
+  },
   "publishResume": {
     "hint": "登录态与渠道配置一致时，可安全恢复：仅回置从未提交到渠道的发布项，已有渠道订单的条目需人工查单对账。",
     "button": "恢复执行",

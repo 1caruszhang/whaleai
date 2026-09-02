@@ -12,11 +12,11 @@ import {
 } from "./publishScheduler";
 
 describe("publish scheduler policy", () => {
-  it("keeps the js_ai dev retry contract at 1, 5 and 15 minutes", () => {
+  it("keeps the 2026-09 retry contract at two 3-second retries", () => {
     expect([1, 2, 3, 4].map(publishRetryBackoffMs)).toEqual([
-      60_000,
-      300_000,
-      900_000,
+      3_000,
+      3_000,
+      null,
       null,
     ]);
   });

@@ -4,7 +4,9 @@ import {
   CloudUpload,
   Loader2,
   RefreshCw,
+  RotateCcw,
   Send,
+  XCircle,
 } from "lucide-react";
 import {
   useCallback,
@@ -17,11 +19,13 @@ import {
 import { useTranslation } from "react-i18next";
 
 import {
+  cancelPublishExecution,
   confirmPublishExecution,
   loadLatestPublishExecution,
   loadPublishExecution,
   loadPublishOrderStatuses,
   resumeReconciledExecution,
+  retryPublishExecutionItem,
   startPublishExecution,
 } from "@/api/publishSchedulerClient";
 import { AccountApiContext, AccountStateContext } from "@/context/AccountContext";
@@ -239,6 +243,7 @@ const EXECUTION_STATUS_LABEL: Record<PublishExecutionProjection["status"], strin
     failed: "执行失败",
     superseded: "已被新预览替代",
     "reconciliation-required": "需要人工核对",
+    cancelled: "已取消",
   };
 
 /** 启动后的非终态：继续轮询直至调度器收敛到终态。 */
@@ -249,12 +254,39 @@ const POST_START_ACTIVE = new Set<PublishExecutionProjection["status"]>([
   "reconciliation-required",
 ]);
 
+/** 可取消的执行态（对账态不并入：走「恢复执行」通道）；failed 与 Rust
+ * 取消 CAS 口径一致（failed 执行的未完成条目仍会被调度器认领，取消是
+ * 停止认领的出口）。 */
+const CANCELLABLE_STATUSES = new Set<PublishExecutionProjection["status"]>([
+  "running",
+  "scheduled",
+  "partially-succeeded",
+  "failed",
+]);
+
 /** 订单投影可见的执行状态：执行终态后渠道状态仍会流转（退款/补发）。 */
 const ORDER_VIEW_STATUSES = new Set<PublishExecutionProjection["status"]>([
   ...POST_START_ACTIVE,
   "succeeded",
   "failed",
+  "cancelled",
 ]);
+
+/** 「重新发布」可见的条目：失败态 + 取消态；取消执行里卡在 uploaded 的
+ * 在途孤儿（上传已落库但永远等不到下单认领）也允许复活补下单。 */
+function canRepublishItem(
+  item: PublishItemProjection,
+  executionStatus: PublishExecutionProjection["status"],
+): boolean {
+  if (
+    item.status === "failed-retryable" ||
+    item.status === "failed-nonretryable" ||
+    item.status === "cancelled"
+  ) {
+    return true;
+  }
+  return item.status === "uploaded" && executionStatus === "cancelled";
+}
 
 function progressFingerprint(execution: PublishExecutionProjection): string {
   return [
@@ -286,11 +318,14 @@ function PublishStatusItem({
   item,
   order,
   balancePoints,
+  republish,
 }: {
   item: PublishItemProjection;
   order?: PublishOrderStatusEntry;
   /** 余额投影（票 06）：仅在退点文案中带出，供用户核对退回后的变化。 */
   balancePoints?: number | null;
+  /** 「重新发布」动作（2026-09）：父级判定可见性并持有 CAS revision。 */
+  republish?: { busy: boolean; run: () => void; label: string; busyLabel: string };
 }) {
   const [showScreenshot, setShowScreenshot] = useState(false);
   const refunded = order ? publishOrderRefundsPoints(order.status) : false;
@@ -310,6 +345,22 @@ function PublishStatusItem({
             {new Date(item.scheduledAt).toLocaleString()}
           </p>
         </div>
+        {republish && (
+          <button
+            type="button"
+            onClick={republish.run}
+            disabled={republish.busy}
+            data-publish-republish={item.id}
+            className="inline-flex shrink-0 items-center gap-1 rounded-lg border border-[var(--line)] px-2 py-1 text-xs text-[var(--ink)] hover:bg-[var(--paper-elevated)] disabled:opacity-50"
+          >
+            {republish.busy ? (
+              <Loader2 className="h-3 w-3 animate-spin" aria-hidden="true" />
+            ) : (
+              <RotateCcw className="h-3 w-3" aria-hidden="true" />
+            )}
+            {republish.busy ? republish.busyLabel : republish.label}
+          </button>
+        )}
       </div>
       <div className="mt-2 flex flex-wrap items-center gap-1.5">
         <span className="inline-flex items-center gap-1 text-xs text-[var(--ink-subtle)]">
@@ -320,6 +371,12 @@ function PublishStatusItem({
           <Send className="h-3 w-3" aria-hidden="true" />
         </span>
         <StageBadge badge={orderStage(item)} />
+        {item.status === "cancelled" && (
+          <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-[var(--paper-inset)] px-2 py-0.5 text-xs leading-4 text-[var(--ink-muted)]">
+            <XCircle className="h-3 w-3" aria-hidden="true" />
+            已取消
+          </span>
+        )}
       </div>
       {item.objectUrl && (
         <a
@@ -615,6 +672,57 @@ export default function PublishAuthorizationGateCard({
     }
   };
 
+  // 「重新发布」（2026-09）：失败/取消条目复活，revision CAS 在 Rust 侧；
+  // 冲突（并发轮询已推进 revision）时提示用户刷新，采信最新投影。
+  const [republishBusyId, setRepublishBusyId] = useState<string | null>(null);
+  const republish = async (item: PublishItemProjection) => {
+    if (republishBusyId) return;
+    setRepublishBusyId(item.id);
+    setError(null);
+    try {
+      const next = await retryPublishExecutionItem(identity, {
+        executionId: execution.id,
+        itemId: item.id,
+        expectedItemRevision: item.revision,
+      });
+      mergeRefreshed(next);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setRepublishBusyId(null);
+    }
+  };
+
+  // 取消发布（2026-09）：在途单跑完当前阶段，其余未完结条目不再发出。
+  const cancelExecution = async () => {
+    if (busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const next = await cancelPublishExecution(identity, {
+        executionId: execution.id,
+        expectedRevision: execution.revision,
+      });
+      mergeRefreshed(next);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const itemRepublish = (item: PublishItemProjection) =>
+    canRepublishItem(item, status)
+      ? {
+          busy: republishBusyId === item.id,
+          run: () => {
+            void republish(item);
+          },
+          label: t("publishRetry.button"),
+          busyLabel: t("publishRetry.busy"),
+        }
+      : undefined;
+
   const disabled = !sessionId || isPendingSessionId(sessionId);
 
   return (
@@ -686,19 +794,39 @@ export default function PublishAuthorizationGateCard({
             <span className="rounded-full bg-[var(--paper-elevated)] px-2 py-0.5 text-xs text-[var(--ink-muted)]">
               {EXECUTION_STATUS_LABEL[status]}
             </span>
-            <button
-              type="button"
-              onClick={() => {
-                void refreshStatus();
-              }}
-              disabled={busy || disabled}
-              aria-label="刷新发布状态"
-              className="ml-auto inline-flex h-6 w-6 items-center justify-center rounded-lg text-[var(--ink-muted)] hover:bg-[var(--paper-elevated)] hover:text-[var(--ink)] disabled:opacity-50"
-            >
-              <RefreshCw
-                className={`h-3.5 w-3.5 ${busy ? "animate-spin" : ""}`}
-              />
-            </button>
+            <div className="ml-auto flex items-center gap-1.5">
+              {CANCELLABLE_STATUSES.has(status) && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    void cancelExecution();
+                  }}
+                  disabled={busy || disabled}
+                  data-publish-cancel={execution.id}
+                  className="inline-flex items-center gap-1 rounded-lg px-2 py-1 text-xs text-[var(--error)] hover:bg-[var(--error-bg)] disabled:opacity-50"
+                >
+                  {busy ? (
+                    <Loader2 className="h-3 w-3 animate-spin" aria-hidden="true" />
+                  ) : (
+                    <XCircle className="h-3 w-3" aria-hidden="true" />
+                  )}
+                  {busy ? t("publishCancel.busy") : t("publishCancel.button")}
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => {
+                  void refreshStatus();
+                }}
+                disabled={busy || disabled}
+                aria-label="刷新发布状态"
+                className="inline-flex h-6 w-6 items-center justify-center rounded-lg text-[var(--ink-muted)] hover:bg-[var(--paper-elevated)] hover:text-[var(--ink)] disabled:opacity-50"
+              >
+                <RefreshCw
+                  className={`h-3.5 w-3.5 ${busy ? "animate-spin" : ""}`}
+                />
+              </button>
+            </div>
           </div>
           {ordersError && (
             <p className="mt-1 text-xs text-[var(--ink-muted)]">
@@ -733,6 +861,7 @@ export default function PublishAuthorizationGateCard({
                 item={item}
                 order={ordersByItemId.get(item.id)}
                 balancePoints={accountState?.points ?? null}
+                republish={itemRepublish(item)}
               />
             ))}
           </div>
@@ -786,7 +915,7 @@ export default function PublishAuthorizationGateCard({
           role="alert"
           className="mt-2 rounded-lg bg-[var(--error-bg)] p-2 text-sm text-[var(--error)]"
         >
-          发布执行失败：失败的发布项与原因见下方状态，可在聊天中让小鲸重试失败项。
+          发布执行失败：失败项见下方状态，点每条的「{t("publishRetry.button")}」可重新发布。
         </p>
       )}
       {status === "failed" && (
@@ -801,8 +930,54 @@ export default function PublishAuthorizationGateCard({
                 item={item}
                 order={ordersByItemId.get(item.id)}
                 balancePoints={accountState?.points ?? null}
+                republish={itemRepublish(item)}
               />
             ))}
+        </div>
+      )}
+
+      {status === "cancelled" && (
+        <div
+          className="mt-2 rounded-lg border border-[var(--line-subtle)] bg-[var(--paper-inset)] p-2"
+          data-publish-status={execution.id}
+        >
+          <div className="flex items-start gap-2">
+            <p className="flex-1 text-xs leading-5 text-[var(--ink-muted)]">
+              发布已取消：未完结的发布项不再发出（在途单已跑完当前阶段）。
+              需要继续发布的条目可点「{t("publishRetry.button")}」逐条恢复。
+            </p>
+            <button
+              type="button"
+              onClick={() => {
+                void refreshStatus();
+              }}
+              disabled={busy || disabled}
+              aria-label="刷新发布状态"
+              className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-lg text-[var(--ink-muted)] hover:bg-[var(--paper-elevated)] hover:text-[var(--ink)] disabled:opacity-50"
+            >
+              <RefreshCw
+                className={`h-3.5 w-3.5 ${busy ? "animate-spin" : ""}`}
+              />
+            </button>
+          </div>
+          {ordersError && (
+            <p className="mt-1 text-xs text-[var(--ink-muted)]">
+              渠道订单状态暂不可用：{ordersError}
+            </p>
+          )}
+          <div className="mt-2 space-y-2">
+            {execution.items
+              .filter((item) => orders !== null || item.status !== "submitted")
+              .map((item) => (
+                <PublishStatusItem
+                  key={item.id}
+                  item={item}
+                  order={ordersByItemId.get(item.id)}
+                  balancePoints={accountState?.points ?? null}
+                  republish={itemRepublish(item)}
+                />
+              ))}
+          </div>
         </div>
       )}
 

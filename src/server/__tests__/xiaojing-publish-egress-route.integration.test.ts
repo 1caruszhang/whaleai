@@ -12,6 +12,7 @@ import type {
   PublishEgressImagesResult,
   PublishEgressOrderResult,
 } from '../geo/publish-egress';
+import { MATERIAL_IMAGE_MAX_PER_ARTICLE } from '../../shared/geo/materialImagePlaceholder';
 
 // 票 08 闭环：/api/xiaojing/publish-scheduler/egress/* 是 Rust 确定性调度器
 // 专用的 localhost 控制面路由。本测试在 HTTP 边界钉住：身份门先于任何
@@ -406,10 +407,10 @@ describe('publish scheduler egress routes', () => {
         400,
         'publish_egress_upload_payload_invalid',
       ],
-      // 超密度上限（共享契约 ≤3 张）。
+      // 超密度上限（共享契约 ≤8 张，发布侧与 Rust 生成门同源）。
       [
         imageUploadBody(
-          Array.from({ length: 4 }, (_, index) => ({
+          Array.from({ length: MATERIAL_IMAGE_MAX_PER_ARTICLE + 1 }, (_, index) => ({
             imageId: `image-${index}`,
             sha256: IMAGE_SHA256,
             mediaType: 'image/png',

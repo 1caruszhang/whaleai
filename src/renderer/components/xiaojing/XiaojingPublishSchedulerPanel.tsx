@@ -35,6 +35,7 @@ const STATUS_LABEL: Record<PublishExecutionProjection["status"], string> = {
   failed: "执行失败",
   superseded: "已被新预览替代",
   "reconciliation-required": "需要人工核对",
+  cancelled: "已取消",
 };
 
 const ITEM_STATUS_LABEL: Record<PublishItemProjection["status"], string> = {
@@ -46,6 +47,7 @@ const ITEM_STATUS_LABEL: Record<PublishItemProjection["status"], string> = {
   "failed-retryable": "可安全重试",
   "failed-nonretryable": "不可自动重试",
   "reconciliation-required": "结果未知，需人工核对",
+  cancelled: "已取消",
 };
 
 /**

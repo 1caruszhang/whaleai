@@ -1,7 +1,13 @@
+/** 预览载荷哈希公式的输入（Rust 侧同名 POLICY_VERSION 逐字同步）：钉的是
+ * 「发布什么 + 不可逆影响」的冻结身份，不含执行循环的重试表——重试语义
+ * 变更（如 2026-09-01 的 3s×2 停车）不升版本，否则存量执行的对账哈希
+ * 全部失配。 */
 export const PUBLISH_SCHEDULER_POLICY_VERSION =
   "js-ai-dev-deterministic-publish-v1";
 
-export const PUBLISH_RETRY_BACKOFF_MS = [60_000, 300_000, 900_000] as const;
+/** 自动重试 2 次、间隔 3 秒（与 Rust 侧 RETRY_BACKOFF_MS 同源契约）：
+ * 耗尽即落终态 failed-nonretryable 跳过，深度恢复交由「重新发布」按钮。 */
+export const PUBLISH_RETRY_BACKOFF_MS = [3_000, 3_000] as const;
 export const PUBLISH_MAX_SAFE_RETRIES = PUBLISH_RETRY_BACKOFF_MS.length;
 
 export type PublishExecutionStatus =
@@ -13,7 +19,8 @@ export type PublishExecutionStatus =
   | "succeeded"
   | "failed"
   | "superseded"
-  | "reconciliation-required";
+  | "reconciliation-required"
+  | "cancelled";
 
 export type PublishItemStatus =
   | "pending"
@@ -23,7 +30,8 @@ export type PublishItemStatus =
   | "submitted"
   | "failed-retryable"
   | "failed-nonretryable"
-  | "reconciliation-required";
+  | "reconciliation-required"
+  | "cancelled";
 
 export interface PublishProviderSnapshot {
   objectStorage: {
@@ -172,6 +180,12 @@ export interface PublishItemRetryInput {
   executionId: string;
   itemId: string;
   expectedItemRevision: number;
+}
+
+/** 取消发布（2026-09）：在途单跑完当前阶段，其余未完结条目转 cancelled。 */
+export interface PublishCancelInput {
+  executionId: string;
+  expectedRevision: number;
 }
 
 export function publishRetryBackoffMs(attempt: number): number | null {

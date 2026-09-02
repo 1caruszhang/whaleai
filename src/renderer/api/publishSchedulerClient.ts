@@ -1,7 +1,9 @@
 import type {
+  PublishCancelInput,
   PublishExecutionConfirmInput,
   PublishExecutionProjection,
   PublishExecutionStartInput,
+  PublishItemRetryInput,
   PublishOrderStatusEntry,
 } from "../../shared/geo/publishScheduler";
 import { invoke } from "@tauri-apps/api/core";
@@ -83,6 +85,32 @@ export function resumeReconciledExecution(
   input: PublishExecutionStartInput,
 ): Promise<PublishExecutionProjection> {
   return invoke<PublishExecutionProjection>("cmd_publish_execution_resume_ui", {
+    ...identity,
+    input,
+  });
+}
+
+/**
+ * 「重新发布」（2026-09）：failed-retryable 立即重试；failed-nonretryable
+ * / cancelled（及取消执行里卡在 uploaded 的孤儿在途单）整单复活。授权
+ * 动作走 Rust UI 命令（revision CAS），Agent 无权跨越。
+ */
+export function retryPublishExecutionItem(
+  identity: { workspaceId: string; sessionId: string },
+  input: PublishItemRetryInput,
+): Promise<PublishExecutionProjection> {
+  return invoke<PublishExecutionProjection>("cmd_publish_item_retry_ui", {
+    ...identity,
+    input,
+  });
+}
+
+/** 取消发布（2026-09）：在途单跑完当前阶段，其余未完结条目不再发出。 */
+export function cancelPublishExecution(
+  identity: { workspaceId: string; sessionId: string },
+  input: PublishCancelInput,
+): Promise<PublishExecutionProjection> {
+  return invoke<PublishExecutionProjection>("cmd_publish_execution_cancel_ui", {
     ...identity,
     input,
   });

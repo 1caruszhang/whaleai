@@ -15,6 +15,9 @@ const mocks = vi.hoisted(() => ({
   confirm: vi.fn(),
   start: vi.fn(),
   resume: vi.fn(),
+  // 2026-09 取消/重新发布：与 confirm/start 同款 invoke 包装的测试桩。
+  cancel: vi.fn(),
+  retryItem: vi.fn(),
   latest: vi.fn(),
   byId: vi.fn(),
   orders: vi.fn(),
@@ -40,6 +43,8 @@ vi.mock("@/api/publishSchedulerClient", () => ({
   confirmPublishExecution: mocks.confirm,
   startPublishExecution: mocks.start,
   resumeReconciledExecution: mocks.resume,
+  cancelPublishExecution: mocks.cancel,
+  retryPublishExecutionItem: mocks.retryItem,
   loadLatestPublishExecution: mocks.latest,
   loadPublishExecution: mocks.byId,
   loadPublishOrderStatuses: mocks.orders,
@@ -171,6 +176,8 @@ describe("PublishAuthorizationGateCard", () => {
     mocks.confirm.mockReset();
     mocks.start.mockReset();
     mocks.resume.mockReset();
+    mocks.cancel.mockReset();
+    mocks.retryItem.mockReset();
     mocks.byId.mockReset();
     mocks.refresh.mockReset();
     mocks.accountState.points = 500;
@@ -569,5 +576,77 @@ describe("PublishAuthorizationGateCard", () => {
     expect(
       within(card).getByText("需要人工核对"),
     ).toBeInTheDocument();
+  });
+
+  // 2026-09 取消/重新发布：取消按钮只在可取消执行态出现；点击走 Rust
+  // UI 命令（revision CAS）并采信服务端权威投影。
+  it("offers cancel while running and applies the cancelled projection", async () => {
+    mocks.cancel.mockResolvedValue(
+      execution({
+        status: "cancelled",
+        revision: 6,
+        items: [{ ...item, status: "cancelled" }],
+        finishedAt: "2026-09-01T14:00:00Z",
+      }),
+    );
+    renderCard(execution({ status: "running", revision: 5 }));
+
+    fireEvent.click(screen.getByRole("button", { name: "取消发布" }));
+    expect(mocks.cancel).toHaveBeenCalledWith(
+      { workspaceId: "brand-1", sessionId: "session-42" },
+      { executionId: "exec-1", expectedRevision: 5 },
+    );
+    const card = screen.getByRole("region", { name: "付费发布授权" });
+    await waitFor(() =>
+      expect(card.textContent).toContain("发布已取消"),
+    );
+    expect(within(card).getAllByText("已取消").length).toBeGreaterThan(0);
+  });
+
+  it("hides cancel on reconciliation-required executions", () => {
+    renderCard(execution({ status: "reconciliation-required" }));
+    expect(
+      screen.queryByRole("button", { name: "取消发布" }),
+    ).toBeNull();
+  });
+
+  // 「重新发布」按钮：失败/取消条目逐条复活；取消执行里卡在 uploaded
+  // 的孤儿在途单也可见（凭保留的 object_url 直接补下单）。
+  it("offers per-item republish on failed items and cancelled orphans", async () => {
+    mocks.retryItem.mockResolvedValue(
+      execution({ status: "running", revision: 7, items: [item] }),
+    );
+    renderCard(
+      execution({
+        status: "cancelled",
+        revision: 6,
+        items: [
+          { ...item, status: "failed-nonretryable", failureCode: "distribution-insufficient-balance" },
+          { ...item, id: "item-2", sequence: 2, status: "cancelled" },
+          { ...item, id: "item-3", sequence: 3, status: "uploaded", objectUrl: "https://oss.example/ops/exec-1/article-1.html" },
+        ],
+      }),
+    );
+
+    const buttons = screen.getAllByRole("button", { name: "重新发布" });
+    expect(buttons).toHaveLength(3);
+    fireEvent.click(buttons[0]);
+    await waitFor(() =>
+      expect(mocks.retryItem).toHaveBeenCalledWith(
+        { workspaceId: "brand-1", sessionId: "session-42" },
+        {
+          executionId: "exec-1",
+          itemId: "item-1",
+          expectedItemRevision: item.revision,
+        },
+      ),
+    );
+  });
+
+  it("does not offer republish on healthy pending items of a running execution", () => {
+    renderCard(execution({ status: "running" }));
+    expect(
+      screen.queryByRole("button", { name: "重新发布" }),
+    ).toBeNull();
   });
 });
