@@ -39,6 +39,25 @@ export const GEO_OPERATION_STEP_STATUSES = [
 export type GeoOperationStepStatus =
   (typeof GEO_OPERATION_STEP_STATUSES)[number];
 
+/** 终态操作状态集：顺序闸、next-step 引述与跳过出口守卫的同口径判定。 */
+export const TERMINAL_GEO_OPERATION_STATUSES: ReadonlySet<GeoOperationStatus> =
+  new Set(["succeeded", "failed", "cancelled"]);
+
+/** 「当前步」口径里视为已走完的步骤状态（failed 未走完——可引述重试）。 */
+export const GEO_STEP_PAST_STATUSES: ReadonlySet<GeoOperationStepStatus> =
+  new Set(["succeeded", "skipped"]);
+
+/**
+ * 计划序上首个未走完的步骤（failed 未走完——可引述指引重试）；全走完
+ * 返回 null。顺序闸（票 #05）、next-step 引述与跳过出口（票 #07）共用
+ * 同一「当前步」口径：业务层、状态机与信封引述不分叉。
+ */
+export function currentGeoOperationStep(
+  steps: readonly GeoOperationStep[],
+): GeoOperationStep | null {
+  return steps.find((step) => !GEO_STEP_PAST_STATUSES.has(step.status)) ?? null;
+}
+
 /**
  * 运行中工作步骤的量化进度（如逐篇生成「3/5」）。只由 Sidecar 在步骤
  * running 期间上报；确认门与未开始步骤恒为 null。
@@ -346,6 +365,15 @@ const KNOWLEDGE_STEPS: readonly StepDefinition[] = [
     ),
   },
 ];
+
+/**
+ * 知识段步骤 id 集（geo-plan-normalization 票 07）：材料收集 / 事实提取 /
+ * 知识确认。跳过出口的计划替换以此判定「知识段剩余步骤」——从
+ * KNOWLEDGE_STEPS 派生，知识段改形状时自动跟随。
+ */
+export const KNOWLEDGE_SEGMENT_STEP_IDS: ReadonlySet<string> = new Set(
+  KNOWLEDGE_STEPS.map((definition) => definition.id),
+);
 
 const QUESTION_STEPS: readonly StepDefinition[] = [
   {

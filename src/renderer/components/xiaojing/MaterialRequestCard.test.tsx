@@ -18,6 +18,7 @@ const mocks = vi.hoisted(() => ({
   rescanImages: vi.fn(),
   fetchStatuses: vi.fn(),
   fetchImageAssets: vi.fn(),
+  skipMaterialCollection: vi.fn(),
 }));
 
 vi.mock('@/context/TabContext', () => ({
@@ -53,6 +54,14 @@ vi.mock('@/api/brandMaterialClient', async (importOriginal) => {
     rescanBrandMaterialImages: mocks.rescanImages,
     fetchBrandMaterialStatuses: mocks.fetchStatuses,
     fetchMaterialImageAssets: mocks.fetchImageAssets,
+  };
+});
+
+vi.mock('@/api/geoOperationClient', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/api/geoOperationClient')>();
+  return {
+    ...actual,
+    skipMaterialCollection: mocks.skipMaterialCollection,
   };
 });
 
@@ -126,10 +135,18 @@ function statusEntry(input: {
   };
 }
 
-function renderRequestCard(reason = '还没有已确认的品牌知识，先补充材料再推进计划。') {
+function renderRequestCard(
+  reason = '还没有已确认的品牌知识，先补充材料再推进计划。',
+  skipTarget?: { operationId: string; expectedRevision: number } | null,
+) {
   return render(
     <MaterialRequestCard
-      data={{ kind: 'material-request-card', requiresUserDecision: true, reason }}
+      data={{
+        kind: 'material-request-card',
+        requiresUserDecision: true,
+        reason,
+        ...(skipTarget === undefined ? {} : { skipTarget }),
+      }}
     />,
   );
 }
@@ -149,6 +166,7 @@ describe('MaterialRequestCard', () => {
       mocks.rescanImages,
       mocks.fetchStatuses,
       mocks.fetchImageAssets,
+      mocks.skipMaterialCollection,
     ]) mock.mockReset();
     // 默认恢复查询返回空；个别用例按需覆盖。
     mocks.fetchStatuses.mockResolvedValue([]);
@@ -646,5 +664,98 @@ describe('MaterialRequestCard', () => {
       expect(screen.getByText(/存量重扫完成：入池 2 张/)).toBeInTheDocument());
     // 重扫同步一次通过后池已变化：无处理中行可挂靠轮询，这里直接补一次刷新。
     await waitFor(() => expect(mocks.fetchImageAssets).toHaveBeenCalledTimes(2));
+  });
+
+  describe('skip-material-collection exit (ticket 07)', () => {
+    const skipTarget = { operationId: 'op-skip-07', expectedRevision: 7 };
+
+    it('hides the skip action entirely for out-of-plan cards without an operation anchor', () => {
+      renderRequestCard('用户主动要求补充品牌材料。', null);
+
+      expect(screen.queryByRole('button', { name: '跳过材料收集' })).not.toBeInTheDocument();
+      expect(screen.queryByTestId('material-skip-exit')).not.toBeInTheDocument();
+      // 计划外补材料入口不受影响：三条上传路径照常。
+      expect(screen.getByRole('button', { name: '选择文件' })).toBeInTheDocument();
+    });
+
+    it('keeps the skip action in the initial state: one click only arms the confirmation', () => {
+      renderRequestCard('按计划停在材料收集步骤。', skipTarget);
+
+      const skipButton = screen.getByRole('button', { name: '跳过材料收集' });
+      fireEvent.click(skipButton);
+
+      // 二次确认防误触：单次点击不发起任何请求，进入确认态。
+      expect(mocks.skipMaterialCollection).not.toHaveBeenCalled();
+      const confirm = screen.getByRole('alertdialog', { name: '确认跳过材料收集' });
+      expect(
+        within(confirm).getByText(/跳过后本轮不再等待新材料，将以现有品牌知识从下一步继续推进/),
+      ).toBeInTheDocument();
+      expect(
+        within(confirm).getByRole('button', { name: '确认跳过材料收集' }),
+      ).toBeInTheDocument();
+      expect(within(confirm).getByRole('button', { name: '暂不跳过' })).toBeInTheDocument();
+    });
+
+    it('returns to the initial state when the user cancels the confirmation', () => {
+      renderRequestCard('按计划停在材料收集步骤。', skipTarget);
+
+      fireEvent.click(screen.getByRole('button', { name: '跳过材料收集' }));
+      fireEvent.click(screen.getByRole('button', { name: '暂不跳过' }));
+
+      expect(screen.queryByRole('alertdialog', { name: '确认跳过材料收集' })).not.toBeInTheDocument();
+      expect(screen.getByRole('button', { name: '跳过材料收集' })).toBeInTheDocument();
+      expect(mocks.skipMaterialCollection).not.toHaveBeenCalled();
+    });
+
+    it('submits the skip with the card-anchored operation identity after the second click', async () => {
+      mocks.skipMaterialCollection.mockResolvedValueOnce({ id: 'op-skip-07' });
+      renderRequestCard('按计划停在材料收集步骤。', skipTarget);
+
+      fireEvent.click(screen.getByRole('button', { name: '跳过材料收集' }));
+      fireEvent.click(screen.getByRole('button', { name: '确认跳过材料收集' }));
+
+      // 卡片锚定的操作身份（workspaceId/sessionId 来自 Tab 上下文，
+      // operationId/expectedRevision 来自卡数据）随跳过动作贯通。
+      await waitFor(() => expect(mocks.skipMaterialCollection).toHaveBeenCalledWith(
+        mocks.apiPost,
+        { workspaceId: 'brand-07', sessionId: 'session-07' },
+        { operationId: 'op-skip-07', expectedRevision: 7 },
+      ));
+      // 成功后收口：跳过是一次 CAS 计划替换，完成态不再回退。
+      await waitFor(() =>
+        expect(
+          screen.getByText(/已跳过材料收集：本轮按现有品牌知识继续推进/),
+        ).toBeInTheDocument());
+      expect(screen.queryByRole('button', { name: '跳过材料收集' })).not.toBeInTheDocument();
+      // 计划外补材料入口不受影响：上传表单仍然可用。
+      expect(screen.getByRole('button', { name: '选择文件' })).toBeInTheDocument();
+    });
+
+    it('surfaces a skip failure with the server error code and keeps the card usable', async () => {
+      mocks.skipMaterialCollection.mockRejectedValueOnce(
+        new Error('revision_conflict: stale expectedRevision'),
+      );
+      renderRequestCard('按计划停在材料收集步骤。', skipTarget);
+
+      fireEvent.click(screen.getByRole('button', { name: '跳过材料收集' }));
+      fireEvent.click(screen.getByRole('button', { name: '确认跳过材料收集' }));
+
+      await waitFor(() =>
+        expect(screen.getByText(/跳过失败：revision_conflict/)).toBeInTheDocument());
+      expect(screen.queryByRole('alertdialog', { name: '确认跳过材料收集' })).not.toBeInTheDocument();
+      // 失败后可以重新发起（再次走二次确认）。
+      fireEvent.click(screen.getByRole('button', { name: '再次尝试跳过' }));
+      expect(screen.getByRole('alertdialog', { name: '确认跳过材料收集' })).toBeInTheDocument();
+    });
+
+    it('disables the skip entry when the Tab has no exact-match brand', () => {
+      mocks.hasWorkspace = false;
+      renderRequestCard('按计划停在材料收集步骤。', skipTarget);
+
+      expect(screen.getByRole('button', { name: '跳过材料收集' })).toBeDisabled();
+      fireEvent.click(screen.getByRole('button', { name: '跳过材料收集' }));
+      expect(screen.queryByRole('alertdialog', { name: '确认跳过材料收集' })).not.toBeInTheDocument();
+      expect(mocks.skipMaterialCollection).not.toHaveBeenCalled();
+    });
   });
 });

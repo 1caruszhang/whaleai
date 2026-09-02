@@ -42,6 +42,7 @@
       "startGeoOperation": "发起 GEO 操作",
       "inspectGeoOperations": "查看 GEO 操作",
       "chooseNextRoundKnowledge": "记录知识更新决定",
+      "skipMaterialCollection": "跳过材料收集",
       "controlGeoOperation": "控制 GEO 操作",
       "proposeBrandFact": "提交品牌事实候选",
       "inspectBrandFact": "查询品牌事实",

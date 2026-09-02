@@ -316,6 +316,12 @@ pub struct GeoOperationMutationRequest {
     pub artifact_refs: Vec<GeoOperationReference>,
     #[serde(default)]
     pub replacement_steps: Option<Vec<GeoOperationStep>>,
+    /// replace-plan 的调用场景（票 07）：缺省 = 知识分支决策（既有唯一
+    /// 形态，守卫要求停卡在 decide-knowledge-refresh 单步）；
+    /// `material-collection-skip` = 材料收集跳过出口——守卫按该场景校验
+    /// 替换形状（只允许剥离知识段未走完步骤），不放宽成自由计划编辑。
+    #[serde(default)]
+    pub replacement_reason: Option<String>,
     /// 仅 replace-plan 消费（票 #04）：知识分支的用户显式答案随计划替换
     /// 一并落库；其余动作忽略。缺省 None 保持现值不变。
     #[serde(default)]
@@ -917,6 +923,7 @@ impl BrandWorkspaceStore {
             error: None,
             artifact_refs: vec![request.evidence_ref],
             replacement_steps: None,
+            replacement_reason: None,
             update_knowledge: None,
             step_progress: None,
             queue_reason: None,
@@ -1272,30 +1279,61 @@ fn apply_action(
             advance_operation(operation)?;
         }
         "replace-plan" => {
-            require_status(&operation.status, &["awaiting-confirmation"])?;
-            if operation.kind != "next-round-optimization"
-                || operation.steps.len() != 1
-                || operation.steps[0].id != "decide-knowledge-refresh"
-            {
-                return Err("geo_operation_plan_replacement_invalid".to_string());
-            }
             let replacement = request
                 .replacement_steps
                 .clone()
                 .ok_or_else(|| "geo_operation_replacement_steps_required".to_string())?;
             validate_steps(&replacement)?;
-            operation.steps = replacement;
-            // 知识分支的用户显式答案随替换一次落库（票 #04）：携带即覆盖，
-            // 缺省保持现值（跳过出口等后续 replace-plan 调用方不受影响）。
-            // revision 语义不变——决策持久化不额外递增，仍是一次 mutation
-            // 一次 CAS 递增。
-            if let Some(update_knowledge) = request.update_knowledge {
-                operation.update_knowledge = Some(update_knowledge);
+            match request.replacement_reason.as_deref() {
+                // 跳过出口（票 07，spec 2026-09-02 决策 5）：材料请求卡的
+                // 「跳过材料收集」经计划替换剥离知识段剩余步骤。守卫按场景
+                // 校验形状——替换步骤必须恰为「原计划剥掉未走完的知识段
+                // 步骤」，已完成/已确认步骤保留，不得夹带其他编辑；替换后
+                // 从首个未走完步骤续接（advance_operation 尊重已成功前缀，
+                // 不重停认可门）。不为该场景新增里程碑：里程碑推进器的确认
+                // 门放行够不着被前置步骤挡住的等待门。
+                Some("material-collection-skip") => {
+                    require_status(
+                        &operation.status,
+                        &["ready", "running", "awaiting-confirmation"],
+                    )?;
+                    let expected = strip_incomplete_knowledge_steps(&operation.steps);
+                    if replacement.len() == operation.steps.len() || replacement != expected {
+                        return Err("geo_operation_plan_replacement_invalid".to_string());
+                    }
+                    operation.steps = replacement;
+                    if let Some(update_knowledge) = request.update_knowledge {
+                        operation.update_knowledge = Some(update_knowledge);
+                    }
+                    operation.pending_confirmation = None;
+                    operation.checkpoint = None;
+                    operation.error = None;
+                    advance_operation(operation)?;
+                }
+                // 知识分支决策（既有唯一形态）：分支未决停卡被显式回答
+                // 替换为已决计划，首个步骤重停自己的门。
+                _ => {
+                    require_status(&operation.status, &["awaiting-confirmation"])?;
+                    if operation.kind != "next-round-optimization"
+                        || operation.steps.len() != 1
+                        || operation.steps[0].id != "decide-knowledge-refresh"
+                    {
+                        return Err("geo_operation_plan_replacement_invalid".to_string());
+                    }
+                    operation.steps = replacement;
+                    // 知识分支的用户显式答案随替换一次落库（票 #04）：携带即覆盖，
+                    // 缺省保持现值（跳过出口等后续 replace-plan 调用方不受影响）。
+                    // revision 语义不变——决策持久化不额外递增，仍是一次 mutation
+                    // 一次 CAS 递增。
+                    if let Some(update_knowledge) = request.update_knowledge {
+                        operation.update_knowledge = Some(update_knowledge);
+                    }
+                    operation.pending_confirmation = None;
+                    operation.checkpoint = None;
+                    operation.error = None;
+                    normalize_first_step(operation)?;
+                }
             }
-            operation.pending_confirmation = None;
-            operation.checkpoint = None;
-            operation.error = None;
-            normalize_first_step(operation)?;
         }
         "pause" => {
             if let Err(error) = require_status(
@@ -1445,6 +1483,25 @@ fn operation_step_mut<'a>(
         })
     }
     .ok_or_else(|| "geo_operation_step_not_found".to_string())
+}
+
+/// 知识段步骤 id（与 shared policy 的 KNOWLEDGE_STEPS 同一序列，票 07）：
+/// 材料收集 / 事实提取 / 知识确认。步骤形状的 policy 在 TS，Rust 侧按 id
+/// 判定「知识段剩余步骤」，职责只是把未走完的知识段步骤从持久层计划里
+/// 剥掉——已完成（succeeded/skipped）的保留。
+const KNOWLEDGE_SEGMENT_STEP_IDS: [&str; 3] =
+    ["collect-materials", "extract-facts", "confirm-knowledge"];
+
+/// 跳过出口（票 07）的替换形状期望值：原步骤序列剥掉未走完的知识段步骤。
+fn strip_incomplete_knowledge_steps(steps: &[GeoOperationStep]) -> Vec<GeoOperationStep> {
+    steps
+        .iter()
+        .filter(|step| {
+            !KNOWLEDGE_SEGMENT_STEP_IDS.contains(&step.id.as_str())
+                || matches!(step.status.as_str(), "succeeded" | "skipped")
+        })
+        .cloned()
+        .collect()
 }
 
 fn normalize_first_step(operation: &mut GeoOperationProjection) -> Result<(), String> {
@@ -2210,6 +2267,7 @@ mod tests {
             error: None,
             artifact_refs: vec![],
             replacement_steps: None,
+            replacement_reason: None,
             update_knowledge: None,
             step_progress: None,
             queue_reason: None,
@@ -2650,6 +2708,340 @@ mod tests {
                 .update_knowledge,
             None
         );
+    }
+
+    /// 全链工作步骤（票 07 测试夹具）：知识段三步 + 问题段两步，全部
+    /// pending；由 released_operation 补上前置认可门。
+    fn full_chain_work_steps() -> Vec<GeoOperationStep> {
+        vec![
+            step(
+                "collect-materials",
+                "brand-material-import",
+                "pending",
+                None,
+            ),
+            step("extract-facts", "brand-knowledge", "pending", None),
+            step(
+                "confirm-knowledge",
+                "brand-knowledge",
+                "pending",
+                Some(confirmation("knowledge-change", "knowledge-authority")),
+            ),
+            step(
+                "generate-question-pool",
+                "question-opportunities",
+                "pending",
+                None,
+            ),
+            step(
+                "confirm-question-selection",
+                "question-opportunities",
+                "pending",
+                Some(confirmation("question-selection", "brand-workspace")),
+            ),
+        ]
+    }
+
+    /// 建一个「认可门已放行」的操作：创建时整单停在 plan-ack（与 TS policy
+    /// 同形态），随后 confirm-step 放行，得到停在首个工作步骤的真实形态。
+    fn released_operation(
+        store: &BrandWorkspaceStore,
+        workspace: &BrandWorkspace,
+        kind: &str,
+        goal: &str,
+        work_steps: Vec<GeoOperationStep>,
+    ) -> GeoOperationProjection {
+        let ack_gate = confirmation("plan-ack", "geo-operation");
+        let opening_capability = work_steps
+            .first()
+            .map(|step| step.capability.clone())
+            .unwrap_or_else(|| "brand-knowledge".into());
+        let mut steps = vec![step(
+            "acknowledge-plan",
+            &opening_capability,
+            "awaiting-confirmation",
+            Some(ack_gate.clone()),
+        )];
+        steps.extend(work_steps);
+        let created = store
+            .create_geo_operation(GeoOperationCreateRequest {
+                workspace_id: workspace.id.clone(),
+                session_id: "session-operation".into(),
+                kind: kind.into(),
+                goal: goal.into(),
+                status: "awaiting-confirmation".into(),
+                steps,
+                input_refs: vec![],
+                pending_confirmation: Some(ack_gate),
+                source_operation_id: None,
+                update_knowledge: Some(true),
+            })
+            .unwrap();
+        store
+            .mutate_geo_operation(mutation(
+                workspace,
+                &created,
+                "confirm-step",
+                Some("acknowledge-plan"),
+            ))
+            .unwrap()
+    }
+
+    /// begin+complete 一个工作步骤（里程碑收尾的同款状态机路径）。
+    fn run_work_step(
+        store: &BrandWorkspaceStore,
+        workspace: &BrandWorkspace,
+        operation: &GeoOperationProjection,
+        step_id: &str,
+    ) -> GeoOperationProjection {
+        let started = store
+            .mutate_geo_operation(mutation(workspace, operation, "start-step", Some(step_id)))
+            .unwrap();
+        store
+            .mutate_geo_operation(mutation(
+                workspace,
+                &started,
+                "complete-step",
+                Some(step_id),
+            ))
+            .unwrap()
+    }
+
+    /// 票 07（spec 2026-09-02 决策 5）：材料收集跳过出口走 replace-plan
+    /// 剥离知识段剩余步骤——已完成/已确认步骤保留，替换后从首个未走完
+    /// 步骤续接，不重停计划认可门；决策随替换落库，一次 mutation 一次
+    /// revision 递增。
+    #[test]
+    fn replace_plan_material_skip_strips_remaining_knowledge_steps_and_continues() {
+        let (store, workspace) = fixture();
+        let parked = released_operation(
+            &store,
+            &workspace,
+            "full-optimization",
+            "一轮完整的 GEO 优化",
+            full_chain_work_steps(),
+        );
+        assert_eq!(parked.status, "ready");
+        assert_eq!(
+            parked
+                .steps
+                .iter()
+                .find(|step| step.id == "collect-materials")
+                .unwrap()
+                .status,
+            "ready"
+        );
+
+        let mut skip = mutation(&workspace, &parked, "replace-plan", None);
+        skip.replacement_reason = Some("material-collection-skip".into());
+        skip.replacement_steps = Some(strip_incomplete_knowledge_steps(&parked.steps));
+        skip.update_knowledge = Some(false);
+        let skipped = store.mutate_geo_operation(skip).unwrap();
+
+        // 认可门的成功状态保留，知识段三步剥离，当前步推进到问题池生成。
+        let ids: Vec<&str> = skipped.steps.iter().map(|step| step.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec![
+                "acknowledge-plan",
+                "generate-question-pool",
+                "confirm-question-selection"
+            ]
+        );
+        assert_eq!(skipped.steps[0].status, "succeeded");
+        assert_eq!(skipped.steps[1].status, "ready");
+        assert_eq!(skipped.status, "ready");
+        assert!(skipped.pending_confirmation.is_none());
+        // 跳过即本轮不更新知识：决策随替换落库，revision 恰好 +1。
+        assert_eq!(skipped.update_knowledge, Some(false));
+        assert_eq!(skipped.revision, parked.revision + 1);
+        // 跨会话摘要跟随：未完成轮次报 updateKnowledge=false。
+        let summaries = store.list_unfinished_geo_operations(&workspace.id).unwrap();
+        assert_eq!(
+            summaries
+                .operations
+                .iter()
+                .find(|summary| summary.id == skipped.id)
+                .unwrap()
+                .update_knowledge,
+            Some(false)
+        );
+    }
+
+    /// 停在知识确认门的跳过：已完成的材料收集/事实提取保留，未裁决的
+    /// 知识门剥离，pending_confirmation 清空、状态回到 ready 续接。
+    #[test]
+    fn replace_plan_material_skip_keeps_succeeded_knowledge_steps() {
+        let (store, workspace) = fixture();
+        let parked = released_operation(
+            &store,
+            &workspace,
+            "full-optimization",
+            "更新知识的轮次",
+            full_chain_work_steps(),
+        );
+        // 材料已导入：collect-materials 与 extract-facts 完成，知识门停靠。
+        let imported = run_work_step(&store, &workspace, &parked, "collect-materials");
+        let parked_at_gate = run_work_step(&store, &workspace, &imported, "extract-facts");
+        assert_eq!(parked_at_gate.status, "awaiting-confirmation");
+
+        let mut skip = mutation(&workspace, &parked_at_gate, "replace-plan", None);
+        skip.replacement_reason = Some("material-collection-skip".into());
+        skip.replacement_steps = Some(strip_incomplete_knowledge_steps(&parked_at_gate.steps));
+        skip.update_knowledge = Some(false);
+        let skipped = store.mutate_geo_operation(skip).unwrap();
+
+        let ids: Vec<&str> = skipped.steps.iter().map(|step| step.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec![
+                "acknowledge-plan",
+                "collect-materials",
+                "extract-facts",
+                "generate-question-pool",
+                "confirm-question-selection"
+            ]
+        );
+        // 已完成步骤的状态原样保留；替换后从问题池生成续接。
+        assert_eq!(skipped.steps[1].status, "succeeded");
+        assert_eq!(skipped.steps[2].status, "succeeded");
+        assert_eq!(skipped.steps[3].status, "ready");
+        assert_eq!(skipped.status, "ready");
+        assert!(skipped.pending_confirmation.is_none());
+    }
+
+    /// 知识更新单意图跳空：知识段全部剥离后无剩余工作，操作收口为
+    /// succeeded——跳过出口不制造「没有步骤却非终态」的残局。
+    #[test]
+    fn replace_plan_material_skip_closes_a_knowledge_only_round() {
+        let (store, workspace) = fixture();
+        let parked = released_operation(
+            &store,
+            &workspace,
+            "knowledge-update",
+            "更新品牌知识",
+            vec![step(
+                "collect-materials",
+                "brand-material-import",
+                "pending",
+                None,
+            )],
+        );
+
+        let mut skip = mutation(&workspace, &parked, "replace-plan", None);
+        skip.replacement_reason = Some("material-collection-skip".into());
+        skip.replacement_steps = Some(strip_incomplete_knowledge_steps(&parked.steps));
+        skip.update_knowledge = Some(false);
+        let skipped = store.mutate_geo_operation(skip).unwrap();
+
+        assert_eq!(skipped.status, "succeeded");
+        assert_eq!(skipped.steps.len(), 1);
+        assert!(skipped.terminal_at.is_some());
+    }
+
+    /// 跳过出口的形状守卫：非「剥掉未走完知识段步骤」的替换一律拒绝，
+    /// 不得把 replace-plan 放宽成自由计划编辑。
+    #[test]
+    fn replace_plan_material_skip_rejects_tampered_or_noop_replacements() {
+        let (store, workspace) = fixture();
+        let parked = released_operation(
+            &store,
+            &workspace,
+            "full-optimization",
+            "一轮完整的 GEO 优化",
+            full_chain_work_steps(),
+        );
+
+        // 夹带私改：替换步骤里混入原计划没有的步骤。
+        let mut tampered = mutation(&workspace, &parked, "replace-plan", None);
+        tampered.replacement_reason = Some("material-collection-skip".into());
+        tampered.replacement_steps = Some(vec![
+            step(
+                "acknowledge-plan",
+                "brand-knowledge",
+                "succeeded",
+                Some(confirmation("plan-ack", "geo-operation")),
+            ),
+            step("rogue-step", "brand-knowledge", "ready", None),
+        ]);
+        assert!(store
+            .mutate_geo_operation(tampered)
+            .unwrap_err()
+            .contains("geo_operation_plan_replacement_invalid"));
+
+        // 无可剥离：当前步已越过知识段，替换前后同长。
+        let imported = run_work_step(&store, &workspace, &parked, "collect-materials");
+        let extracted = run_work_step(&store, &workspace, &imported, "extract-facts");
+        let past = store
+            .mutate_geo_operation(mutation(
+                &workspace,
+                &extracted,
+                "confirm-step",
+                Some("confirm-knowledge"),
+            ))
+            .unwrap();
+        assert_eq!(past.status, "ready");
+        let mut noop = mutation(&workspace, &past, "replace-plan", None);
+        noop.replacement_reason = Some("material-collection-skip".into());
+        noop.replacement_steps = Some(strip_incomplete_knowledge_steps(&past.steps));
+        assert!(store
+            .mutate_geo_operation(noop)
+            .unwrap_err()
+            .contains("geo_operation_plan_replacement_invalid"));
+
+        // paused 轮次不允许原地跳过：先 resume 再跳，控制面纪律不被绕过。
+        // 取最新 revision（前段越序路径已推进过这单操作）。
+        let latest = store.get_geo_operation(&workspace.id, &parked.id).unwrap();
+        let paused_projection = store
+            .mutate_geo_operation(mutation(&workspace, &latest, "pause", None))
+            .unwrap();
+        let mut paused_skip = mutation(&workspace, &paused_projection, "replace-plan", None);
+        paused_skip.replacement_reason = Some("material-collection-skip".into());
+        paused_skip.replacement_steps =
+            Some(strip_incomplete_knowledge_steps(&paused_projection.steps));
+        assert!(store
+            .mutate_geo_operation(paused_skip)
+            .unwrap_err()
+            .contains("geo_operation_transition_invalid"));
+
+        // 分支决策停卡（decide-knowledge-refresh 单步）不得借用跳过场景
+        // 绕过停卡守卫：跳过场景要求真的剥离知识段步骤。
+        let branch_gate = confirmation("next-round-knowledge", "brand-workspace");
+        let undecided = store
+            .create_geo_operation(GeoOperationCreateRequest {
+                workspace_id: workspace.id.clone(),
+                session_id: "session-operation".into(),
+                kind: "next-round-optimization".into(),
+                goal: "下一轮优化".into(),
+                status: "awaiting-confirmation".into(),
+                steps: vec![step(
+                    "decide-knowledge-refresh",
+                    "brand-knowledge",
+                    "awaiting-confirmation",
+                    Some(branch_gate.clone()),
+                )],
+                input_refs: vec![],
+                pending_confirmation: Some(branch_gate),
+                source_operation_id: None,
+                update_knowledge: None,
+            })
+            .unwrap();
+        let mut borrowed = mutation(&workspace, &undecided, "replace-plan", None);
+        borrowed.replacement_reason = Some("material-collection-skip".into());
+        borrowed.replacement_steps = Some(strip_incomplete_knowledge_steps(&undecided.steps));
+        assert!(store
+            .mutate_geo_operation(borrowed)
+            .unwrap_err()
+            .contains("geo_operation_plan_replacement_invalid"));
+
+        // 原计划原样：全部被拒的跳过尝试都没有副作用（唯一的 revision
+        // 变化来自上面合法的 pause 本身）。
+        let after = store
+            .get_geo_operation(&workspace.id, &paused_projection.id)
+            .unwrap();
+        assert_eq!(after.steps.len(), paused_projection.steps.len());
+        assert_eq!(after.revision, paused_projection.revision);
+        assert_eq!(after.status, "paused");
     }
 
     #[test]
@@ -3244,6 +3636,7 @@ mod tests {
             error: None,
             artifact_refs: vec![],
             replacement_steps: None,
+            replacement_reason: None,
             update_knowledge: None,
             step_progress: None,
             queue_reason: None,

@@ -10,6 +10,7 @@ const XIAOJING_GEO_TOOL_LABEL_KEYS: Record<string, string> = {
   'mcp__xiaojing-geo__start_geo_operation': 'process.tools.startGeoOperation',
   'mcp__xiaojing-geo__inspect_geo_operations': 'process.tools.inspectGeoOperations',
   'mcp__xiaojing-geo__choose_next_round_knowledge': 'process.tools.chooseNextRoundKnowledge',
+  'mcp__xiaojing-geo__skip_material_collection': 'process.tools.skipMaterialCollection',
   'mcp__xiaojing-geo__control_geo_operation': 'process.tools.controlGeoOperation',
   'mcp__xiaojing-geo__propose_brand_fact': 'process.tools.proposeBrandFact',
   'mcp__xiaojing-geo__inspect_brand_fact': 'process.tools.inspectBrandFact',

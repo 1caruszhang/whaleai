@@ -4,6 +4,11 @@ import type {
   GeoOperationStep,
   GeoOperationStepProgress,
 } from "../../shared/geo/operation";
+import {
+  currentGeoOperationStep,
+  GEO_STEP_PAST_STATUSES as STEP_PAST_STATUSES,
+  TERMINAL_GEO_OPERATION_STATUSES,
+} from "../../shared/geo/operation";
 import { MATERIAL_COLLECTION_CONTRACT } from "../../shared/geo/materialRequestCard";
 import { QUESTION_POOL_REUSE_CONTRACT } from "../../shared/geo/questionPool";
 import type { NextStepReminderInput } from "../../shared/systemReminder";
@@ -142,12 +147,13 @@ export interface GeoOperationProgressService {
   }): Promise<GeoOperationProjection>;
 }
 
-/** 终态操作集（导出供顺序闸等消费方同口径判定「非终态」）。 */
-export const TERMINAL_OPERATION = new Set([
-  "succeeded",
-  "failed",
-  "cancelled",
-]);
+/** 终态操作集（导出供顺序闸等消费方同口径判定「非终态」）；口径下沉
+ * shared policy（票 07），此处按既有名字转发，消费方零改动。「已走完」
+ * 步骤状态集与 currentGeoOperationStep 同源 shared policy，上方以
+ * STEP_PAST_STATUSES 别名引入，正文复用。 */
+export const TERMINAL_OPERATION = TERMINAL_GEO_OPERATION_STATUSES;
+
+export { currentGeoOperationStep };
 
 /**
  * next-step 单表（ADR-0011 Decision 2，与上方里程碑表同文件维护）：
@@ -214,19 +220,6 @@ export const GEO_NEXT_STEP_GUIDES: Readonly<Record<string, GeoNextStepGuide>> = 
 /** 决策回执信封携带的引述：步骤、工具、指引与所引述计划快照的 revision。
  * 与 builder 侧的 NextStepReminderInput 同一契约（结构一致，直传）。 */
 export type GeoNextStepQuotation = NextStepReminderInput;
-
-/** 引述时视为「已走完」的步骤状态（failed 可引述：指引重试）。 */
-const STEP_PAST_STATUSES = new Set(["succeeded", "skipped"]);
-
-/**
- * 计划序上首个未走完的步骤（failed 未走完——可引述指引重试）；全走完
- * 返回 null。顺序闸（票 #05）与 next-step 引述共用同一「当前步」口径。
- */
-export function currentGeoOperationStep(
-  steps: readonly GeoOperationStep[],
-): GeoOperationStep | null {
-  return steps.find((step) => !STEP_PAST_STATUSES.has(step.status)) ?? null;
-}
 
 /**
  * 从持久化计划引述 next-step（ADR-0011 Decision 2）：锚定 afterStepId 时
@@ -305,8 +298,9 @@ export async function quoteGeoNextStepForGateKind(
 
 /**
  * 操作事件信封的引述锚点策略：confirm-step 锚定刚放行的门之后，
- * resume/retry/next-round 锚定首个未完成步骤；pause/cancel 是停进或
- * 终态，不引述。
+ * resume/retry/next-round/skip-material-collection 锚定首个未完成步骤；
+ * pause/cancel 是停进或终态，不引述。跳过出口（票 07）的回执读的是替换
+ * 后的持久化计划——引述即跳过后的真实下一步，与顺序闸同口径不分叉。
  */
 export function quoteGeoNextStepForAction(
   operation: GeoOperationProjection,
@@ -315,7 +309,12 @@ export function quoteGeoNextStepForAction(
   if (action.startsWith("confirm-step:")) {
     return quoteGeoNextStep(operation, action.slice("confirm-step:".length)) ?? undefined;
   }
-  if (action === "resume" || action === "retry" || action.startsWith("next-round-")) {
+  if (
+    action === "resume" ||
+    action === "retry" ||
+    action === "skip-material-collection" ||
+    action.startsWith("next-round-")
+  ) {
     return quoteGeoNextStep(operation) ?? undefined;
   }
   return undefined;

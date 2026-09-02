@@ -61,6 +61,7 @@ import { cnyToPoints, pointsToCny } from '../../shared/geo/points';
 import { GEO_PORT_CONTRACT } from '../../shared/geo/portContract';
 import type { GeoContentType } from '../../shared/geo/portContract';
 import { recordGeoOperationMilestone, reportGeoOperationStepProgress } from '../geo/operation-progress';
+import { currentGeoOperationStep, TERMINAL_OPERATION } from '../geo/operation-progress';
 import {
   createGeoOperationService,
   type GeoOperationCreateInput,
@@ -70,6 +71,7 @@ import { buildKnowledgeCandidatesCardData } from '../../shared/geo/knowledgeCard
 import {
   buildMaterialRequestCardData,
   MATERIAL_COLLECTION_CONTRACT,
+  type MaterialRequestSkipTarget,
 } from '../../shared/geo/materialRequestCard';
 import {
   dispatchGateRevision,
@@ -486,6 +488,40 @@ export async function chooseNextRoundKnowledge(input: {
   updateKnowledge: boolean;
 }) {
   return geoOperationService().chooseNextRoundKnowledge(input);
+}
+
+/**
+ * 跳过出口的服务入口（票 07）：与知识分支决策同一 service seam，计划
+ * 替换动作 + revision CAS 由 GeoOperationService 裁决。
+ */
+export async function skipMaterialCollection(input: {
+  operationId: string;
+  expectedRevision: number;
+}) {
+  return geoOperationService().skipMaterialCollection(input);
+}
+
+/**
+ * 材料请求卡的跳过出口锚点（票 07）：卡片发出时查本会话非终态操作中
+ * 当前停在 collect-materials 的最新一个（列表按 updated_at 倒序），把
+ * operationId + revision 嵌进卡数据——跳过动作据此发起 CAS 计划替换。
+ * 查不到或读取失败返回 null：计划外补材料入口照常出卡，只是不呈现
+ * 跳过动作，卡片上传路径不受影响。
+ */
+async function resolveMaterialSkipTarget(): Promise<MaterialRequestSkipTarget | null> {
+  if (!context.workspace) return null;
+  try {
+    const operations = await geoOperationService().list();
+    const parked = operations.find((operation) =>
+      !TERMINAL_OPERATION.has(operation.status)
+      && currentGeoOperationStep(operation.steps)?.id === 'collect-materials');
+    return parked
+      ? { operationId: parked.id, expectedRevision: parked.revision }
+      : null;
+  } catch {
+    // 卡片必须始终能发出：锚点解析失败降级为无跳过动作的普通卡。
+    return null;
+  }
 }
 
 /**
@@ -1533,11 +1569,40 @@ export async function createXiaojingGeoServer() {
       ),
       tool(
         'request_brand_material',
-        `Surface the brand-material request card in chat where the user uploads materials (file picker, pasted text or official-site URL; PDF/Office are parsed there). Call it exactly when: (1) material-collection contract: ${MATERIAL_COLLECTION_CONTRACT}; (2) the user explicitly asks to add brand material; (3) the user attached a binary file that read_session_file cannot parse and it is brand material. Never call it mid-operation just because a gate lacks material evidence — proceed with AI-completion rows and let the user adjudicate on that card. reason is one plain-language line shown on the card header. After calling it, tell the user to upload on the card and end your turn; the knowledge confirmation card follows the import automatically.`,
+        `Surface the brand-material request card in chat where the user uploads materials (file picker, pasted text or official-site URL; PDF/Office are parsed there). Call it exactly when: (1) material-collection contract: ${MATERIAL_COLLECTION_CONTRACT}; (2) the user explicitly asks to add brand material; (3) the user attached a binary file that read_session_file cannot parse and it is brand material. Never call it mid-operation just because a gate lacks material evidence — proceed with AI-completion rows and let the user adjudicate on that card. reason is one plain-language line shown on the card header. When the card is issued while the round parks at the material-collection step it also carries a real skip action: the user may press 跳过材料收集 (behind a confirmation) to strip the round's remaining knowledge steps and continue from the next planned step; if the user asks to skip in chat instead, record it with skip_material_collection rather than telling them to press anything else. After calling it, tell the user to upload on the card and end your turn; the knowledge confirmation card follows the import automatically.`,
         { reason: z.string().min(1).max(300).describe('One plain-language line telling the user why material is needed now.') },
         async (input) => ({
           content: [
-            { type: 'text' as const, text: JSON.stringify(buildMaterialRequestCardData(input.reason)) },
+            {
+              type: 'text' as const,
+              text: JSON.stringify(
+                buildMaterialRequestCardData(input.reason, await resolveMaterialSkipTarget()),
+              ),
+            },
+          ],
+        }),
+        { alwaysLoad: true },
+      ),
+      tool(
+        'skip_material_collection',
+        "Record the user's explicit request to skip this round's material collection (e.g. they reply 跳过/先不补材料 while the material-request card waits): one plan-replacement strips the round's remaining knowledge-segment steps — already completed or confirmed steps stay — and the operation continues from the next planned step on the existing confirmed knowledge; the user can still upload material at any time afterwards. Read operationId and the latest revision from inspect_geo_operations first; never call it speculatively, never call it because the round feels slow, and never re-ask after the user already confirmed the skip — the skip is the user's decision, not yours. Invalid when the round is not currently parked inside the knowledge segment (nothing left to strip) or when the revision is stale (re-read and retry).",
+        {
+          operationId: z
+            .string()
+            .min(1)
+            .max(200)
+            .regex(/^[A-Za-z0-9_.-]+$/),
+          expectedRevision: z.number().int().min(1),
+        },
+        async (input) => ({
+          content: [
+            {
+              type: 'text' as const,
+              text: JSON.stringify({
+                kind: 'geo-operation',
+                operation: await skipMaterialCollection(input),
+              }),
+            },
           ],
         }),
         { alwaysLoad: true },

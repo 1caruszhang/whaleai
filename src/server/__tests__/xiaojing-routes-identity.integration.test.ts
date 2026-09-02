@@ -33,6 +33,7 @@ const XIAOJING_POST_ROUTES = [
   '/api/xiaojing/geo-operations/get',
   '/api/xiaojing/geo-operations/control',
   '/api/xiaojing/geo-operations/choose-next-round-knowledge',
+  '/api/xiaojing/geo-operations/skip-material-collection',
   '/api/xiaojing/geo-operations/confirm-step',
   '/api/xiaojing/knowledge/decide',
   '/api/xiaojing/knowledge/decide-batch',

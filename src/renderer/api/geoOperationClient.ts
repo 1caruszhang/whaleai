@@ -90,6 +90,25 @@ export function chooseNextRoundKnowledge(
   ).then(requireOperation);
 }
 
+/**
+ * 跳过出口（geo-plan-normalization 票 07）：材料请求卡上的「跳过材料
+ * 收集」动作——服务端走既有 replace-plan 计划替换剥离知识段剩余步骤，
+ * operationId 与 expectedRevision 来自卡片发出的操作锚点（CAS 防覆盖）。
+ */
+export function skipMaterialCollection(
+  apiPost: GeoOperationApiPost,
+  identity: GeoOperationIdentity,
+  input: {
+    operationId: string;
+    expectedRevision: number;
+  },
+): Promise<GeoOperationProjection> {
+  return apiPost<GeoOperationResponse>(
+    "/api/xiaojing/geo-operations/skip-material-collection",
+    { ...identity, ...input },
+  ).then(requireOperation);
+}
+
 export function confirmGeoOperationStep(
   apiPost: GeoOperationApiPost,
   identity: GeoOperationIdentity,

@@ -1,5 +1,9 @@
 import {
+  currentGeoOperationStep,
+  GEO_STEP_PAST_STATUSES,
+  KNOWLEDGE_SEGMENT_STEP_IDS,
   planGeoOperation,
+  TERMINAL_GEO_OPERATION_STATUSES,
   type GeoOperationCheckpoint,
   type GeoOperationError,
   type GeoOperationKind,
@@ -92,6 +96,11 @@ interface GeoOperationMutationRequest {
   /** 仅 replace-plan 消费（票 #04）：知识分支的用户显式答案随计划替换
    * 一并落库；其他动作忽略，避免散落第二条写入路径。 */
   updateKnowledge?: boolean;
+  /** replace-plan 的调用场景（票 07）：缺省 = 知识分支决策（既有唯一
+   * 形态，守卫要求停卡在 decide-knowledge-refresh 单步）；
+   * 'material-collection-skip' = 材料收集跳过出口——Rust 守卫按场景
+   * 校验替换形状（只允许剥离知识段未走完步骤），不放宽成自由计划编辑。 */
+  replacementReason?: string;
   stepProgress?: GeoOperationStepProgress;
   queueReason?: string;
   queuePosition?: number;
@@ -307,6 +316,42 @@ export class GeoOperationService {
       // 决策随替换一次落库（票 #04）：一次 mutation 一次 revision 递增，
       // 不为持久化分支答案另开写入路径。
       updateKnowledge: input.updateKnowledge,
+    });
+  }
+
+  /**
+   * 跳过出口（geo-plan-normalization 票 07）：用户在材料请求卡上确认
+   * 「跳过材料收集」后，走既有 replace-plan 计划替换动作剥离知识段剩余
+   * 步骤——已完成/已确认步骤保留，替换后从首个未走完步骤续接。不为该
+   * 场景新增里程碑：里程碑推进器的确认门放行只作用于「等待确认」步骤，
+   * 够不着被前置步骤挡住的等待门。跳过即本轮不更新知识，决策随替换
+   * 落库（票 #04 同机制），跨会话摘要据实显示复用轮。
+   */
+  async skipMaterialCollection(input: {
+    operationId: string;
+    expectedRevision: number;
+  }): Promise<GeoOperationProjection> {
+    const operation = await this.persistence.get(input.operationId);
+    const current = currentGeoOperationStep(operation.steps);
+    if (
+      TERMINAL_GEO_OPERATION_STATUSES.has(operation.status) ||
+      !current ||
+      !KNOWLEDGE_SEGMENT_STEP_IDS.has(current.id)
+    ) {
+      throw new Error("geo_operation_material_skip_invalid");
+    }
+    const replacementSteps = operation.steps.filter(
+      (step) =>
+        !KNOWLEDGE_SEGMENT_STEP_IDS.has(step.id) ||
+        GEO_STEP_PAST_STATUSES.has(step.status),
+    );
+    return this.mutate({
+      operationId: input.operationId,
+      expectedRevision: input.expectedRevision,
+      action: "replace-plan",
+      replacementSteps,
+      replacementReason: "material-collection-skip",
+      updateKnowledge: false,
     });
   }
 

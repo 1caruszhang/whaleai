@@ -42,6 +42,7 @@
       "startGeoOperation": "Start GEO operation",
       "inspectGeoOperations": "Inspect GEO operations",
       "chooseNextRoundKnowledge": "Record knowledge-refresh decision",
+      "skipMaterialCollection": "Skip material collection",
       "controlGeoOperation": "Control GEO operation",
       "proposeBrandFact": "Propose brand fact",
       "inspectBrandFact": "Inspect brand fact",
