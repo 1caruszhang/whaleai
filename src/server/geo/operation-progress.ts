@@ -142,7 +142,8 @@ export interface GeoOperationProgressService {
   }): Promise<GeoOperationProjection>;
 }
 
-const TERMINAL_OPERATION = new Set([
+/** 终态操作集（导出供顺序闸等消费方同口径判定「非终态」）。 */
+export const TERMINAL_OPERATION = new Set([
   "succeeded",
   "failed",
   "cancelled",
@@ -218,6 +219,16 @@ export type GeoNextStepQuotation = NextStepReminderInput;
 const STEP_PAST_STATUSES = new Set(["succeeded", "skipped"]);
 
 /**
+ * 计划序上首个未走完的步骤（failed 未走完——可引述指引重试）；全走完
+ * 返回 null。顺序闸（票 #05）与 next-step 引述共用同一「当前步」口径。
+ */
+export function currentGeoOperationStep(
+  steps: readonly GeoOperationStep[],
+): GeoOperationStep | null {
+  return steps.find((step) => !STEP_PAST_STATUSES.has(step.status)) ?? null;
+}
+
+/**
  * 从持久化计划引述 next-step（ADR-0011 Decision 2）：锚定 afterStepId 时
  * 取其后首个未走完的步骤，无锚点时取整单首个未走完步骤。查不到表项、
  * 计划走完或操作终态时返回 null——信封退回收据形态，绝不虚构引述。
@@ -231,9 +242,9 @@ export function quoteGeoNextStep(
     ? operation.steps.findIndex((step) => step.id === afterStepId)
     : -1;
   if (afterStepId && anchorIndex === -1) return null;
-  const candidate = operation.steps
-    .slice(anchorIndex + 1)
-    .find((step) => !STEP_PAST_STATUSES.has(step.status));
+  const candidate = currentGeoOperationStep(
+    operation.steps.slice(anchorIndex + 1),
+  );
   if (!candidate) return null;
   const guide = GEO_NEXT_STEP_GUIDES[candidate.id];
   if (!guide) return null;

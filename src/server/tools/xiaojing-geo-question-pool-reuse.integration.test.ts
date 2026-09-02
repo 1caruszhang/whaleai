@@ -10,6 +10,10 @@ vi.mock('../utils/management-api-client', () => ({
 
 import { GEO_NEXT_STEP_GUIDES } from '../geo/operation-progress';
 import {
+  planGeoOperation,
+  type GeoOperationProjection,
+} from '../../shared/geo/operation';
+import {
   QUESTION_POOL_REUSE_CONTRACT,
   QUESTION_POOL_REUSE_OUTCOME,
   type QuestionPoolProjection,
@@ -60,6 +64,44 @@ const reusedContext = {
   recentSelectedQuestions: [],
   keywordLibrary: [],
 };
+
+/**
+ * 顺序闸（票 #05）放行形态的本会话操作：全链计划走到知识链完成，当前步
+ * generate-question-pool 恰引述 run_question_pool——工具照常放行业务。
+ */
+function operationAtQuestionPoolStage(): GeoOperationProjection {
+  const steps = planGeoOperation({
+    intent: 'full-optimization',
+    goal: '一轮完整的 GEO 优化',
+  }).steps.map((step, index, all) => {
+    const lastKnowledgeIndex = all.findIndex((candidate) => candidate.id === 'confirm-knowledge');
+    return index <= lastKnowledgeIndex ? { ...step, status: 'succeeded' as const } : { ...step };
+  });
+  return {
+    id: 'op-reuse-32',
+    workspaceId: 'brand-a',
+    sessionId: 'session-pool-reuse',
+    kind: 'full-optimization',
+    goal: '一轮完整的 GEO 优化',
+    status: 'running',
+    steps,
+    inputRefs: [],
+    artifactRefs: [],
+    checkpoint: null,
+    pendingConfirmation: null,
+    error: null,
+    sourceOperationId: null,
+    updateKnowledge: null,
+    revision: 7,
+    executionGeneration: 1,
+    executionSidecarGeneration: null,
+    queueReason: null,
+    queuePosition: null,
+    createdAt: '2026-09-02T00:00:00Z',
+    updatedAt: '2026-09-02T00:10:00Z',
+    terminalAt: null,
+  };
+}
 
 async function withClient(
   routes: Record<string, Record<string, unknown>>,
@@ -135,6 +177,10 @@ describe('run_question_pool reuse contract over a live MCP server', () => {
     const pool = poolOf({ status: 'confirmed', reused: true });
     await withClient(
       {
+        '/api/brand-geo-operations/list': {
+          ok: true,
+          operations: [operationAtQuestionPoolStage()],
+        },
         '/api/brand-question-pools/prepare': {
           ok: true,
           preparation: { kind: 'reused', context: reusedContext, attempt: null, pool },
@@ -191,6 +237,10 @@ describe('run_question_pool reuse contract over a live MCP server', () => {
     const pool = poolOf({ status: 'awaiting-selection', reused: true });
     await withClient(
       {
+        '/api/brand-geo-operations/list': {
+          ok: true,
+          operations: [operationAtQuestionPoolStage()],
+        },
         '/api/brand-question-pools/prepare': {
           ok: true,
           preparation: { kind: 'reused', context: reusedContext, attempt: null, pool },

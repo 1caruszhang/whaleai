@@ -13,6 +13,7 @@ import {
   configureXiaojingGeo,
   createXiaojingGeoServer,
 } from './xiaojing-geo-tool';
+import { planGeoOperation } from '../../shared/geo/operation';
 
 /**
  * 跨 Session 状态盲区回归（MCP 协议级）：新 Session 的 agent 第一个动作
@@ -329,6 +330,16 @@ describe('generate_articles latest-confirmed-plan fallback over a live MCP serve
     // 捕获 start 的请求体：空参必须以 topicPlanId: null 落到端口，
     // 由 Rust「最新 confirmed plan」回落裁决，而不是工具层报错。
     // start 成功后服务按规格回读自身（get_article_operation），一并路由。
+    // 顺序闸（票 #05）放行形态：本会话操作当前步 = generate-articles，
+    // 空参调用是计划内的当前阶段。
+    const gateSteps = planGeoOperation({
+      intent: 'article-generation',
+      goal: '写文章',
+    }).steps.map((step) =>
+      step.id === 'generate-articles'
+        ? { ...step, status: 'ready' as const }
+        : { ...step, status: 'succeeded' as const },
+    );
     vi.mocked(managementApi).mockImplementation(
       async (path: string, _method?: string, body?: Record<string, unknown>) => {
         if (path === '/api/brand-articles/start' && body) startCalls.push(body);
@@ -349,6 +360,22 @@ describe('generate_articles latest-confirmed-plan fallback over a live MCP serve
         const routes: Record<string, Record<string, unknown>> = {
           '/api/brand-articles/start': { ok: true, operation },
           '/api/brand-articles/operation/get': { ok: true, operation },
+          '/api/brand-geo-operations/list': {
+            ok: true,
+            operations: [
+              {
+                id: 'op-articles-it',
+                sessionId: 'session-articles',
+                kind: 'article-generation',
+                goal: '写文章',
+                status: 'running',
+                steps: gateSteps,
+                revision: 3,
+                createdAt: '2026-09-01T00:00:00Z',
+                updatedAt: '2026-09-01T00:00:00Z',
+              },
+            ],
+          },
         };
         const response = routes[path];
         if (!response) return { ok: false, error: `unrouted:${path}` };

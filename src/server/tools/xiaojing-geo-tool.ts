@@ -65,6 +65,7 @@ import {
   createGeoOperationService,
   type GeoOperationCreateInput,
 } from '../geo/operation';
+import { stageToolOrderRejection, type GeoStageOrderRejection } from '../geo/stage-order-gate';
 import { buildKnowledgeCandidatesCardData } from '../../shared/geo/knowledgeCard';
 import {
   buildMaterialRequestCardData,
@@ -485,6 +486,18 @@ export async function chooseNextRoundKnowledge(input: {
   updateKnowledge: boolean;
 }) {
   return geoOperationService().chooseNextRoundKnowledge(input);
+}
+
+/**
+ * 顺序闸拒绝的工具结果（票 #05）：结构化指路信封直接作为工具内容返回——
+ * 当前步 + 应调工具 + 一句话指引，模型一次读明白、一次重试到位，不 throw
+ * 成 isError 单行文本。闸只覆盖五个有后果的阶段工具（GEO_STAGE_ORDER_
+ * GATED_TOOLS）；只读查询与材料类工具不经此路径。
+ */
+function stageOrderGateResult(rejection: GeoStageOrderRejection) {
+  return {
+    content: [{ type: 'text' as const, text: JSON.stringify(rejection) }],
+  };
 }
 
 function knowledgeAuthority() {
@@ -1726,6 +1739,10 @@ export async function createXiaojingGeoServer() {
         },
         async (input): Promise<{ content: Array<{ type: 'text'; text: string }> }> => {
           const identity = stageIdentity();
+          // 顺序闸（票 #05）：阶段工具先对齐本会话操作的当前步，越序调用
+          // 在任何业务工作（含缺省产品线回读）之前被结构化拒绝。
+          const orderGate = await stageToolOrderRejection(identity, 'run_question_pool');
+          if (orderGate) return stageOrderGateResult(orderGate);
           let productLine = input.productLine?.trim();
           if (!productLine) {
             const sidecarId = process.env.XIAOJING_SIDECAR_ID?.trim();
@@ -1794,6 +1811,10 @@ export async function createXiaojingGeoServer() {
         },
         async (input): Promise<{ content: Array<{ type: 'text'; text: string }> }> => {
           const identity = stageIdentity();
+          // 顺序闸（票 #05）：先对齐当前步，越序调用在真实 provider 工作前
+          // 被结构化拒绝。
+          const orderGate = await stageToolOrderRejection(identity, 'plan_topics');
+          if (orderGate) return stageOrderGateResult(orderGate);
           // 执行段先行 begin：主题规划是真实 provider 工作。
           await recordGeoOperationMilestone(identity, 'topic-plan-started');
           const plan: TopicPlanProjection = await topicPlanService().generate({
@@ -1845,6 +1866,11 @@ export async function createXiaojingGeoServer() {
           const source: ArticleOperationSource =
             articleOperationSourceFromGenerateInput(input);
           const identity = stageIdentity();
+          // 顺序闸（票 #05）：先对齐当前步，越序调用在真实 provider 工作
+          //（含执行段 begin 里程碑）前被结构化拒绝；纯入参校验仍先行，
+          // 互斥组合的 isError 语义不变。
+          const orderGate = await stageToolOrderRejection(identity, 'generate_articles');
+          if (orderGate) return stageOrderGateResult(orderGate);
           // 执行段先行 begin：文章生成是全程最长的真实工作段，进度条从
           // 工具开始即进入 running，逐篇落定由 onArticleSettled 回报 N/M。
           await recordGeoOperationMilestone(identity, 'article-generation-started');
@@ -1942,6 +1968,10 @@ export async function createXiaojingGeoServer() {
         },
         async (input): Promise<{ content: Array<{ type: 'text'; text: string }> }> => {
           const identity = stageIdentity();
+          // 顺序闸（票 #05）：先对齐当前步，越序调用在渠道候选探测等业务
+          // 工作前被结构化拒绝。
+          const orderGate = await stageToolOrderRejection(identity, 'plan_distribution');
+          if (orderGate) return stageOrderGateResult(orderGate);
           const service = distributionService();
           const [context, spendLimits] = await Promise.all([
             service.context({ ...stageIdentity() }),
@@ -1995,6 +2025,11 @@ export async function createXiaojingGeoServer() {
           planId: z.string().min(1).max(120).optional(),
         },
         async (input): Promise<{ content: Array<{ type: 'text'; text: string }> }> => {
+          // 顺序闸（票 #05）：发布预览也要对齐当前步——越序预览同样制造
+          // 叙事与状态分叉（模型拿着预览数据向用户描述未到阶段的发布）。
+          const identity = stageIdentity();
+          const orderGate = await stageToolOrderRejection(identity, 'prepare_publish');
+          if (orderGate) return stageOrderGateResult(orderGate);
           const execution = await publishPreviewPort().preview(input.planId);
           if (!execution) {
             throw new Error('publish_preview_requires_confirmed_plan');
