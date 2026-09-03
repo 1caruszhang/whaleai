@@ -450,9 +450,39 @@ describe('generate_articles latest-confirmed-plan fallback over a live MCP serve
       sessionId: 'session-articles',
       workspace: 'C:/ws/brand-a',
     });
+    // 顺序闸已在注册缝先于入参校验（票 01 唯一登记的窄偏离）：本测试钉
+    // 的是互斥入参校验语义本身，必须让闸先放行——操作当前步停在
+    // generate-articles（与上一用例同形态），handler 才会跑到纯校验。
+    // 「互斥入参 × 越序/读不到状态」交叉点的新口径（闸拒绝信封优先）
+    // 由 xiaojing-geo-stage-order-gate.integration.test.ts 守护。
+    const gateSteps = planGeoOperation({
+      intent: 'article-generation',
+      goal: '写文章',
+    }).steps.map((step) =>
+      step.id === 'generate-articles'
+        ? { ...step, status: 'ready' as const }
+        : { ...step, status: 'succeeded' as const },
+    );
     vi.mocked(managementApi).mockImplementation(
       async (path: string): Promise<Record<string, unknown>> => {
-        void path;
+        if (path === '/api/brand-geo-operations/list') {
+          return {
+            ok: true,
+            operations: [
+              {
+                id: 'op-articles-validation',
+                sessionId: 'session-articles',
+                kind: 'article-generation',
+                goal: '写文章',
+                status: 'running',
+                steps: gateSteps,
+                revision: 3,
+                createdAt: '2026-09-01T00:00:00Z',
+                updatedAt: '2026-09-01T00:00:00Z',
+              },
+            ],
+          };
+        }
         return { ok: false, error: 'unrouted' };
       },
     );

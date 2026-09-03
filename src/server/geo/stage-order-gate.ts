@@ -10,21 +10,42 @@ import {
 } from "./operation-progress";
 
 /**
- * 顺序闸覆盖的五个有后果阶段工具（票 #05，spec 2026-09-02 决策 4）：它们
- * 触发真实 Provider 花费或推进阶段产物，调用必须与「本会话非终态操作的
- * 当前步骤」对齐——否则业务层放行越序调用而状态机纹丝不动，叙事与状态
- * 就此分叉（f74ce69e 实证）。只读查询与材料类工具不闸：前者保护「先重读
- * 操作状态」纪律畅通，后者是计划外的合法补材料入口。
+ * 顺序闸的显式不闸白名单（spec 2026-09-03 决策 3）：GEO_NEXT_STEP_GUIDES
+ * 值域里有意识不闸的工具——新增阶段工具进 Guides 即自动入闸，想让某个
+ * Guides 工具不闸必须把名字写进这里并给理由（有意识裁决，不是漏配）。
+ * - request_brand_material：计划外补材料是合法入口（票 05 口径）。
+ * - choose_next_round_knowledge：知识段用户答复记录，无产物无花费，与
+ *   材料类同口径。
  */
-export const GEO_STAGE_ORDER_GATED_TOOLS = [
-  "run_question_pool",
-  "plan_topics",
-  "generate_articles",
-  "plan_distribution",
-  "prepare_publish",
+export const GEO_STAGE_ORDER_UNGATED_TOOLS = [
+  "request_brand_material",
+  "choose_next_round_knowledge",
 ] as const;
 
-export type GeoStageOrderGatedTool = (typeof GEO_STAGE_ORDER_GATED_TOOLS)[number];
+/**
+ * 顺序闸的被闸工具表（票 01 起改为派生，消灭与 GEO_NEXT_STEP_GUIDES 的
+ * 双源）：被闸集 := Guides 值域工具集 − 上方显式白名单——闸的放行判定
+ * 本就查 Guides 表，「忘加闸表」与「忘插桩」是同一个洞的两种忘法，
+ * 前者随派生消灭、后者随注册缝上移（stage-order-gate-registration.ts）
+ * 消灭。派生集恰好等于票 05 时代的五个有后果阶段工具：它们触发真实
+ * Provider 花费或推进阶段产物，调用必须与「本会话非终态操作的当前步」
+ * 对齐——否则业务层放行越序调用而状态机纹丝不动，叙事与状态就此分叉
+ * （f74ce69e 实证）。只读查询不进 Guides 值域、天然不闸：保护「先重读
+ * 操作状态」纪律畅通。派生等价（派生集==现五工具 ∧ 白名单==恰好两工具）
+ * 由 stage-order-gate.unit.test.ts 的派生钉守护；类型随派生从字面量联合
+ * 放宽为 string（仅服务端内部消费点，无外部契约面，不入跨语言 pin）。
+ */
+export const GEO_STAGE_ORDER_GATED_TOOLS: readonly string[] = (() => {
+  const guidesTools = new Set(
+    Object.values(GEO_NEXT_STEP_GUIDES).map((guide) => guide.tool),
+  );
+  for (const tool of GEO_STAGE_ORDER_UNGATED_TOOLS) guidesTools.delete(tool);
+  return [...guidesTools];
+})();
+
+/** 被闸工具名：随派生放宽为 string——闸覆盖面由派生钉守护，不再由
+ * 类型字面量联合静态枚举。 */
+export type GeoStageOrderGatedTool = string;
 
 /** 当前步不是 agent 工具步时的所停步骤：用户门等放行，或由其他通道推进。 */
 export interface GeoStageOrderHeldStep {

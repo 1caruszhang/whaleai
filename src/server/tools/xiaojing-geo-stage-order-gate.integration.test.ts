@@ -275,6 +275,43 @@ describe('stage-tool order gate over a live MCP server', () => {
     );
   });
 
+  it('fails closed when the operations list read errors: unavailable envelope, zero business calls', async () => {
+    // 闸的安全姿态（票 01 补钉，此前全仓零覆盖）：操作状态读不到就无从
+    // 裁决顺序——五个阶段工具全部被 fail-closed 拒绝并指路重读，绝不
+    // 半执行（真实 Provider 花费零发生）。
+    await withClient(
+      { '/api/brand-geo-operations/list': { ok: false, error: 'rust_management_unreachable' } },
+      async (client, calls) => {
+        for (const tool of GEO_STAGE_ORDER_GATED_TOOLS) {
+          const result = await client.callTool({
+            name: tool,
+            arguments: STAGE_TOOL_ARGUMENTS[tool] ?? {},
+          });
+          const payload = payloadOf(result);
+          expect(payload).toMatchObject({
+            kind: 'geo-stage-order-gate',
+            ok: false,
+            error: 'geo_stage_order_unavailable',
+            tool,
+          });
+          expect(payload.hint).toContain('inspect_geo_operations');
+        }
+        // 每个被闸工具恰好一次操作列表查询（全部报错），零业务路由触达。
+        expect(calls).toEqual(
+          Array.from({ length: GEO_STAGE_ORDER_GATED_TOOLS.length }, () => [
+            '/api/brand-geo-operations/list',
+            {
+              workspaceId: 'brand-a',
+              sessionId: 'session-gate-it',
+              sidecarId: 'sidecar-order-gate-it',
+              payload: {},
+            },
+          ]),
+        );
+      },
+    );
+  });
+
   it('keeps read-only queries and material tools ungated', async () => {
     // 同样「无操作」的状态下：只读查询照常应答（保护「先重读操作状态」
     // 纪律畅通），材料请求卡照常发卡（计划外补材料是合法入口）。
