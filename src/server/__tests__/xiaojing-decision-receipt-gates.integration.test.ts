@@ -34,12 +34,10 @@ vi.mock('../routes/xiaojing-shared', () => ({
   getRuntimeSessionIdForRequest: () => 'session-1',
   // 测试请求不带账号 token 头，与真实现对缺头请求的返回一致（undefined）。
   requestAccountAccessToken: () => undefined,
-}));
-
-// GEO 领域服务经组合根取用（spec：geo-service-composition）——路由不再
-// 私建服务，mock 面随之从 getter 组换到 service-composition 模块。
-vi.mock('../geo/service-composition', () => ({
-  geoServices: () => ({
+  // GEO 领域服务经组合根取用（spec：geo-service-composition）——路由统一
+  // 经 xiaojing-shared 的 geoServicesForRequest 取服务（提取与传参单源），
+  // mock 面随之落在 xiaojing-shared 模块。
+  geoServicesForRequest: () => ({
     topicPlan: { confirm: gateMocks.confirmTopicPlan },
     article: { approve: gateMocks.approveArticle },
     distribution: { confirm: gateMocks.confirmDistribution },

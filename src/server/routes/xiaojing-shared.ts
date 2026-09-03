@@ -3,6 +3,11 @@ import {
   buildGeoOperationEventReminder,
 } from '../../shared/systemReminder';
 import { getSessionId } from '../agent-session';
+import {
+  geoServices,
+  type GeoServiceBundle,
+  type GeoServiceIdentity,
+} from '../geo/service-composition';
 import { recordGeoOperationMilestone, quoteGeoNextStepForAction } from '../geo/operation-progress';
 import { sendXiaojingMessage } from '../xiaojing-reminder-send';
 
@@ -24,10 +29,21 @@ function getRuntimeSessionIdForRequest(): string {
 }
 
 // GEO 领域服务的组装已收敛到 service-composition 组合根（spec：
-// geo-service-composition）——面板/卡片路由一律经
-// geoServices(identity, { accountToken: requestAccountAccessToken(request) })
-// 取服务：请求级新鲜 token 优先，未携带时由组合根回退启动单例
-// （票 B 闭合 env-token 过期 401 隐患族）。
+// geo-service-composition）。面板/卡片路由一律经下述 geoServicesForRequest
+// 取服务：请求级新鲜 token（x-xiaojing-account-token 头）优先，未携带时由
+// 组合根回退启动单例（票 B 闭合 env-token 过期 401 隐患族）——提取与传参
+// 约定单源于此，三个域路由文件共用，不再逐文件复制。
+
+/** 面板/卡片路由取 GEO 领域服务的统一入口：从请求头提取请求级账号 token
+ * 传入组合根（token 口径与回退语义由组合根统一实现）。 */
+export function geoServicesForRequest(
+  identity: GeoServiceIdentity,
+  request: Request,
+): GeoServiceBundle {
+  return geoServices(identity, {
+    accountToken: requestAccountAccessToken(request),
+  });
+}
 
 async function notifyGeoOperationWorkbenchEvent(
   sessionId: string,

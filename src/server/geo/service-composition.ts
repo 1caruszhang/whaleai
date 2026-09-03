@@ -57,7 +57,12 @@ export interface GeoServiceOptions {
    * `'default'`：按 accountToken 同口径解析计费 permit 通道。
    */
   billing?: 'default' | 'revision-unbilled';
-  /** 图片重扫的提取预算（毫秒），透传 MaterialImportService；仅重扫场景。 */
+  /**
+   * 图片重扫的提取预算（毫秒），透传 MaterialImportService；仅重扫场景。
+   * 在场即按不计费口径构造材料导入服务（重扫从不接计费通道——收敛前
+   * 口径，与 revision-unbilled 同为 unbilled 构造；要「带预算的计费
+   * 导入」必须先显式拆开该耦合）。
+   */
   rescanBudgetMs?: number;
 }
 

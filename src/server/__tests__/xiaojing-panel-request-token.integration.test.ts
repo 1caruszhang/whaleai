@@ -3,6 +3,8 @@ import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { ARTICLE_IMAGE_CANDIDATE_INJECTION_LIMIT } from '../../shared/geo/articleGeneration';
+
 // 票 B 回归钉（spec：geo-service-composition Implementation Decision 7）：
 // HTTP 面板/卡片路由的网关调用携带请求级新鲜账号 token
 // （x-xiaojing-account-token 头，与 Rust 侧 ACCOUNT_TOKEN_HEADER 逐字节
@@ -10,8 +12,8 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vites
 // 确认/重试/重生成不再 401（6594d58 前科的隐患族闭合）。断言在能力层
 // （mock provider-runtime，仓库既有模块 mock 习惯）：真实路由 → 真实
 // 组合根构造出的服务，其能力与计费通道携带的 token 来自请求头而非 env
-// 单例；未携带头时回退启动单例口径。三个域路由文件共用同一提取与传参
-// 约定（逐文件复制），各驱动一条代表路由钉住。
+// 单例；未携带头时回退启动单例口径。三个域路由文件统一经 xiaojing-shared
+// 的 geoServicesForRequest 提取与传参（约定单源），各驱动一条代表路由钉住。
 
 const mocks = vi.hoisted(() => ({
   capabilitiesForRequest: vi.fn(),
@@ -19,6 +21,9 @@ const mocks = vi.hoisted(() => ({
   topicPlanCtor: vi.fn(),
   questionPoolCtor: vi.fn(),
   baselineCtor: vi.fn(),
+  articleCtor: vi.fn(),
+  brandPortSpy: vi.fn(),
+  listImageAssetsSpy: vi.fn(),
 }));
 
 vi.mock('../agent-session', () => ({
@@ -108,6 +113,40 @@ vi.mock('../geo/baseline', () => {
   return {
     GeoBaselineService,
     createGeoBaselinePort: vi.fn(() => ({ __port: 'baseline' })),
+  };
+});
+
+// HTTP 面板文章路径的配图候选池回归钉（2026-08-31 零配图事故）：组合根
+// 直测（service-composition.unit.test.ts）以 options 等价钉三条路径，
+// 此处补 HTTP 腿的路由级钉——真实路由经 geoServicesForRequest 取到的
+// articleService 必须带着接通材料图片资产的池（构造边界捕获入参）。
+vi.mock('../geo/article-generation', () => {
+  class ArticleGenerationService {
+    readonly received: unknown[];
+    constructor(...received: unknown[]) {
+      this.received = received;
+      mocks.articleCtor(this);
+    }
+    async latest() {
+      return null;
+    }
+  }
+  return {
+    ArticleGenerationService,
+    createArticlePort: vi.fn(() => ({ __port: 'article' })),
+  };
+});
+
+vi.mock('../geo/material-import', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../geo/material-import')>();
+  return {
+    ...actual,
+    createBrandMaterialPort: mocks.brandPortSpy.mockImplementation(
+      (identity: unknown) => ({
+        listImageAssets: mocks.listImageAssetsSpy,
+        __identity: identity,
+      }),
+    ),
   };
 });
 
@@ -251,6 +290,40 @@ describe.each(PANEL_ROUTES)('面板路由 $label 的请求级 token（票 B）',
     ).toBe('ENV_SINGLETON');
     expect(service.received[route.billingArg]).toEqual({
       __channel: 'singleton',
+    });
+  });
+});
+
+describe('HTTP 面板文章路径的配图候选池（2026-08-31 零配图事故回归钉）', () => {
+  it('articles/latest 经真实路由→组合根构造的 articleService 接通配图候选池', async () => {
+    const response = await handleContentPipeline(
+      '/api/xiaojing/articles/latest',
+      post('/ignored', identityPayload()),
+      { workspacePath: workspace },
+    );
+    expect(response?.status).toBe(200);
+    expect(await response?.json()).toMatchObject({ success: true });
+
+    // 构造参数：identity, persistence, generation, reflection, permits, imageCandidates
+    const service = lastConstructed(mocks.articleCtor);
+    expect(service.received[0]).toEqual({
+      workspaceId,
+      sessionId: 'session-panel-1',
+    });
+    const pool = service.received[5] as () => Promise<unknown[]>;
+    expect(typeof pool).toBe('function');
+
+    mocks.listImageAssetsSpy.mockResolvedValue([]);
+    mocks.brandPortSpy.mockClear();
+    mocks.listImageAssetsSpy.mockClear();
+    await expect(pool()).resolves.toEqual([]);
+    expect(mocks.brandPortSpy).toHaveBeenCalledWith({
+      workspaceId,
+      sessionId: 'session-panel-1',
+    });
+    expect(mocks.listImageAssetsSpy).toHaveBeenCalledTimes(1);
+    expect(mocks.listImageAssetsSpy).toHaveBeenCalledWith({
+      limit: ARTICLE_IMAGE_CANDIDATE_INJECTION_LIMIT,
     });
   });
 });

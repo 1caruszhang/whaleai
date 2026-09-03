@@ -23,9 +23,9 @@ import {
   getXiaojingGeoProviderCapabilitiesForRequest,
 } from '../geo/provider-runtime';
 import { PublishEgressService } from '../geo/publish-egress';
-import { geoServices } from '../geo/service-composition';
 import { jsonResponse } from '../utils/http';
 import {
+  geoServicesForRequest,
   getRuntimeSessionIdForRequest,
   recordBaselineMilestones,
   requestAccountAccessToken,
@@ -142,9 +142,9 @@ export async function handleXiaojingEffectsRoute(
   ctx: XiaojingRouteContext,
 ): Promise<Response | null> {
   const { workspacePath } = ctx;
-  // 面板/卡片路径的网关调用一律携带请求级新鲜账号 token（票 B）；未携带
-  // 时回退启动单例——回退语义由组合根统一实现。发布预览端口不走网关，
-  // 传值只为保持同一构造口径。
+  // 领域服务统一经 geoServicesForRequest 取（请求级 token 口径单源在
+  // xiaojing-shared）；裸 accountToken 供家族外服务（发布 egress/仪表盘/
+  // 探测）与计费/能力 getter 按同一请求级口径使用。
   const accountToken = requestAccountAccessToken(request);
 
   // Publish execution is a Rust-owned deterministic scheduler. This
@@ -172,10 +172,10 @@ export async function handleXiaojingEffectsRoute(
           403,
         );
       }
-      const execution = await geoServices({
+      const execution = await geoServicesForRequest({
         workspaceId,
         sessionId: runtimeSessionId,
-      }, { accountToken }).publishPreview.latest();
+      }, request).publishPreview.latest();
       return jsonResponse({ success: true, execution });
     } catch (error) {
       return jsonResponse(
@@ -209,10 +209,10 @@ export async function handleXiaojingEffectsRoute(
           403,
         );
       }
-      const execution = await geoServices({
+      const execution = await geoServicesForRequest({
         workspaceId,
         sessionId: runtimeSessionId,
-      }, { accountToken }).publishPreview.get(payload.executionId);
+      }, request).publishPreview.get(payload.executionId);
       return jsonResponse({ success: true, execution });
     } catch (error) {
       return jsonResponse(
@@ -246,10 +246,10 @@ export async function handleXiaojingEffectsRoute(
           403,
         );
       }
-      const execution = await geoServices({
+      const execution = await geoServicesForRequest({
         workspaceId,
         sessionId: runtimeSessionId,
-      }, { accountToken }).publishPreview.preview(payload.planId);
+      }, request).publishPreview.preview(payload.planId);
       return jsonResponse({ success: true, execution });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -290,10 +290,10 @@ export async function handleXiaojingEffectsRoute(
           400,
         );
       }
-      const execution = await geoServices({
+      const execution = await geoServicesForRequest({
         workspaceId,
         sessionId: runtimeSessionId,
-      }, { accountToken }).publishPreview.get(payload.executionId);
+      }, request).publishPreview.get(payload.executionId);
       const distribution = getXiaojingGeoProviderCapabilitiesForRequest(
         accountToken,
       ).distribution;
@@ -548,10 +548,10 @@ export async function handleXiaojingEffectsRoute(
           403,
         );
       }
-      const engines = geoServices({
+      const engines = geoServicesForRequest({
         workspaceId,
         sessionId: runtimeSessionId,
-      }, { accountToken }).baseline.engines();
+      }, request).baseline.engines();
       return jsonResponse({ success: true, engines });
     } catch (error) {
       return jsonResponse(
@@ -584,10 +584,10 @@ export async function handleXiaojingEffectsRoute(
           403,
         );
       }
-      const baseline = await geoServices({
+      const baseline = await geoServicesForRequest({
         workspaceId,
         sessionId: runtimeSessionId,
-      }, { accountToken }).baseline.latest({ workspaceId, sessionId: runtimeSessionId });
+      }, request).baseline.latest({ workspaceId, sessionId: runtimeSessionId });
       return jsonResponse({ success: true, baseline });
     } catch (error) {
       return jsonResponse(
@@ -624,7 +624,7 @@ export async function handleXiaojingEffectsRoute(
         );
       }
       const identity = { workspaceId, sessionId: runtimeSessionId };
-      const baseline = await geoServices(identity, { accountToken }).baseline.start({
+      const baseline = await geoServicesForRequest(identity, request).baseline.start({
         ...payload,
         ...identity,
       });
@@ -663,7 +663,7 @@ export async function handleXiaojingEffectsRoute(
         );
       }
       const identity = { workspaceId, sessionId: runtimeSessionId };
-      const baseline = await geoServices(identity, { accountToken }).baseline.retry({
+      const baseline = await geoServicesForRequest(identity, request).baseline.retry({
         ...payload,
         ...identity,
       });
