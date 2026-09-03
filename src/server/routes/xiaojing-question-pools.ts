@@ -5,11 +5,11 @@ import type { QuestionPoolQuestion } from '../../shared/geo/questionPool';
 import { buildQuestionPoolDecisionReminder } from '../../shared/systemReminder';
 import { currentGeoAutonomyProfile } from '../geo/autonomy-profile';
 import { recordGeoOperationMilestone, quoteGeoNextStepForGateKind } from '../geo/operation-progress';
+import { geoServices } from '../geo/service-composition';
 import { jsonResponse } from '../utils/http';
 import { sendXiaojingMessage } from '../xiaojing-reminder-send';
 import {
   getRuntimeSessionIdForRequest,
-  getXiaojingQuestionPoolService,
   requestAccountAccessToken,
   type XiaojingRouteContext,
 } from './xiaojing-shared';
@@ -38,10 +38,10 @@ export async function handleXiaojingQuestionPoolsRoute(
         || payload.sessionId !== runtimeSessionId) {
         return jsonResponse({ success: false, error: 'question_pool_identity_mismatch' }, 403);
       }
-      const pool = await getXiaojingQuestionPoolService({
+      const pool = await geoServices({
         workspaceId,
         sessionId: runtimeSessionId,
-      }).latest({ ...payload, workspaceId, sessionId: runtimeSessionId });
+      }).questionPool.latest({ ...payload, workspaceId, sessionId: runtimeSessionId });
       return jsonResponse({ success: true, pool });
     } catch (error) {
       return jsonResponse({
@@ -74,7 +74,7 @@ export async function handleXiaojingQuestionPoolsRoute(
         return jsonResponse({ success: false, error: 'question_pool_identity_mismatch' }, 403);
       }
       const identity = { workspaceId, sessionId: runtimeSessionId };
-      const service = getXiaojingQuestionPoolService(identity);
+      const service = geoServices(identity).questionPool;
       const pool = await service.generate({
         ...payload,
         ...identity,
@@ -146,10 +146,10 @@ export async function handleXiaojingQuestionPoolsRoute(
         || payload.sessionId !== runtimeSessionId) {
         return jsonResponse({ success: false, error: 'question_pool_identity_mismatch' }, 403);
       }
-      const pool = await getXiaojingQuestionPoolService({
+      const pool = await geoServices({
         workspaceId,
         sessionId: runtimeSessionId,
-      }).cancel(payload.idempotencyKey);
+      }).questionPool.cancel(payload.idempotencyKey);
       return jsonResponse({ success: true, pool });
     } catch (error) {
       return jsonResponse({
@@ -175,7 +175,7 @@ export async function handleXiaojingQuestionPoolsRoute(
         return jsonResponse({ success: false, error: 'question_pool_identity_mismatch' }, 403);
       }
       const identity = { workspaceId, sessionId: runtimeSessionId };
-      const decision = await getXiaojingQuestionPoolService(identity).confirm({
+      const decision = await geoServices(identity).questionPool.confirm({
         ...payload,
         ...identity,
       });

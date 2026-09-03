@@ -6,13 +6,11 @@ import type { TopicPlanWireItem } from '../../shared/geo/topicPlan';
 import { toTopicPlanCardProjection } from '../../shared/geo/topicPlan';
 import { buildArticleApprovalDecisionReminder, buildDistributionPlanDecisionReminder, buildTopicPlanDecisionReminder } from '../../shared/systemReminder';
 import { recordGeoOperationMilestone, quoteGeoNextStepForGateKind } from '../geo/operation-progress';
+import { geoServices } from '../geo/service-composition';
 import { jsonResponse } from '../utils/http';
 import { sendXiaojingMessage } from '../xiaojing-reminder-send';
 import {
   getRuntimeSessionIdForRequest,
-  getXiaojingArticleService,
-  getXiaojingDistributionPlanService,
-  getXiaojingTopicPlanService,
   requestAccountAccessToken,
   type XiaojingRouteContext,
 } from './xiaojing-shared';
@@ -48,10 +46,10 @@ export async function handleXiaojingContentPipelineRoute(
           403,
         );
       }
-      const plan = await getXiaojingTopicPlanService({
+      const plan = await geoServices({
         workspaceId,
         sessionId: runtimeSessionId,
-      }).latest({ ...payload, workspaceId, sessionId: runtimeSessionId });
+      }).topicPlan.latest({ ...payload, workspaceId, sessionId: runtimeSessionId });
       // 轮询响应走卡片瘦身投影：完整投影 ~84KB × 每 3s 一次太浪费；
       // 两个消费方（确认卡轮询、工作台面板）都只读瘦身字段。
       return jsonResponse({
@@ -93,7 +91,7 @@ export async function handleXiaojingContentPipelineRoute(
         );
       }
       const identity = { workspaceId, sessionId: runtimeSessionId };
-      const plan = await getXiaojingTopicPlanService(identity).generate({
+      const plan = await geoServices(identity).topicPlan.generate({
         ...payload,
         ...identity,
         forceRegenerate: payload.regenerate === true,
@@ -133,7 +131,7 @@ export async function handleXiaojingContentPipelineRoute(
         );
       }
       const identity = { workspaceId, sessionId: runtimeSessionId };
-      const result = await getXiaojingTopicPlanService(identity).saveItems({
+      const result = await geoServices(identity).topicPlan.saveItems({
         ...payload,
         ...identity,
       });
@@ -172,7 +170,7 @@ export async function handleXiaojingContentPipelineRoute(
         );
       }
       const identity = { workspaceId, sessionId: runtimeSessionId };
-      const result = await getXiaojingTopicPlanService(identity).regenerate(
+      const result = await geoServices(identity).topicPlan.regenerate(
         {
           ...payload,
           ...identity,
@@ -213,9 +211,9 @@ export async function handleXiaojingContentPipelineRoute(
         );
       }
       const identity = { workspaceId, sessionId: runtimeSessionId };
-      const confirmation = await getXiaojingTopicPlanService(
+      const confirmation = await geoServices(
         identity,
-      ).confirm({
+      ).topicPlan.confirm({
         ...payload,
         ...identity,
       });
@@ -274,10 +272,10 @@ export async function handleXiaojingContentPipelineRoute(
           403,
         );
       }
-      const operation = await getXiaojingArticleService({
+      const operation = await geoServices({
         workspaceId,
         sessionId: runtimeSessionId,
-      }).latest({ workspaceId, sessionId: runtimeSessionId });
+      }).article.latest({ workspaceId, sessionId: runtimeSessionId });
       return jsonResponse({ success: true, operation });
     } catch (error) {
       return jsonResponse(
@@ -312,10 +310,10 @@ export async function handleXiaojingContentPipelineRoute(
           403,
         );
       }
-      const operation = await getXiaojingArticleService({
+      const operation = await geoServices({
         workspaceId,
         sessionId: runtimeSessionId,
-      }).operation({
+      }).article.operation({
         workspaceId,
         sessionId: runtimeSessionId,
         operationId: payload.operationId,
@@ -354,7 +352,7 @@ export async function handleXiaojingContentPipelineRoute(
         );
       }
       const identity = { workspaceId, sessionId: runtimeSessionId };
-      const operation = await getXiaojingArticleService(identity).start({
+      const operation = await geoServices(identity).article.start({
         ...identity,
         source: payload.source,
       });
@@ -395,7 +393,7 @@ export async function handleXiaojingContentPipelineRoute(
       const identity = { workspaceId, sessionId: runtimeSessionId };
       // fire-and-forget：单篇重生成可达 1–2 分钟，同步等待会撞 Rust 代理
       // ~100s 超时；卡片每 3s 轮询 /articles/latest 自行追上状态。
-      const article = await getXiaojingArticleService(identity).retryStart({
+      const article = await geoServices(identity).article.retryStart({
         ...payload,
         ...identity,
       });
@@ -435,7 +433,7 @@ export async function handleXiaojingContentPipelineRoute(
         );
       }
       const identity = { workspaceId, sessionId: runtimeSessionId };
-      const body = await getXiaojingArticleService(identity).body({
+      const body = await geoServices(identity).article.body({
         ...payload,
         ...identity,
       });
@@ -477,7 +475,7 @@ export async function handleXiaojingContentPipelineRoute(
         );
       }
       const identity = { workspaceId, sessionId: runtimeSessionId };
-      const article = await getXiaojingArticleService(identity).edit({
+      const article = await geoServices(identity).article.edit({
         ...payload,
         ...identity,
       });
@@ -516,7 +514,7 @@ export async function handleXiaojingContentPipelineRoute(
         );
       }
       const identity = { workspaceId, sessionId: runtimeSessionId };
-      const article = await getXiaojingArticleService(identity).discard({
+      const article = await geoServices(identity).article.discard({
         ...payload,
         ...identity,
       });
@@ -555,7 +553,7 @@ export async function handleXiaojingContentPipelineRoute(
         );
       }
       const identity = { workspaceId, sessionId: runtimeSessionId };
-      const article = await getXiaojingArticleService(identity).approve({
+      const article = await geoServices(identity).article.approve({
         ...payload,
         ...identity,
       });
@@ -621,9 +619,9 @@ export async function handleXiaojingContentPipelineRoute(
         );
       }
       const identity = { workspaceId, sessionId: runtimeSessionId };
-      const context = await getXiaojingDistributionPlanService(
+      const context = await geoServices(
         identity,
-      ).context({
+      ).distribution.context({
         ...identity,
         articleOperationId: payload.articleOperationId,
       });
@@ -661,7 +659,7 @@ export async function handleXiaojingContentPipelineRoute(
       }
       const identity = { workspaceId, sessionId: runtimeSessionId };
       const plan =
-        await getXiaojingDistributionPlanService(identity).latest(identity);
+        await geoServices(identity).distribution.latest(identity);
       return jsonResponse({ success: true, plan });
     } catch (error) {
       return jsonResponse(
@@ -696,7 +694,7 @@ export async function handleXiaojingContentPipelineRoute(
         );
       }
       const identity = { workspaceId, sessionId: runtimeSessionId };
-      const plan = await getXiaojingDistributionPlanService(identity).start(
+      const plan = await geoServices(identity).distribution.start(
         {
           ...identity,
           source: payload.source,
@@ -737,7 +735,7 @@ export async function handleXiaojingContentPipelineRoute(
         );
       }
       const identity = { workspaceId, sessionId: runtimeSessionId };
-      const plan = await getXiaojingDistributionPlanService(identity).edit({
+      const plan = await geoServices(identity).distribution.edit({
         ...identity,
         planId: payload.planId,
         expectedRevision: payload.expectedRevision,
@@ -777,9 +775,9 @@ export async function handleXiaojingContentPipelineRoute(
         );
       }
       const identity = { workspaceId, sessionId: runtimeSessionId };
-      const plan = await getXiaojingDistributionPlanService(
+      const plan = await geoServices(
         identity,
-      ).confirm({
+      ).distribution.confirm({
         ...identity,
         planId: payload.planId,
         expectedRevision: payload.expectedRevision,

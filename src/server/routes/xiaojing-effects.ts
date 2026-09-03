@@ -23,11 +23,10 @@ import {
   getXiaojingGeoProviderCapabilitiesForRequest,
 } from '../geo/provider-runtime';
 import { PublishEgressService } from '../geo/publish-egress';
-import { createPublishSchedulerPort } from '../geo/publish-scheduler';
+import { geoServices } from '../geo/service-composition';
 import { jsonResponse } from '../utils/http';
 import {
   getRuntimeSessionIdForRequest,
-  getXiaojingGeoBaselineService,
   recordBaselineMilestones,
   requestAccountAccessToken,
   type XiaojingRouteContext,
@@ -169,10 +168,10 @@ export async function handleXiaojingEffectsRoute(
           403,
         );
       }
-      const execution = await createPublishSchedulerPort({
+      const execution = await geoServices({
         workspaceId,
         sessionId: runtimeSessionId,
-      }).latest();
+      }).publishPreview.latest();
       return jsonResponse({ success: true, execution });
     } catch (error) {
       return jsonResponse(
@@ -206,10 +205,10 @@ export async function handleXiaojingEffectsRoute(
           403,
         );
       }
-      const execution = await createPublishSchedulerPort({
+      const execution = await geoServices({
         workspaceId,
         sessionId: runtimeSessionId,
-      }).get(payload.executionId);
+      }).publishPreview.get(payload.executionId);
       return jsonResponse({ success: true, execution });
     } catch (error) {
       return jsonResponse(
@@ -243,10 +242,10 @@ export async function handleXiaojingEffectsRoute(
           403,
         );
       }
-      const execution = await createPublishSchedulerPort({
+      const execution = await geoServices({
         workspaceId,
         sessionId: runtimeSessionId,
-      }).preview(payload.planId);
+      }).publishPreview.preview(payload.planId);
       return jsonResponse({ success: true, execution });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -287,10 +286,10 @@ export async function handleXiaojingEffectsRoute(
           400,
         );
       }
-      const execution = await createPublishSchedulerPort({
+      const execution = await geoServices({
         workspaceId,
         sessionId: runtimeSessionId,
-      }).get(payload.executionId);
+      }).publishPreview.get(payload.executionId);
       const distribution = getXiaojingGeoProviderCapabilitiesForRequest(
         requestAccountAccessToken(request),
       ).distribution;
@@ -545,10 +544,10 @@ export async function handleXiaojingEffectsRoute(
           403,
         );
       }
-      const engines = getXiaojingGeoBaselineService({
+      const engines = geoServices({
         workspaceId,
         sessionId: runtimeSessionId,
-      }).engines();
+      }).baseline.engines();
       return jsonResponse({ success: true, engines });
     } catch (error) {
       return jsonResponse(
@@ -581,10 +580,10 @@ export async function handleXiaojingEffectsRoute(
           403,
         );
       }
-      const baseline = await getXiaojingGeoBaselineService({
+      const baseline = await geoServices({
         workspaceId,
         sessionId: runtimeSessionId,
-      }).latest({ workspaceId, sessionId: runtimeSessionId });
+      }).baseline.latest({ workspaceId, sessionId: runtimeSessionId });
       return jsonResponse({ success: true, baseline });
     } catch (error) {
       return jsonResponse(
@@ -621,7 +620,7 @@ export async function handleXiaojingEffectsRoute(
         );
       }
       const identity = { workspaceId, sessionId: runtimeSessionId };
-      const baseline = await getXiaojingGeoBaselineService(identity).start({
+      const baseline = await geoServices(identity).baseline.start({
         ...payload,
         ...identity,
       });
@@ -660,7 +659,7 @@ export async function handleXiaojingEffectsRoute(
         );
       }
       const identity = { workspaceId, sessionId: runtimeSessionId };
-      const baseline = await getXiaojingGeoBaselineService(identity).retry({
+      const baseline = await geoServices(identity).baseline.retry({
         ...payload,
         ...identity,
       });

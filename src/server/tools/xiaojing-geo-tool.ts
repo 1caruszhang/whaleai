@@ -1,12 +1,10 @@
-import { createHash } from 'node:crypto';
 import { basename, resolve } from 'node:path';
 
 import {
   configureXiaojingGeoProviderAdmission,
-  getXiaojingGeoBillingPermitChannelForRequest,
   getXiaojingGeoProviderCapabilities,
-  getXiaojingGeoProviderCapabilitiesForRequest,
 } from '../geo/provider-runtime';
+import { geoServices } from '../geo/service-composition';
 import {
   createKnowledgeAuthority,
   KNOWLEDGE_EXCERPT_MAX_LENGTH,
@@ -47,7 +45,6 @@ import {
   type GeoProbeSamplesReport,
 } from '../geo/probe-samples';
 import {
-  ARTICLE_IMAGE_CANDIDATE_INJECTION_LIMIT,
   filterValidRankingCompetitors,
   type ArticleOperationProjection,
   type ArticleOperationSource,
@@ -588,134 +585,48 @@ function materialIdentity(): { workspaceId: string; sessionId: string } {
 }
 
 function materialImportService(): MaterialImportService {
-  const identity = materialIdentity();
-  const capabilities = getXiaojingGeoProviderCapabilitiesForRequest(context.requestAccountToken);
-  return new MaterialImportService(
-    identity,
-    createBrandMaterialPort(identity),
-    capabilities.extraction,
-    createKnowledgeAuthority(identity),
-    {},
-    capabilities.keywordSearch,
-    undefined,
-    getXiaojingGeoBillingPermitChannelForRequest(context.requestAccountToken),
-  );
+  return geoServices(materialIdentity(), {
+    accountToken: context.requestAccountToken,
+  }).materialImport;
 }
 
 function brandMaterialPort() {
   return createBrandMaterialPort(materialIdentity());
 }
 
-// 题库/主题服务与 index.ts 的 HTTP 路由共用同一构造；这里按 Session 缓存实例，
-// 保证 agent 工具与面板/卡片走完全相同的领域语义与复用规则。缓存键携带本轮
-// 请求级 token 的截断指纹：轮换（refresh）后必须重建服务，不能让旧 token 留在
-// 已缓存的能力闭包里；token 稳定时实例照常复用。原始 token 不进常驻缓存键
-// （生命周期长于请求），只留 SHA-256 前 16 hex。
 function stageIdentity(): { workspaceId: string; sessionId: string } {
   if (!context.workspace) throw new Error('This stage requires an explicit workspace identity');
   return { workspaceId: basename(context.workspace), sessionId: context.sessionId };
 }
 
-/**
- * 请求级 token 的缓存键指纹：SHA-256 前 16 hex。原始 token 不进常驻缓存键
- * （生命周期长于请求）；指纹只用于区分轮换前后的 token，碰撞即同 key 复用
- * 同实例，语义与原「token 原文入 key」一致。
- */
-export function accountTokenCacheFingerprint(token: string | undefined): string {
-  if (!token) return '';
-  return createHash('sha256').update(token).digest('hex').slice(0, 16);
+// 组合根 delegation（spec：geo-service-composition 等价搬家）：GEO 领域
+// 服务的唯一出生点是 service-composition 的 geoServices——能力口径、
+// token 口径、实例缓存（工作区:会话:token 指纹，token 轮换即重建）、
+// 配图候选池注入、计费通道选择全部收在那一份实现里；本层只携带会话
+// 身份与请求级 token 取服务，Agent 工具与面板/卡片由此共享同一构造
+// 保证的实例族。
+function sessionGeoServices() {
+  return geoServices(stageIdentity(), { accountToken: context.requestAccountToken });
 }
 
-function stageRuntimeKey(identity: { workspaceId: string; sessionId: string }): string {
-  return `${identity.workspaceId}:${identity.sessionId}:${accountTokenCacheFingerprint(context.requestAccountToken)}`;
-}
-
-let questionPoolRuntime: { key: string; service: QuestionPoolService } | null = null;
 function questionPoolService(): QuestionPoolService {
-  const identity = stageIdentity();
-  const key = stageRuntimeKey(identity);
-  if (questionPoolRuntime?.key === key) return questionPoolRuntime.service;
-  const capabilities = getXiaojingGeoProviderCapabilitiesForRequest(context.requestAccountToken);
-  const service = new QuestionPoolService(
-    identity,
-    createQuestionPoolPort(identity),
-    capabilities.keywordSearch,
-    capabilities.generation,
-    capabilities.embedding,
-    getXiaojingGeoBillingPermitChannelForRequest(context.requestAccountToken),
-  );
-  questionPoolRuntime = { key, service };
-  return service;
+  return sessionGeoServices().questionPool;
 }
 
-let topicPlanRuntime: { key: string; service: TopicPlanService } | null = null;
 function topicPlanService(): TopicPlanService {
-  const identity = stageIdentity();
-  const key = stageRuntimeKey(identity);
-  if (topicPlanRuntime?.key === key) return topicPlanRuntime.service;
-  const capabilities = getXiaojingGeoProviderCapabilitiesForRequest(context.requestAccountToken);
-  const service = new TopicPlanService(
-    identity,
-    createTopicPlanPort(identity),
-    capabilities.generation,
-    capabilities.embedding,
-    undefined,
-    getXiaojingGeoBillingPermitChannelForRequest(context.requestAccountToken),
-  );
-  topicPlanRuntime = { key, service };
-  return service;
+  return sessionGeoServices().topicPlan;
 }
 
-let articleRuntime: { key: string; service: ArticleGenerationService } | null = null;
 function articleService(): ArticleGenerationService {
-  const identity = stageIdentity();
-  const key = stageRuntimeKey(identity);
-  if (articleRuntime?.key === key) return articleRuntime.service;
-  const capabilities = getXiaojingGeoProviderCapabilitiesForRequest(context.requestAccountToken);
-  const service = new ArticleGenerationService(
-    identity,
-    createArticlePort(identity),
-    capabilities.generation,
-    capabilities.reflection,
-    getXiaojingGeoBillingPermitChannelForRequest(context.requestAccountToken),
-    // 配图候选池（ADR-0008 T4）：与 xiaojing-shared 的 HTTP 路由同一取数。
-    // 2026-08-31 线上事故：本构造点漏传池，Agent 经 MCP 的批量生成与
-    // 重生成全部静默零配图（HTTP 重试路径有池、有图——两路径行为分裂）。
-    async () =>
-      createBrandMaterialPort(identity).listImageAssets({
-        limit: ARTICLE_IMAGE_CANDIDATE_INJECTION_LIMIT,
-      }),
-  );
-  articleRuntime = { key, service };
-  return service;
+  return sessionGeoServices().article;
 }
 
-let distributionRuntime: { key: string; service: DistributionPlanningService } | null = null;
 function distributionService(): DistributionPlanningService {
-  const identity = stageIdentity();
-  const key = stageRuntimeKey(identity);
-  if (distributionRuntime?.key === key) return distributionRuntime.service;
-  const capabilities = getXiaojingGeoProviderCapabilitiesForRequest(context.requestAccountToken);
-  const service = new DistributionPlanningService(
-    identity,
-    createDistributionPlanPort(identity),
-    capabilities.distribution,
-    capabilities.keywordSearch,
-    undefined,
-    getXiaojingGeoBillingPermitChannelForRequest(context.requestAccountToken),
-  );
-  distributionRuntime = { key, service };
-  return service;
+  return sessionGeoServices().distribution;
 }
 
-let publishPreviewRuntime: { key: string; port: ReturnType<typeof createPublishSchedulerPort> } | null = null;
 function publishPreviewPort(): ReturnType<typeof createPublishSchedulerPort> {
-  const identity = stageIdentity();
-  const key = `${identity.workspaceId}:${identity.sessionId}`;
-  if (publishPreviewRuntime?.key === key) return publishPreviewRuntime.port;
-  const port = createPublishSchedulerPort(identity);
-  publishPreviewRuntime = { key, port };
-  return port;
+  return sessionGeoServices().publishPreview;
 }
 
 /** 导入产出候选后推进 GeoOperation 的材料/抽取步骤；best-effort，不阻断工具结果。 */

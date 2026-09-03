@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { managementApi } from "../utils/management-api-client";
+import { accountTokenCacheFingerprint } from "../geo/service-composition";
 
 vi.mock("../utils/management-api-client", () => ({
   managementApi: vi.fn(),
@@ -10,7 +11,6 @@ import type { GeoOperationProjection } from '../../shared/geo/operation';
 import type { DistributionPlanProjection } from '../../shared/geo/distributionPlan';
 import type { PublishExecutionProjection } from '../../shared/geo/publishScheduler';
 import {
-  accountTokenCacheFingerprint,
   articleOperationSourceFromGenerateInput,
   brandWorkspaceStateSummary,
   listUnfinishedGeoRounds,

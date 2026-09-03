@@ -15,16 +15,12 @@ import { createKnowledgeAuthority, type KnowledgeDecision } from '../geo/knowled
 import {
   createBrandMaterialPort,
   fetchWebsiteMaterial,
-  MaterialImportService,
   materialLogProjection,
   type BrandMaterial,
   type MaterialErrorCode,
 } from '../geo/material-import';
 import { recordGeoOperationMilestone, quoteGeoNextStepForGateKind } from '../geo/operation-progress';
-import {
-  getXiaojingGeoBillingPermitChannelForRequest,
-  getXiaojingGeoProviderCapabilitiesForRequest,
-} from '../geo/provider-runtime';
+import { geoServices } from '../geo/service-composition';
 import { jsonResponse } from '../utils/http';
 import { sendXiaojingMessage } from '../xiaojing-reminder-send';
 import { getRuntimeSessionIdForRequest, requestAccountAccessToken, type XiaojingRouteContext } from './xiaojing-shared';
@@ -73,21 +69,12 @@ async function runBackgroundProcessing(input: {
   /** 入队请求携带的账号 token（Rust 代理附带，临期已在 Rust 侧刷新）。
    * 后台任务脱离请求上下文执行，必须在入队时捕获：sidecar 启动时注入的
    * env token 约 15 分钟过期，长会话的面板导入/重试会全部落 401
-   * token_expired → material_billing_failed。 */
+   * token_expired → material_billing_failed。捕获时机在调用方，传值进
+   * 组合根（spec：geo-service-composition Decision 3）。 */
   accountToken?: string;
 }): Promise<void> {
   const { identity, materialIds, accountToken } = input;
-  const capabilities = getXiaojingGeoProviderCapabilitiesForRequest(accountToken);
-  const service = new MaterialImportService(
-    identity,
-    createBrandMaterialPort(identity),
-    capabilities.extraction,
-    createKnowledgeAuthority(identity),
-    {},
-    capabilities.keywordSearch,
-    undefined,
-    getXiaojingGeoBillingPermitChannelForRequest(accountToken),
-  );
+  const service = geoServices(identity, { accountToken }).materialImport;
   for (const materialId of materialIds) {
     const result = await service.process(materialId);
     logMaterial({
@@ -600,25 +587,18 @@ export async function handleXiaojingKnowledgeRoute(
       }
       const identity = { workspaceId, sessionId: runtimeSessionId };
       // 同后台队列口径：extraction 走网关也带账号 token，env 单例过期后
-      // 重扫同样会 401，必须用本请求的新鲜 token。
-      const capabilities = getXiaojingGeoProviderCapabilitiesForRequest(
-        requestAccountAccessToken(request),
-      );
+      // 重扫同样会 401，必须用本请求的新鲜 token；重扫预算经
+      // rescanBudgetMs 透传组合根（重扫场景不接计费通道＝收敛前口径）。
       logMaterial({
         operation: 'rescan-images', workspaceId, sessionId: runtimeSessionId,
         status: 'started',
       });
       // 每份材料的提取预算（也约束单次打标调用）与整次通过的总预算共同
       // 保证同步请求落在转发控制面 120s 超时内；预算截断由幂等续扫兜底。
-      const service = new MaterialImportService(
-        identity,
-        createBrandMaterialPort(identity),
-        capabilities.extraction,
-        createKnowledgeAuthority(identity),
-        {},
-        capabilities.keywordSearch,
-        RESCAN_MATERIAL_BUDGET_MS,
-      );
+      const service = geoServices(identity, {
+        accountToken: requestAccountAccessToken(request),
+        rescanBudgetMs: RESCAN_MATERIAL_BUDGET_MS,
+      }).materialImport;
       const result = await service.rescanWorkspaceDocumentImages({
         totalBudgetMs: RESCAN_TOTAL_BUDGET_MS,
       });
