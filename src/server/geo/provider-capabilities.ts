@@ -326,10 +326,11 @@ export interface GeoProviderCapabilityDependencies {
   sleep?: (ms: number) => Promise<void>;
   now?: () => Date;
   /**
-   * openAiChat 流式超时覆盖（测试注入）：idleMs = 相邻 chunk 最长静默，
-   * totalMs = 单次补全总时长兜底。缺省用生产常量（120s / 15min）。
+   * openAiChat 流式超时覆盖（测试注入）：firstChunkMs = 请求发起至首字节
+   * 最长静默，idleMs = 相邻 chunk 最长静默，totalMs = 单次补全总时长兜底。
+   * 缺省用生产常量（5min / 120s / 15min）。
    */
-  chatTimeouts?: { idleMs?: number; totalMs?: number };
+  chatTimeouts?: Partial<OpenAiChatTimeouts>;
 }
 
 const secretTransportEnvNames = [
@@ -598,8 +599,16 @@ async function upstreamHttpFailure(
 }
 
 /**
- * openAiChat 空闲超时：相邻 chunk 之间的最长静默。挂死连接（曾出现
- * 2 分 12 秒才断）到点中断重试；模型持续吐字的正常长文生成不触发。
+ * openAiChat 首块预算：请求发起至第一个字节的最长静默。高推理模型
+ * （reflection 槽 deepseek-v4-pro）首 token 前可能长时间思考且无 SSE
+ * 心跳，这段静默是「还没开始吐字」而非「生成中断」，预算必须大于
+ * 相邻 chunk 空闲，否则流式改造对慢思考场景仍是变相死线。
+ */
+const OPENAI_CHAT_FIRST_CHUNK_TIMEOUT_MS = 300_000;
+/**
+ * openAiChat 空闲超时：相邻 chunk 之间的最长静默（首字节到达后起算）。
+ * 挂死连接（曾出现 2 分 12 秒才断）到点中断重试；模型持续吐字的正常
+ * 长文生成不触发。
  */
 const OPENAI_CHAT_IDLE_TIMEOUT_MS = 120_000;
 /**
@@ -613,6 +622,7 @@ const OPENAI_CHAT_RETRY_DELAYS_MS: readonly number[] = [500, 1_500];
 
 /** openAiChat 超时参数（测试经 GeoProviderCapabilityDependencies.chatTimeouts 注入）。 */
 interface OpenAiChatTimeouts {
+  firstChunkMs: number;
   idleMs: number;
   totalMs: number;
 }
@@ -624,16 +634,13 @@ async function openAiChat(
   apiKey: string,
   model: string,
   messages: readonly GeoTextMessage[],
+  timeouts: OpenAiChatTimeouts,
   options?: {
     signal?: AbortSignal;
     maxTokens?: number;
     temperature?: number;
     topP?: number;
     webSearch?: boolean;
-  },
-  timeouts: OpenAiChatTimeouts = {
-    idleMs: OPENAI_CHAT_IDLE_TIMEOUT_MS,
-    totalMs: OPENAI_CHAT_TOTAL_TIMEOUT_MS,
   },
 ): Promise<string> {
   // 流式请求（2026-09-02 排查结论）：非流式长文生成期间零字节到达，与
@@ -669,23 +676,23 @@ async function openAiChat(
     const timeout = new AbortController();
     // abort 携带可读 reason：undici 把 reason 原样抛给调用方，超时不再
     // 以裸 "This operation was aborted" 文案漏进文章失败原因。
+    const firstChunkTimeoutError = new Error(
+      `${slot} 上游首字节超时：${timeouts.firstChunkMs / 1000} 秒未收到任何数据`,
+    );
     const idleTimeoutError = new Error(
       `${slot} 上游响应空闲超时：${timeouts.idleMs / 1000} 秒未收到新数据`,
     );
     const totalTimeoutError = new Error(
       `${slot} 上游响应总时长超时：超过 ${timeouts.totalMs / 60_000} 分钟`,
     );
-    const armIdle = () => {
-      clearTimeout(idleTimer);
-      idleTimer = setTimeout(
-        () => timeout.abort(idleTimeoutError),
-        timeouts.idleMs,
-      );
+    let idleTimer: ReturnType<typeof setTimeout> | undefined;
+    const armIdle = (ms: number, reason: Error) => {
+      if (idleTimer !== undefined) clearTimeout(idleTimer);
+      idleTimer = setTimeout(() => timeout.abort(reason), ms);
     };
-    let idleTimer = setTimeout(
-      () => timeout.abort(idleTimeoutError),
-      timeouts.idleMs,
-    );
+    // 先武装首块预算：首 token 前的长思考不算空闲；第一个字节到达后
+    // （readChatCompletionBody 的 onData）换轨为相邻 chunk 空闲计时。
+    armIdle(timeouts.firstChunkMs, firstChunkTimeoutError);
     const totalTimer = setTimeout(
       () => timeout.abort(totalTimeoutError),
       timeouts.totalMs,
@@ -707,7 +714,9 @@ async function openAiChat(
       if (response.ok) {
         // 累积缓冲是本 attempt 的局部量：断流重试天然从空串重来，
         // 不会把上一次尝试的半截正文拼进重试结果。
-        return await readChatCompletionBody(slot, response, armIdle);
+        return await readChatCompletionBody(slot, response, () =>
+          armIdle(timeouts.idleMs, idleTimeoutError),
+        );
       }
       const failure = safeUpstreamFailure(slot, response.status);
       const retryable = response.status === 429 || response.status >= 500;
@@ -736,7 +745,7 @@ async function openAiChat(
       }
       lastError = error;
     } finally {
-      clearTimeout(idleTimer);
+      if (idleTimer !== undefined) clearTimeout(idleTimer);
       clearTimeout(totalTimer);
     }
   }
@@ -744,10 +753,13 @@ async function openAiChat(
 }
 
 /**
- * 读取 chat/completions 响应体：增量读字节（每读到数据即重置空闲计时
- * 器），读完后按文本形态二选一解析——SSE（含 `data:` 行）累积 delta；
- * 否则按非流式 JSON 信封取 content，覆盖网关整包缓冲与无 content-type
- * 的兼容实现。两类形态共用同一套有效性校验（空 content 即无效响应）。
+ * 读取 chat/completions 响应体：增量读字节（第一个字节起把空闲计时
+ * 换轨为相邻 chunk 空闲预算），读完后按文本形态二选一解析——含
+ * `data:` 行按 SSE 累积 delta（文本嗅探优先于 Content-Type：网关把
+ * SSE 整包缓冲却误报 json 的响应同样分流到 SSE，不裸抛 JSON.parse
+ * 的 SyntaxError）；否则按非流式 JSON 信封取 content，覆盖网关整包
+ * 缓冲与无 content-type 的兼容实现，解析失败判无效响应。两类形态
+ * 共用同一套有效性校验（空 content 即无效响应）。
  */
 async function readChatCompletionBody(
   slot: "extraction" | "generation" | "reflection",
@@ -768,16 +780,22 @@ async function readChatCompletionBody(
   } else {
     text = await response.text();
   }
-  const contentType = response.headers.get("content-type") ?? "";
-  if (contentType.includes("application/json") || !/(^|\n)[ \t]*data:/.test(text)) {
-    const payload = JSON.parse(text) as {
+  const invalidResponse = (): never => {
+    throw new Error(`${slot} 返回了无效响应`);
+  };
+  if (!/(^|\n)[ \t]*data:/.test(text)) {
+    let payload: {
       choices?: Array<{ message?: { content?: string } }>;
     };
-    const content = payload.choices?.[0]?.message?.content;
-    if (typeof content !== "string" || content.length === 0) {
-      throw new Error(`${slot} 返回了无效响应`);
+    try {
+      payload = JSON.parse(text);
+    } catch {
+      return invalidResponse();
     }
-    return content;
+    const content = payload.choices?.[0]?.message?.content;
+    return typeof content === "string" && content.length > 0
+      ? content
+      : invalidResponse();
   }
   let accumulated = "";
   for (const rawLine of text.split("\n")) {
@@ -798,10 +816,7 @@ async function readChatCompletionBody(
       // 跳过单个坏行，不因它报废整次补全。
     }
   }
-  if (accumulated.length === 0) {
-    throw new Error(`${slot} 返回了无效响应`);
-  }
-  return accumulated;
+  return accumulated.length > 0 ? accumulated : invalidResponse();
 }
 
 function encodeObjectKey(objectKey: string): string {
@@ -830,7 +845,9 @@ export function createGeoProviderCapabilities(
     deps.sleep ??
     ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
   const now = deps.now ?? (() => new Date());
-  const chatTimeouts = {
+  const chatTimeouts: OpenAiChatTimeouts = {
+    firstChunkMs:
+      deps.chatTimeouts?.firstChunkMs ?? OPENAI_CHAT_FIRST_CHUNK_TIMEOUT_MS,
     idleMs: deps.chatTimeouts?.idleMs ?? OPENAI_CHAT_IDLE_TIMEOUT_MS,
     totalMs: deps.chatTimeouts?.totalMs ?? OPENAI_CHAT_TOTAL_TIMEOUT_MS,
   };
@@ -902,8 +919,8 @@ export function createGeoProviderCapabilities(
             ? XIAOJING_GEO_PROVIDER_DEFAULTS.titlePlanningModel
             : model,
           messages,
-          options,
           chatTimeouts,
+          options,
         );
       } catch (error) {
         throw sanitizeGeoProviderError(error, secrets);
