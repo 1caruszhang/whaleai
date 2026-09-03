@@ -33,6 +33,7 @@ import {
 } from "../../shared/geo/topicPlan";
 import { GEO_PORT_CONTRACT } from "../../shared/geo/portContract";
 import { XIAOJING_GEO_PROVIDER_DEFAULTS } from "../../shared/geo/providerCapabilities";
+import { titleRedLineCompetitors } from "../../shared/geo/competitorRoster";
 import {
   deriveServiceScope,
   projectBrandProfile,
@@ -221,10 +222,12 @@ function deriveProfile(context: TopicPlanContext) {
   const industry = valuesFor(".industry")[0];
   if (!industry) throw new Error("topic_plan_industry_required");
   const projected = projectBrandProfile(context.facts);
-  const competitors = [
-    ...valuesFor(".competitors"),
-    ...valuesFor(".potentialcompetitors"),
-  ];
+  // 标题红线名单消费名单内核投影（票 #43）：两层原始串联、无身份排除——
+  // 禁令名单宁滥勿缺（此前是本文件手卷的后缀拼接，语义未变）。
+  const competitors = titleRedLineCompetitors(
+    valuesFor(".competitors"),
+    valuesFor(".potentialcompetitors"),
+  );
   const relatedBrands = valuesFor(".relatedbrands");
   const businessTerms = [
     ...new Set([

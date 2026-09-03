@@ -2444,11 +2444,19 @@ mod tests {
 
     #[test]
     fn ranking_competitor_contract_excludes_workspace_identity_and_related_brands() {
-        let cases: Vec<Value> = serde_json::from_str(include_str!(concat!(
+        let contract: Value = serde_json::from_str(include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../src/shared/geo/rankingCompetitorContractCases.json"
         )))
         .expect("shared ranking competitor contract cases");
+        // 票 #43 契约扩容：顶层从用例数组改为 { mergeCases, keyNormalizationCases }
+        // 两段——本测试跑合并用例（集合比对），排序断言与键向量见下方新增
+        // pin 测试；镜像实现（valid_ranking_competitors）原位不动。
+        let cases: Vec<Value> = contract
+            .get("mergeCases")
+            .and_then(Value::as_array)
+            .cloned()
+            .expect("mergeCases section");
         for contract_case in cases {
             let values = |key: &str| {
                 contract_case
@@ -2505,6 +2513,92 @@ mod tests {
                     format!("article_generation_ranking_competitors_insufficient:{expected_count}")
                 );
             }
+        }
+    }
+
+    /// 票 #43 契约扩容：排序用例（镜像现行返回无序 HashSet，形态不动——与
+    /// expected 做集合比对；「直接层在前、补位在后」的序列断言在 TS 侧）＋
+    /// 排行键归一输入向量（双侧算法一致子集：中文、全角折叠、空白折叠、
+    /// ASCII 大小写；markdown 剥离与 Unicode lowercase 的分歧挂起漂移台账，
+    /// 不入向量）。
+    #[test]
+    fn ranking_competitor_contract_pins_merged_order_and_key_normalization() {
+        let contract: Value = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../src/shared/geo/rankingCompetitorContractCases.json"
+        )))
+        .expect("shared ranking competitor contract cases");
+
+        let ordering_case = contract
+            .get("mergeCases")
+            .and_then(Value::as_array)
+            .expect("mergeCases section")
+            .iter()
+            .find(|case| {
+                case.get("name").and_then(Value::as_str)
+                    == Some("merged sequence keeps direct tier before potential backfill")
+            })
+            .expect("ordering contract case")
+            .clone();
+        let values = |key: &str| {
+            ordering_case
+                .get(key)
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default()
+        };
+        let mut fact_list = vec![
+            json!({
+                "predicate": "enterprise-profile.fullName",
+                "normalizedValueJson": serde_json::to_string(&values("fullNames")).unwrap()
+            }),
+            json!({
+                "predicate": "enterprise-profile.shortNames",
+                "normalizedValueJson": serde_json::to_string(&values("shortNames")).unwrap()
+            }),
+            json!({
+                "predicate": "enterprise-profile.relatedBrands",
+                "normalizedValueJson": serde_json::to_string(&values("relatedBrands")).unwrap()
+            }),
+            json!({
+                "predicate": "enterprise-profile.competitors",
+                "normalizedValueJson": serde_json::to_string(&values("competitors")).unwrap()
+            }),
+        ];
+        let potential = values("potentialCompetitors");
+        if !potential.is_empty() {
+            fact_list.push(json!({
+                "predicate": "enterprise-profile.potentialCompetitors",
+                "normalizedValueJson": serde_json::to_string(&potential).unwrap()
+            }));
+        }
+        let facts = Value::Array(fact_list);
+        let workspace_name = ordering_case
+            .get("workspaceBrandName")
+            .and_then(Value::as_str)
+            .unwrap();
+        let actual = valid_ranking_competitors(&facts, workspace_name);
+        let expected: HashSet<String> = values("expected")
+            .into_iter()
+            .filter_map(|value| value.as_str().map(normalize_ranking_entity_name))
+            .collect();
+        // 集合比对：镜像不保序（TS 侧同用例断言精确序列），集合相等即两侧
+        // 同一幸存名集。
+        assert_eq!(actual, expected, "ordering case set comparison");
+
+        for key_case in contract
+            .get("keyNormalizationCases")
+            .and_then(Value::as_array)
+            .expect("keyNormalizationCases section")
+        {
+            let input = key_case.get("input").and_then(Value::as_str).unwrap();
+            let expected = key_case.get("expected").and_then(Value::as_str).unwrap();
+            assert_eq!(
+                normalize_ranking_entity_name(input),
+                expected,
+                "key case: {}",
+                key_case.get("name").and_then(Value::as_str).unwrap_or("?")
+            );
         }
     }
 

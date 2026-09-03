@@ -1,100 +1,154 @@
-[
-  {
-    "name": "exclude identity related and duplicates",
-    "workspaceBrandName": "工作区品牌",
-    "fullNames": [
-      "目标品牌有限公司"
-    ],
-    "shortNames": [
-      "目标品牌"
-    ],
-    "relatedBrands": [
-      "合作品牌"
-    ],
-    "competitors": [
-      "工作区品牌",
-      "目标品牌",
-      "合作品牌",
-      "竞品甲",
-      "竞品乙",
-      "竞品丙",
-      "竞品丁",
-      "竞品戊",
-      "竞品甲"
-    ],
-    "expected": [
-      "竞品甲",
-      "竞品乙",
-      "竞品丙",
-      "竞品丁",
-      "竞品戊"
-    ]
-  },
-  {
-    "name": "workspace self does not fill the fifth slot",
-    "workspaceBrandName": "工作区品牌",
-    "fullNames": [],
-    "shortNames": [],
-    "relatedBrands": [],
-    "competitors": [
-      "工作区品牌",
-      "竞品甲",
-      "竞品乙",
-      "竞品丙",
-      "竞品丁"
-    ],
-    "expected": [
-      "竞品甲",
-      "竞品乙",
-      "竞品丙",
-      "竞品丁"
-    ]
-  },
-  {
-    "name": "potential tier survives alongside direct tier and fills the fifth slot",
-    "workspaceBrandName": "工作区品牌",
-    "fullNames": [],
-    "shortNames": [],
-    "relatedBrands": [],
-    "competitors": [
-      "竞品甲",
-      "竞品乙",
-      "竞品丙",
-      "竞品丁"
-    ],
-    "potentialCompetitors": [
-      "工作区品牌",
-      "竞品甲",
-      "潜在品牌甲",
-      "潜在品牌乙"
-    ],
-    "expected": [
-      "竞品甲",
-      "竞品乙",
-      "竞品丙",
-      "竞品丁",
-      "潜在品牌甲",
-      "潜在品牌乙"
-    ]
-  },
-  {
-    "name": "potential tier alone merges but still fails the five-slot gate",
-    "workspaceBrandName": "工作区品牌",
-    "fullNames": [],
-    "shortNames": [],
-    "relatedBrands": [],
-    "competitors": [],
-    "potentialCompetitors": [
-      "潜在品牌甲",
-      "潜在品牌乙",
-      "潜在品牌丙",
-      "潜在品牌丁"
-    ],
-    "expected": [
-      "潜在品牌甲",
-      "潜在品牌乙",
-      "潜在品牌丙",
-      "潜在品牌丁"
-    ]
-  }
-]
+{
+  "mergeCases": [
+    {
+      "name": "exclude identity related and duplicates",
+      "workspaceBrandName": "工作区品牌",
+      "fullNames": [
+        "目标品牌有限公司"
+      ],
+      "shortNames": [
+        "目标品牌"
+      ],
+      "relatedBrands": [
+        "合作品牌"
+      ],
+      "competitors": [
+        "工作区品牌",
+        "目标品牌",
+        "合作品牌",
+        "竞品甲",
+        "竞品乙",
+        "竞品丙",
+        "竞品丁",
+        "竞品戊",
+        "竞品甲"
+      ],
+      "expected": [
+        "竞品甲",
+        "竞品乙",
+        "竞品丙",
+        "竞品丁",
+        "竞品戊"
+      ]
+    },
+    {
+      "name": "workspace self does not fill the fifth slot",
+      "workspaceBrandName": "工作区品牌",
+      "fullNames": [],
+      "shortNames": [],
+      "relatedBrands": [],
+      "competitors": [
+        "工作区品牌",
+        "竞品甲",
+        "竞品乙",
+        "竞品丙",
+        "竞品丁"
+      ],
+      "expected": [
+        "竞品甲",
+        "竞品乙",
+        "竞品丙",
+        "竞品丁"
+      ]
+    },
+    {
+      "name": "potential tier survives alongside direct tier and fills the fifth slot",
+      "workspaceBrandName": "工作区品牌",
+      "fullNames": [],
+      "shortNames": [],
+      "relatedBrands": [],
+      "competitors": [
+        "竞品甲",
+        "竞品乙",
+        "竞品丙",
+        "竞品丁"
+      ],
+      "potentialCompetitors": [
+        "工作区品牌",
+        "竞品甲",
+        "潜在品牌甲",
+        "潜在品牌乙"
+      ],
+      "expected": [
+        "竞品甲",
+        "竞品乙",
+        "竞品丙",
+        "竞品丁",
+        "潜在品牌甲",
+        "潜在品牌乙"
+      ]
+    },
+    {
+      "name": "potential tier alone merges but still fails the five-slot gate",
+      "workspaceBrandName": "工作区品牌",
+      "fullNames": [],
+      "shortNames": [],
+      "relatedBrands": [],
+      "competitors": [],
+      "potentialCompetitors": [
+        "潜在品牌甲",
+        "潜在品牌乙",
+        "潜在品牌丙",
+        "潜在品牌丁"
+      ],
+      "expected": [
+        "潜在品牌甲",
+        "潜在品牌乙",
+        "潜在品牌丙",
+        "潜在品牌丁"
+      ]
+    },
+    {
+      "name": "merged sequence keeps direct tier before potential backfill",
+      "workspaceBrandName": "工作区品牌",
+      "fullNames": [],
+      "shortNames": [],
+      "relatedBrands": [],
+      "competitors": [
+        "直甲",
+        "直乙",
+        "直丙",
+        "直甲"
+      ],
+      "potentialCompetitors": [
+        "潜甲",
+        "直甲",
+        "潜乙"
+      ],
+      "expected": [
+        "直甲",
+        "直乙",
+        "直丙",
+        "潜甲",
+        "潜乙"
+      ]
+    }
+  ],
+  "keyNormalizationCases": [
+    {
+      "name": "cjk brand name passes through unchanged",
+      "input": "张仔纪·老顺德干蒸菜",
+      "expected": "张仔纪·老顺德干蒸菜"
+    },
+    {
+      "name": "fullwidth forms fold to ascii and lowercase",
+      "input": "ＢＲＡＮＤ５号",
+      "expected": "brand5号"
+    },
+    {
+      "name": "whitespace collapses across spaces tabs and ideographic space",
+      "input": " 云帆\t信息　科技 ",
+      "expected": "云帆信息科技"
+    },
+    {
+      "name": "ascii case folds to lowercase",
+      "input": "BrandX Café店",
+      "expected": "brandxcafé店"
+    },
+    {
+      "name": "mixed cjk fullwidth digits and case in one name",
+      "input": "Ａｂｃ云帆 ２０２６",
+      "expected": "abc云帆2026"
+    }
+  ]
+}

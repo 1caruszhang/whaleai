@@ -2,7 +2,6 @@ import { describe, expect, it } from "vitest";
 
 import articleGenerationContract from "./articleGenerationContract.json";
 import materialImagePlaceholderContract from "./materialImagePlaceholderContractCases.json";
-import rankingCompetitorContractCases from "./rankingCompetitorContractCases.json";
 
 import {
   ARTICLE_BODY_MAX_BYTES,
@@ -18,13 +17,10 @@ import {
   combineArticleReview,
   dealNarrativeSeeds,
   deterministicArticleReview,
-  filterValidRankingCompetitors,
-  mergeRankingCompetitorTiers,
   parseArticleReflection,
   parseGeneratedArticleBody,
   parseRankingDimensions,
   normalizeUnicodeBulletsToMarkdown,
-  resolveRankingRoster,
   shuffledNarrativeSeeds,
   validateDirectArticleSource,
 } from "./articleGeneration";
@@ -34,27 +30,6 @@ import {
   scanMaterialImagePlaceholders,
   trimMaterialImagePlaceholders,
 } from "./materialImagePlaceholder";
-
-describe("ranking competitor cross-process contract", () => {
-  it.each(rankingCompetitorContractCases)("$name", (contractCase) => {
-    // 两层联合（与 Rust valid_ranking_competitors 同构）恒为断言主体：
-    // 直接层在前、潜在层补位，跨层互斥与身份排除两层共用；expected 是
-    // 联合结果。纯直接层用例额外校验单层过滤行为不变。
-    const potential = contractCase.potentialCompetitors ?? [];
-    if (potential.length === 0) {
-      expect(
-        filterValidRankingCompetitors(contractCase.competitors, contractCase),
-      ).toEqual(contractCase.expected);
-    }
-    expect(
-      mergeRankingCompetitorTiers(
-        contractCase.competitors,
-        potential,
-        contractCase,
-      ),
-    ).toEqual(contractCase.expected);
-  });
-});
 
 describe("article generation contract pin（ADR-0012 三方裁判）", () => {
   it("三键与 articleGenerationContract.json 严格相等", () => {
@@ -226,114 +201,9 @@ describe("direct article generation contract", () => {
     expect(messages.system).not.toContain("倒数第三段");
   });
 
-  it("requires five confirmed competitors and injects the fixed ranking roster", () => {
-    const rankingFacts = [
-      {
-        factKey: "brand-name",
-        predicate: "enterprise-profile.fullname",
-        normalizedValueJson: '"目标品牌"',
-      },
-      {
-        factKey: "competitors",
-        predicate: "enterprise-profile.competitors",
-        normalizedValueJson: '["竞品甲","竞品乙","竞品丙","竞品丁","竞品戊"]',
-      },
-    ];
-    expect(resolveRankingRoster(rankingFacts, "工作区名称")).toEqual({
-      targetBrand: "目标品牌",
-      competitors: ["竞品甲", "竞品乙", "竞品丙", "竞品丁", "竞品戊"],
-    });
-    const messages = buildArticleGenerationMessages({
-      brandName: "目标品牌",
-      productLine: "本地服务",
-      targetRegion: "成都",
-      contentType: "ranking",
-      topic: "本地服务怎么选",
-      requestedTitle: "本地服务六家对比",
-      constraints: "",
-      plannedFacts: rankingFacts,
-      rankingDimensions: [
-        "服务范围",
-        "核心项目",
-        "适用人群",
-        "服务方式",
-        "区域覆盖",
-        "选择要点",
-      ],
-    });
-    expect(messages.user).toContain("目标品牌固定为陈列位 1");
-    expect(messages.user).toContain("竞品甲、竞品乙、竞品丙、竞品丁、竞品戊");
-    expect(messages.user).toContain("五家竞品在陈列位 2–6 的顺序可自由调整");
-    expect(() =>
-      buildArticleGenerationMessages({
-        brandName: "目标品牌",
-        productLine: "本地服务",
-        targetRegion: "成都",
-        contentType: "ranking",
-        topic: "本地服务怎么选",
-        requestedTitle: "本地服务六家对比",
-        constraints: "",
-        plannedFacts: rankingFacts,
-      }),
-    ).toThrow("article_generation_ranking_dimensions_missing");
-
-    expect(() =>
-      resolveRankingRoster(
-        [
-          rankingFacts[0],
-          { ...rankingFacts[1], normalizedValueJson: '["竞品甲","竞品乙"]' },
-        ],
-        "工作区名称",
-      ),
-    ).toThrow("article_generation_ranking_competitors_insufficient:2");
-  });
-
-  it("excludes workspace self names and related brands from the ranking roster", () => {
-    const roster = resolveRankingRoster(
-      [
-        {
-          factKey: "related",
-          predicate: "enterprise-profile.relatedbrands",
-          normalizedValueJson: '["合作品牌"]',
-        },
-        {
-          factKey: "competitors",
-          predicate: "enterprise-profile.competitors",
-          normalizedValueJson:
-            '["工作区品牌","合作品牌","竞品甲","竞品乙","竞品丙","竞品丁","竞品戊"]',
-        },
-      ],
-      "工作区品牌",
-    );
-    expect(roster).toEqual({
-      targetBrand: "工作区品牌",
-      competitors: ["竞品甲", "竞品乙", "竞品丙", "竞品丁", "竞品戊"],
-    });
-  });
-
-  it("backfills the ranking roster with potential competitors when direct tier is short", () => {
-    // ADR-0007 两层名单：直接层 4 家不足 5，潜在层按序补位到 5；
-    // 与直接层重复/嵌套的潜在名（竞品甲）不留双份。
-    const roster = resolveRankingRoster(
-      [
-        {
-          factKey: "competitors",
-          predicate: "enterprise-profile.competitors",
-          normalizedValueJson: '["竞品甲","竞品乙","竞品丙","竞品丁"]',
-        },
-        {
-          factKey: "potential",
-          predicate: "enterprise-profile.potentialcompetitors",
-          normalizedValueJson: '["竞品甲","潜在品牌甲","潜在品牌乙","潜在品牌丙"]',
-        },
-      ],
-      "工作区品牌",
-    );
-    expect(roster).toEqual({
-      targetBrand: "工作区品牌",
-      competitors: ["竞品甲", "竞品乙", "竞品丙", "竞品丁", "潜在品牌甲"],
-    });
-  });
+  // 票 #43：排行名单 describe 块（roster 解析/排除/补位）与跨进程契约
+  // describe 已原样搬移至名单内核测试 competitorRoster.test.ts，不在本文件
+  // 重复断言。
 
   it("accepts plain markdown only when title and placeholders are valid", () => {
     expect(

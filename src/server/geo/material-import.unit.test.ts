@@ -7,11 +7,9 @@ import type { KnowledgeCandidate, KnowledgeCurrentFact, KnowledgeProposalInput }
 import { GatewayBillingError } from './billing-permit';
 import {
   MaterialImportService,
-  sameBrandIdentity,
   capSourcesPerDomain,
   dedupeSourcesByUrl,
   fetchWebsiteMaterial,
-  isSimilarSelfName,
   materialLogProjection,
   parseBrandMaterial,
   parseCompetitorSearchQueries,
@@ -24,6 +22,9 @@ import {
   type BrandMaterialPort,
   type SaveMaterialImageInput,
 } from './material-import';
+// 票 #43：sameBrandIdentity/isSimilarSelfName 的直测 describe 已原样搬移至
+// 名单内核测试（src/shared/geo/competitorRoster.test.ts）；本文件经管线
+// parseProfileFacts 的间接断言保留不动。
 import { MATERIAL_IMAGE_MAX_TAGGABLE_BYTES } from './material-image';
 
 const context: BrandMaterialContext = {
@@ -2101,36 +2102,6 @@ describe('检索语料域名封顶（语料多样性）', () => {
   });
 });
 
-describe('sameBrandIdentity（同品牌身份判定：归一键嵌套 + ·分段交叉）', () => {
-  it('collapses registration-name variants and disguise suffixes via keys and segments', () => {
-    // 注册名变体：括号中缀剥离后相等/嵌套。
-    expect(sameBrandIdentity('张仔纪（广州）餐饮管理有限公司', '张仔纪餐饮管理有限公司')).toBe(true);
-    expect(sameBrandIdentity('顺德杨廷记餐饮有限公司', '顺德杨廷记')).toBe(true);
-    // 「品牌·系列」马甲：共享「张仔纪」段。
-    expect(sameBrandIdentity('张仔纪·老顺德干蒸菜', '张仔纪干蒸菜')).toBe(true);
-    expect(sameBrandIdentity('粤食堂·经典蒸饭', '粤食堂')).toBe(true);
-    // 「地域·品牌」马甲：共享品牌段「渔文乐」。
-    expect(sameBrandIdentity('顺德·渔文乐', '渔文乐')).toBe(true);
-    // 注册名后缀剥离（第六写实跑，用户指认三马甲同一家）：法人形态词不是
-    // 品牌身份——剥离后「张仔纪」互相包含。
-    expect(sameBrandIdentity('张仔纪（广州）餐饮管理有限公司', '张仔纪老顺德干蒸菜')).toBe(true);
-    expect(sameBrandIdentity('广州张氏味好餐饮服务有限责任公司', '张氏味好')).toBe(true);
-    // 后缀剥离不把地域词短键误并：剥后不足 3 字保留全键。
-    expect(sameBrandIdentity('广东餐饮有限公司', '广东干蒸坊')).toBe(false);
-    // 无关名字不误并。
-    expect(sameBrandIdentity('云帆信息', '星河智能')).toBe(false);
-  });
-
-  it('excludes region segments so 地域·品牌 does not merge with 同地域他牌', () => {
-    // 第四写实跑教训：「顺德·渔文乐」若按段盲比会与「顺德杨廷记」因共享
-    // 地名段误并——regionHints 剔除地域段后只剩品牌段参与交叉。
-    expect(sameBrandIdentity('顺德·渔文乐', '顺德杨廷记', ['顺德'])).toBe(false);
-    expect(sameBrandIdentity('顺德·渔文乐', '渔文乐', ['顺德'])).toBe(true);
-    // 服务区锚（广东省）同样剔除：段「广东」不参与身份比对。
-    expect(sameBrandIdentity('广东·干蒸汇', '广东干蒸坊', ['广东省'])).toBe(false);
-  });
-});
-
 describe('parseRetryQuery（两段式补枪的重写词解析）', () => {
   it('takes a valid query, trims and caps length', () => {
     expect(parseRetryQuery(JSON.stringify({ query: '  广东 干蒸菜 品牌 有哪些  ' }), ['a']))
@@ -2408,24 +2379,8 @@ describe('profile and document compatibility', () => {
     expect(facts).toEqual([]);
   });
 
-  describe("isSimilarSelfName", () => {
-    it("treats edit-distance-1 CJK short names as self references", () => {
-      expect(isSimilarSelfName("炊事班", "炊班长")).toBe(true);
-      expect(isSimilarSelfName("炊事班", "炊班主")).toBe(true);
-      expect(isSimilarSelfName("炊 事 班", "炊班长")).toBe(true);
-      expect(isSimilarSelfName("真功夫", "炊班长")).toBe(false);
-      expect(isSimilarSelfName("云帆信息", "鲸跃科技")).toBe(false);
-    });
-
-    it('stays scoped to 2–4 char CJK names (length 1 exempt, length ≥5 uses legacy rules)', () => {
-      // 长度 1 豁免（单字重名率太高）。
-      expect(isSimilarSelfName('鲸', '鲸')).toBe(false);
-      // 长度 ≥5 不启用相似度，仍只走相等/双向子串旧规则。
-      expect(isSimilarSelfName('鲸跃科技有', '鲸跃科技司')).toBe(false);
-      // 非 CJK 短名不适用（拉丁名缩写重名率高）。
-      expect(isSimilarSelfName('abcd', 'abce')).toBe(false);
-    });
-  });
+  // 票 #43：isSimilarSelfName 的直测 describe 已原样搬移至名单内核测试
+  // （src/shared/geo/competitorRoster.test.ts）。
 
   // 回归：模型对同一 (field, scope) 重复输出多条事实（如多门店电话各一条）时，
   // 必须合并为一条候选；放行会造成同一 fact key 多条候选，整卡确认时第二条
