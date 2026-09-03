@@ -165,11 +165,7 @@ const EXEMPTIONS: readonly SyncCommentExemption[] = [
     hit: "src/shared/geo/publishScheduler.ts :: * 是否为原路退点状态（后端 REFUND_STATUSES 同源）：已拒稿(2)、已取消(5)、",
     owner: "迁移票①publish_scheduler 试点",
   },
-  // 迁移票④：点数三源＋spend-limits
-  {
-    hit: "src/shared/geo/distributionSpendLimits.ts :: /** Shared client/Sidecar defaults. Rust owns persistence and independently",
-    owner: "迁移票④点数三源＋spend-limits",
-  },
+  // 迁移票④：点数三源＋spend-limits（票 #39 已删全部条目）
   // 迁移票⑤：provider 字符串＋图片白名单（票 #40 已删全部条目）
   // 迁移票⑥：其余版本戳＋BINARY_EXTENSIONS 收尾
   {
@@ -391,7 +387,7 @@ describe("跨语言契约守卫（ADR-0012）", () => {
     expect(tsJsonSpecifiers('import x from "./notJson";')).toEqual([]);
   });
 
-  it("守卫工具函数：跨行折行的英文短语可检出（豁免表 distributionSpendLimits 条目的依据）", () => {
+  it("守卫工具函数：跨行折行的英文短语可检出（词汇扫描器能力自检；票 #39 删尽豁免表英文条目后仍需防跨行漏检）", () => {
     const content = "/** Shared defaults. Rust owns persistence and independently\n * mirrors these values. */";
     expect(/independently[\s*]+mirrors/gi.test(content)).toBe(true);
   });

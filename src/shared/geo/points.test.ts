@@ -1,10 +1,11 @@
 import { describe, expect, it } from "vitest";
 
+import pointsContract from "./pointsContract.json";
 import { cnyToPoints, pointsToCny } from "./points";
 
 describe("cnyToPoints", () => {
   it("converts media price to points with the service-fee multiplier", () => {
-    // 与 Rust/网关同式：¥88.00 → ceil(8800 × 4 / 25) = 1408 点。
+    // 公式裁判 pointsContract.json：¥88.00 → ceil(8800 × 4 / 25) = 1408 点。
     expect(cnyToPoints(88)).toBe(1408);
     // 换算示例：¥1000 → 16000 点。
     expect(cnyToPoints(1000)).toBe(16000);
@@ -26,6 +27,22 @@ describe("cnyToPoints", () => {
     expect(cnyToPoints(88.004)).toBe(1408);
     // ¥88.01 → 8801 分 → ceil(35204 / 25) = 1409 点。
     expect(cnyToPoints(88.01)).toBe(1409);
+  });
+});
+
+describe("点数公式契约（票 #39，ADR-0012）", () => {
+  it("公式参数钉在 pointsContract.json 裁判上", () => {
+    expect(pointsContract.formula.multiplier).toBe(4);
+    expect(pointsContract.formula.divisor).toBe(25);
+    expect(pointsContract.formula.rounding).toBe("ceil");
+  });
+
+  it("cnyToPoints 实跑裁判 cases（用例按分给出，经 /100 走同一条 round-to-cents 链路）", () => {
+    // 三侧之一：Rust publish_channel_price_points 与网关 publishOrderPoints
+    // 各自的 pin 测试实跑同一裁判文件（只钉参数测不出算式结构漂移）。
+    for (const { inputCents, expectedPoints } of pointsContract.cases) {
+      expect(cnyToPoints(inputCents / 100)).toBe(expectedPoints);
+    }
   });
 });
 

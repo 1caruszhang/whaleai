@@ -475,9 +475,11 @@ fn external_request_sn(idempotency_key: &str) -> String {
     )
 }
 
-/// 渠道订单点数单价（票 09，与网关 `publishOrderPoints` 同式）：媒介价
-/// ×1.6 → 点数向上取整（1 元 = 10 点锚点）。以分为基的整数运算：
-/// ceil(分 × 1.6 × 10 / 100) = ceil(分 × 4 / 25)。例：¥88.00 → 1408 点。
+/// 渠道订单点数单价（票 09）：媒介价 ×1.6 → 点数向上取整（1 元 = 10 点
+/// 锚点）。以分为基的整数运算：ceil(分 × 1.6 × 10 / 100) = ceil(分 × 4 /
+/// 25)。例：¥88.00 → 1408 点。公式契约（参数＋用例向量）的裁判文件是
+/// `src/shared/geo/pointsContract.json`，与 shared `points.ts`、网关
+/// `publishOrderPoints` 三侧 pin 实跑同一组 cases（票 #39，ADR-0012）。
 pub(super) fn publish_channel_price_points(price_cny: f64) -> i64 {
     if !price_cny.is_finite() || price_cny <= 0.0 {
         return 0;
@@ -4771,7 +4773,8 @@ mod tests {
 
     #[test]
     fn channel_price_points_matches_gateway_ceiling_formula() {
-        // 与网关 publishOrderPoints 同式：ceil(分 × 4 / 25)。
+        // 公式裁判：src/shared/geo/pointsContract.json（ceil(分 × 4 / 25)，
+        // 三侧 cases pin 见 points_contract_cases_pin_channel_price_points）。
         assert_eq!(publish_channel_price_points(88.0), 1408);
         assert_eq!(publish_channel_price_points(12.34), 198);
         // 整除边界不得多进一位：6.25 元 × 16 = 100 点恰好整除。
@@ -6829,6 +6832,57 @@ mod tests {
             legacy_items.replace(&without, &with),
             "CHECK(status IN ('failed-retryable','failed-nonretryable','reconciliation-required','cancelled'\n                ))"
         );
+    }
+
+    // ── 点数公式契约（票 #39，ADR-0012 Decision 2）：三侧公式（shared
+    // points.ts / 本文件 publish_channel_price_points / 网关 publishOrderPoints）
+    // 的共享裁判。三侧实现结构异构（TS Math.ceil vs 本处整数 (cents*4+24)/25），
+    // 参数等值测不出算式结构漂移，cases 向量三侧各自实跑兜底（与 TS 侧
+    // points.test.ts、backend/tests/points-contract-pin.test.ts 同一裁判文件）。
+
+    #[derive(Debug, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct PointsContract {
+        formula: PointsContractFormula,
+        cases: Vec<PointsContractCase>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct PointsContractFormula {
+        multiplier: i64,
+        divisor: i64,
+        rounding: String,
+    }
+
+    #[derive(Debug, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct PointsContractCase {
+        input_cents: i64,
+        expected_points: i64,
+    }
+
+    #[test]
+    fn points_contract_cases_pin_channel_price_points() {
+        let contract: PointsContract = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../src/shared/geo/pointsContract.json"
+        )))
+        .expect("shared points contract json");
+        assert_eq!(contract.formula.multiplier, 4);
+        assert_eq!(contract.formula.divisor, 25);
+        assert_eq!(contract.formula.rounding, "ceil");
+        for case in &contract.cases {
+            // 本实现入参是元：用例按分给出，经 /100.0 走同一条 round-to-cents
+            // 链路；25 的倍数用例专测整数实现 (a+24)/25 → (a+25)/25 类变异
+            //（参数没变、行为变了，只钉参数测不出）。
+            let cny = case.input_cents as f64 / 100.0;
+            assert_eq!(
+                publish_channel_price_points(cny),
+                case.expected_points,
+                "inputCents={} 的点数用例",
+                case.input_cents
+            );
+        }
     }
 
     #[test]

@@ -1,9 +1,9 @@
 /**
- * 媒介价（元）→ 点数，与 Rust `publish_channel_price_points`
- * （src-tauri/src/brand_workspace/publish_scheduler.rs）、网关
- * `publishOrderPoints`（backend/src/domain/publish-orders.ts）同式：
- * 媒介价 ×1.6（含服务费）、1 元 = 10 点，以分为基向上取整
- * ceil(分 × 4 / 25)。例：¥88.00 → 1408 点，¥1000 → 16000 点。
+ * 媒介价（元）→ 点数：媒介价 ×1.6（含服务费）、1 元 = 10 点，以分为基
+ * 向上取整 ceil(分 × 4 / 25)。例：¥88.00 → 1408 点，¥1000 → 16000 点。
+ * 公式契约（参数＋用例向量）的裁判文件是 `pointsContract.json`：本模块
+ * 测试、Rust `publish_channel_price_points`、网关 `publishOrderPoints`
+ * 三侧 pin 实跑同一组 cases（票 #39，ADR-0012）。
  *
  * 仅用于展示换算；点数计费权威仍是 Rust 执行投影与网关，本函数不改变
  * 任何定价/计费/下单语义。

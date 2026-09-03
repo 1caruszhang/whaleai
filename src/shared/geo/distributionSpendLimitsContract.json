@@ -1,0 +1,6 @@
+{
+  "_comment": "分发点数限额的双侧裁判（票 #39，ADR-0012）：TS 展示缺省（src/shared/geo/distributionSpendLimits.ts）与 Rust 持久化冷启动缺省（src-tauri/src/distribution_spend_limits.rs）。上限 160,000,000 点恰为 ¥1000 万媒介价的折算点数（pointsContract.json 最大用例）。",
+  "defaultPerArticleMaxPoints": 3000,
+  "defaultPerExecutionMaxPoints": 20000,
+  "maxDistributionSpendLimitPoints": 160000000
+}
