@@ -9,23 +9,12 @@ import {
   createKnowledgeAuthority,
   type KnowledgeRevisionInput,
 } from './knowledge-authority';
-import {
-  ArticleGenerationService,
-  createArticlePort,
-} from './article-generation';
-import { createBrandMaterialPort } from './material-import';
-import { ARTICLE_IMAGE_CANDIDATE_INJECTION_LIMIT } from '../../shared/geo/articleGeneration';
-import {
-  DistributionPlanningService,
-  createDistributionPlanPort,
-} from './distribution-plan';
-import { createPublishSchedulerPort, type PublishSchedulerPort } from './publish-scheduler';
-import {
-  QuestionPoolService,
-  createQuestionPoolPort,
-} from './question-pool';
-import { TopicPlanService, createTopicPlanPort } from './topic-plan';
-import { getXiaojingGeoProviderCapabilities } from './provider-runtime';
+import type { ArticleGenerationService } from './article-generation';
+import type { DistributionPlanningService } from './distribution-plan';
+import type { PublishSchedulerPort } from './publish-scheduler';
+import type { QuestionPoolService } from './question-pool';
+import type { TopicPlanService } from './topic-plan';
+import { geoServices } from './service-composition';
 import type {
   TopicPlanItem,
   TopicPlanKnowledgeFact,
@@ -117,6 +106,12 @@ export interface GateRevisionReceipt {
 export interface GateRevisionContext {
   workspaceId: string;
   sessionId: string;
+  /**
+   * 请求级新鲜账号 token（revise_gate_content 工具从 MCP 会话上下文带入，
+   * 与 MCP 组装点同源）：组合根按其取能力与计费口径，缺省回退启动单例
+   * ——长会话（env token 已过期）下的修订路径不再依赖启动单例。
+   */
+  requestAccountToken?: string;
 }
 
 export type GateRevisionHandler = (
@@ -930,110 +925,53 @@ export function createPublishPreparationGateRevisionHandler(
 }
 
 /**
- * 默认注册（票 38）：五个域 handler 全部挂接同一工具契约，服务实例按
- * Session 惰性构造（修订路径不触发任何 provider 调用）。新增闸门仍只需
+ * 默认注册（票 38）：五个域 handler 全部挂接同一工具契约；服务实例向
+ * service-composition 组合根按闸门修订口径取用——显式携带
+ * `billing: 'revision-unbilled'`（修订是对已付费产物的修正迭代，不计费
+ * 是领域裁决而非遗漏；要变更必须走独立裁决，不得夹带在重构里）与
+ * `accountToken: context.requestAccountToken`（票 B：请求级新鲜 token，
+ * 由 revise_gate_content 唯一入口从 MCP 会话上下文带入）。修订路径只调
+ * 持久化面方法，不触发任何 provider 调用。新增闸门仍只需
  * registerGateRevisionHandler，不得另起修改入口。
  */
-type GateRevisionDomainService =
-  | QuestionPoolService
-  | TopicPlanService
-  | ArticleGenerationService
-  | DistributionPlanningService;
-
-const gateRevisionServiceRuntimes = new Map<string, GateRevisionDomainService>();
-
-function lazyService<T extends GateRevisionDomainService>(
-  key: string,
-  build: () => T,
-  context: GateRevisionContext,
-): T {
-  const cacheKey = `${key}:${context.workspaceId}:${context.sessionId}`;
-  const cached = gateRevisionServiceRuntimes.get(cacheKey);
-  if (cached) return cached as T;
-  const service = build();
-  gateRevisionServiceRuntimes.set(cacheKey, service);
-  return service as T;
-}
-
-function stageIdentity(context: GateRevisionContext) {
-  return { workspaceId: context.workspaceId, sessionId: context.sessionId };
+function revisionGeoServices(context: GateRevisionContext) {
+  return geoServices(context, {
+    accountToken: context.requestAccountToken,
+    billing: 'revision-unbilled',
+  });
 }
 
 registerGateRevisionHandler(
   'question-pool',
   createQuestionPoolGateRevisionHandler((context) =>
-    lazyService('question-pool', () => {
-      const identity = stageIdentity(context);
-      const capabilities = getXiaojingGeoProviderCapabilities();
-      return new QuestionPoolService(
-        identity,
-        createQuestionPoolPort(identity),
-        capabilities.keywordSearch,
-        capabilities.generation,
-        capabilities.embedding,
-      );
-    }, context),
+    revisionGeoServices(context).questionPool,
   ),
 );
 
 registerGateRevisionHandler(
   'topic-plan',
   createTopicPlanGateRevisionHandler((context) =>
-    lazyService('topic-plan', () => {
-      const identity = stageIdentity(context);
-      const capabilities = getXiaojingGeoProviderCapabilities();
-      return new TopicPlanService(
-        identity,
-        createTopicPlanPort(identity),
-        capabilities.generation,
-        capabilities.embedding,
-      );
-    }, context),
+    revisionGeoServices(context).topicPlan,
   ),
 );
 
 registerGateRevisionHandler(
   'article',
   createArticleGateRevisionHandler((context) =>
-    lazyService('article', () => {
-      const identity = stageIdentity(context);
-      const capabilities = getXiaojingGeoProviderCapabilities();
-      return new ArticleGenerationService(
-        identity,
-        createArticlePort(identity),
-        capabilities.generation,
-        capabilities.reflection,
-        undefined,
-        // 配图候选池：聊天修订重生成与 MCP/HTTP 路径同一取数（漏传即
-        // 静默零配图，见 2026-08-31 xiaojing-geo-tool 同款修复）。
-        async () =>
-          createBrandMaterialPort(identity).listImageAssets({
-            limit: ARTICLE_IMAGE_CANDIDATE_INJECTION_LIMIT,
-          }),
-      );
-    }, context),
+    revisionGeoServices(context).article,
   ),
 );
 
 registerGateRevisionHandler(
   'distribution-plan',
   createDistributionPlanGateRevisionHandler((context) =>
-    lazyService('distribution-plan', () => {
-      const identity = stageIdentity(context);
-      const capabilities = getXiaojingGeoProviderCapabilities();
-      return new DistributionPlanningService(
-        identity,
-        createDistributionPlanPort(identity),
-        capabilities.distribution,
-        capabilities.keywordSearch,
-      );
-    }, context),
+    revisionGeoServices(context).distribution,
   ),
 );
 
 registerGateRevisionHandler(
   'publish-preparation',
   createPublishPreparationGateRevisionHandler((context) =>
-    createPublishSchedulerPort(stageIdentity(context)),
+    revisionGeoServices(context).publishPreview,
   ),
 );

@@ -8,8 +8,8 @@ import { recordGeoOperationMilestone, quoteGeoNextStepForGateKind } from '../geo
 import { jsonResponse } from '../utils/http';
 import { sendXiaojingMessage } from '../xiaojing-reminder-send';
 import {
+  geoServicesForRequest,
   getRuntimeSessionIdForRequest,
-  getXiaojingQuestionPoolService,
   requestAccountAccessToken,
   type XiaojingRouteContext,
 } from './xiaojing-shared';
@@ -20,6 +20,9 @@ export async function handleXiaojingQuestionPoolsRoute(
   ctx: XiaojingRouteContext,
 ): Promise<Response | null> {
   const { workspacePath } = ctx;
+  // 领域服务统一经 geoServicesForRequest 取（请求级 token 口径单源在
+  // xiaojing-shared）；裸 accountToken 仅供提醒发送等非组装用途。
+  const accountToken = requestAccountAccessToken(request);
 
   // Question opportunities are a brand-scoped GeoArtifact operation. The
   // Session route owns provider execution; Rust owns immutable knowledge
@@ -38,10 +41,10 @@ export async function handleXiaojingQuestionPoolsRoute(
         || payload.sessionId !== runtimeSessionId) {
         return jsonResponse({ success: false, error: 'question_pool_identity_mismatch' }, 403);
       }
-      const pool = await getXiaojingQuestionPoolService({
+      const pool = await geoServicesForRequest({
         workspaceId,
         sessionId: runtimeSessionId,
-      }).latest({ ...payload, workspaceId, sessionId: runtimeSessionId });
+      }, request).questionPool.latest({ ...payload, workspaceId, sessionId: runtimeSessionId });
       return jsonResponse({ success: true, pool });
     } catch (error) {
       return jsonResponse({
@@ -74,7 +77,7 @@ export async function handleXiaojingQuestionPoolsRoute(
         return jsonResponse({ success: false, error: 'question_pool_identity_mismatch' }, 403);
       }
       const identity = { workspaceId, sessionId: runtimeSessionId };
-      const service = getXiaojingQuestionPoolService(identity);
+      const service = geoServicesForRequest(identity, request).questionPool;
       const pool = await service.generate({
         ...payload,
         ...identity,
@@ -109,7 +112,7 @@ export async function handleXiaojingQuestionPoolsRoute(
                   'question-selection',
                 ),
               }),
-              requestAccountToken: requestAccountAccessToken(request),
+              requestAccountToken: accountToken,
             });
             await recordGeoOperationMilestone(identity, 'question-pool-confirmed');
             autoConfirmed = {
@@ -146,10 +149,10 @@ export async function handleXiaojingQuestionPoolsRoute(
         || payload.sessionId !== runtimeSessionId) {
         return jsonResponse({ success: false, error: 'question_pool_identity_mismatch' }, 403);
       }
-      const pool = await getXiaojingQuestionPoolService({
+      const pool = await geoServicesForRequest({
         workspaceId,
         sessionId: runtimeSessionId,
-      }).cancel(payload.idempotencyKey);
+      }, request).questionPool.cancel(payload.idempotencyKey);
       return jsonResponse({ success: true, pool });
     } catch (error) {
       return jsonResponse({
@@ -175,7 +178,7 @@ export async function handleXiaojingQuestionPoolsRoute(
         return jsonResponse({ success: false, error: 'question_pool_identity_mismatch' }, 403);
       }
       const identity = { workspaceId, sessionId: runtimeSessionId };
-      const decision = await getXiaojingQuestionPoolService(identity).confirm({
+      const decision = await geoServicesForRequest(identity, request).questionPool.confirm({
         ...payload,
         ...identity,
       });
@@ -191,7 +194,7 @@ export async function handleXiaojingQuestionPoolsRoute(
             'question-selection',
           ),
         }),
-        requestAccountToken: requestAccountAccessToken(request),
+        requestAccountToken: accountToken,
       });
       await recordGeoOperationMilestone(identity, 'question-pool-confirmed');
       return jsonResponse({
