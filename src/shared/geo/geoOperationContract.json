@@ -1,0 +1,95 @@
+{
+  "operationKinds": [
+    "knowledge-update",
+    "question-opportunities",
+    "article-generation",
+    "performance-inspection",
+    "distribution-planning",
+    "publishing",
+    "monitoring",
+    "full-optimization",
+    "next-round-optimization"
+  ],
+  "operationStatuses": [
+    "ready",
+    "queued",
+    "running",
+    "awaiting-confirmation",
+    "paused",
+    "recovering",
+    "succeeded",
+    "failed",
+    "cancelled"
+  ],
+  "terminalStatuses": ["succeeded", "failed", "cancelled"],
+  "stepStatuses": [
+    "pending",
+    "ready",
+    "running",
+    "awaiting-confirmation",
+    "succeeded",
+    "failed",
+    "skipped"
+  ],
+  "capabilities": [
+    "brand-material-import",
+    "brand-knowledge",
+    "question-opportunities",
+    "geo-observation",
+    "content-planning",
+    "content-production",
+    "distribution-planning",
+    "publishing",
+    "monitoring",
+    "geo-dashboard"
+  ],
+  "referenceKinds": [
+    "knowledge-version",
+    "material",
+    "question-pool",
+    "baseline",
+    "topic-plan",
+    "article-operation",
+    "article",
+    "distribution-plan",
+    "publish-execution",
+    "monitor-plan",
+    "operation",
+    "report"
+  ],
+  "retryUnits": [
+    "operation",
+    "article",
+    "probe",
+    "publish-item",
+    "monitor-item"
+  ],
+  "confirmationKinds": [
+    "plan-ack",
+    "knowledge-change",
+    "next-round-knowledge",
+    "question-selection",
+    "baseline-probe",
+    "topic-plan",
+    "article-approval",
+    "distribution-plan",
+    "paid-publish",
+    "external-publish",
+    "monitoring-activation"
+  ],
+  "confirmationAuthorities": [
+    "geo-operation",
+    "knowledge-authority",
+    "brand-workspace",
+    "publish-scheduler",
+    "post-publish-monitor"
+  ],
+  "rustUiConfirmationAuthorities": [
+    "publish-scheduler",
+    "post-publish-monitor"
+  ],
+  "knowledgeSegmentStepIds": {
+    "_comment": "知识段步骤 id 序列（geo-plan-normalization 票 07）：TS 侧由 KNOWLEDGE_STEPS 步骤形状 policy 派生（改知识段形状时本表需一并更新），Rust 侧按 id 判定「知识段剩余步骤」。",
+    "values": ["collect-materials", "extract-facts", "confirm-knowledge"]
+  }
+}

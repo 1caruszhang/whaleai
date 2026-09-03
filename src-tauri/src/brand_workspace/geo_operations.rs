@@ -10,6 +10,8 @@ use super::{
 };
 
 const MAX_JSON_BYTES: usize = 128 * 1024;
+// 下列常量表的跨语言对照由 src/shared/geo/geoOperationContract.json 裁决
+//（ADR-0012，票 #37）：同文件 #[cfg(test)] 的 pin 测试断言逐表严格相等。
 const STRUCTURED_KINDS: [&str; 9] = [
     "knowledge-update",
     "question-opportunities",
@@ -95,6 +97,10 @@ const CONFIRMATION_AUTHORITIES: [&str; 5] = [
     "publish-scheduler",
     "post-publish-monitor",
 ];
+/// 裁决面在产品界面（Rust UI）而非聊天卡片的确认 authority 子集：付费/
+/// 外部发布与监测激活。通用确认入口（confirm-step）拒绝它们，外部门
+/// attestation 只认它们——两个判定点都从这一个常量读取。
+const RUST_UI_CONFIRMATION_AUTHORITIES: [&str; 2] = ["publish-scheduler", "post-publish-monitor"];
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -1299,7 +1305,7 @@ fn apply_action(
                 .as_ref()
                 .map(|value| value.authority.as_str())
                 .ok_or_else(|| "geo_operation_confirmation_step_invalid".to_string())?;
-            if matches!(authority, "publish-scheduler" | "post-publish-monitor") {
+            if RUST_UI_CONFIRMATION_AUTHORITIES.contains(&authority) {
                 return Err("geo_operation_confirmation_requires_rust_ui_authority".to_string());
             }
             step.status = "succeeded".to_string();
@@ -1316,7 +1322,7 @@ fn apply_action(
                 .ok_or_else(|| "geo_operation_confirmation_step_invalid".to_string())?;
             if step.status != "awaiting-confirmation"
                 || !step.requires_confirmation
-                || !matches!(authority, "publish-scheduler" | "post-publish-monitor")
+                || !RUST_UI_CONFIRMATION_AUTHORITIES.contains(&authority)
             {
                 return Err("geo_operation_external_gate_invalid".to_string());
             }
@@ -1515,10 +1521,10 @@ fn operation_step_mut<'a>(
     .ok_or_else(|| "geo_operation_step_not_found".to_string())
 }
 
-/// 知识段步骤 id（与 shared policy 的 KNOWLEDGE_STEPS 同一序列，票 07）：
-/// 材料收集 / 事实提取 / 知识确认。步骤形状的 policy 在 TS，Rust 侧按 id
-/// 判定「知识段剩余步骤」，职责只是把未走完的知识段步骤从持久层计划里
-/// 剥掉——已完成（succeeded/skipped）的保留。
+/// 知识段步骤 id：材料收集 / 事实提取 / 知识确认。步骤形状的 policy 在
+/// TS，Rust 侧按 id 判定「知识段剩余步骤」，职责只是把未走完的知识段步骤
+/// 从持久层计划里剥掉——已完成（succeeded/skipped）的保留。id 序列的
+/// 跨语言对照由 geoOperationContract.json 双侧 pin 裁决（票 #37）。
 const KNOWLEDGE_SEGMENT_STEP_IDS: [&str; 3] =
     ["collect-materials", "extract-facts", "confirm-knowledge"];
 
@@ -2241,6 +2247,93 @@ mod tests {
         SessionTitleSource,
     };
     use tempfile::tempdir;
+
+    // ── geo_operations 契约（票 #37，ADR-0012）：共享裁判 JSON 的 Rust pin
+    //（与 TS 侧 operation.test.ts 的 import pin 同一裁判文件）。
+
+    #[derive(Debug, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct GeoOperationContract {
+        operation_kinds: Vec<String>,
+        operation_statuses: Vec<String>,
+        terminal_statuses: Vec<String>,
+        step_statuses: Vec<String>,
+        capabilities: Vec<String>,
+        reference_kinds: Vec<String>,
+        retry_units: Vec<String>,
+        confirmation_kinds: Vec<String>,
+        confirmation_authorities: Vec<String>,
+        rust_ui_confirmation_authorities: Vec<String>,
+        knowledge_segment_step_ids: GeoOperationContractKnowledgeSegment,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct GeoOperationContractKnowledgeSegment {
+        values: Vec<String>,
+    }
+
+    fn assert_contract_table(contract: &[String], constant: &[&str], table: &str) {
+        assert_eq!(
+            contract,
+            &constant
+                .iter()
+                .map(|value| value.to_string())
+                .collect::<Vec<_>>(),
+            "geoOperationContract.json 的 {table} 表与 Rust 常量不一致（含顺序）"
+        );
+    }
+
+    #[test]
+    fn geo_operation_contract_pins_constants() {
+        let contract: GeoOperationContract = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../src/shared/geo/geoOperationContract.json"
+        )))
+        .expect("shared geo operation contract json");
+        assert_contract_table(
+            &contract.operation_kinds,
+            &STRUCTURED_KINDS,
+            "operationKinds",
+        );
+        assert_contract_table(
+            &contract.operation_statuses,
+            &OPERATION_STATUSES,
+            "operationStatuses",
+        );
+        assert_contract_table(
+            &contract.terminal_statuses,
+            &TERMINAL_STATUSES,
+            "terminalStatuses",
+        );
+        assert_contract_table(&contract.step_statuses, &STEP_STATUSES, "stepStatuses");
+        assert_contract_table(&contract.capabilities, &CAPABILITIES, "capabilities");
+        assert_contract_table(
+            &contract.reference_kinds,
+            &REFERENCE_KINDS,
+            "referenceKinds",
+        );
+        assert_contract_table(&contract.retry_units, &RETRY_UNITS, "retryUnits");
+        assert_contract_table(
+            &contract.confirmation_kinds,
+            &CONFIRMATION_KINDS,
+            "confirmationKinds",
+        );
+        assert_contract_table(
+            &contract.confirmation_authorities,
+            &CONFIRMATION_AUTHORITIES,
+            "confirmationAuthorities",
+        );
+        assert_contract_table(
+            &contract.rust_ui_confirmation_authorities,
+            &RUST_UI_CONFIRMATION_AUTHORITIES,
+            "rustUiConfirmationAuthorities",
+        );
+        assert_contract_table(
+            &contract.knowledge_segment_step_ids.values,
+            &KNOWLEDGE_SEGMENT_STEP_IDS,
+            "knowledgeSegmentStepIds",
+        );
+    }
 
     fn fixture() -> (BrandWorkspaceStore, BrandWorkspace) {
         let root = tempdir().unwrap().keep();

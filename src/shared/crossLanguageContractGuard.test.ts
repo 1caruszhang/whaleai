@@ -165,11 +165,6 @@ const EXEMPTIONS: readonly SyncCommentExemption[] = [
     hit: "src/shared/geo/publishScheduler.ts :: * 是否为原路退点状态（后端 REFUND_STATUSES 同源）：已拒稿(2)、已取消(5)、",
     owner: "迁移票①publish_scheduler 试点",
   },
-  // 迁移票②：geo_operations 九表
-  {
-    hit: "src-tauri/src/brand_workspace/geo_operations.rs :: /// 知识段步骤 id（与 shared policy 的 KNOWLEDGE_STEPS 同一序列，票 07）：",
-    owner: "迁移票②geo_operations 九表",
-  },
   // 迁移票④：点数三源＋spend-limits
   {
     hit: "src/shared/geo/distributionSpendLimits.ts :: /** Shared client/Sidecar defaults. Rust owns persistence and independently",
@@ -297,10 +292,6 @@ const EXEMPTIONS: readonly SyncCommentExemption[] = [
   {
     hit: "src/shared/geo/articleGeneration.ts :: `- 首行必须是指定标题的 H1，逐字一致。`,",
     owner: "非跨语言：提示词文案用词（改写会动模型行为，收尾票裁定）",
-  },
-  {
-    hit: "src/shared/geo/operation.ts :: * heldStep 指引按同一对区分裁决面——两处同源，防漂移。 */",
-    owner: "非跨语言：TS 内部（heldStep 指引）",
   },
 ];
 

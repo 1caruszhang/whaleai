@@ -1,12 +1,62 @@
 import { describe, expect, it } from "vitest";
 
+import geoOperationContract from "./geoOperationContract.json";
 import {
+  GEO_OPERATION_CAPABILITIES,
+  GEO_OPERATION_CONFIRMATION_AUTHORITIES,
+  GEO_OPERATION_CONFIRMATION_KINDS,
+  GEO_OPERATION_KINDS,
+  GEO_OPERATION_REFERENCE_KINDS,
+  GEO_OPERATION_RETRY_UNITS,
+  GEO_OPERATION_STATUSES,
+  GEO_OPERATION_STEP_STATUSES,
+  KNOWLEDGE_SEGMENT_STEP_IDS,
+  RUST_UI_CONFIRMATION_AUTHORITIES,
+  TERMINAL_GEO_OPERATION_STATUSES,
   classifyGeoIntent,
   formatGeoOperationSpanLabel,
   geoOperationPhaseStatus,
   groupGeoOperationSteps,
   planGeoOperation,
 } from "./operation";
+
+describe("geo operation contract pin（ADR-0012 三方裁判）", () => {
+  it("十一键与 geoOperationContract.json 严格相等（含顺序）", () => {
+    expect(geoOperationContract.operationKinds).toEqual([
+      ...GEO_OPERATION_KINDS,
+    ]);
+    expect(geoOperationContract.operationStatuses).toEqual([
+      ...GEO_OPERATION_STATUSES,
+    ]);
+    expect(geoOperationContract.terminalStatuses).toEqual([
+      ...TERMINAL_GEO_OPERATION_STATUSES,
+    ]);
+    expect(geoOperationContract.stepStatuses).toEqual([
+      ...GEO_OPERATION_STEP_STATUSES,
+    ]);
+    expect(geoOperationContract.capabilities).toEqual([
+      ...GEO_OPERATION_CAPABILITIES,
+    ]);
+    expect(geoOperationContract.referenceKinds).toEqual([
+      ...GEO_OPERATION_REFERENCE_KINDS,
+    ]);
+    expect(geoOperationContract.retryUnits).toEqual([
+      ...GEO_OPERATION_RETRY_UNITS,
+    ]);
+    expect(geoOperationContract.confirmationKinds).toEqual([
+      ...GEO_OPERATION_CONFIRMATION_KINDS,
+    ]);
+    expect(geoOperationContract.confirmationAuthorities).toEqual([
+      ...GEO_OPERATION_CONFIRMATION_AUTHORITIES,
+    ]);
+    expect(geoOperationContract.rustUiConfirmationAuthorities).toEqual([
+      ...RUST_UI_CONFIRMATION_AUTHORITIES,
+    ]);
+    expect(geoOperationContract.knowledgeSegmentStepIds.values).toEqual([
+      ...KNOWLEDGE_SEGMENT_STEP_IDS,
+    ]);
+  });
+});
 
 describe("GeoOperation intent policy", () => {
   it.each([
@@ -281,9 +331,7 @@ describe("GeoOperation intent policy", () => {
       "extract-facts",
       "confirm-knowledge",
     ]) {
-      expect(
-        full.steps.some((step) => step.id === knowledgeStep),
-      ).toBe(false);
+      expect(full.steps.some((step) => step.id === knowledgeStep)).toBe(false);
     }
     // 计划照常停靠认可门（借用首工作步 capability，落问题机会段）。
     expect(full.steps[0]).toMatchObject({
@@ -758,7 +806,9 @@ describe("GeoOperation span label", () => {
       goal: "做到文章为止",
       endingPhase: "publishing",
     });
-    expect(formatGeoOperationSpanLabel(plan.steps)).toBe("跨度：品牌知识 → 发布");
+    expect(formatGeoOperationSpanLabel(plan.steps)).toBe(
+      "跨度：品牌知识 → 发布",
+    );
   });
 
   it("reports a single stage name when start and end share the phase", () => {
