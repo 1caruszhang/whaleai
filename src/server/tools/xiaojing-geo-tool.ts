@@ -63,7 +63,7 @@ import {
   createGeoOperationService,
   type GeoOperationCreateInput,
 } from '../geo/operation';
-import { stageToolOrderRejection, type GeoStageOrderRejection } from '../geo/stage-order-gate';
+import { stageOrderGatedTool } from './stage-order-gate-registration';
 import { buildKnowledgeCandidatesCardData } from '../../shared/geo/knowledgeCard';
 import {
   buildMaterialRequestCardData,
@@ -557,18 +557,6 @@ async function resolveMaterialSkipTarget(): Promise<MaterialRequestSkipTarget | 
     // 卡片必须始终能发出：锚点解析失败降级为无跳过动作的普通卡。
     return null;
   }
-}
-
-/**
- * 顺序闸拒绝的工具结果（票 #05）：结构化指路信封直接作为工具内容返回——
- * 当前步 + 应调工具 + 一句话指引，模型一次读明白、一次重试到位，不 throw
- * 成 isError 单行文本。闸只覆盖五个有后果的阶段工具（GEO_STAGE_ORDER_
- * GATED_TOOLS）；只读查询与材料类工具不经此路径。
- */
-function stageOrderGateResult(rejection: GeoStageOrderRejection) {
-  return {
-    content: [{ type: 'text' as const, text: JSON.stringify(rejection) }],
-  };
 }
 
 function knowledgeAuthority() {
@@ -1746,195 +1734,193 @@ export async function createXiaojingGeoServer() {
         },
         { alwaysLoad: true },
       ),
-      tool(
-        'run_question_pool',
-        `Run the question-opportunity stage for one product line (domain-level, e.g. 汽车音响改装 — not a fine-grained service item). Reuse contract: ${QUESTION_POOL_REUSE_CONTRACT}; call it as planned without judging whether to skip or rerun — when no reusable pool exists the service mines keywords online and generates candidate questions (real provider spend). Omit productLine to use the brand's first confirmed product line (synced from the industry fact at knowledge confirmation — if none exists, call request_brand_material so the user can import brand material and confirm knowledge first, then retry). When the user names a specific business within the domain (e.g. 汽车隔音), pass it as businessFocus instead of inventing a new product line. On fresh generation the result renders as the confirmation card where the user reviews the mined keywords and selects questions — never claim the pool is confirmed; a reused confirmed pool arrives on the card pre-checked with the previous selection and the user re-selects this round's questions there (the card also offers a paid regenerate) — the question gate releases only on the user's card confirmation, never proceed past it on your own. Keyword geography is bounded by the user-declared service area (服务区域): the declared scope kept at its own granularity (e.g. 新都区 stays 新都区, not the whole 成都) is both the mining anchor and the ceiling — terms never reference regions beyond it, and store addresses only anchor when no usable scope is declared. For targetRegion pass the declared scope as a plain name (e.g. 新都区 or 成都); never prose like 成都本地，辐射西南地区 and never boundless values such as 全国 — nationwide/online service mines in geo-free mode.`,
+      stageOrderGatedTool(
+        tool,
         {
-          productLine: z.string().min(1).max(120).optional(),
-          targetRegion: z.string().min(1).max(60),
-          businessFocus: z.string().min(2).max(120).optional(),
-          idempotencyKey: z.string().min(8).max(120).optional(),
-        },
-        async (input): Promise<{ content: Array<{ type: 'text'; text: string }> }> => {
-          const identity = stageIdentity();
-          // 顺序闸（票 #05）：阶段工具先对齐本会话操作的当前步，越序调用
-          // 在任何业务工作（含缺省产品线回读）之前被结构化拒绝。
-          const orderGate = await stageToolOrderRejection(identity, 'run_question_pool');
-          if (orderGate) return stageOrderGateResult(orderGate);
-          let productLine = input.productLine?.trim();
-          if (!productLine) {
-            const sidecarId = process.env.XIAOJING_SIDECAR_ID?.trim();
-            if (!sidecarId) {
-              throw new Error('Brand workspace info requires an authenticated Sidecar identity');
-            }
-            const info = await managementApi('/api/brand-workspace/info', 'POST', {
-              sidecarId,
-              workspaceId: identity.workspaceId,
-              sessionId: identity.sessionId,
-              payload: {},
-            });
-            const lines: unknown = (info as { workspace?: { productLines?: unknown } }).workspace?.productLines;
-            if (info.ok !== true || !Array.isArray(lines)) {
-              throw new Error(
-                typeof (info as { error?: unknown }).error === 'string'
-                  ? (info as { error: string }).error
-                  : 'brand_workspace_info_unavailable',
-              );
-            }
-            const first = (lines as string[]).find((line) => line.trim().length > 0);
-            if (!first) {
-              throw new Error(
-                '品牌还没有已确认的产品线（领域）：请先用 request_brand_material 发起材料请求，待用户上传品牌资料并在确认卡片上完成知识裁决后重试；行业事实确认后产品线会自动同步。',
-              );
-            }
-            productLine = first;
-          }
-          // 执行段先行 begin：题库挖掘是真实 provider 工作，进度条从
-          // ready 推进到 running，避免长耗时期间条上无事发生。必须在
-          // 输入解析（含缺省产品线回读）之后触发——纯校验失败不应把
-          // 步骤留在 running。
-          await recordGeoOperationMilestone(identity, 'question-pool-generation-started');
-          const pool: QuestionPoolProjection = await questionPoolService().generate({
-            ...identity,
-            productLine,
-            targetRegion: input.targetRegion,
-            ...(input.businessFocus ? { businessFocus: input.businessFocus } : {}),
-            idempotencyKey: input.idempotencyKey ?? `agent-pool-${crypto.randomUUID()}`,
-          });
-          await recordGeoOperationMilestone(identity, 'question-pool-generated');
-          // 复用契约（ADR-0011 Decision 3，2026-09-01 修订）：已确认池到达时
-          // 卡片预勾上次的选择，由用户为本轮重选——问题门只在用户的卡片
-          // 确认（confirm 路由发 question-pool-confirmed 里程碑）后放行，
-          // 这里不自动放行。信封 outcome + proceed 提示与工具描述、next-step
-          // 表同一话术。判定与确认卡展示侧同口径：只看 status=confirmed。
-          const envelope = pool.status === 'confirmed'
-            ? {
-                kind: 'question-pool',
-                outcome: QUESTION_POOL_REUSE_OUTCOME,
-                proceed: `Zero-cost reuse hit — ${QUESTION_POOL_REUSE_CONTRACT}; park at the question gate and wait for the user's card confirmation, never proceed past it on your own.`,
-                pool,
+          name: 'run_question_pool',
+          description: `Run the question-opportunity stage for one product line (domain-level, e.g. 汽车音响改装 — not a fine-grained service item). Reuse contract: ${QUESTION_POOL_REUSE_CONTRACT}; call it as planned without judging whether to skip or rerun — when no reusable pool exists the service mines keywords online and generates candidate questions (real provider spend). Omit productLine to use the brand's first confirmed product line (synced from the industry fact at knowledge confirmation — if none exists, call request_brand_material so the user can import brand material and confirm knowledge first, then retry). When the user names a specific business within the domain (e.g. 汽车隔音), pass it as businessFocus instead of inventing a new product line. On fresh generation the result renders as the confirmation card where the user reviews the mined keywords and selects questions — never claim the pool is confirmed; a reused confirmed pool arrives on the card pre-checked with the previous selection and the user re-selects this round's questions there (the card also offers a paid regenerate) — the question gate releases only on the user's card confirmation, never proceed past it on your own. Keyword geography is bounded by the user-declared service area (服务区域): the declared scope kept at its own granularity (e.g. 新都区 stays 新都区, not the whole 成都) is both the mining anchor and the ceiling — terms never reference regions beyond it, and store addresses only anchor when no usable scope is declared. For targetRegion pass the declared scope as a plain name (e.g. 新都区 or 成都); never prose like 成都本地，辐射西南地区 and never boundless values such as 全国 — nationwide/online service mines in geo-free mode.`,
+          schema: {
+            productLine: z.string().min(1).max(120).optional(),
+            targetRegion: z.string().min(1).max(60),
+            businessFocus: z.string().min(2).max(120).optional(),
+            idempotencyKey: z.string().min(8).max(120).optional(),
+          },
+          handler: async (input): Promise<{ content: Array<{ type: 'text'; text: string }> }> => {
+            const identity = stageIdentity();
+            let productLine = input.productLine?.trim();
+            if (!productLine) {
+              const sidecarId = process.env.XIAOJING_SIDECAR_ID?.trim();
+              if (!sidecarId) {
+                throw new Error('Brand workspace info requires an authenticated Sidecar identity');
               }
-            : { kind: 'question-pool', pool };
-          return {
-            content: [{ type: 'text' as const, text: JSON.stringify(envelope) }],
-          };
-        },
-        { alwaysLoad: true },
-      ),
-      tool(
-        'plan_topics',
-        'Run the content-planning stage: cluster the confirmed questions semantically and produce the five-type topic/title plan (real provider spend). Plan reuse: the service returns the existing confirmed plan for the same pool revision at zero cost — the card arrives pre-checked with the previously approved items and the user re-confirms or regenerates there (a paid regenerate); the content gate releases only on the card confirmation by the user, never proceed past it on your own. On fresh generation the result renders as the confirmation card where the user approves plan items — never claim a fresh plan is confirmed; the user confirms on the card. Requires a confirmed question pool first.',
-        {
-          questionPoolId: z.string().min(1).max(120).optional(),
-        },
-        async (input): Promise<{ content: Array<{ type: 'text'; text: string }> }> => {
-          const identity = stageIdentity();
-          // 顺序闸（票 #05）：先对齐当前步，越序调用在真实 provider 工作前
-          // 被结构化拒绝。
-          const orderGate = await stageToolOrderRejection(identity, 'plan_topics');
-          if (orderGate) return stageOrderGateResult(orderGate);
-          // 执行段先行 begin：主题规划是真实 provider 工作。
-          await recordGeoOperationMilestone(identity, 'topic-plan-started');
-          const plan: TopicPlanProjection = await topicPlanService().generate({
-            ...identity,
-            ...(input.questionPoolId ? { questionPoolId: input.questionPoolId } : {}),
-          });
-          await recordGeoOperationMilestone(identity, 'topic-plan-generated');
-          // 复用命中（prepare 返回同池同版本的既有 confirmed 计划，零成本）：
-          // 停卡重选（预勾上次的已批准项），用户「沿用此计划」确认或付费
-          // 重新生成——内容计划门只在用户的卡片确认后放行，这里不自动放行。
-          const envelope = plan.status === 'confirmed'
-            ? {
-                kind: 'topic-plan',
-                outcome: TOPIC_PLAN_REUSE_OUTCOME,
-                proceed: 'Zero-cost reuse hit — this confirmed plan was already approved; park at the content gate and wait for the user to re-confirm or regenerate on the card, never proceed past it on your own.',
-                plan: toTopicPlanCardProjection(plan),
-              }
-            : { kind: 'topic-plan', plan: toTopicPlanCardProjection(plan) };
-          // 信封必须走卡片瘦身投影：完整投影曾达 ~81KB，超过 MCP 工具结果
-          // 上限被 MCP 宿主客户端持久化成文件，tool.result 变存根、确认卡
-          // 随之不渲染。瘦身后同级计划 ~29KB；plannedFacts 全量值以 SQLite
-          // 为权威（saveItems 合并时服务端回填）。
-          return {
-            content: [{ type: 'text' as const, text: JSON.stringify(envelope) }],
-          };
-        },
-        { alwaysLoad: true },
-      ),
-      tool(
-        'generate_articles',
-        'Run the article stage from the confirmed topic plan (or a direct explicit article task the user asked for). Real provider spend; drafts then pass the dual quality-gate review. The result renders as the approval card where the user reads each draft, checks the ones to approve and approves the selection — never claim an article is approved; only the user can approve on the card. Omit planId to consume the latest confirmed topic plan; pass planId only to pin a specific confirmed plan. Pass itemIds only when the user names a subset of the confirmed plan items to write now (e.g. "先写这三篇" — copy the item ids from the confirmed plan card); the rest stay available for later generations. Never pass both planId/direct together, and never combine itemIds with direct.',
-        {
-          planId: z.string().min(1).max(120).optional(),
-          itemIds: z.array(z.string().min(1).max(200)).min(1).max(20).optional(),
-          direct: z.object({
-            count: z.number().int().min(1).max(10),
-            themes: z.array(z.string().min(1).max(200)).min(1).max(10),
-            contentType: z.enum(
-              GEO_PORT_CONTRACT.contentTypes.slice() as unknown as [string, ...string[]],
-            ),
-            constraints: z.string().max(2000),
-          }).optional(),
-        },
-        async (input): Promise<{ content: Array<{ type: 'text'; text: string }> }> => {
-          // 空 planId 走 Rust「最新 confirmed plan」回落（规格：指定或最新）；
-          // planId/direct 互斥与 itemIds 归属校验收敛在纯函数里（含历史注释
-          // 的初衷：旧实现强制二选一，模型被迫空参试探报错后绕路四步打捞
-          // planId——inspect_brand_fact 打错库、重跑 pool/plan）。
-          const source: ArticleOperationSource =
-            articleOperationSourceFromGenerateInput(input);
-          const identity = stageIdentity();
-          // 顺序闸（票 #05）：先对齐当前步，越序调用在真实 provider 工作
-          //（含执行段 begin 里程碑）前被结构化拒绝；纯入参校验仍先行，
-          // 互斥组合的 isError 语义不变。
-          const orderGate = await stageToolOrderRejection(identity, 'generate_articles');
-          if (orderGate) return stageOrderGateResult(orderGate);
-          // 执行段先行 begin：文章生成是全程最长的真实工作段，进度条从
-          // 工具开始即进入 running，逐篇落定由 onArticleSettled 回报 N/M。
-          await recordGeoOperationMilestone(identity, 'article-generation-started');
-          let operation: ArticleOperationProjection;
-          try {
-            operation = await articleService().start({
-              ...identity,
-              source,
-              onArticleSettled: (settled, total) => {
-                // Fire-and-forget：并发逐篇回报不得串行等待管理端口往返。
-                void reportGeoOperationStepProgress(identity, 'generate-articles', {
-                  current: settled,
-                  total,
-                });
-              },
-            });
-          } catch (error) {
-            const requirement = rankingCompetitorRequirement(error);
-            if (requirement) {
-              const [brandContext, latest] = await Promise.all([
-                brandMaterialPort().context(),
-                latestUserMessage(),
-              ]);
-              if (!latest) throw error;
-              rankingCompetitorGate.issue({
-                subject: brandContext.brandName,
-                source,
-                issuedAfterUserMessageId: latest.id,
+              const info = await managementApi('/api/brand-workspace/info', 'POST', {
+                sidecarId,
+                workspaceId: identity.workspaceId,
+                sessionId: identity.sessionId,
+                payload: {},
               });
-              return {
-                content: [
-                  { type: "text" as const, text: JSON.stringify(requirement) },
-                ],
-              };
+              const lines: unknown = (info as { workspace?: { productLines?: unknown } }).workspace?.productLines;
+              if (info.ok !== true || !Array.isArray(lines)) {
+                throw new Error(
+                  typeof (info as { error?: unknown }).error === 'string'
+                    ? (info as { error: string }).error
+                    : 'brand_workspace_info_unavailable',
+                );
+              }
+              const first = (lines as string[]).find((line) => line.trim().length > 0);
+              if (!first) {
+                throw new Error(
+                  '品牌还没有已确认的产品线（领域）：请先用 request_brand_material 发起材料请求，待用户上传品牌资料并在确认卡片上完成知识裁决后重试；行业事实确认后产品线会自动同步。',
+                );
+              }
+              productLine = first;
+            }
+            // 执行段先行 begin：题库挖掘是真实 provider 工作，进度条从
+            // ready 推进到 running，避免长耗时期间条上无事发生。必须在
+            // 输入解析（含缺省产品线回读）之后触发——纯校验失败不应把
+            // 步骤留在 running。
+            await recordGeoOperationMilestone(identity, 'question-pool-generation-started');
+            const pool: QuestionPoolProjection = await questionPoolService().generate({
+              ...identity,
+              productLine,
+              targetRegion: input.targetRegion,
+              ...(input.businessFocus ? { businessFocus: input.businessFocus } : {}),
+              idempotencyKey: input.idempotencyKey ?? `agent-pool-${crypto.randomUUID()}`,
+            });
+            await recordGeoOperationMilestone(identity, 'question-pool-generated');
+            // 复用契约（ADR-0011 Decision 3，2026-09-01 修订）：已确认池到达时
+            // 卡片预勾上次的选择，由用户为本轮重选——问题门只在用户的卡片
+            // 确认（confirm 路由发 question-pool-confirmed 里程碑）后放行，
+            // 这里不自动放行。信封 outcome + proceed 提示与工具描述、next-step
+            // 表同一话术。判定与确认卡展示侧同口径：只看 status=confirmed。
+            const envelope = pool.status === 'confirmed'
+              ? {
+                  kind: 'question-pool',
+                  outcome: QUESTION_POOL_REUSE_OUTCOME,
+                  proceed: `Zero-cost reuse hit — ${QUESTION_POOL_REUSE_CONTRACT}; park at the question gate and wait for the user's card confirmation, never proceed past it on your own.`,
+                  pool,
+                }
+              : { kind: 'question-pool', pool };
+            return {
+              content: [{ type: 'text' as const, text: JSON.stringify(envelope) }],
+            };
+          },
+        },
+        stageIdentity,
+      ),
+      stageOrderGatedTool(
+        tool,
+        {
+          name: 'plan_topics',
+          description: 'Run the content-planning stage: cluster the confirmed questions semantically and produce the five-type topic/title plan (real provider spend). Plan reuse: the service returns the existing confirmed plan for the same pool revision at zero cost — the card arrives pre-checked with the previously approved items and the user re-confirms or regenerates there (a paid regenerate); the content gate releases only on the card confirmation by the user, never proceed past it on your own. On fresh generation the result renders as the confirmation card where the user approves plan items — never claim a fresh plan is confirmed; the user confirms on the card. Requires a confirmed question pool first.',
+          schema: {
+            questionPoolId: z.string().min(1).max(120).optional(),
+          },
+          handler: async (input): Promise<{ content: Array<{ type: 'text'; text: string }> }> => {
+            const identity = stageIdentity();
+            // 执行段先行 begin：主题规划是真实 provider 工作。
+            await recordGeoOperationMilestone(identity, 'topic-plan-started');
+            const plan: TopicPlanProjection = await topicPlanService().generate({
+              ...identity,
+              ...(input.questionPoolId ? { questionPoolId: input.questionPoolId } : {}),
+            });
+            await recordGeoOperationMilestone(identity, 'topic-plan-generated');
+            // 复用命中（prepare 返回同池同版本的既有 confirmed 计划，零成本）：
+            // 停卡重选（预勾上次的已批准项），用户「沿用此计划」确认或付费
+            // 重新生成——内容计划门只在用户的卡片确认后放行，这里不自动放行。
+            const envelope = plan.status === 'confirmed'
+              ? {
+                  kind: 'topic-plan',
+                  outcome: TOPIC_PLAN_REUSE_OUTCOME,
+                  proceed: 'Zero-cost reuse hit — this confirmed plan was already approved; park at the content gate and wait for the user to re-confirm or regenerate on the card, never proceed past it on your own.',
+                  plan: toTopicPlanCardProjection(plan),
+                }
+              : { kind: 'topic-plan', plan: toTopicPlanCardProjection(plan) };
+            // 信封必须走卡片瘦身投影：完整投影曾达 ~81KB，超过 MCP 工具结果
+            // 上限被 MCP 宿主客户端持久化成文件，tool.result 变存根、确认卡
+            // 随之不渲染。瘦身后同级计划 ~29KB；plannedFacts 全量值以 SQLite
+            // 为权威（saveItems 合并时服务端回填）。
+            return {
+              content: [{ type: 'text' as const, text: JSON.stringify(envelope) }],
+            };
+          },
+        },
+        stageIdentity,
+      ),
+      stageOrderGatedTool(
+        tool,
+        {
+          name: 'generate_articles',
+          description: 'Run the article stage from the confirmed topic plan (or a direct explicit article task the user asked for). Real provider spend; drafts then pass the dual quality-gate review. The result renders as the approval card where the user reads each draft, checks the ones to approve and approves the selection — never claim an article is approved; only the user can approve on the card. Omit planId to consume the latest confirmed topic plan; pass planId only to pin a specific confirmed plan. Pass itemIds only when the user names a subset of the confirmed plan items to write now (e.g. "先写这三篇" — copy the item ids from the confirmed plan card); the rest stay available for later generations. Never pass both planId/direct together, and never combine itemIds with direct.',
+          schema: {
+            planId: z.string().min(1).max(120).optional(),
+            itemIds: z.array(z.string().min(1).max(200)).min(1).max(20).optional(),
+            direct: z.object({
+              count: z.number().int().min(1).max(10),
+              themes: z.array(z.string().min(1).max(200)).min(1).max(10),
+              contentType: z.enum(
+                GEO_PORT_CONTRACT.contentTypes.slice() as unknown as [string, ...string[]],
+              ),
+              constraints: z.string().max(2000),
+            }).optional(),
+          },
+          handler: async (input): Promise<{ content: Array<{ type: 'text'; text: string }> }> => {
+            // 空 planId 走 Rust「最新 confirmed plan」回落（规格：指定或最新）；
+            // planId/direct 互斥与 itemIds 归属校验收敛在纯函数里（含历史注释
+            // 的初衷：旧实现强制二选一，模型被迫空参试探报错后绕路四步打捞
+            // planId——inspect_brand_fact 打错库、重跑 pool/plan）。闸已在注册
+            // 缝先行（spec 2026-09-03 决策 2 唯一登记的窄偏离）：「互斥入参
+            // 错误 × 越序调用」交叉点现在返回闸拒绝信封而不是 isError 校验错。
+            const source: ArticleOperationSource =
+              articleOperationSourceFromGenerateInput(input);
+            const identity = stageIdentity();
+            // 执行段先行 begin：文章生成是全程最长的真实工作段，进度条从
+            // 工具开始即进入 running，逐篇落定由 onArticleSettled 回报 N/M。
+            await recordGeoOperationMilestone(identity, 'article-generation-started');
+            let operation: ArticleOperationProjection;
+            try {
+              operation = await articleService().start({
+                ...identity,
+                source,
+                onArticleSettled: (settled, total) => {
+                  // Fire-and-forget：并发逐篇回报不得串行等待管理端口往返。
+                  void reportGeoOperationStepProgress(identity, 'generate-articles', {
+                    current: settled,
+                    total,
+                  });
+                },
+              });
+            } catch (error) {
+              const requirement = rankingCompetitorRequirement(error);
+              if (requirement) {
+                const [brandContext, latest] = await Promise.all([
+                  brandMaterialPort().context(),
+                  latestUserMessage(),
+                ]);
+                if (!latest) throw error;
+                rankingCompetitorGate.issue({
+                  subject: brandContext.brandName,
+                  source,
+                  issuedAfterUserMessageId: latest.id,
+                });
+                return {
+                  content: [
+                    { type: "text" as const, text: JSON.stringify(requirement) },
+                  ],
+                };
+              }
+              rankingCompetitorGate.clear();
+              throw error;
             }
             rankingCompetitorGate.clear();
-            throw error;
-          }
-          rankingCompetitorGate.clear();
-          // 生成收尾：complete 执行段，确认门（审核并批准文章）就地停靠。
-          await recordGeoOperationMilestone(identity, 'articles-generated');
-          return {
-            content: [{ type: 'text' as const, text: JSON.stringify({ kind: 'article-operation', operation }) }],
-          };
+            // 生成收尾：complete 执行段，确认门（审核并批准文章）就地停靠。
+            await recordGeoOperationMilestone(identity, 'articles-generated');
+            return {
+              content: [{ type: 'text' as const, text: JSON.stringify({ kind: 'article-operation', operation }) }],
+            };
+          },
         },
-        { alwaysLoad: true },
+        stageIdentity,
       ),
       tool(
         'get_article_operation',
@@ -1971,93 +1957,90 @@ export async function createXiaojingGeoServer() {
         },
         { alwaysLoad: true },
       ),
-      tool(
-        'plan_distribution',
-        'Run the distribution-planning stage: discover real channel candidates from the approved articles and persisted evidence, then render the confirmation card where the user selects channels and confirms the plan. Confirming the plan never places orders or spends money. Derive targetAudience from brand context or the user goal; optional mappingMode/ratio/budgetPoints/publishStartAt default to product defaults. All cost values are points: pass the budget cap as budgetPoints and quote only the points fields in the result.',
+      stageOrderGatedTool(
+        tool,
         {
-          targetAudience: z.string().min(2).max(200),
-          mappingMode: z.enum(['one-to-one', 'ratio']).optional(),
-          mediaRatio: z.number().min(0).max(100).optional(),
-          weMediaRatio: z.number().min(0).max(100).optional(),
-          budgetPoints: z.number().min(0).max(160_000_000).optional()
-            .describe('Total budget cap in points (预算点数上限). Default: product default.'),
-          publishStartAt: z.string().datetime().optional()
-            .describe('Publish start time (发布开始时间), ISO 8601. Omit to publish immediately once the user authorizes; pass a future timestamp only for deliberate scheduled publishing.'),
-        },
-        async (input): Promise<{ content: Array<{ type: 'text'; text: string }> }> => {
-          const identity = stageIdentity();
-          // 顺序闸（票 #05）：先对齐当前步，越序调用在渠道候选探测等业务
-          // 工作前被结构化拒绝。
-          const orderGate = await stageToolOrderRejection(identity, 'plan_distribution');
-          if (orderGate) return stageOrderGateResult(orderGate);
-          const service = distributionService();
-          const [context, spendLimits] = await Promise.all([
-            service.context({ ...stageIdentity() }),
-            service.spendLimits({ ...stageIdentity() }),
-          ]);
-          if (context.articles.length === 0) {
-            throw new Error('distribution_approved_articles_required');
-          }
-          const plan: DistributionPlanProjection = await service.start({
-            ...identity,
-            source: {
-              articleOperationId: context.articles[0]?.operationId ?? '',
-              articleIds: context.articles.map((article) => article.id),
-              industry: context.industry,
-              targetAudience: input.targetAudience,
-              // 被动路证据由服务在现场探测问题池产出（js_ai 语义），工具不再
-              // 透传基线快照；偏好路由品牌 overlay 合成。
-              questionSources: [],
-              preferredResourceIds: [],
-              mappingMode: input.mappingMode ?? 'one-to-one',
-              ratio: {
-                media: input.mediaRatio ?? 2,
-                weMedia: input.weMediaRatio ?? 1,
+          name: 'plan_distribution',
+          description: 'Run the distribution-planning stage: discover real channel candidates from the approved articles and persisted evidence, then render the confirmation card where the user selects channels and confirms the plan. Confirming the plan never places orders or spends money. Derive targetAudience from brand context or the user goal; optional mappingMode/ratio/budgetPoints/publishStartAt default to product defaults. All cost values are points: pass the budget cap as budgetPoints and quote only the points fields in the result.',
+          schema: {
+            targetAudience: z.string().min(2).max(200),
+            mappingMode: z.enum(['one-to-one', 'ratio']).optional(),
+            mediaRatio: z.number().min(0).max(100).optional(),
+            weMediaRatio: z.number().min(0).max(100).optional(),
+            budgetPoints: z.number().min(0).max(160_000_000).optional()
+              .describe('Total budget cap in points (预算点数上限). Default: product default.'),
+            publishStartAt: z.string().datetime().optional()
+              .describe('Publish start time (发布开始时间), ISO 8601. Omit to publish immediately once the user authorizes; pass a future timestamp only for deliberate scheduled publishing.'),
+          },
+          handler: async (input): Promise<{ content: Array<{ type: 'text'; text: string }> }> => {
+            const identity = stageIdentity();
+            const service = distributionService();
+            const [context, spendLimits] = await Promise.all([
+              service.context({ ...stageIdentity() }),
+              service.spendLimits({ ...stageIdentity() }),
+            ]);
+            if (context.articles.length === 0) {
+              throw new Error('distribution_approved_articles_required');
+            }
+            const plan: DistributionPlanProjection = await service.start({
+              ...identity,
+              source: {
+                articleOperationId: context.articles[0]?.operationId ?? '',
+                articleIds: context.articles.map((article) => article.id),
+                industry: context.industry,
+                targetAudience: input.targetAudience,
+                // 被动路证据由服务在现场探测问题池产出（js_ai 语义），工具不再
+                // 透传基线快照；偏好路由品牌 overlay 合成。
+                questionSources: [],
+                preferredResourceIds: [],
+                mappingMode: input.mappingMode ?? 'one-to-one',
+                ratio: {
+                  media: input.mediaRatio ?? 2,
+                  weMedia: input.weMediaRatio ?? 1,
+                },
+                perArticleMaxPoints: spendLimits.perArticleMaxPoints,
+                totalMaxPoints: spendLimits.perExecutionMaxPoints,
+                // 聊天边界只携带点数：预算入参是点数，服务端换算回内部 CNY
+                // （预算是上限语义，非计费），换算倍率不进转录。
+                budgetCny: planDistributionBudgetCny(
+                  input.budgetPoints,
+                  spendLimits.perExecutionMaxPoints,
+                ),
+                // 确认即发：默认开始时间取当前时间——用户授权启动后到期项立即被
+                // 调度器认领执行；只有显式传入未来时间才是定时发布。
+                publishStartAt: input.publishStartAt ?? new Date().toISOString(),
               },
-              perArticleMaxPoints: spendLimits.perArticleMaxPoints,
-              totalMaxPoints: spendLimits.perExecutionMaxPoints,
-              // 聊天边界只携带点数：预算入参是点数，服务端换算回内部 CNY
-              // （预算是上限语义，非计费），换算倍率不进转录。
-              budgetCny: planDistributionBudgetCny(
-                input.budgetPoints,
-                spendLimits.perExecutionMaxPoints,
-              ),
-              // 确认即发：默认开始时间取当前时间——用户授权启动后到期项立即被
-              // 调度器认领执行；只有显式传入未来时间才是定时发布。
-              publishStartAt: input.publishStartAt ?? new Date().toISOString(),
-            },
-          });
-          // 工具结果是聊天转录的一部分：只回「卡片初始渲染 + agent 复述」
-          // 所需的最小投影，且费用字段一律为点数（CNY 与换算倍率不进聊天）；
-          // 字段口径见 distributionPlanCardProjection。
-          return {
-            content: [{ type: 'text' as const, text: JSON.stringify({ kind: 'distribution-plan', plan: distributionPlanCardProjection(plan) }) }],
-          };
+            });
+            // 工具结果是聊天转录的一部分：只回「卡片初始渲染 + agent 复述」
+            // 所需的最小投影，且费用字段一律为点数（CNY 与换算倍率不进聊天）；
+            // 字段口径见 distributionPlanCardProjection。
+            return {
+              content: [{ type: 'text' as const, text: JSON.stringify({ kind: 'distribution-plan', plan: distributionPlanCardProjection(plan) }) }],
+            };
+          },
         },
-        { alwaysLoad: true },
+        stageIdentity,
       ),
-      tool(
-        'prepare_publish',
-        'Run the publishing stage: build the exact publish-execution preview (final approved articles, channels, per-channel points prices, points budget, schedule) from the confirmed distribution plan. This uploads nothing, charges nothing and places no order. The result renders as the irreversible-authorization card; the user authorizes and starts publishing there — the Agent can never authorize or start a paid publish. Quote only the points fields (totalPricePoints, budgetPoints, pricePoints) from the result.',
+      stageOrderGatedTool(
+        tool,
         {
-          planId: z.string().min(1).max(120).optional(),
+          name: 'prepare_publish',
+          description: 'Run the publishing stage: build the exact publish-execution preview (final approved articles, channels, per-channel points prices, points budget, schedule) from the confirmed distribution plan. This uploads nothing, charges nothing and places no order. The result renders as the irreversible-authorization card; the user authorizes and starts publishing there — the Agent can never authorize or start a paid publish. Quote only the points fields (totalPricePoints, budgetPoints, pricePoints) from the result.',
+          schema: {
+            planId: z.string().min(1).max(120).optional(),
+          },
+          handler: async (input): Promise<{ content: Array<{ type: 'text'; text: string }> }> => {
+            const execution = await publishPreviewPort().preview(input.planId);
+            if (!execution) {
+              throw new Error('publish_preview_requires_confirmed_plan');
+            }
+            const preview: PublishExecutionProjection = execution;
+            return {
+              content: [{ type: 'text' as const, text: JSON.stringify({ kind: 'publish-execution', execution: publishExecutionCardProjection(preview) }) }],
+            };
+          },
         },
-        async (input): Promise<{ content: Array<{ type: 'text'; text: string }> }> => {
-          // 顺序闸（票 #05）：发布预览也要对齐当前步——越序预览同样制造
-          // 叙事与状态分叉（模型拿着预览数据向用户描述未到阶段的发布）。
-          const identity = stageIdentity();
-          const orderGate = await stageToolOrderRejection(identity, 'prepare_publish');
-          if (orderGate) return stageOrderGateResult(orderGate);
-          const execution = await publishPreviewPort().preview(input.planId);
-          if (!execution) {
-            throw new Error('publish_preview_requires_confirmed_plan');
-          }
-          const preview: PublishExecutionProjection = execution;
-          return {
-            content: [{ type: 'text' as const, text: JSON.stringify({ kind: 'publish-execution', execution: publishExecutionCardProjection(preview) }) }],
-          };
-        },
-        { alwaysLoad: true },
+        stageIdentity,
       ),
       tool(
         'inspect_geo_probe_samples',
