@@ -31,8 +31,11 @@ import type {
 
 /** 进入结转的上游状态：发布中(3)、已发布(4)、退款被拒(8，费用成立)、补发/收录(10/11/12)。 */
 const SETTLE_STATUSES = new Set([3, 4, 8, 10, 11, 12]);
-/** 原路退点的上游状态：已拒稿(2)、已取消(5)、已退款(7)。 */
-const REFUND_STATUSES = new Set([2, 5, 7]);
+/** 原路退点的上游状态：已拒稿(2)、已取消(5)、已退款(7)。裁判与双侧 pin：
+ * src/shared/geo/publishSchedulerContract.json 的 publishOrderRefundStatuses
+ *（TS 侧 publishScheduler.test.ts、本侧 backend/tests/
+ * publish-scheduler-contract-pin.test.ts，ADR-0012）。导出仅供 pin 测试消费。 */
+export const REFUND_STATUSES = new Set([2, 5, 7]);
 
 export interface PublishOrderProjection {
   sn: string;

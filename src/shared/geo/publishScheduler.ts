@@ -266,7 +266,9 @@ export const PUBLISH_ORDER_STATUS_LABEL: Record<
 };
 
 /**
- * 是否为原路退点状态（后端 `REFUND_STATUSES` 亦为 {2, 5, 7}）：已拒稿(2)、已取消(5)、
+ * 是否为原路退点状态（裁判：publishSchedulerContract.json 的
+ * publishOrderRefundStatuses，ADR-0012 双侧 pin；网关 backend 的
+ * REFUND_STATUSES 对同一裁判在 backend/tests 断言）：已拒稿(2)、已取消(5)、
  * 已退款(7)。进入这些状态时订单点数退回余额，UI 需联动余额刷新展示。
  * 未知状态码（上游契约外的漂移）不判定退点，按需人工核对。
  */

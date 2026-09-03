@@ -56,6 +56,16 @@ describe("geo operation contract pin（ADR-0012 三方裁判）", () => {
       ...KNOWLEDGE_SEGMENT_STEP_IDS,
     ]);
   });
+
+  it("rustUiConfirmationAuthorities 是 confirmationAuthorities 的子集", () => {
+    // 两表各自等值 pin 测不出跨表漂移：子集里出现全集外的 authority 时，
+    // Rust 的 `contains` 判定会静默失效——每个 rustUi 值都必须在全集内。
+    for (const authority of geoOperationContract.rustUiConfirmationAuthorities) {
+      expect(geoOperationContract.confirmationAuthorities).toContain(
+        authority,
+      );
+    }
+  });
 });
 
 describe("GeoOperation intent policy", () => {

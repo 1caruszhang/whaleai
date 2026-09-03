@@ -40,6 +40,19 @@ describe("publish scheduler contract pin（ADR-0012 三方裁判）", () => {
     ]);
   });
 
+  it("退点状态谓词语义与 publishSchedulerContract.json 严格相等（含顺序）", () => {
+    // 1..12 全域推导：谓词的退点结果集恰为裁判数组（含顺序）。
+    const refunding = Array.from({ length: 12 }, (_, index) => index + 1)
+      .filter((status) => publishOrderRefundsPoints(status));
+    expect(refunding).toEqual(
+      publishSchedulerContract.publishOrderRefundStatuses.values,
+    );
+    // 12 值状态域外（含 null）一律不判退点：未知码不触发余额联动。
+    for (const outside of [null, 0, -2, 13, 99]) {
+      expect(publishOrderRefundsPoints(outside)).toBe(false);
+    }
+  });
+
   it("egress provider 身份四值与 publishSchedulerContract.json 相等", () => {
     expect(publishSchedulerContract.egressProviders.objectStorage.provider).toBe(
       PUBLISH_EGRESS_OBJECT_STORAGE_PROVIDER,

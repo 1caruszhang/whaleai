@@ -38,5 +38,9 @@
     "failed-nonretryable",
     "reconciliation-required",
     "cancelled"
-  ]
+  ],
+  "publishOrderRefundStatuses": {
+    "_comment": "原路退点的上游订单状态（票 09 状态机）：已拒稿(2)、已取消(5)、已退款(7)——进入即订单点数退回余额。TS 谓词 publishOrderRefundsPoints（src/shared/geo/publishScheduler.ts）与网关 backend REFUND_STATUSES（backend/src/domain/publish-orders.ts）两处独立手写值的双源裁判（ADR-0012）：双侧 pin 断言严格相等，含顺序（升序）。",
+    "values": [2, 5, 7]
+  }
 }

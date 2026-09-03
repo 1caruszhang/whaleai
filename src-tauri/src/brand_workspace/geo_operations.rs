@@ -2333,6 +2333,15 @@ mod tests {
             &KNOWLEDGE_SEGMENT_STEP_IDS,
             "knowledgeSegmentStepIds",
         );
+        // 子集不变量：rustUi 裁决面必须是 authority 全表的子集——两表各自
+        // 等值 pin 测不出跨表漂移，子集里混入全集外的 authority 时本文件
+        // 的 `contains` 判定会静默失效。
+        for authority in &contract.rust_ui_confirmation_authorities {
+            assert!(
+                contract.confirmation_authorities.contains(authority),
+                "rustUiConfirmationAuthorities 的 {authority} 不在 confirmationAuthorities 全表内"
+            );
+        }
     }
 
     fn fixture() -> (BrandWorkspaceStore, BrandWorkspace) {
