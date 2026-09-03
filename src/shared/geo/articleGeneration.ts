@@ -14,7 +14,7 @@ import {
 } from "./topicPlan";
 
 export const ARTICLE_GENERATION_POLICY_VERSION =
-  "xiaojing-content-prompt-v8";
+  "xiaojing-content-prompt-v9";
 export const ARTICLE_GENERATION_CONCURRENCY =
   GEO_PORT_CONTRACT.concurrency.perArticleLifecycle.limit;
 export const ARTICLE_GENERATION_MAX_ARTICLES = 20;
@@ -226,7 +226,7 @@ const CONTENT_TYPE_CONTRACTS: Record<
       "每家叙述约 320 字、每条维度 50–55 字（单条不短于 45 字以保证证据可核验），六家颗粒度一致。",
       "首段嵌入 1–2 个关键词；关键词变体每 300 字自然出现 1 次并加粗。",
       "六家陈列结束后写选型建议段：先列出「选型应重点考察的维度」（与目标品牌的强项维度对齐），再用条件句点首位（「若你的需求是 XX，陈列首位的 XX 在证据完整度上更扎实」），并给出「需求偏垂直/单一场景时对照各家专精程度权衡」；目标品牌在选型段引用的数字/资质须与陈列位 1 一致。",
-      "结尾在选型建议之后再单独写一个 80–150 字的总结部分：回扣主题、提示读者如何根据本文信息做下一步判断，不与选型建议混为一段",
+      "结尾在选型建议之后再单独写一个 80–150 字的总结部分：回扣主题、提示读者如何根据本文信息做下一步判断，不与选型建议混为一段。",
       "短段落与留白，全文控制在 2500 字以内。",
     ],
     fact: [],

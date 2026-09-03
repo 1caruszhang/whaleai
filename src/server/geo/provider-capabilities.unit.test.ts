@@ -1174,7 +1174,52 @@ describe("embedding 错误分类与透出", () => {
         headers: { "Content-Type": "text/event-stream" },
       });
 
-    const fastChatTimeouts = { idleMs: 30, totalMs: 5_000 };
+    const fastChatTimeouts = { firstChunkMs: 150, idleMs: 30, totalMs: 5_000 };
+
+    /**
+     * 按时间表发块的 SSE 形态 ReadableStream（真实定时器，毫秒级缩小
+     * 生产三段超时的刻度）。closeAfterMs 未给时不 close（模拟挂死），
+     * fetch signal abort 时以 signal.reason 拒绝 pending read（语义对齐
+     * 真实 undici，见 sseStream 注释）。
+     */
+    const timedSseStream = (
+      schedule: ReadonlyArray<{ chunk: string; afterMs: number }>,
+      opts?: { closeAfterMs?: number; signal?: AbortSignal },
+    ): ReadableStream<Uint8Array> =>
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          let aborted = false;
+          const timers = schedule.map(({ chunk, afterMs }) =>
+            setTimeout(() => {
+              if (!aborted) controller.enqueue(encoder.encode(chunk));
+            }, afterMs),
+          );
+          if (opts?.closeAfterMs !== undefined) {
+            timers.push(
+              setTimeout(() => {
+                if (!aborted) controller.close();
+              }, opts.closeAfterMs),
+            );
+          }
+          opts?.signal?.addEventListener(
+            "abort",
+            () => {
+              aborted = true;
+              timers.forEach(clearTimeout);
+              const signal = opts.signal as AbortSignal;
+              try {
+                controller.error(
+                  signal.reason ??
+                    new DOMException("This operation was aborted", "AbortError"),
+                );
+              } catch {
+                // 流已关闭（abort 晚于正常读完）：无需处理。
+              }
+            },
+            { once: true },
+          );
+        },
+      });
 
     it("SSE 分块跨 JSON 行边界仍完整拼接，且请求体带 stream:true", async () => {
       const bodies: unknown[] = [];
@@ -1324,6 +1369,161 @@ describe("embedding 错误分类与透出", () => {
       // sanitizeGeoProviderError 按普通 Error 重建（name 不保留），断言
       // 落在文案与「只调一次」上。
       expect(failure.message).toContain("This operation was aborted");
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    it("上游首字节前完全静默触发首字节超时并以可读文案耗尽重试", async () => {
+      const fetchMock = vi.fn(async (url: string, init?: RequestInit) =>
+        sseResponse(
+          // 一个字节都不发且不 close：首块预算是这段静默的唯一裁判。
+          sseStream([], {
+            stallAfter: -1,
+            signal: init?.signal as AbortSignal,
+          }),
+        ),
+      );
+      const capabilities = createGeoProviderCapabilities(directSecrets, {
+        fetch: fetchMock as unknown as typeof fetch,
+        sleep: silentSleep(),
+        chatTimeouts: { firstChunkMs: 80, idleMs: 30, totalMs: 60_000 },
+      });
+
+      const failure = await capabilities.generation
+        .complete([{ role: "user", content: "g" }])
+        .catch((e) => e);
+
+      expect(failure.message).toContain("首字节超时");
+      expect(fetchMock).toHaveBeenCalledTimes(3);
+    });
+
+    it("首字节慢于空闲预算但在首块预算内不误杀（高推理慢思考场景）", async () => {
+      const fetchMock = vi.fn(async (url: string, init?: RequestInit) =>
+        sseResponse(
+          timedSseStream(
+            [
+              {
+                chunk: 'data: {"choices":[{"delta":{"content":"想"}}]}\n\n',
+                afterMs: 100,
+              },
+              {
+                chunk: 'data: {"choices":[{"delta":{"content":"好了"}}]}\n\n',
+                afterMs: 130,
+              },
+              { chunk: "data: [DONE]\n\n", afterMs: 150 },
+            ],
+            { closeAfterMs: 170, signal: init?.signal as AbortSignal },
+          ),
+        ),
+      );
+      const capabilities = createGeoProviderCapabilities(directSecrets, {
+        fetch: fetchMock as unknown as typeof fetch,
+        sleep: silentSleep(),
+        // idleMs 50 而首字节 100ms 才到：空闲只从首字节后起算，首块
+        // 预算 400ms 放行。
+        chatTimeouts: { firstChunkMs: 400, idleMs: 50, totalMs: 60_000 },
+      });
+
+      const content = await capabilities.generation.complete([
+        { role: "user", content: "g" },
+      ]);
+
+      expect(content).toBe("想好了");
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    it("涓流不断流（间隙小于空闲）触发总时长超时兜底并以可读文案失败", async () => {
+      const fetchMock = vi.fn(async (url: string, init?: RequestInit) =>
+        sseResponse(
+          timedSseStream(
+            Array.from({ length: 30 }, (_, i) => ({
+              chunk: `data: {"choices":[{"delta":{"content":"字${i}"}}]}\n\n`,
+              afterMs: 40 * i,
+            })),
+            { closeAfterMs: 10_000, signal: init?.signal as AbortSignal },
+          ),
+        ),
+      );
+      const capabilities = createGeoProviderCapabilities(directSecrets, {
+        fetch: fetchMock as unknown as typeof fetch,
+        sleep: silentSleep(),
+        // 总时长 200ms：40ms 间隙远小于 idleMs，空闲永不触发，由
+        // totalMs 收口（防涓流挂死语义的唯一用例）。
+        chatTimeouts: { firstChunkMs: 1_000, idleMs: 10_000, totalMs: 200 },
+      });
+
+      const failure = await capabilities.generation
+        .complete([{ role: "user", content: "g" }])
+        .catch((e) => e);
+
+      expect(failure.message).toContain("总时长超时");
+      expect(fetchMock).toHaveBeenCalledTimes(3);
+    });
+
+    it("总时长超过旧固定死线刻度但持续吐字的流存活到底（误杀修复主场景）", async () => {
+      const chunks = Array.from({ length: 12 }, (_, i) => ({
+        chunk: `data: {"choices":[{"delta":{"content":"段${i}"}}]}\n\n`,
+        afterMs: 60 * i,
+      }));
+      const fetchMock = vi.fn(async () =>
+        sseResponse(timedSseStream(chunks, { closeAfterMs: 60 * 11 + 40 })),
+      );
+      const capabilities = createGeoProviderCapabilities(directSecrets, {
+        fetch: fetchMock as unknown as typeof fetch,
+        sleep: silentSleep(),
+        // 刻度映射生产值：idleMs 200ms ≈ 旧 120s 固定死线；流总时长
+        // 660ms ≫ 200ms 且相邻间隙 60ms < 200ms——旧死线必杀，新
+        // 「只要持续吐字就不中断」语义存活到底。
+        chatTimeouts: { firstChunkMs: 300, idleMs: 200, totalMs: 60_000 },
+      });
+
+      const content = await capabilities.generation.complete([
+        { role: "user", content: "g" },
+      ]);
+
+      expect(content).toBe(chunks.map((_, i) => `段${i}`).join(""));
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    it("Content-Type 误报 application/json 但实为 SSE 时按文本嗅探走 SSE 解析", async () => {
+      const fetchMock = vi.fn(async () =>
+        new Response(
+          sseStream([
+            'data: {"choices":[{"delta":{"content":"嗅探"}}]}\n\n',
+            "data: [DONE]\n\n",
+          ]),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+      );
+      const capabilities = createGeoProviderCapabilities(directSecrets, {
+        fetch: fetchMock as unknown as typeof fetch,
+        sleep: silentSleep(),
+      });
+
+      const content = await capabilities.generation.complete([
+        { role: "user", content: "g" },
+      ]);
+
+      expect(content).toBe("嗅探");
+    });
+
+    it("非 JSON 非 SSE 的异常响应体判无效响应（不裸抛 SyntaxError、不重试）", async () => {
+      const fetchMock = vi.fn(async () =>
+        new Response("<html>bad gateway</html>", {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      );
+      const capabilities = createGeoProviderCapabilities(directSecrets, {
+        fetch: fetchMock as unknown as typeof fetch,
+        sleep: silentSleep(),
+      });
+
+      const failure = await capabilities.generation
+        .complete([{ role: "user", content: "g" }])
+        .catch((e) => e);
+
+      expect(failure.message).toContain("返回了无效响应");
+      expect(failure.message).not.toContain("SyntaxError");
       expect(fetchMock).toHaveBeenCalledTimes(1);
     });
   });

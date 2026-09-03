@@ -42,6 +42,8 @@ Ticket 05 的 `keywordSearch.search` 接口按 ADR-0006 扩展可选 `system` �
 
 Ticket 11 的正文使用 `generation` 默认 pro 模型并显式保留 js_ai 参数 `max_tokens=8192 / temperature=0.85 / top_p=0.9`；审校使用 `reflection` DeepSeek pro。Provider 响应不直接拥有批准权：确定性事实、广告法、占位符和可引用结构检查先执行，再与严格 reflection JSON 合并。任一 Provider 缺失、解析失败或硬门失败均显式阻断，不能返回模板、mock 或随机正文。正文和 review response 不记录到 Provider 状态、日志或 Session transcript。
 
+Chat Completions 槽位（extraction/generation/reflection）统一走流式补全（2026-09-02 起：非流式长文生成期间零字节到达，与挂死连接无法区分，固定 120 秒死线曾把正常生成误杀）与三段超时（2026-09-03 补首块预算）：首块预算 5min（请求发起至第一个字节——高推理模型首 token 前长思考不算空闲）、相邻 chunk 空闲 120s（首字节后起算）、单次补全总时长 15min 兜底（防涓流挂死）。本层超时中断按可重试错误整次重来（与网络层/429/5xx 同退避节奏），abort reason 携带可读文案；调用方主动取消不重试。响应体判形以文本嗅探为准（含 `data:` 行即 SSE），Content-Type 仅作参考，网关整包缓冲成 JSON 信封时按非流式 content 解析。常量与实现见 `src/server/geo/provider-capabilities.ts`（`OPENAI_CHAT_*_TIMEOUT_MS`）；材料导入侧另有调用方级 `extractionTimeoutMs` 降级死线，语义见 `material_import.md`。
+
 Ticket 12 的渠道发现只使用 `distribution` port 分页读取媒体与自媒体资源。Node 按 kind 保存 30 分钟非 secret snapshot cache，并合并同 kind 并发读取；Sidecar generation 替换后不复用旧缓存。资源目录不可用时只保存明确 unavailable 状态和空候选，不回退到 demo、随机或 LLM 伪造资源。候选的 name/price/rate/status 均以 typed resource snapshot 为准；本阶段没有超级媒介下单调用，credentialed smoke 也不得提交订单。
 
 ## 配置与状态
