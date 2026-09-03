@@ -453,8 +453,10 @@ describe('generate_articles latest-confirmed-plan fallback over a live MCP serve
     // 顺序闸已在注册缝先于入参校验（票 01 唯一登记的窄偏离）：本测试钉
     // 的是互斥入参校验语义本身，必须让闸先放行——操作当前步停在
     // generate-articles（与上一用例同形态），handler 才会跑到纯校验。
-    // 「互斥入参 × 越序/读不到状态」交叉点的新口径（闸拒绝信封优先）
-    // 由 xiaojing-geo-stage-order-gate.integration.test.ts 守护。
+    // 交叉点的新口径（越序时闸拒绝信封优先于 'never both' 校验错）由
+    // xiaojing-geo-stage-order-gate.integration.test.ts 的用例
+    // 'rejects an out-of-order generate_articles call before its
+    // mutual-exclusion input validation (registered deviation)' 守护。
     const gateSteps = planGeoOperation({
       intent: 'article-generation',
       goal: '写文章',

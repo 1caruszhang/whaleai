@@ -64,7 +64,7 @@ export type StageToolFn = typeof tool;
  * 表内的有后果阶段工具（GEO_STAGE_ORDER_GATED_TOOLS）；只读查询与白名单
  * 工具不经此路径。
  */
-export function stageOrderGateResult(rejection: GeoStageOrderRejection) {
+function stageOrderGateResult(rejection: GeoStageOrderRejection) {
   return {
     content: [{ type: "text" as const, text: JSON.stringify(rejection) }],
   };
@@ -81,7 +81,7 @@ export function stageOrderGatedTool<Schema extends AnyZodRawShape>(
   def: StageOrderGatedToolDef<Schema>,
   resolveIdentity: () => { workspaceId: string; sessionId: string },
 ): SdkMcpToolDefinition<Schema> {
-  if (!(GEO_STAGE_ORDER_GATED_TOOLS as readonly string[]).includes(def.name)) {
+  if (!GEO_STAGE_ORDER_GATED_TOOLS.includes(def.name)) {
     throw new Error(
       `stageOrderGatedTool: '${def.name}' is outside the derived stage-order gate table (GEO_NEXT_STEP_GUIDES value domain minus GEO_STAGE_ORDER_UNGATED_TOOLS). Read-only/material tools register with the plain tool() instead; widening the gate is a conscious decision that must update the derivation pin in stage-order-gate.unit.test.ts.`,
     );

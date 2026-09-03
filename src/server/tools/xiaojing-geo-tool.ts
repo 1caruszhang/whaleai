@@ -559,13 +559,6 @@ async function resolveMaterialSkipTarget(): Promise<MaterialRequestSkipTarget | 
   }
 }
 
-/**
- * 顺序闸拒绝的工具结果构造（stageOrderGateResult）已随闸上移注册层：
- * 五个阶段工具经 stage-order-gate-registration.ts 的 stageOrderGatedTool
- * 注册，闸调用＋拒绝信封收在该模块；口径矩阵（何时拒、拒成什么样、哪些
- * 工具豁免及原因）见其模块文档注释。
- */
-
 function knowledgeAuthority() {
   if (!context.workspace) throw new Error('Brand knowledge requires an explicit workspace identity');
   return createKnowledgeAuthority({
@@ -1812,7 +1805,7 @@ export async function createXiaojingGeoServer() {
               content: [{ type: 'text' as const, text: JSON.stringify(envelope) }],
             };
           },
-          },
+        },
         stageIdentity,
       ),
       stageOrderGatedTool(
@@ -1851,7 +1844,7 @@ export async function createXiaojingGeoServer() {
               content: [{ type: 'text' as const, text: JSON.stringify(envelope) }],
             };
           },
-          },
+        },
         stageIdentity,
       ),
       stageOrderGatedTool(
@@ -1926,7 +1919,7 @@ export async function createXiaojingGeoServer() {
               content: [{ type: 'text' as const, text: JSON.stringify({ kind: 'article-operation', operation }) }],
             };
           },
-          },
+        },
         stageIdentity,
       ),
       tool(
@@ -2025,7 +2018,7 @@ export async function createXiaojingGeoServer() {
               content: [{ type: 'text' as const, text: JSON.stringify({ kind: 'distribution-plan', plan: distributionPlanCardProjection(plan) }) }],
             };
           },
-          },
+        },
         stageIdentity,
       ),
       stageOrderGatedTool(
@@ -2046,7 +2039,7 @@ export async function createXiaojingGeoServer() {
               content: [{ type: 'text' as const, text: JSON.stringify({ kind: 'publish-execution', execution: publishExecutionCardProjection(preview) }) }],
             };
           },
-          },
+        },
         stageIdentity,
       ),
       tool(

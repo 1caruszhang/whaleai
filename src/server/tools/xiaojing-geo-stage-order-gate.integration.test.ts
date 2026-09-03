@@ -182,6 +182,61 @@ describe('stage-tool order gate over a live MCP server', () => {
     );
   });
 
+  it('rejects an out-of-order generate_articles call before its mutual-exclusion input validation (registered deviation)', async () => {
+    // 票 01 唯一登记的行为偏离（spec 2026-09-03 决策 2）：闸上移注册缝后
+    // 无条件先于 handler 一切工作（含纯入参解析）——「互斥入参错误 ×
+    // 越序调用」交叉点从 isError 校验错（'never both'）变为闸拒绝信封。
+    // 越序＋坏入参时给指路信封比给校验错更有用；校验语义本身在闸放行
+    // 后原样生效（xiaojing-geo-brand-context.integration.test.ts）。
+    const operation = gateOperation(
+      progressedThrough(
+        planSteps({ intent: 'full-optimization', goal: '一轮完整的 GEO 优化' }),
+        'acknowledge-plan',
+      ),
+    );
+    await withClient(
+      { '/api/brand-geo-operations/list': { ok: true, operations: [operation] } },
+      async (client, calls) => {
+        const result = await client.callTool({
+          name: 'generate_articles',
+          arguments: {
+            planId: 'plan-1',
+            direct: { count: 1, themes: ['主题'], contentType: 'guide', constraints: '无' },
+          },
+        });
+        const payload = payloadOf(result);
+        // 信封口径与既有越序用例一致：结构化指路，不是校验 isError。
+        expect(payload).toMatchObject({
+          kind: 'geo-stage-order-gate',
+          ok: false,
+          error: 'geo_stage_tool_out_of_order',
+          tool: 'generate_articles',
+        });
+        expect(payload.nextStep).toEqual({
+          stepId: 'collect-materials',
+          tool: 'request_brand_material',
+          guidance: expect.any(String),
+          planRevision: 7,
+        });
+        const text =
+          (result.content as Array<{ type: string; text?: string }>)[0]?.text ?? '';
+        expect(text).not.toContain('never both');
+        // 闸先于一切业务工作：恰一次操作列表查询，零业务路由触达。
+        expect(calls).toEqual([
+          [
+            '/api/brand-geo-operations/list',
+            {
+              workspaceId: 'brand-a',
+              sessionId: 'session-gate-it',
+              sidecarId: 'sidecar-order-gate-it',
+              payload: {},
+            },
+          ],
+        ]);
+      },
+    );
+  });
+
   it('rejects freestyle stage calls with no operations and points to creating one', async () => {
     await withClient(
       { '/api/brand-geo-operations/list': { ok: true, operations: [] } },
