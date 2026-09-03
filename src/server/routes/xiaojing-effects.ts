@@ -142,6 +142,10 @@ export async function handleXiaojingEffectsRoute(
   ctx: XiaojingRouteContext,
 ): Promise<Response | null> {
   const { workspacePath } = ctx;
+  // 面板/卡片路径的网关调用一律携带请求级新鲜账号 token（票 B）；未携带
+  // 时回退启动单例——回退语义由组合根统一实现。发布预览端口不走网关，
+  // 传值只为保持同一构造口径。
+  const accountToken = requestAccountAccessToken(request);
 
   // Publish execution is a Rust-owned deterministic scheduler. This
   // Session route only authenticates the current Tab and forwards
@@ -171,7 +175,7 @@ export async function handleXiaojingEffectsRoute(
       const execution = await geoServices({
         workspaceId,
         sessionId: runtimeSessionId,
-      }).publishPreview.latest();
+      }, { accountToken }).publishPreview.latest();
       return jsonResponse({ success: true, execution });
     } catch (error) {
       return jsonResponse(
@@ -208,7 +212,7 @@ export async function handleXiaojingEffectsRoute(
       const execution = await geoServices({
         workspaceId,
         sessionId: runtimeSessionId,
-      }).publishPreview.get(payload.executionId);
+      }, { accountToken }).publishPreview.get(payload.executionId);
       return jsonResponse({ success: true, execution });
     } catch (error) {
       return jsonResponse(
@@ -245,7 +249,7 @@ export async function handleXiaojingEffectsRoute(
       const execution = await geoServices({
         workspaceId,
         sessionId: runtimeSessionId,
-      }).publishPreview.preview(payload.planId);
+      }, { accountToken }).publishPreview.preview(payload.planId);
       return jsonResponse({ success: true, execution });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -289,9 +293,9 @@ export async function handleXiaojingEffectsRoute(
       const execution = await geoServices({
         workspaceId,
         sessionId: runtimeSessionId,
-      }).publishPreview.get(payload.executionId);
+      }, { accountToken }).publishPreview.get(payload.executionId);
       const distribution = getXiaojingGeoProviderCapabilitiesForRequest(
-        requestAccountAccessToken(request),
+        accountToken,
       ).distribution;
       // 网关查单上限 20 个 sn：按渠道类别分组后分批查询。只查网关侧已存在
       // 订单的 item——pending 排期项的 sn 尚不在网关 publish_orders 表，
@@ -389,7 +393,7 @@ export async function handleXiaojingEffectsRoute(
       }
       const capabilities = () =>
         getXiaojingGeoProviderCapabilitiesForRequest(
-          requestAccountAccessToken(request),
+          accountToken,
         );
       // 配图对象上传（票 #15）：与 HTML 二选一，载荷形状互斥。
       if (payload.images !== undefined) {
@@ -500,7 +504,7 @@ export async function handleXiaojingEffectsRoute(
       }
       const result = await new PublishEgressService(
         getXiaojingGeoProviderCapabilitiesForRequest(
-          requestAccountAccessToken(request),
+          accountToken,
         ),
       ).placeOrder({
         executionId: identity.executionId,
@@ -547,7 +551,7 @@ export async function handleXiaojingEffectsRoute(
       const engines = geoServices({
         workspaceId,
         sessionId: runtimeSessionId,
-      }).baseline.engines();
+      }, { accountToken }).baseline.engines();
       return jsonResponse({ success: true, engines });
     } catch (error) {
       return jsonResponse(
@@ -583,7 +587,7 @@ export async function handleXiaojingEffectsRoute(
       const baseline = await geoServices({
         workspaceId,
         sessionId: runtimeSessionId,
-      }).baseline.latest({ workspaceId, sessionId: runtimeSessionId });
+      }, { accountToken }).baseline.latest({ workspaceId, sessionId: runtimeSessionId });
       return jsonResponse({ success: true, baseline });
     } catch (error) {
       return jsonResponse(
@@ -620,7 +624,7 @@ export async function handleXiaojingEffectsRoute(
         );
       }
       const identity = { workspaceId, sessionId: runtimeSessionId };
-      const baseline = await geoServices(identity).baseline.start({
+      const baseline = await geoServices(identity, { accountToken }).baseline.start({
         ...payload,
         ...identity,
       });
@@ -659,7 +663,7 @@ export async function handleXiaojingEffectsRoute(
         );
       }
       const identity = { workspaceId, sessionId: runtimeSessionId };
-      const baseline = await geoServices(identity).baseline.retry({
+      const baseline = await geoServices(identity, { accountToken }).baseline.retry({
         ...payload,
         ...identity,
       });
@@ -702,7 +706,7 @@ export async function handleXiaojingEffectsRoute(
       const dashboard = await new GeoDashboardService(
         createGeoDashboardPort(identity),
         getXiaojingGeoProviderCapabilitiesForRequest(
-          requestAccountAccessToken(request),
+          accountToken,
         ).keywordSearch,
       ).get(payload.filters ?? {});
       return jsonResponse({ success: true, dashboard });
@@ -741,7 +745,7 @@ export async function handleXiaojingEffectsRoute(
       const drilldown = await new GeoDashboardService(
         createGeoDashboardPort(identity),
         getXiaojingGeoProviderCapabilitiesForRequest(
-          requestAccountAccessToken(request),
+          accountToken,
         ).keywordSearch,
       ).drilldown({ kind: payload.kind, id: payload.id });
       return jsonResponse({ success: true, drilldown });
@@ -778,10 +782,9 @@ export async function handleXiaojingEffectsRoute(
           403,
         );
       }
-      const requestToken = requestAccountAccessToken(request);
       const result = await new PostPublishBaselineProbeService(
-        getXiaojingGeoProviderCapabilitiesForRequest(requestToken).keywordSearch,
-        getXiaojingGeoBillingPermitChannelForRequest(requestToken),
+        getXiaojingGeoProviderCapabilitiesForRequest(accountToken).keywordSearch,
+        getXiaojingGeoBillingPermitChannelForRequest(accountToken),
       ).probe(payload.input);
       return jsonResponse({ success: true, result });
     } catch (error) {
@@ -891,7 +894,7 @@ export async function handleXiaojingEffectsRoute(
       const kind = payload.kind;
       const sn = distributionOrderSn(payload.executionId, payload.itemId);
       const [record] = await getXiaojingGeoProviderCapabilitiesForRequest(
-        requestAccountAccessToken(request),
+        accountToken,
       )
         .distribution.queryOrders(kind, [sn]);
       return jsonResponse({
@@ -935,7 +938,7 @@ export async function handleXiaojingEffectsRoute(
         );
       }
       const channel = getXiaojingGeoBillingPermitChannelForRequest(
-        requestAccountAccessToken(request),
+        accountToken,
       );
       if (!channel) {
         return jsonResponse({

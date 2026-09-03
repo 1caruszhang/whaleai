@@ -24,9 +24,10 @@ function getRuntimeSessionIdForRequest(): string {
 }
 
 // GEO 领域服务的组装已收敛到 service-composition 组合根（spec：
-// geo-service-composition 等价搬家）——面板/卡片路由一律经
-// geoServices(identity) 取服务；本票（票 A）HTTP 路由暂不接请求级
-// token（缺省回退启动单例＝现状），token 接入在票 B。
+// geo-service-composition）——面板/卡片路由一律经
+// geoServices(identity, { accountToken: requestAccountAccessToken(request) })
+// 取服务：请求级新鲜 token 优先，未携带时由组合根回退启动单例
+// （票 B 闭合 env-token 过期 401 隐患族）。
 
 async function notifyGeoOperationWorkbenchEvent(
   sessionId: string,

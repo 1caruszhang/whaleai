@@ -106,6 +106,12 @@ export interface GateRevisionReceipt {
 export interface GateRevisionContext {
   workspaceId: string;
   sessionId: string;
+  /**
+   * 请求级新鲜账号 token（revise_gate_content 工具从 MCP 会话上下文带入，
+   * 与 MCP 组装点同源）：组合根按其取能力与计费口径，缺省回退启动单例
+   * ——长会话（env token 已过期）下的修订路径不再依赖启动单例。
+   */
+  requestAccountToken?: string;
 }
 
 export type GateRevisionHandler = (
@@ -922,12 +928,17 @@ export function createPublishPreparationGateRevisionHandler(
  * 默认注册（票 38）：五个域 handler 全部挂接同一工具契约；服务实例向
  * service-composition 组合根按闸门修订口径取用——显式携带
  * `billing: 'revision-unbilled'`（修订是对已付费产物的修正迭代，不计费
- * 是领域裁决而非遗漏；要变更必须走独立裁决，不得夹带在重构里）。修订
- * 路径只调持久化面方法，不触发任何 provider 调用。新增闸门仍只需
+ * 是领域裁决而非遗漏；要变更必须走独立裁决，不得夹带在重构里）与
+ * `accountToken: context.requestAccountToken`（票 B：请求级新鲜 token，
+ * 由 revise_gate_content 唯一入口从 MCP 会话上下文带入）。修订路径只调
+ * 持久化面方法，不触发任何 provider 调用。新增闸门仍只需
  * registerGateRevisionHandler，不得另起修改入口。
  */
 function revisionGeoServices(context: GateRevisionContext) {
-  return geoServices(context, { billing: 'revision-unbilled' });
+  return geoServices(context, {
+    accountToken: context.requestAccountToken,
+    billing: 'revision-unbilled',
+  });
 }
 
 registerGateRevisionHandler(

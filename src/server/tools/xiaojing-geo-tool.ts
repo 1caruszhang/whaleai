@@ -1508,6 +1508,9 @@ export async function createXiaojingGeoServer() {
               {
                 workspaceId: basename(context.workspace),
                 sessionId: context.sessionId,
+                // 票 B：修订路径同接请求级新鲜 token（与 sessionGeoServices
+                // 同源的本轮聊天 token），长会话修订不再依赖过期 env 单例。
+                requestAccountToken: context.requestAccountToken,
               },
             );
           }

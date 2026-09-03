@@ -208,7 +208,7 @@ describe('geoServices 配图候选池（2026-08-31 零配图事故回归钉）',
       expectedPermits: { __channel: 'request', token: 'token-a' },
     },
     {
-      label: 'HTTP 面板路由（缺省回退单例）',
+      label: 'HTTP 面板路由（未携带请求 token 头时回退单例）',
       identity: { workspaceId: 'ws-img-http', sessionId: 's-1' },
       options: undefined,
       expectedPermits: { __channel: 'singleton' },

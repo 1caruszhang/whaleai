@@ -87,9 +87,10 @@ export function accountTokenCacheFingerprint(
 /**
  * 五个缓存服务的单槽缓存键：「工作区:会话:token 指纹」。token 轮换（或
  * 身份变化）即整槽重建，旧 token 不留缓存闭包（旧实例随槽位丢弃，长跑
- * sidecar 不会攒下过期 token 的服务族）。注：票 A 里 HTTP 面板路由暂不
- * 传 token、MCP 传请求级 token——两者键不同，交替调用会互相顶槽重建；
- * 这是两张票时序的中间态，票 B 接入请求级 token 后两路径同键不再互顶。
+ * sidecar 不会攒下过期 token 的服务族）。MCP 与 HTTP 面板两条路径都传
+ * 请求级 token（票 B 起同键，不再互相顶槽）；未携带 token 的无头场景键
+ * 退化为「工作区:会话:」，与携带方交替调用会顶槽重建——等价于 token
+ * 轮换语义，无正确性问题。
  */
 function serviceRuntimeKey(
   identity: GeoServiceIdentity,

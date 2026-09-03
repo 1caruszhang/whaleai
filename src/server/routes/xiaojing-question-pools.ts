@@ -20,6 +20,9 @@ export async function handleXiaojingQuestionPoolsRoute(
   ctx: XiaojingRouteContext,
 ): Promise<Response | null> {
   const { workspacePath } = ctx;
+  // 面板/卡片路径的网关调用一律携带请求级新鲜账号 token（票 B）；未携带
+  // 时回退启动单例——回退语义由组合根统一实现。
+  const accountToken = requestAccountAccessToken(request);
 
   // Question opportunities are a brand-scoped GeoArtifact operation. The
   // Session route owns provider execution; Rust owns immutable knowledge
@@ -41,7 +44,7 @@ export async function handleXiaojingQuestionPoolsRoute(
       const pool = await geoServices({
         workspaceId,
         sessionId: runtimeSessionId,
-      }).questionPool.latest({ ...payload, workspaceId, sessionId: runtimeSessionId });
+      }, { accountToken }).questionPool.latest({ ...payload, workspaceId, sessionId: runtimeSessionId });
       return jsonResponse({ success: true, pool });
     } catch (error) {
       return jsonResponse({
@@ -74,7 +77,7 @@ export async function handleXiaojingQuestionPoolsRoute(
         return jsonResponse({ success: false, error: 'question_pool_identity_mismatch' }, 403);
       }
       const identity = { workspaceId, sessionId: runtimeSessionId };
-      const service = geoServices(identity).questionPool;
+      const service = geoServices(identity, { accountToken }).questionPool;
       const pool = await service.generate({
         ...payload,
         ...identity,
@@ -109,7 +112,7 @@ export async function handleXiaojingQuestionPoolsRoute(
                   'question-selection',
                 ),
               }),
-              requestAccountToken: requestAccountAccessToken(request),
+              requestAccountToken: accountToken,
             });
             await recordGeoOperationMilestone(identity, 'question-pool-confirmed');
             autoConfirmed = {
@@ -149,7 +152,7 @@ export async function handleXiaojingQuestionPoolsRoute(
       const pool = await geoServices({
         workspaceId,
         sessionId: runtimeSessionId,
-      }).questionPool.cancel(payload.idempotencyKey);
+      }, { accountToken }).questionPool.cancel(payload.idempotencyKey);
       return jsonResponse({ success: true, pool });
     } catch (error) {
       return jsonResponse({
@@ -175,7 +178,7 @@ export async function handleXiaojingQuestionPoolsRoute(
         return jsonResponse({ success: false, error: 'question_pool_identity_mismatch' }, 403);
       }
       const identity = { workspaceId, sessionId: runtimeSessionId };
-      const decision = await geoServices(identity).questionPool.confirm({
+      const decision = await geoServices(identity, { accountToken }).questionPool.confirm({
         ...payload,
         ...identity,
       });
@@ -191,7 +194,7 @@ export async function handleXiaojingQuestionPoolsRoute(
             'question-selection',
           ),
         }),
-        requestAccountToken: requestAccountAccessToken(request),
+        requestAccountToken: accountToken,
       });
       await recordGeoOperationMilestone(identity, 'question-pool-confirmed');
       return jsonResponse({
