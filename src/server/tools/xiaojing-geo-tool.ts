@@ -46,8 +46,11 @@ import {
 } from '../geo/probe-samples';
 import {
   filterValidRankingCompetitors,
-  type ArticleOperationProjection,
-  type ArticleOperationSource,
+  RANKING_COMPETITORS_INSUFFICIENT_CODE,
+} from '../../shared/geo/competitorRoster';
+import type {
+  ArticleOperationProjection,
+  ArticleOperationSource,
 } from '../../shared/geo/articleGeneration';
 import {
   QUESTION_POOL_REUSE_CONTRACT,
@@ -879,6 +882,11 @@ export async function confirmRankingCompetitors(
   };
 }
 
+/**
+ * ranking 生成因竞品不足 fail-closed 时的 UX 补名入口（票 #43：文案留工具
+ * 层，错误码常量自名单内核进口——错误语义与 resolveRankingRoster 的抛错
+ * 单源）。
+ */
 export function rankingCompetitorRequirement(error: unknown): {
   kind: "ranking-competitors-required";
   confirmedCount: number;
@@ -887,7 +895,7 @@ export function rankingCompetitorRequirement(error: unknown): {
 } | null {
   const message = error instanceof Error ? error.message : String(error);
   const match =
-    /article_generation_ranking_competitors_insufficient:(\d+)/.exec(message);
+    new RegExp(`${RANKING_COMPETITORS_INSUFFICIENT_CODE}:(\\d+)`).exec(message);
   if (!match) return null;
   const confirmedCount = Math.min(4, Math.max(0, Number(match[1])));
   const missingCount = 5 - confirmedCount;

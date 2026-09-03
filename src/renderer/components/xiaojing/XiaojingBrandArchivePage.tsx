@@ -26,7 +26,7 @@ import { canonicalEnterpriseProfileField, PROFILE_PREDICATE_PREFIX } from "../..
 import {
   decodeCompetitorEvidence,
   formatCompetitorFactValue,
-} from '../../../shared/geo/competitorDetails';
+} from '../../../shared/geo/competitorRoster';
 
 interface Props {
   workspace: BrandWorkspace | null;

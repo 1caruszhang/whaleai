@@ -5,6 +5,11 @@ import { useTranslation } from 'react-i18next';
 import { useTabApi } from '@/context/TabContext';
 import { isEnterpriseProfileField } from '../../../shared/geo/enterpriseProfile';
 import {
+  competitorCardPotentialDividerAt,
+  competitorCardTierOrder,
+  isCompetitorTierField,
+} from '../../../shared/geo/competitorRoster';
+import {
   buildKnowledgeFieldRows,
   KNOWLEDGE_CARD_MAX_CANDIDATES,
   competitorSourceLinks,
@@ -154,17 +159,19 @@ function candidateBaseValue(candidate: KnowledgeCardCandidate): unknown {
 /** 候选当前值（或已暂存编辑）→ 编辑框文本：字符串数组顿号连接，标量保持原文。 */
 /** 编辑视图的多候选标签：竞品行按层级（直接/潜在）标注——事实主体标签
  * 在竞品行恒为品牌名（两条候选同主体），显示出来会被误读成竞品值的一部分
- * （用户反馈 2026-08-31）；其他字段仍用主体名区分归属。 */
+ * （用户反馈 2026-08-31）；其他字段仍用主体名区分归属。层级序自名单内核
+ * 进口（competitorCardTierOrder：直接 0 / 潜在 1 / 其他 0）。 */
 function editLabelOf(
   candidate: KnowledgeCardCandidate,
   fieldText: string,
   tierDirect: string,
   tierPotential: string,
 ): string {
-  if (knowledgeFieldKeyOfPredicate(candidate.key.predicate) === 'potentialCompetitors') {
+  const field = knowledgeFieldKeyOfPredicate(candidate.key.predicate);
+  if (competitorCardTierOrder(field) === 1) {
     return `${fieldText}·${tierPotential}`;
   }
-  if (knowledgeFieldKeyOfPredicate(candidate.key.predicate) === 'competitors') {
+  if (field === 'competitors') {
     return `${fieldText}·${tierDirect}`;
   }
   return candidate.key.subject;
@@ -179,11 +186,6 @@ function editableTextOf(candidate: KnowledgeCardCandidate, state: CandidateState
 /** 候选原值是字符串数组 → 编辑框按顿号切分回多值；标量整体为字符串。 */
 function isArrayShapedCandidate(candidate: KnowledgeCardCandidate): boolean {
   return Array.isArray(candidateBaseValue(candidate));
-}
-
-/** 两层竞品行（ADR-0007）共享的胶囊排版形态：品牌名可换行陈列。 */
-function isCompetitorTierField(field: string): boolean {
-  return field === 'competitors' || field === 'potentialCompetitors';
 }
 
 function parseEditedInput(text: string, candidate: KnowledgeCardCandidate): unknown {
@@ -653,10 +655,15 @@ function FieldRow({ row, stateOf, busy, onConfirmRow, onChoose, onStageEdits, on
     ? t(`knowledgeCard.fields.${row.field}`)
     : row.field;
   // ADR-0007 两层名单：潜在竞品并入竞品栏，仅当行内确有潜在候选时说明
-  // 补位语义（纯直接层的竞品行不打扰）。
-  const rowHasPotential = row.candidates.some(
-    (candidate) => knowledgeFieldKeyOfPredicate(candidate.key.predicate) === 'potentialCompetitors',
+  // 补位语义（纯直接层的竞品行不打扰）。「潜在」分界插入位自名单内核
+  // 进口（competitorCardPotentialDividerAt：首个潜在候选前）。
+  const potentialDividerAt = useMemo(
+    () => competitorCardPotentialDividerAt(
+      row.candidates.map((candidate) => knowledgeFieldKeyOfPredicate(candidate.key.predicate)),
+    ),
+    [row.candidates],
   );
+  const rowHasPotential = potentialDividerAt !== null;
   const fieldNote = rowHasPotential
     ? t(`knowledgeCard.fieldNotes.potentialCompetitors`)
     : '';
@@ -810,12 +817,8 @@ function FieldRow({ row, stateOf, busy, onConfirmRow, onChoose, onStageEdits, on
         {row.candidates.map((candidate, candidateIndex) => {
           const state = stateOf(candidate);
           // 两层竞品同栏陈列：首个潜在候选前插一个弱化「潜在」分界标签，
-          // 让补位候选可辨认（行内排序保证直接层在前）。
-          const isPotentialTier = knowledgeFieldKeyOfPredicate(candidate.key.predicate) === 'potentialCompetitors';
-          const showPotentialDivider = isPotentialTier
-            && !row.candidates.slice(0, candidateIndex).some(
-              (earlier) => knowledgeFieldKeyOfPredicate(earlier.key.predicate) === 'potentialCompetitors',
-            );
+          // 让补位候选可辨认（行内排序保证直接层在前；插入位自名单内核）。
+          const showPotentialDivider = candidateIndex === potentialDividerAt;
           const potentialDivider = showPotentialDivider ? (
             <span
               key={`${candidate.id}:potential-divider`}

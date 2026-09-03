@@ -17,7 +17,6 @@ import {
   parseGeneratedArticleBody,
   parseRankingDimensions,
   normalizeTitleIdentity,
-  resolveRankingRoster,
   validateDirectArticleSource,
   type ArticleBodyProjection,
   type ArticleGenerationContext,
@@ -28,6 +27,7 @@ import {
   type ArticleProjection,
   type ArticleReviewResult,
 } from "../../shared/geo/articleGeneration";
+import { resolveRankingRoster } from "../../shared/geo/competitorRoster";
 import { trimMaterialImagePlaceholders } from "../../shared/geo/materialImagePlaceholder";
 import {
   deriveServiceScope,

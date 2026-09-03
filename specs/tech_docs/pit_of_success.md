@@ -43,6 +43,8 @@
 
 TS↔Rust（含网关）共享的常量契约——枚举集、版本戳、限值与公式——禁止手写镜像或注释声明同源（ADR-0012）。唯一形态：`*Contract.json` 为裁判，Rust `include_str!` pin 测试与 TS import pin 测试断言严格相等（含顺序）；公式类附用例向量，全部实现跑同一 cases。新增跨语言常量先建 Contract.json 再写两侧常量；同步注释词汇在非测试源文件中由守卫测试断言零命中。
 
+名单语义只出自内核（票 #43）：竞品名单的投影（排行 roster、标题红线、卡面行）、身份判定与归一键只许定义在 `src/shared/geo/competitorRoster.ts`，消费方一律进口，原居所不留转发出口；词法守卫（competitorRosterGuard.test.ts，零豁免）拦「内核导出函数名在别处重定义」，但拦不住换名私建归一/合并逻辑，也拦不住改定义形态——守卫正则只识别 `function X(`／`const X =` 两种形态，class 方法简写、`let`/`var` 绑定、对象属性函数均可绕过；防第二份手抄副本靠跨语言契约 pin 与 review，新增名单语义先改内核再接消费方。
+
 ## 验证
 
 删除 owner 后同时删除命令注册、route、类型、测试、配置、资源和文档。`npm run verify:geo-surface` 是失败即退出的全仓门禁；禁止用注释、别名或排除规则保存已删除事实。

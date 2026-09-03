@@ -2,6 +2,30 @@
 
 决策依据：ADR 0007。本文是该 ADR 的执行细则与改动清单。v1 采用最小结构（见「显式延后」），本文件描述 v1 口径。
 
+## 名单语义内核（票 #43，2026-09-03）
+
+竞品名单的全部语义收进一个纯函数内核模块：`src/shared/geo/competitorRoster.ts`（零 I/O、零 LLM）。职责边界一句话——**从已确认事实到一切名单投影＋一切名单名字判定**。全仓消费方（文章生成、确定性审校、NL 补名确认、选题/标题红线、确认卡投影、富化管线、档案页/知识面板）只从该模块进口名单语义，原居所（文章生成共享模块、material-import、competitorDetails——后者整文件溶入后删除）不留转发出口；私建名单语义由 `src/shared/geo/competitorRosterGuard.test.ts` 词法守卫拦红（内核全部导出函数名的定义处只许内核与测试文件，零豁免）。
+
+导出面（语义现状冻结，等价搬家不收敛语义）：
+
+- **投影族**：`resolveRankingRoster`（身份排除＋两层合并＋直接层在前取 5＋<5 fail-closed，错误码常量 `RANKING_COMPETITORS_INSUFFICIENT_CODE` 随内核所有）；`filterValidRankingCompetitors`；`mergeRankingCompetitorTiers`；`titleRedLineCompetitors`（标题红线：两层原始串联、**无身份排除**——禁令名单宁滥勿缺，默认刻意，见漂移台账）；卡面竞品行投影（`competitorCardRowField` 两层并栏＋`competitorCardTierOrder` 直接层在前＋`competitorCardPotentialDividerAt`「潜在」分界插入位，确认卡投影与渲染卡片消费）。
+- **身份判定族**（自 material-import 迁入，管线降为消费方）：`sameBrandIdentity`／`isSimilarSelfName`／`dropSelfReferences`。
+- **具名键（两把钥匙并存，不合而钉之）**：`rosterIdentityKey`（排行键：剥 markdown 强调字符＋全角折叠＋Unicode lowercase＋空白折叠；与 Rust 镜像 `normalize_ranking_entity_name` 的一致子集由契约向量钉死）；`competitorIdentityKey`（富化键：繁→简映射＋括号中缀剥离＋小写；TS 单侧，常规单测覆盖）。`toSimplifiedChinese` 高频繁→简映射表随富化键入内核。
+- **旧审计头解码**：`decodeCompetitorEvidence`／`collectCompetitorDetails`／`formatCompetitorDisplayNames`／`formatCompetitorFactValue`（只读兼容存量，原 competitorDetails 模块溶入后删文件）。
+- **类型**：`RankingRoster`／`RankingCompetitorIdentity`／`CompetitorDisplayDetail`。
+
+明确不入内核（原地保留、进口内核）：富化管线的存在/关系/地域闸、续枪与候选解析、材料腿证据闸（`hasCompetitorEvidence`／`dropUnsupportedMaterialCompetitors`）；`deriveCompetitorScope`（地域锚语义）；`RankingCompetitorConfirmationGate`（会话交互，留工具层）；`rankingCompetitorRequirement`（UX 文案，错误码常量自内核进口）。
+
+Rust 镜像原位不动：`articles.rs` 的 `valid_ranking_competitors`／`normalize_ranking_entity_name`、`geo_baselines.rs` 的冻结读取各自留在原文件。行为由 `rankingCompetitorContractCases.json` 双侧 pin（TS import＋Rust include_str!）：`mergeCases` 断言两层合并的幸存名集（TS 断言精确序列「直接层在前、补位在后」，Rust pin 测试集合比对——镜像现行返回无序 HashSet，形态不动）；`keyNormalizationCases` 是排行键归一的双侧一致子集向量（中文、全角折叠、空白折叠、ASCII 大小写）。
+
+基线/监测冻结只读直接层是**刻意领域语义**（诊断只关心强竞争直接对手，潜在层仅作排行补位燃料；CONTEXT.md「竞品名单」词条：同一两层事实，两种显式投影，不得混用）——本票显式命名，不改读取行为。
+
+**票 #43 漂移台账（挂起不排期，各自独立裁决票）**：
+
+1. 归一键算法分歧——TS 排行键剥 markdown 字符（\*\`\_~）＋Unicode lowercase；Rust 镜像不剥＋仅 ASCII lowercase（中文品牌名上等价、拉丁扩展字符如 É 上分歧）。等价红线下不合并；契约向量只收一致子集。
+2. 标题红线名单无身份排除——默认刻意（禁令宁滥勿缺：把自名/关联主体从禁令排除等于放行它们进标题）。
+3. `portContract` 的 `competitorNamesAvailableTo` 为纯声明不执行。
+
 ## 背景与病灶
 
 竞品链路的三类真实事故（2026-08 复盘）：
