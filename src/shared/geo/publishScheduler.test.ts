@@ -2,6 +2,10 @@ import { describe, expect, it } from "vitest";
 
 import publishSchedulerContract from "./publishSchedulerContract.json";
 import {
+  PUBLISH_EGRESS_DISTRIBUTION_ENDPOINT_FAMILY,
+  PUBLISH_EGRESS_DISTRIBUTION_PROVIDER,
+  PUBLISH_EGRESS_OBJECT_STORAGE_ENDPOINT_FAMILY,
+  PUBLISH_EGRESS_OBJECT_STORAGE_PROVIDER,
   PUBLISH_EXECUTION_STATUSES,
   PUBLISH_ITEM_STATUSES,
   PUBLISH_MAX_SAFE_RETRIES,
@@ -34,6 +38,21 @@ describe("publish scheduler contract pin（ADR-0012 三方裁判）", () => {
     expect(publishSchedulerContract.itemStatuses).toEqual([
       ...PUBLISH_ITEM_STATUSES,
     ]);
+  });
+
+  it("egress provider 身份四值与 publishSchedulerContract.json 相等", () => {
+    expect(publishSchedulerContract.egressProviders.objectStorage.provider).toBe(
+      PUBLISH_EGRESS_OBJECT_STORAGE_PROVIDER,
+    );
+    expect(
+      publishSchedulerContract.egressProviders.objectStorage.endpointFamily,
+    ).toBe(PUBLISH_EGRESS_OBJECT_STORAGE_ENDPOINT_FAMILY);
+    expect(publishSchedulerContract.egressProviders.distribution.provider).toBe(
+      PUBLISH_EGRESS_DISTRIBUTION_PROVIDER,
+    );
+    expect(
+      publishSchedulerContract.egressProviders.distribution.endpointFamily,
+    ).toBe(PUBLISH_EGRESS_DISTRIBUTION_ENDPOINT_FAMILY);
   });
 });
 

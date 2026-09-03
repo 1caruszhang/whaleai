@@ -1,0 +1,9 @@
+{
+  "_comment": "图片对象上传的格式白名单与对象扩展名映射（ADR-0008 Decision 4：png/jpg/gif/webp；emf/wmf/tiff 浏览器渲染不了，转换显式延后）。extensionsByMediaType 的键集＝白名单本身：白名单外媒体类型在材料入库时直接拒绝，映射永远命中。jpeg 统一落 .jpg。消费面：TS src/server/geo/provider-capabilities.ts、Rust publish_scheduler.rs image_extension_for_media_type。",
+  "extensionsByMediaType": {
+    "image/png": "png",
+    "image/jpeg": "jpg",
+    "image/gif": "gif",
+    "image/webp": "webp"
+  }
+}

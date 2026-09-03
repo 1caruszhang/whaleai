@@ -154,8 +154,9 @@ export type GeoStoredImageMediaType =
   | "image/gif"
   | "image/webp";
 
-/** 白名单 mediaType → 对象扩展名（jpeg 统一落 .jpg）。 */
-const STORED_IMAGE_EXTENSION_BY_MEDIA_TYPE: Readonly<
+/** 白名单 mediaType → 对象扩展名（裁判：storedImageContract.json，ADR-0012 双侧
+ * pin；键集即白名单，Record 键完备性由类型保证）。jpeg 统一落 .jpg。 */
+export const STORED_IMAGE_EXTENSION_BY_MEDIA_TYPE: Readonly<
   Record<GeoStoredImageMediaType, string>
 > = {
   "image/png": "png",

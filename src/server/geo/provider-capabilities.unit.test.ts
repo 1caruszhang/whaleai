@@ -2,6 +2,7 @@ import { createHash, createHmac } from "node:crypto";
 
 import { describe, expect, it, vi } from "vitest";
 
+import storedImageContract from "../../shared/geo/storedImageContract.json";
 import {
   captureGeoProviderRuntimeSecrets,
   createGeoProviderCapabilities,
@@ -10,6 +11,7 @@ import {
   GeoUpstreamHttpError,
   isTransientGeoUpstreamFailure,
   sanitizeGeoProviderError,
+  STORED_IMAGE_EXTENSION_BY_MEDIA_TYPE,
   type GeoProviderRuntimeSecrets,
 } from "./provider-capabilities";
 
@@ -1541,5 +1543,18 @@ describe("embedding 错误分类与透出", () => {
 
     expect(failure.message).toContain("bad key [REDACTED] leaked");
     expect(failure.message).not.toContain("ark-test");
+  });
+});
+
+describe("stored image 契约 pin（ADR-0012 双侧裁判）", () => {
+  it("白名单映射与 storedImageContract.json 严格相等（键集＝白名单）", () => {
+    expect(STORED_IMAGE_EXTENSION_BY_MEDIA_TYPE).toEqual(
+      storedImageContract.extensionsByMediaType,
+    );
+    // 键集即格式白名单本身：JSON 加键而 Record 未扩会在此红（编译期已
+    // 保证 Record 键完备，这里钉反向——契约多出的键不许静默存在）。
+    expect(
+      Object.keys(storedImageContract.extensionsByMediaType).sort(),
+    ).toEqual(Object.keys(STORED_IMAGE_EXTENSION_BY_MEDIA_TYPE).sort());
   });
 });

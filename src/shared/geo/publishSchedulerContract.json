@@ -5,6 +5,17 @@
     "values": [3000, 3000]
   },
   "maxSafeRetries": 2,
+  "egressProviders": {
+    "_comment": "发布 egress 的 provider/endpointFamily 身份（票 08 网关 port 闭环）：objectStorage＝OSS 上传（经运营网关重签），distribution＝渠道下单（经网关 order API）。变更 provider 意味着对外承诺的链路变化，属用户可感知语义。",
+    "objectStorage": {
+      "provider": "aliyun-oss",
+      "endpointFamily": "gateway-oss-put"
+    },
+    "distribution": {
+      "provider": "超级媒介",
+      "endpointFamily": "gateway-order-api"
+    }
+  },
   "executionStatuses": [
     "awaiting-confirmation",
     "confirmed",

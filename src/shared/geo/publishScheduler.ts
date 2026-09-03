@@ -45,18 +45,24 @@ export const PUBLISH_ITEM_STATUSES = [
 
 export type PublishItemStatus = (typeof PUBLISH_ITEM_STATUSES)[number];
 
+/** 发布 egress 身份（裁判：publishSchedulerContract.json egressProviders，ADR-0012 双侧 pin）。 */
+export const PUBLISH_EGRESS_OBJECT_STORAGE_PROVIDER = "aliyun-oss";
+export const PUBLISH_EGRESS_OBJECT_STORAGE_ENDPOINT_FAMILY = "gateway-oss-put";
+export const PUBLISH_EGRESS_DISTRIBUTION_PROVIDER = "超级媒介";
+export const PUBLISH_EGRESS_DISTRIBUTION_ENDPOINT_FAMILY = "gateway-order-api";
+
 export interface PublishProviderSnapshot {
   objectStorage: {
-    provider: "aliyun-oss";
+    provider: typeof PUBLISH_EGRESS_OBJECT_STORAGE_PROVIDER;
     /** 票 08 起：发布 egress 经运营网关（服务器侧重签），不再直连 OSS。 */
-    endpointFamily: "gateway-oss-put";
+    endpointFamily: typeof PUBLISH_EGRESS_OBJECT_STORAGE_ENDPOINT_FAMILY;
     configured: boolean;
     configurationFingerprint: string | null;
   };
   distribution: {
-    provider: "超级媒介";
+    provider: typeof PUBLISH_EGRESS_DISTRIBUTION_PROVIDER;
     /** 票 08 起：下单经网关 port（服务器定价 + 预扣冻结 + sn 幂等）。 */
-    endpointFamily: "gateway-order-api";
+    endpointFamily: typeof PUBLISH_EGRESS_DISTRIBUTION_ENDPOINT_FAMILY;
     configured: boolean;
     configurationFingerprint: string | null;
   };

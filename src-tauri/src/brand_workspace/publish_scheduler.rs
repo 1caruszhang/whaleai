@@ -3160,8 +3160,8 @@ impl PublishScheduler {
     }
 }
 
-/// 图片对象扩展名（与 TS capability 的白名单口径逐字一致：jpeg 统一
-/// .jpg）。白名单外类型在材料入库时已被拒，这里只做映射。
+/// 图片对象扩展名（裁判：`src/shared/geo/storedImageContract.json`，ADR-0012
+/// 双侧 pin；jpeg 统一 .jpg）。白名单外类型在材料入库时已被拒，这里只做映射。
 fn image_extension_for_media_type(media_type: &str) -> &'static str {
     match media_type {
         "image/jpeg" => "jpg",
@@ -5873,8 +5873,30 @@ mod tests {
         let configured = configured_provider_snapshot().unwrap();
         assert!(configured.object_storage.configured);
         assert!(configured.distribution.configured);
-        assert_eq!(configured.object_storage.endpoint_family, "gateway-oss-put");
-        assert_eq!(configured.distribution.endpoint_family, "gateway-order-api");
+        // 票 #40：configured 构造点的 egress 身份对照契约 JSON 断言（测试内
+        // 字面量比对升级为契约 pin；unavailable 构造点由
+        // publish_scheduler_contract_pins_constants 钉）。
+        let contract: PublishSchedulerContract = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../src/shared/geo/publishSchedulerContract.json"
+        )))
+        .expect("shared publish scheduler contract json");
+        assert_eq!(
+            configured.object_storage.provider,
+            contract.egress_providers.object_storage.provider
+        );
+        assert_eq!(
+            configured.object_storage.endpoint_family,
+            contract.egress_providers.object_storage.endpoint_family
+        );
+        assert_eq!(
+            configured.distribution.provider,
+            contract.egress_providers.distribution.provider
+        );
+        assert_eq!(
+            configured.distribution.endpoint_family,
+            contract.egress_providers.distribution.endpoint_family
+        );
         let fingerprint = configured
             .object_storage
             .configuration_fingerprint
@@ -6642,6 +6664,21 @@ mod tests {
         max_safe_retries: usize,
         execution_statuses: Vec<String>,
         item_statuses: Vec<String>,
+        egress_providers: PublishSchedulerContractEgress,
+    }
+
+    #[derive(Debug, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct PublishSchedulerContractEgress {
+        object_storage: PublishSchedulerContractProviderSlot,
+        distribution: PublishSchedulerContractProviderSlot,
+    }
+
+    #[derive(Debug, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct PublishSchedulerContractProviderSlot {
+        provider: String,
+        endpoint_family: String,
     }
 
     #[derive(Debug, Deserialize)]
@@ -6677,6 +6714,72 @@ mod tests {
                 .map(|status| status.to_string())
                 .collect::<Vec<_>>()
         );
+        // 票 #40：egress 身份四值钉到快照构造点。unavailable 构造是纯函数，
+        // configured 构造读账号会话（须在网关 egress 测试的受控环境里跑），
+        // 那一侧由 gateway_snapshot_tracks_admission_identity… 测试对照同一
+        // 份契约 JSON 断言，两个构造点任一漂移都会红灯。
+        let unavailable = unavailable_provider_snapshot();
+        assert_eq!(
+            contract.egress_providers.object_storage.provider,
+            unavailable.object_storage.provider
+        );
+        assert_eq!(
+            contract.egress_providers.object_storage.endpoint_family,
+            unavailable.object_storage.endpoint_family
+        );
+        assert_eq!(
+            contract.egress_providers.distribution.provider,
+            unavailable.distribution.provider
+        );
+        assert_eq!(
+            contract.egress_providers.distribution.endpoint_family,
+            unavailable.distribution.endpoint_family
+        );
+    }
+
+    // ── storedImage 契约（票 #40，ADR-0012）：图片媒体类型→扩展名白名单的
+    // Rust pin（与 TS 侧 provider-capabilities.unit.test.ts 同一裁判文件）。
+
+    #[derive(Debug, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct StoredImageContract {
+        extensions_by_media_type: std::collections::BTreeMap<String, String>,
+    }
+
+    #[test]
+    fn stored_image_contract_pins_extension_whitelist() {
+        let contract: StoredImageContract = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../src/shared/geo/storedImageContract.json"
+        )))
+        .expect("shared stored image contract json");
+        assert_eq!(
+            contract.extensions_by_media_type.keys().collect::<Vec<_>>(),
+            vec!["image/gif", "image/jpeg", "image/png", "image/webp"],
+            "键集即白名单本身（BTreeMap 序）；扩白名单必须先改裁判 JSON"
+        );
+        for (media_type, extension) in &contract.extensions_by_media_type {
+            assert_eq!(
+                image_extension_for_media_type(media_type),
+                extension.as_str(),
+                "媒体类型 {media_type} 的扩展名漂移"
+            );
+        }
+        // 反向钉：契约外的媒体类型必须落 png 兜底——有人往 match 里加
+        // 新映射（如 image/tiff）而不同步裁判 JSON 时，这里先红。
+        for outside in [
+            "image/tiff",
+            "image/bmp",
+            "image/svg+xml",
+            "image/x-emf",
+            "application/octet-stream",
+        ] {
+            assert_eq!(
+                image_extension_for_media_type(outside),
+                "png",
+                "契约外媒体类型 {outside} 不得有独立映射（扩白名单先改裁判 JSON）"
+            );
+        }
     }
 
     /// 生成式 DDL 的逐字节红线：两个 CHECK 子句的生成文本与本票重构前的

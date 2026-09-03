@@ -175,11 +175,7 @@ const EXEMPTIONS: readonly SyncCommentExemption[] = [
     hit: "src/shared/geo/distributionSpendLimits.ts :: /** Shared client/Sidecar defaults. Rust owns persistence and independently",
     owner: "迁移票④点数三源＋spend-limits",
   },
-  // 迁移票⑤：provider 字符串＋图片白名单
-  {
-    hit: "src-tauri/src/brand_workspace/publish_scheduler.rs :: /// 图片对象扩展名（与 TS capability 的白名单口径逐字一致：jpeg 统一",
-    owner: "迁移票⑤provider 字符串＋图片白名单",
-  },
+  // 迁移票⑤：provider 字符串＋图片白名单（票 #40 已删全部条目）
   // 迁移票⑥：其余版本戳＋BINARY_EXTENSIONS 收尾
   {
     hit: "src-tauri/src/workspace_files/read_preview.rs :: /// Keep in sync with `src/shared/fileTypes.ts::BINARY_EXTENSIONS`.",
