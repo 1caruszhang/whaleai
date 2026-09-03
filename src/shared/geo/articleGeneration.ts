@@ -13,10 +13,13 @@ import {
   type TopicPlanKnowledgeFact,
 } from "./topicPlan";
 
+/** 内容策略版本戳（裁判：articleGenerationContract.json，ADR-0012 双侧
+ * pin）：只钉当前值等值，落库的旧版本串是数据不是契约。 */
 export const ARTICLE_GENERATION_POLICY_VERSION =
   "xiaojing-content-prompt-v9";
 export const ARTICLE_GENERATION_CONCURRENCY =
   GEO_PORT_CONTRACT.concurrency.perArticleLifecycle.limit;
+/** 单批文章数与单篇正文字节上限（裁判：articleGenerationContract.json）。 */
 export const ARTICLE_GENERATION_MAX_ARTICLES = 20;
 export const ARTICLE_BODY_MAX_BYTES = 256 * 1024;
 /**

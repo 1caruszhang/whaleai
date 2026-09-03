@@ -1,0 +1,8 @@
+{
+  "policyVersion": "xiaojing-content-prompt-v9",
+  "maxArticles": 20,
+  "maxBodyBytes": {
+    "_comment": "单篇正文字节上限。Rust 侧常量有两份（brand_workspace/articles.rs 与 brand_workspace/publish_scheduler.rs），两处各自 pin 本裁判；TS 侧 ARTICLE_BODY_MAX_BYTES（ADR-0012 双侧 pin）。",
+    "bytes": 262144
+  }
+}

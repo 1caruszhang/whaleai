@@ -1,10 +1,13 @@
 import { describe, expect, it } from "vitest";
 
+import articleGenerationContract from "./articleGenerationContract.json";
 import materialImagePlaceholderContract from "./materialImagePlaceholderContractCases.json";
 import rankingCompetitorContractCases from "./rankingCompetitorContractCases.json";
 
 import {
+  ARTICLE_BODY_MAX_BYTES,
   ARTICLE_GENERATION_CONCURRENCY,
+  ARTICLE_GENERATION_MAX_ARTICLES,
   ARTICLE_GENERATION_POLICY_VERSION,
   ARTICLE_NARRATIVE_SEEDS,
   ARTICLE_IMAGE_CANDIDATE_INJECTION_LIMIT,
@@ -50,6 +53,20 @@ describe("ranking competitor cross-process contract", () => {
         contractCase,
       ),
     ).toEqual(contractCase.expected);
+  });
+});
+
+describe("article generation contract pin（ADR-0012 三方裁判）", () => {
+  it("三键与 articleGenerationContract.json 严格相等", () => {
+    expect(articleGenerationContract.policyVersion).toBe(
+      ARTICLE_GENERATION_POLICY_VERSION,
+    );
+    expect(articleGenerationContract.maxArticles).toBe(
+      ARTICLE_GENERATION_MAX_ARTICLES,
+    );
+    expect(articleGenerationContract.maxBodyBytes.bytes).toBe(
+      ARTICLE_BODY_MAX_BYTES,
+    );
   });
 });
 

@@ -20,6 +20,9 @@ use uuid::Uuid;
 use super::{open_database, BrandWorkspace, BrandWorkspaceStore};
 
 const POLICY_VERSION: &str = "js-ai-dev-deterministic-publish-v1";
+/// 单篇正文字节上限（裁判：`src/shared/geo/articleGenerationContract.json`，
+/// ADR-0012 双侧 pin）：articles.rs 另有一份同值常量，两处常量都各自 pin
+/// 该裁判——改值需 JSON、TS 与 Rust 两处共四处齐动。
 const MAX_BODY_BYTES: usize = 256 * 1024;
 const CLAIM_LEASE_MS: i64 = 5 * 60 * 1_000;
 const BACKGROUND_INTERVAL: Duration = Duration::from_secs(30);
@@ -6671,6 +6674,11 @@ mod tests {
     }
 
     #[derive(Debug, Deserialize)]
+    struct PublishSchedulerContractRetry {
+        values: Vec<i64>,
+    }
+
+    #[derive(Debug, Deserialize)]
     #[serde(rename_all = "camelCase")]
     struct PublishSchedulerContractEgress {
         object_storage: PublishSchedulerContractProviderSlot,
@@ -6682,11 +6690,6 @@ mod tests {
     struct PublishSchedulerContractProviderSlot {
         provider: String,
         endpoint_family: String,
-    }
-
-    #[derive(Debug, Deserialize)]
-    struct PublishSchedulerContractRetry {
-        values: Vec<i64>,
     }
 
     #[test]
@@ -6783,6 +6786,34 @@ mod tests {
                 "契约外媒体类型 {outside} 不得有独立映射（扩白名单先改裁判 JSON）"
             );
         }
+    }
+
+    // ── articleGeneration 契约（票 #38，ADR-0012）：MAX_BODY_BYTES 在 Rust
+    // 侧有两份（articles.rs 与本文件），本测试钉住本文件这一份——两处引用
+    // 同一份裁判 JSON，任一份漂移都会在此或 articles.rs 的 pin 里红灯。
+
+    #[derive(Debug, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct ArticleGenerationContract {
+        max_body_bytes: ArticleGenerationContractBodyBytes,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct ArticleGenerationContractBodyBytes {
+        bytes: usize,
+    }
+
+    #[test]
+    fn article_generation_contract_pins_max_body_bytes() {
+        let contract: ArticleGenerationContract = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../src/shared/geo/articleGenerationContract.json"
+        )))
+        .expect("shared article generation contract json");
+        assert_eq!(
+            contract.max_body_bytes.bytes, MAX_BODY_BYTES,
+            "单篇正文字节上限；Rust 侧双份常量的事实记于 JSON 的 _comment"
+        );
     }
 
     /// 生成式 DDL 的逐字节红线：两个 CHECK 子句的生成文本与本票重构前的

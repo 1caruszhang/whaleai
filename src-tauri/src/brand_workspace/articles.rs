@@ -6,7 +6,12 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::OpenOptions;
 use std::io::Write;
 
+/// 内容策略版本戳（裁判：`src/shared/geo/articleGenerationContract.json`，
+/// ADR-0012 双侧 pin）：只钉当前值等值，落库的旧版本串是数据不是契约。
 const POLICY_VERSION: &str = "xiaojing-content-prompt-v9";
+/// 单批文章数与单篇正文字节上限（同一裁判 JSON）。MAX_BODY_BYTES 在
+/// publish_scheduler.rs 另有一份，两处常量都各自 pin 该裁判——改值需
+/// JSON、TS 与 Rust 两处共四处齐动。
 const MAX_ARTICLES: usize = 20;
 const MAX_BODY_BYTES: usize = 256 * 1024;
 
@@ -4086,6 +4091,37 @@ mod tests {
                 )
                 .unwrap_err(),
             "article_discard_status_invalid"
+        );
+    }
+
+    // ── articleGeneration 契约（票 #38，ADR-0012）：共享裁判 JSON 的 Rust pin
+    //（与 TS 侧 articleGeneration.test.ts 的 import pin 同一裁判文件）。
+
+    #[derive(Debug, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct ArticleGenerationContract {
+        policy_version: String,
+        max_articles: usize,
+        max_body_bytes: ArticleGenerationContractBodyBytes,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct ArticleGenerationContractBodyBytes {
+        bytes: usize,
+    }
+
+    #[test]
+    fn article_generation_contract_pins_constants() {
+        let contract: ArticleGenerationContract = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../src/shared/geo/articleGenerationContract.json"
+        )))
+        .expect("shared article generation contract json");
+        assert_eq!(contract.policy_version, POLICY_VERSION);
+        assert_eq!(contract.max_articles, MAX_ARTICLES);
+        assert_eq!(
+            contract.max_body_bytes.bytes, MAX_BODY_BYTES,
+            "单篇正文字节上限；Rust 侧双份常量的事实记于 JSON 的 _comment"
         );
     }
 }
