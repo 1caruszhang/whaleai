@@ -39,6 +39,10 @@
 
 发布和监测由 BrandWorkspace 的确定性调度 owner 驱动。模型只提出候选或继续对话，不能推进付费、上传、发布、监测激活或结算。重试必须消费持久化 claim/idempotency key，并再次验证 exact revision。
 
+## 跨语言契约
+
+TS↔Rust（含网关）共享的常量契约——枚举集、版本戳、限值与公式——禁止手写镜像或注释声明同源（ADR-0012）。唯一形态：`*Contract.json` 为裁判，Rust `include_str!` pin 测试与 TS import pin 测试断言严格相等（含顺序）；公式类附用例向量，全部实现跑同一 cases。新增跨语言常量先建 Contract.json 再写两侧常量；同步注释词汇在非测试源文件中由守卫测试断言零命中。
+
 ## 验证
 
 删除 owner 后同时删除命令注册、route、类型、测试、配置、资源和文档。`npm run verify:geo-surface` 是失败即退出的全仓门禁；禁止用注释、别名或排除规则保存已删除事实。
