@@ -74,6 +74,9 @@ export function isImageMimeType(mimeType: string): boolean {
  * Strategy: blocklist binary → everything else is assumed text-previewable.
  * This covers far more file types than a text allowlist ever could
  * (.dev.vars, .env.dev, Makefile, README, .tool-versions, etc.).
+ *
+ * 裁判：binaryExtensionsContract.json（ADR-0012 双侧 pin，Rust
+ * read_preview.rs 持同一黑名单）——双侧严格相等含顺序。
  */
 export const BINARY_EXTENSIONS = new Set([
   // Images (superset of IMAGE_EXTENSIONS — includes raw/vector formats)

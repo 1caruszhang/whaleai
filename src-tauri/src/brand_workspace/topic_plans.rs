@@ -103,7 +103,7 @@ pub struct TopicPlanCreateRequest {
     pub model_audit: Value,
     pub provider_snapshot: Value,
     pub model_attempts: Value,
-    /// 「重新生成内容计划」：与 prepare 的 force_regenerate 同源——跳过
+    /// 「重新生成内容计划」：与 prepare 的 force_regenerate 同一语义——跳过
     /// create 事务内的复用查找，允许同一 source identity 落第二代计划
     /// （旧 confirmed 计划保留为历史）；缺省仍复用既有计划。
     #[serde(default)]

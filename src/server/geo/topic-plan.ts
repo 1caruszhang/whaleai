@@ -86,7 +86,7 @@ export interface TopicPlanPersistencePort {
     providerSnapshot: TopicPlanProjection["providerSnapshot"];
     modelAttempts: TopicPlanModelAttempt[];
     /** 「重新生成内容计划」：跳过 create 复用查找、允许同一 source
-     * identity 落第二代计划（与 prepare 的 forceRegenerate 同源）。 */
+     * identity 落第二代计划（与 prepare 的 forceRegenerate 同一语义）。 */
     forceRegenerate?: boolean;
   }): Promise<TopicPlanProjection>;
   mutate(input: {

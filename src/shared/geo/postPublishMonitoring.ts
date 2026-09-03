@@ -5,6 +5,8 @@ import type {
   GeoProbeCitation,
 } from "./baseline";
 
+/** 发布后监测策略版本戳（裁判：postPublishMonitoringContract.json，
+ * ADR-0012 双侧 pin）：只钉当前值等值。 */
 export const POST_PUBLISH_MONITOR_POLICY_VERSION =
   "xiaojing-post-publish-monitor-v1" as const;
 

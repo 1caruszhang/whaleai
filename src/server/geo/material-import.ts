@@ -108,7 +108,7 @@ const COMPETITOR_CONTINUATION_ROUNDS = 3;
 
 /**
  * 续搜轮换词的目标语料池轮换（票 #23「换词多轮」）：各轮分别逼向品类
- * 盘点、口碑探店、行业榜单三个中立观察者语料池，避免同词重搜同源。
+ * 盘点、口碑探店、行业榜单三个中立观察者语料池，避免同词重搜回捞重复语料。
  * 形态全部无行业词、无招商词；招商词过滤由 parseRetryQuery 兜底。
  */
 const COMPETITOR_ROUND_QUERY_FORMS = [
@@ -715,7 +715,7 @@ function extractionPrompt(
     '- 第 1 条以【目标客户】的口吻写需求问句——客户带着具体问题搜：目标客户是',
     '  经营者/采购方（加盟商、企业采购）→「地域 + 品类/项目 + 加盟/合作/供应商',
     '  哪家好/怎么选」；终端消费者 →「地域 + 品类 + 排行榜/哪家好/口碑」。客户',
-    '  是谁由材料决定（targetCustomers 字段的判定同源），不套固定模板。这条',
+    '  是谁由材料决定（与 targetCustomers 字段的判定一致），不套固定模板。这条',
     '  命中的是招商/比价类内容池。',
     '- 第 2 条以中立的行业观察者口吻写品类盘点——「地域 + 品类 + 品牌 有哪些/',
     '  盘点/名单」，不得出现加盟、招商、合作、供应商这类客户口吻词，且品类',
@@ -1335,7 +1335,7 @@ export function parseRetryQuery(raw: string, existingQueries: readonly string[])
 /**
  * 检索语料域名封顶的分组键：复用共享层 registeredDomain（可注册域近似值，
  * 子域/前缀不参与分组，com.cn 等两段公共后缀取倒数三段——后缀清单只此一
- * 份，渠道召回侧同源）。解析失败/非 URL 原样返回，退化为每条独立成组
+ * 份，渠道召回侧共用同一份）。解析失败/非 URL 原样返回，退化为每条独立成组
  * （不影响封顶正确性，只少合并）。纯函数。
  */
 export function sourceDomainKey(url: string): string {
@@ -2089,7 +2089,7 @@ export class MaterialImportService {
       : [];
     // 语料多样性两步裁剪：先按 URL 去重（两条查询召回同一篇只算一份），再按
     // 可注册域封顶——防单一品牌的 GEO 投放霸屏软文站挤出列表页/品类文（张仔纪
-    // 事故：19/20 同四站）。裁剪后的列表同源供给模型快照与存在闸语料。
+    // 事故：19/20 同四站）。裁剪后的同一份列表供给模型快照与存在闸语料。
     const sources = capSourcesPerDomain(
       dedupeSourcesByUrl(sourceGroups.flat()),
       COMPETITOR_SOURCE_DOMAIN_CAP,
@@ -2296,7 +2296,7 @@ export class MaterialImportService {
             response: rewrite.slice(0, 1_000),
           });
           // parseRetryQuery 拒空/过短/与已试词重复/仍带招商词——换不出合规
-          // 新词时续搜收束，不拿同词重搜同源浪费预算。
+          // 新词时续搜收束，不拿同词重搜重复语料浪费预算。
           retryQuery = parseRetryQuery(rewrite, roundQueries);
         } catch {
           // 重写调用失败（provider 异常）：保既有结果，续搜终止。
@@ -2511,7 +2511,7 @@ export class MaterialImportService {
       }
       try {
         facts = parseProfileFacts(response, context, text);
-        // 竞品检索词与 facts 同源同响应：抽取模型已读完材料，顺手产出
+        // 竞品检索词与 facts 同一响应产出：抽取模型已读完材料，顺手产出
         // 目标客户视角的查询词（管线瞬时值）。
         competitorSearchQueries = parseCompetitorSearchQueries(response);
         break;

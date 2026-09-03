@@ -123,7 +123,8 @@ export function parseGeoOperationEventCard(
   }
 }
 
-/** 操作状态文案与状态行派生（ADR-0011）在 GeoGateProgressStrip 与停靠条同源。 */
+/** 操作状态文案与状态行派生（ADR-0011）：本文件 re-export GeoGateProgressStrip
+ * 的同一份定义，停靠条与进度条共用。 */
 export { GEO_OPERATION_STATUS_LABEL } from "./GeoGateProgressStrip";
 
 const STEP_STATUS_LABEL: Record<

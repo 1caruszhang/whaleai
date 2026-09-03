@@ -57,7 +57,7 @@ export type GeoStageOrderRejection =
       ok: false;
       error: "geo_stage_tool_out_of_order";
       tool: string;
-      /** 当前步是 agent 工具步时：应调工具的引述（next-step 单表同源）。 */
+      /** 当前步是 agent 工具步时：应调工具的引述（取自 next-step 单表）。 */
       nextStep?: GeoNextStepQuotation;
       /** 当前步不是 agent 工具步时：所停步骤与等待原因（与 nextStep 互斥）。 */
       heldStep?: GeoStageOrderHeldStep;

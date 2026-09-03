@@ -2,6 +2,8 @@ use super::*;
 use rusqlite::TransactionBehavior;
 use serde_json::{json, Value};
 
+/// 基线证据策略版本戳（裁判：src/shared/geo/baselineContract.json，ADR-0012
+/// 双侧 pin）：只钉当前值等值，落库的 v1 旧版本串是数据不是契约。
 const BASELINE_POLICY_VERSION: &str = "xiaojing-geo-baseline-v2";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -867,8 +869,8 @@ fn baseline_brand_names(
     Ok(names)
 }
 
-/// 冻结的已确认竞品名单：与 `baseline_brand_names` 同源的 knowledge 版本
-/// 快照读取，predicate 收敛到 `%.competitors`，兼容字符串/字符串数组值形态。
+/// 冻结的已确认竞品名单：读取与 `baseline_brand_names` 相同 knowledge 版本的
+/// 快照，predicate 收敛到 `%.competitors`，兼容字符串/字符串数组值形态。
 fn baseline_competitor_names(
     connection: &Connection,
     knowledge_version: i64,
@@ -1717,5 +1719,27 @@ mod tests {
                 [canonical_json(&questions).unwrap()],
             )
             .unwrap();
+    }
+
+    // ── baseline 契约（票 #41，ADR-0012）：共享裁判 JSON 的 Rust pin
+    //（与 TS 侧 baseline.test.ts 的 import pin 同一裁判文件）。
+
+    #[derive(Debug, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct BaselineContract {
+        policy_version: String,
+    }
+
+    #[test]
+    fn baseline_contract_pins_constants() {
+        let contract: BaselineContract = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../src/shared/geo/baselineContract.json"
+        )))
+        .expect("shared baseline contract json");
+        assert_eq!(
+            contract.policy_version, BASELINE_POLICY_VERSION,
+            "基线策略版本戳；ADR-0012 Decision 2 只钉当前值——存量库 v1 旧串是数据不是契约"
+        );
     }
 }

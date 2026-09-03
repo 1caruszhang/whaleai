@@ -108,7 +108,7 @@ export interface GateRevisionContext {
   sessionId: string;
   /**
    * 请求级新鲜账号 token（revise_gate_content 工具从 MCP 会话上下文带入，
-   * 与 MCP 组装点同源）：组合根按其取能力与计费口径，缺省回退启动单例
+   * 与 MCP 组装点共用同一取值）：组合根按其取能力与计费口径，缺省回退启动单例
    * ——长会话（env token 已过期）下的修订路径不再依赖启动单例。
    */
   requestAccountToken?: string;
@@ -260,7 +260,7 @@ export async function dispatchGateRevision(
   };
 }
 
-/** 卡片决策与聊天修订同源：指令都来自桌面前的用户本人。 */
+/** 卡片决策与聊天修订同出一人：指令都来自桌面前的用户本人。 */
 const GATE_REVISION_ACTOR_ID = 'desktop-user';
 
 /**

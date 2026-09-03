@@ -70,7 +70,7 @@ interface CandidateState {
   /**
    * 该候选裁决落库时刻（票 08）：实时路径取 decide-batch 结果的
    * settledAt，水合路径取候选投影的 resolvedAt。卡片完成时刻的本地
-   * 暂存，与权威投影同源。
+   * 暂存，取值即权威投影。
    */
   settledAt?: string;
   error?: string;

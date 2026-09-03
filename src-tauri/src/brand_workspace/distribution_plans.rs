@@ -3,6 +3,9 @@ use rusqlite::TransactionBehavior;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 
+/// 分发计划策略版本戳（裁判：src/shared/geo/distributionPlanContract.json，
+/// ADR-0012 双侧 pin）。全仓唯一兼任兼容闸的版本戳：prepare 直接拒绝
+/// policyVersion 不符的 provider 快照，TS 侧组装必须逐字符相等才能过闸。
 const POLICY_VERSION: &str = "js-ai-dev-four-path-distribution-v1";
 const MAX_CANDIDATES: usize = 30;
 
@@ -1560,7 +1563,7 @@ fn validate_discovery_against_plan(
                     }
                 }
                 // 保底路：结构化类目/人群/官方 GEO 标记规则匹配（合并后单路）。
-                // geo: 载荷必须与候选自带资源快照的 geoPlatforms 逐字一致
+                // geo: 载荷必须与候选自带资源快照的 geoPlatforms 逐字相同
                 // （官方 geo_platforms 非空是保底路第三个触发条件，2026-08-27）。
                 "fallback" => {
                     let geo_labels = candidate
@@ -2476,5 +2479,27 @@ mod tests {
             )
             .unwrap_err();
         assert_eq!(error, "distribution_plan_resource_price_unknown");
+    }
+
+    // ── distributionPlan 契约（票 #41，ADR-0012）：共享裁判 JSON 的 Rust pin
+    //（与 TS 侧 distributionPlan.test.ts 的 import pin 同一裁判文件）。
+
+    #[derive(Debug, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct DistributionPlanContract {
+        policy_version: String,
+    }
+
+    #[test]
+    fn distribution_plan_contract_pins_constants() {
+        let contract: DistributionPlanContract = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../src/shared/geo/distributionPlanContract.json"
+        )))
+        .expect("shared distribution plan contract json");
+        assert_eq!(
+            contract.policy_version, POLICY_VERSION,
+            "分发计划策略版本戳——全仓唯一兼任兼容闸的版本戳（prepare 拒绝不符快照）"
+        );
     }
 }

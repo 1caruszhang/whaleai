@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 
+import baselineContract from "./baselineContract.json";
 import {
+  GEO_BASELINE_POLICY_VERSION,
   aggregateGeoBaselineUnits,
   analyzeGeoProbeAnswer,
   classifyGeoQuestionDiagnosis,
@@ -326,5 +328,13 @@ describe("GEO real baseline evidence", () => {
         { id: "failed", status: "failed", analysis: null },
       ]).mentionRate,
     ).toBeNull();
+  });
+});
+
+// 基线策略版本戳契约（票 #41，ADR-0012）：与裁判 JSON 严格相等；
+// Rust 侧 geo_baselines.rs 的同文件测试 include_str! 同一裁判。
+describe("baseline 契约（票 #41，ADR-0012）", () => {
+  it("GEO_BASELINE_POLICY_VERSION 与 baselineContract.json 裁判严格相等", () => {
+    expect(baselineContract.policyVersion).toBe(GEO_BASELINE_POLICY_VERSION);
   });
 });

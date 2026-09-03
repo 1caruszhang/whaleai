@@ -4471,7 +4471,7 @@ mod tests {
     const TEST_GATEWAY_BASE: &str = "https://gateway.example.test";
 
     /// setup_fixture 的首篇文章 id（= `format!("article-{}",
-    /// "long-identifier-".repeat(8))` 的字面值，与夹具构造式逐字同源）。
+    /// "long-identifier-".repeat(8))` 的字面值，与夹具构造式逐字相同）。
     const ARTICLE_ID: &str = "article-long-identifier-long-identifier-long-identifier-long-identifier-long-identifier-long-identifier-long-identifier-long-identifier-";
 
     /// 测试网关 egress 身份注入：生产路径读 `account_auth` 的账号会话

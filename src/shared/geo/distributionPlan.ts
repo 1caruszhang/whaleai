@@ -38,6 +38,9 @@ export {
   type DistributionSpendLimits,
 } from "./distributionSpendLimits";
 
+/** 分发计划策略版本戳（裁判：distributionPlanContract.json，ADR-0012 双侧
+ * pin）。全仓唯一兼任兼容闸的版本戳：Rust prepare 直接拒绝 policyVersion
+ * 不符的 provider 快照，本常量必须与 Rust 侧逐字符相等才能过闸。 */
 export const DISTRIBUTION_PLAN_POLICY_VERSION =
   "js-ai-dev-four-path-distribution-v1";
 export const DISTRIBUTION_RESOURCE_PAGE_SIZE = 200;

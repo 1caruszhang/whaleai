@@ -768,7 +768,7 @@ export function buildArticleRepairMessages(input: {
     "你是文章格式修复器。你会收到一篇已生成的文章草稿与一份「无法通过确定性审核的具体问题清单」。你的唯一任务是把清单里的问题全部修掉；其余内容逐字保留——不改写段落措辞、不增删事实或卖点、不调整配图、不润色。",
     "输出要求：",
     "- 直接输出修复后的完整文章（plain Markdown）：不要 JSON、不要代码围栏、不要任何解释、前言或后缀。",
-    `- 首行必须是指定标题的 H1，逐字一致。`,
+    `- 首行必须是指定标题的 H1，一字不差。`,
     "- 不得引入【】占位符；配图语法 ![alt](material-image://图片ID) 一律原样保留，不得增删。",
     "- 列表用标准 Markdown 语法（行首 `- ` 或 `1. `），禁止用 •、●、· 等圆点字符起行。",
     `本篇类型：${CONTENT_TYPE_LABELS[input.contentType]} / ${input.contentType}`,

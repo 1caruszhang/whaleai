@@ -115,7 +115,7 @@ function rowPatchFromStatus(entry: BrandMaterialStatusEntry): Partial<MaterialRo
       status: 'failed',
       image,
       errorCode: material.lastErrorCode ?? 'material_processing_failed',
-      // 失败也是落定：完成时刻与成功行同源（终态 UPDATE 的 updated_at）。
+      // 失败也是落定：完成时刻同样取终态 UPDATE 的 updated_at。
       settledAt: material.updatedAt,
     };
   }

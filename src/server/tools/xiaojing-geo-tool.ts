@@ -292,7 +292,7 @@ export async function listUnfinishedGeoRounds(): Promise<UnfinishedGeoRoundsPayl
 
 /**
  * 跨 Session 只读的品牌工作台状态摘要：BrandWorkspace 是权威 owner，各阶段
- * 产物经 Rust `latest` 端点读取，与右侧工作台投影同源。Agent 在新 Session
+ * 产物经 Rust `latest` 端点读取，与右侧工作台投影同一数据。Agent 在新 Session
  * 里先读这里再决定是否向用户要信息；单阶段读取失败只降级为 absent，
  * 不阻断整体摘要（只读路径，无副作用可安全重试）。
  */
@@ -1509,7 +1509,7 @@ export async function createXiaojingGeoServer() {
                 workspaceId: basename(context.workspace),
                 sessionId: context.sessionId,
                 // 票 B：修订路径同接请求级新鲜 token（与 sessionGeoServices
-                // 同源的本轮聊天 token），长会话修订不再依赖过期 env 单例。
+                // 共用的本轮聊天 token），长会话修订不再依赖过期 env 单例。
                 requestAccountToken: context.requestAccountToken,
               },
             );

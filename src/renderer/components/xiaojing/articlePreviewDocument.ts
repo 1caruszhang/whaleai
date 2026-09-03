@@ -3,7 +3,7 @@ import { normalizeUnicodeBulletsToMarkdown } from "../../../shared/geo/articleGe
 
 /**
  * 文章独立 HTML 预览文档（2026-08-31 用户裁决 C）：全屏预览与导出共用
- * 同一个生成器，保证「预览 = 导出」——正文结构与 CSS 字节同源，仅图片
+ * 同一个生成器，保证「预览 = 导出」——正文结构与 CSS 字节完全相同，仅图片
  * 寻址按用途区分：iframe 预览传会话期 blob: URL，导出/复制传 data: URL
  * （blob: 离开会话即失效，导出件内嵌图片字节才自包含）。
  * 文档不依赖应用主题/外部资源：CSS 全量内嵌（ARTICLE_PREVIEW_CSS），

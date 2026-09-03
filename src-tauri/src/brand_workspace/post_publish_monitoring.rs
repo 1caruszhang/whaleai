@@ -13,6 +13,8 @@ use tauri::Manager;
 
 use super::{open_database, BrandWorkspace, BrandWorkspaceStore};
 
+/// 发布后监测策略版本戳（裁判：src/shared/geo/postPublishMonitoringContract.json，
+/// ADR-0012 双侧 pin）：只钉当前值等值。WAKE_SCHEMA 是 Rust 单源常量，不入契约。
 const POLICY_VERSION: &str = "xiaojing-post-publish-monitor-v1";
 const WAKE_SCHEMA: &str = "xiaojing-geo-monitor-wake-v1";
 const CLAIM_LEASE_MS: i64 = 5 * 60 * 1_000;
@@ -3764,5 +3766,27 @@ mod tests {
             .unwrap();
         // 已含 widened CHECK 的库重复执行迁移是幂等 no-op。
         widen_monitor_plan_status_check(&connection).unwrap();
+    }
+
+    // ── postPublishMonitoring 契约（票 #41，ADR-0012）：共享裁判 JSON 的
+    // Rust pin（与 TS 侧 postPublishMonitoring.test.ts 的 import pin 同一裁判文件）。
+
+    #[derive(Debug, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct PostPublishMonitorContract {
+        policy_version: String,
+    }
+
+    #[test]
+    fn post_publish_monitor_contract_pins_constants() {
+        let contract: PostPublishMonitorContract = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../src/shared/geo/postPublishMonitoringContract.json"
+        )))
+        .expect("shared post publish monitoring contract json");
+        assert_eq!(
+            contract.policy_version, POLICY_VERSION,
+            "发布后监测策略版本戳；ADR-0012 Decision 2 只钉当前值"
+        );
     }
 }

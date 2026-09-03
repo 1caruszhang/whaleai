@@ -1,0 +1,16 @@
+{
+  "extensions": [
+    "png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "ico", "tiff", "tif",
+    "psd", "ai", "eps", "raw", "cr2", "nef", "heic", "heif", "avif", "jxl",
+    "mp4", "avi", "mov", "mkv", "wmv", "flv", "webm", "m4v", "mpg", "mpeg", "3gp",
+    "mp3", "wav", "aac", "ogg", "flac", "wma", "m4a", "opus", "aiff",
+    "zip", "tar", "gz", "bz2", "xz", "rar", "7z", "zst", "lz4", "lzma", "cab", "dmg", "iso",
+    "exe", "dll", "so", "dylib", "bin", "app", "msi", "deb", "rpm", "apk", "ipa",
+    "o", "obj", "class", "pyc", "pyo", "wasm", "elc",
+    "ttf", "otf", "woff", "woff2", "eot",
+    "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "odt", "ods", "odp", "rtf",
+    "db", "sqlite", "sqlite3", "mdb",
+    "dat", "ds_store", "swp", "swo"
+  ],
+  "_comment": "不可文本预览的二进制扩展名黑名单（小写、无点），双侧严格相等含顺序：Rust read_preview.rs 的 is_previewable 闸与 TS fileTypes.ts 的 isPreviewable 闸共用。策略是黑名单——不在表内即视为可预览，无扩展名（Makefile/README/点文件）恒可预览；IMAGE_EXTENSIONS/CHAT_IMAGE_EXTENSIONS/RICH_DOC_EXTENSIONS 是 TS 单侧策略，不入本契约。"
+}

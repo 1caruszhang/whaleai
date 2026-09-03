@@ -426,7 +426,7 @@ export function createProviderProxyRoutes(deps: BackendDeps) {
       }
 
       // 定价权威在服务器：媒介价只取资源快照缓存（miss 回源上游并回填），
-      // 客户端不传价、传了也不看（与 permit 价目红线同源）。
+      // 客户端不传价、传了也不看（与 permit 价目红线同一规则）。
       let cached = readDistributionResourceCache(deps.db, kind, body.resourceId);
       if (!cached) {
         const fetched = await upstream.queryResource(kind, body.resourceId);

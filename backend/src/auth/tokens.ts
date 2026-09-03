@@ -41,7 +41,7 @@ async function verifyHmacJwt(
   nowMs?: number,
 ): Promise<{ ok: true; payload: JWTPayload } | TokenVerifyFailure> {
   try {
-    // nowMs 注入校验时钟（与签发同源）：测试固定假时钟时，jose 默认按真实
+    // nowMs 注入校验时钟（与签发共用同一时钟）：测试固定假时钟时，jose 默认按真实
     // 墙钟（new Date()）校验 exp，真实时间越过「假时钟锚点 + TTL」后用例会
     // 整批爆红；生产调用方传 deps.now()（即 Date.now()），行为不变。jose v6
     // 的选项名是 currentDate（v5 的 clockTimestamp 已不存在，传错名被静默忽略）。
