@@ -1,7 +1,13 @@
 import { describe, expect, it } from "vitest";
 
+import publishSchedulerContract from "./publishSchedulerContract.json";
 import {
+  PUBLISH_EXECUTION_STATUSES,
+  PUBLISH_ITEM_STATUSES,
+  PUBLISH_MAX_SAFE_RETRIES,
   PUBLISH_ORDER_STATUS_LABEL,
+  PUBLISH_RETRY_BACKOFF_MS,
+  PUBLISH_SCHEDULER_POLICY_VERSION,
   isPublishExecutionImmutable,
   publishExecutionCanStart,
   publishOrderRefundsPoints,
@@ -10,6 +16,26 @@ import {
   type PublishExecutionProjection,
   type PublishOrderUpstreamStatus,
 } from "./publishScheduler";
+
+describe("publish scheduler contract pin（ADR-0012 三方裁判）", () => {
+  it("五键与 publishSchedulerContract.json 严格相等（含顺序）", () => {
+    expect(publishSchedulerContract.policyVersion).toBe(
+      PUBLISH_SCHEDULER_POLICY_VERSION,
+    );
+    expect(publishSchedulerContract.retryBackoffMs.values).toEqual([
+      ...PUBLISH_RETRY_BACKOFF_MS,
+    ]);
+    expect(publishSchedulerContract.maxSafeRetries).toBe(
+      PUBLISH_MAX_SAFE_RETRIES,
+    );
+    expect(publishSchedulerContract.executionStatuses).toEqual([
+      ...PUBLISH_EXECUTION_STATUSES,
+    ]);
+    expect(publishSchedulerContract.itemStatuses).toEqual([
+      ...PUBLISH_ITEM_STATUSES,
+    ]);
+  });
+});
 
 describe("publish scheduler policy", () => {
   it("keeps the 2026-09 retry contract at two 3-second retries", () => {

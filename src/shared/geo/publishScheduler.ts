@@ -1,37 +1,49 @@
-/** 预览载荷哈希公式的输入（Rust 侧同名 POLICY_VERSION 逐字同步）：钉的是
- * 「发布什么 + 不可逆影响」的冻结身份，不含执行循环的重试表——重试语义
- * 变更（如 2026-09-01 的 3s×2 停车）不升版本，否则存量执行的对账哈希
- * 全部失配。 */
+/** 预览载荷哈希公式的输入（裁判：publishSchedulerContract.json，ADR-0012
+ * 双侧 pin）：钉的是「发布什么 + 不可逆影响」的冻结身份，不含执行循环的
+ * 重试表——重试语义变更（如 2026-09-01 的 3s×2 停车）不升版本，否则存量
+ * 执行的对账哈希全部失配。 */
 export const PUBLISH_SCHEDULER_POLICY_VERSION =
   "js-ai-dev-deterministic-publish-v1";
 
-/** 自动重试 2 次、间隔 3 秒（与 Rust 侧 RETRY_BACKOFF_MS 同源契约）：
- * 耗尽即落终态 failed-nonretryable 跳过，深度恢复交由「重新发布」按钮。 */
+/** 自动重试 2 次、间隔 3 秒（产品语义与「不升版」红线记于契约 JSON 的
+ * `_comment`，见 publishSchedulerContract.json / ADR-0012）：耗尽即落终态
+ * failed-nonretryable 跳过，深度恢复交由「重新发布」按钮。 */
 export const PUBLISH_RETRY_BACKOFF_MS = [3_000, 3_000] as const;
 export const PUBLISH_MAX_SAFE_RETRIES = PUBLISH_RETRY_BACKOFF_MS.length;
 
-export type PublishExecutionStatus =
-  | "awaiting-confirmation"
-  | "confirmed"
-  | "running"
-  | "scheduled"
-  | "partially-succeeded"
-  | "succeeded"
-  | "failed"
-  | "superseded"
-  | "reconciliation-required"
-  | "cancelled";
+/** 发布执行状态全集（裁判：publishSchedulerContract.json，ADR-0012 双侧
+ * pin）；union type 由本表派生以保字面量收窄。 */
+export const PUBLISH_EXECUTION_STATUSES = [
+  "awaiting-confirmation",
+  "confirmed",
+  "running",
+  "scheduled",
+  "partially-succeeded",
+  "succeeded",
+  "failed",
+  "reconciliation-required",
+  "superseded",
+  "cancelled",
+] as const;
 
-export type PublishItemStatus =
-  | "pending"
-  | "uploading"
-  | "uploaded"
-  | "submitting"
-  | "submitted"
-  | "failed-retryable"
-  | "failed-nonretryable"
-  | "reconciliation-required"
-  | "cancelled";
+export type PublishExecutionStatus =
+  (typeof PUBLISH_EXECUTION_STATUSES)[number];
+
+/** 发布条目状态全集（裁判：publishSchedulerContract.json，ADR-0012 双侧
+ * pin）；union type 由本表派生以保字面量收窄。 */
+export const PUBLISH_ITEM_STATUSES = [
+  "pending",
+  "uploading",
+  "uploaded",
+  "submitting",
+  "submitted",
+  "failed-retryable",
+  "failed-nonretryable",
+  "reconciliation-required",
+  "cancelled",
+] as const;
+
+export type PublishItemStatus = (typeof PUBLISH_ITEM_STATUSES)[number];
 
 export interface PublishProviderSnapshot {
   objectStorage: {

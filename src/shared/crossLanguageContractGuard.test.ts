@@ -155,15 +155,8 @@ type SyncCommentExemption = {
 };
 
 const EXEMPTIONS: readonly SyncCommentExemption[] = [
-  // 迁移票①：publish_scheduler 族试点（POLICY_VERSION / RETRY / 订单状态枚举 / 退点状态）
-  {
-    hit: 'src/shared/geo/publishScheduler.ts :: /** 预览载荷哈希公式的输入（Rust 侧同名 POLICY_VERSION 逐字同步）：钉的是',
-    owner: "迁移票①publish_scheduler 试点",
-  },
-  {
-    hit: 'src/shared/geo/publishScheduler.ts :: /** 自动重试 2 次、间隔 3 秒（与 Rust 侧 RETRY_BACKOFF_MS 同源契约）：',
-    owner: "迁移票①publish_scheduler 试点",
-  },
+  // 迁移票①：publish_scheduler 族试点（票 #36 已删 POLICY_VERSION/RETRY 两条；
+  // 余下订单状态枚举/退点状态是 TS↔backend 契约，待 backend 侧入 pin 的票认领）
   {
     hit: "src/shared/geo/publishScheduler.ts :: * 上游渠道订单状态码（超级媒介契约，与后端 `publish-orders` 状态机同源）：",
     owner: "迁移票①publish_scheduler 试点",

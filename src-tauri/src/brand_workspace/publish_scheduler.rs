@@ -27,6 +27,33 @@ const BACKGROUND_INTERVAL: Duration = Duration::from_secs(30);
 /// 耗尽即落终态 failed-nonretryable 跳过，队列不再长时间等待退避；
 /// 深度恢复交由用户驱动的「重新发布」按钮。
 const RETRY_BACKOFF_MS: [i64; 2] = [3_000, 3_000];
+/// 发布执行状态全集（三方裁判：`src/shared/geo/publishSchedulerContract.json`，
+/// ADR-0012 双侧 pin）。顺序即契约顺序，建表 CHECK 与存量库迁移都由本表生成。
+const PUBLISH_EXECUTION_STATUSES: [&str; 10] = [
+    "awaiting-confirmation",
+    "confirmed",
+    "running",
+    "scheduled",
+    "partially-succeeded",
+    "succeeded",
+    "failed",
+    "reconciliation-required",
+    "superseded",
+    "cancelled",
+];
+/// 发布条目状态全集（三方裁判：`src/shared/geo/publishSchedulerContract.json`，
+/// ADR-0012 双侧 pin）。顺序即契约顺序。
+const PUBLISH_ITEM_STATUSES: [&str; 9] = [
+    "pending",
+    "uploading",
+    "uploaded",
+    "submitting",
+    "submitted",
+    "failed-retryable",
+    "failed-nonretryable",
+    "reconciliation-required",
+    "cancelled",
+];
 /// 未登录时认领到的执行单推迟到下一轮再试的间隔：不消耗重试次数，
 /// 登录恢复后指纹自然匹配、自动继续执行。
 const LOGIN_RESUME_DEFER_MS: i64 = 5 * 60 * 1_000;
@@ -203,20 +230,71 @@ pub struct PublishExecutionProjection {
     updated_at: String,
 }
 
+/// geo_publish_executions 的 status CHECK 子句（由 PUBLISH_EXECUTION_STATUSES
+/// 生成）。折行是历史存量形态：'superseded' 与 'cancelled' 两代迁移按
+/// sqlite_master 原文 replace 追加、新库 DDL 对齐同一文本——生成文本必须与
+/// 现存 DDL 逐字节一致（bytes-match 测试钉死），否则新旧二进制建出的库
+/// sqlite_master 文本分叉，按原文匹配的表重建迁移会失配。
+fn publish_execution_status_check_clause() -> String {
+    let [awaiting, confirmed, running, scheduled, partially, succeeded, failed, reconciliation, superseded, cancelled] =
+        PUBLISH_EXECUTION_STATUSES;
+    format!(
+        "status TEXT NOT NULL CHECK(status IN (
+                    '{awaiting}','{confirmed}','{running}','{scheduled}',
+                    '{partially}','{succeeded}','{failed}','{reconciliation}'
+                    ,'{superseded}','{cancelled}'
+                ))"
+    )
+}
+
+/// geo_publish_items 的 status CHECK 子句（由 PUBLISH_ITEM_STATUSES 生成），
+/// 逐字节一致约束同上。
+fn publish_item_status_check_clause() -> String {
+    let [pending, uploading, uploaded, submitting, submitted, failed_retryable, failed_nonretryable, reconciliation, cancelled] =
+        PUBLISH_ITEM_STATUSES;
+    format!(
+        "status TEXT NOT NULL CHECK(status IN (
+                    '{pending}','{uploading}','{uploaded}','{submitting}','{submitted}',
+                    '{failed_retryable}','{failed_nonretryable}','{reconciliation}',
+                    '{cancelled}'
+                ))"
+    )
+}
+
+/// 旧库（'cancelled' 入契约前）CHECK 列表尾值 → 追加 'cancelled' 后的替换
+/// 对，由状态常量生成：锚定旧列表最后一个值的裸引号串。executions 旧形态
+/// 为 `,'superseded'` 独立行、items 旧形态为行尾 `'reconciliation-required'`，
+/// 裸值锚点对两种形态的替换结果与既有硬编码迁移逐字节一致（带前导逗号的
+/// 锚点是裸值的子串，裸值只会多匹配、不会错替换——替换语义都是追加
+/// 'cancelled'，方向不变）。
+fn append_cancelled_replace_pair(statuses: &[&str]) -> Result<(String, String), String> {
+    let (&appended, legacy) = statuses
+        .split_last()
+        .ok_or("publish status contract must not be empty")?;
+    if appended != "cancelled" {
+        return Err(format!(
+            "publish status contract must end with 'cancelled' (got '{appended}')"
+        ));
+    }
+    let &legacy_tail = legacy
+        .last()
+        .ok_or("publish status contract lacks a pre-cancelled tail")?;
+    let anchor = format!("'{legacy_tail}'");
+    Ok((anchor.clone(), format!("{anchor},'{appended}'")))
+}
+
 pub(crate) fn ensure_schema(connection: &Connection) -> Result<(), String> {
+    let execution_status_check = publish_execution_status_check_clause();
+    let item_status_check = publish_item_status_check_clause();
     connection
-        .execute_batch(
+        .execute_batch(&format!(
             "CREATE TABLE IF NOT EXISTS geo_publish_executions (
                 id TEXT PRIMARY KEY,
                 operation_id TEXT NOT NULL UNIQUE REFERENCES geo_operations(id),
                 created_by_session_id TEXT NOT NULL,
                 distribution_plan_id TEXT NOT NULL REFERENCES geo_distribution_plans(id),
                 distribution_plan_revision INTEGER NOT NULL,
-                status TEXT NOT NULL CHECK(status IN (
-                    'awaiting-confirmation','confirmed','running','scheduled',
-                    'partially-succeeded','succeeded','failed','reconciliation-required'
-                    ,'superseded','cancelled'
-                )),
+                {execution_status_check},
                 revision INTEGER NOT NULL,
                 budget_cny REAL NOT NULL,
                 estimated_spend_cny REAL NOT NULL,
@@ -245,11 +323,7 @@ pub(crate) fn ensure_schema(connection: &Connection) -> Result<(), String> {
                 channel_json TEXT NOT NULL,
                 scheduled_at TEXT NOT NULL,
                 scheduled_at_ms INTEGER NOT NULL,
-                status TEXT NOT NULL CHECK(status IN (
-                    'pending','uploading','uploaded','submitting','submitted',
-                    'failed-retryable','failed-nonretryable','reconciliation-required',
-                    'cancelled'
-                )),
+                {item_status_check},
                 idempotency_key TEXT NOT NULL UNIQUE,
                 external_request_sn TEXT NOT NULL,
                 payload_hash TEXT NOT NULL,
@@ -281,7 +355,7 @@ pub(crate) fn ensure_schema(connection: &Connection) -> Result<(), String> {
                 detail_json TEXT NOT NULL,
                 created_at TEXT NOT NULL
              );",
-        )
+        ))
         .map_err(|error| format!("initialize publish scheduler schema: {error}"))?;
     super::drop_brand_sessions_foreign_keys(connection, &["geo_publish_executions"])?;
     super::ensure_column(
@@ -305,19 +379,13 @@ pub(crate) fn ensure_schema(connection: &Connection) -> Result<(), String> {
 /// foreign_keys 同一先例（foreign_keys=OFF 包裹、索引随 DROP 消失后按原文
 /// 重建）。SQLite 的 CHECK 在 UPDATE 上同样强制，无法绕开重建。
 fn extend_publish_status_checks(connection: &Connection) -> Result<(), String> {
-    const STATUS_CHECK_TABLES: [(&str, &str, &str); 2] = [
-        (
-            "geo_publish_executions",
-            ",'superseded'",
-            ",'superseded','cancelled'",
-        ),
-        (
-            "geo_publish_items",
-            "'reconciliation-required'",
-            "'reconciliation-required','cancelled'",
-        ),
+    let status_check_tables: [(&str, &[&str]); 2] = [
+        ("geo_publish_executions", &PUBLISH_EXECUTION_STATUSES),
+        ("geo_publish_items", &PUBLISH_ITEM_STATUSES),
     ];
-    for (table, check_without, check_with) in STATUS_CHECK_TABLES {
+    for (table, statuses) in status_check_tables {
+        let (check_without, check_with) = append_cancelled_replace_pair(statuses)
+            .map_err(|error| format!("inspect {table} status check: {error}"))?;
         let existing: Option<String> = connection
             .query_row(
                 "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?1",
@@ -333,7 +401,7 @@ fn extend_publish_status_checks(connection: &Connection) -> Result<(), String> {
         {
             continue;
         }
-        let rebuilt_sql = existing_sql.replace(check_without, check_with);
+        let rebuilt_sql = existing_sql.replace(&check_without, &check_with);
         if rebuilt_sql == existing_sql {
             // 非预期形态（历史 schema 措辞不同）：fail loud，取消路径会因
             // CHECK 拒绝而显式报错，不会被误认为已迁移。
@@ -6561,6 +6629,103 @@ mod tests {
             // 解析侧错误码只由 TS 侧消费；Rust 侧只确认其存在形状。
             let _ = case.expected_parse_error;
         }
+    }
+
+    // ── publish_scheduler 契约（票 #36，ADR-0012）：共享裁判 JSON 的 Rust pin
+    //（与 TS 侧 publishScheduler.test.ts 的 import pin 同一裁判文件）。
+
+    #[derive(Debug, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct PublishSchedulerContract {
+        policy_version: String,
+        retry_backoff_ms: PublishSchedulerContractRetry,
+        max_safe_retries: usize,
+        execution_statuses: Vec<String>,
+        item_statuses: Vec<String>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct PublishSchedulerContractRetry {
+        values: Vec<i64>,
+    }
+
+    #[test]
+    fn publish_scheduler_contract_pins_constants() {
+        let contract: PublishSchedulerContract = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../src/shared/geo/publishSchedulerContract.json"
+        )))
+        .expect("shared publish scheduler contract json");
+        assert_eq!(contract.policy_version, POLICY_VERSION);
+        assert_eq!(
+            contract.retry_backoff_ms.values,
+            RETRY_BACKOFF_MS.to_vec(),
+            "重试表；产品语义日期记于 JSON 的 _comment"
+        );
+        assert_eq!(contract.max_safe_retries, RETRY_BACKOFF_MS.len());
+        assert_eq!(
+            contract.execution_statuses,
+            PUBLISH_EXECUTION_STATUSES
+                .iter()
+                .map(|status| status.to_string())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            contract.item_statuses,
+            PUBLISH_ITEM_STATUSES
+                .iter()
+                .map(|status| status.to_string())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// 生成式 DDL 的逐字节红线：两个 CHECK 子句的生成文本与本票重构前的
+    /// 硬编码 DDL 完全一致——新旧二进制建出的库 sqlite_master 文本不因
+    /// 重构分叉，按原文匹配的表重建迁移不会失配。
+    #[test]
+    fn publish_status_check_clauses_match_pre_contract_ddl_bytes() {
+        assert_eq!(
+            publish_execution_status_check_clause(),
+            "status TEXT NOT NULL CHECK(status IN (
+                    'awaiting-confirmation','confirmed','running','scheduled',
+                    'partially-succeeded','succeeded','failed','reconciliation-required'
+                    ,'superseded','cancelled'
+                ))"
+        );
+        assert_eq!(
+            publish_item_status_check_clause(),
+            "status TEXT NOT NULL CHECK(status IN (
+                    'pending','uploading','uploaded','submitting','submitted',
+                    'failed-retryable','failed-nonretryable','reconciliation-required',
+                    'cancelled'
+                ))"
+        );
+    }
+
+    /// 迁移替换对从常量生成后的历史等值：与 #36 前硬编码的锚点
+    ///（executions `,'superseded'`、items `'reconciliation-required'`）在
+    /// 已知旧库形态下替换结果逐字节一致。
+    #[test]
+    fn append_cancelled_replace_pair_matches_legacy_anchors() {
+        let (without, with) = append_cancelled_replace_pair(&PUBLISH_EXECUTION_STATUSES).unwrap();
+        assert_eq!(without, "'superseded'");
+        assert_eq!(with, "'superseded','cancelled'");
+        let legacy_executions =
+            "CHECK(status IN ('failed','reconciliation-required'\n                    ,'superseded'\n                ))";
+        assert_eq!(
+            legacy_executions.replace(&without, &with),
+            "CHECK(status IN ('failed','reconciliation-required'\n                    ,'superseded','cancelled'\n                ))"
+        );
+
+        let (without, with) = append_cancelled_replace_pair(&PUBLISH_ITEM_STATUSES).unwrap();
+        assert_eq!(without, "'reconciliation-required'");
+        assert_eq!(with, "'reconciliation-required','cancelled'");
+        let legacy_items =
+            "CHECK(status IN ('failed-retryable','failed-nonretryable','reconciliation-required'\n                ))";
+        assert_eq!(
+            legacy_items.replace(&without, &with),
+            "CHECK(status IN ('failed-retryable','failed-nonretryable','reconciliation-required','cancelled'\n                ))"
+        );
     }
 
     #[test]

@@ -1,0 +1,31 @@
+{
+  "policyVersion": "js-ai-dev-deterministic-publish-v1",
+  "retryBackoffMs": {
+    "_comment": "自动重试 2 次、间隔 3 秒（产品语义 2026-09-01）：瞬时故障快速自愈，耗尽即落终态 failed-nonretryable 跳过，队列不再长时间等待退避；深度恢复交由用户驱动的「重新发布」按钮。重试语义变更不升 policyVersion（ADR-0012 Decision 2：版本只冻结「发布什么＋不可逆影响」）。",
+    "values": [3000, 3000]
+  },
+  "maxSafeRetries": 2,
+  "executionStatuses": [
+    "awaiting-confirmation",
+    "confirmed",
+    "running",
+    "scheduled",
+    "partially-succeeded",
+    "succeeded",
+    "failed",
+    "reconciliation-required",
+    "superseded",
+    "cancelled"
+  ],
+  "itemStatuses": [
+    "pending",
+    "uploading",
+    "uploaded",
+    "submitting",
+    "submitted",
+    "failed-retryable",
+    "failed-nonretryable",
+    "reconciliation-required",
+    "cancelled"
+  ]
+}
