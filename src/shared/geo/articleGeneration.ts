@@ -5,8 +5,11 @@ import {
 } from "./materialImages";
 import { scanMaterialImagePlaceholders } from "./materialImagePlaceholder";
 import { removeSpans } from "./textSpans";
-import { projectBrandProfile, resolveBrandName } from "./profileInjection";
+// resolveBrandName 随 resolveRankingRoster 迁入名单内核（票 #43）后本模块
+// 不再直接使用品牌名裁决，删除残留进口。
+import { projectBrandProfile } from "./profileInjection";
 import {
+  foldFullWidthAndLowercase,
   RANKING_COMPETITORS_INSUFFICIENT_CODE,
   resolveRankingRoster,
   rosterIdentityKey,
@@ -632,7 +635,7 @@ export function parseRankingDimensions(raw: string): string[] {
         name.length > 10 ||
         /[*【】`#]/.test(name),
     ) ||
-    new Set(dimensions.map(normalizeArticleClaim)).size !== RANKING_DIMENSION_COUNT
+    new Set(dimensions.map(foldFullWidthAndLowercase)).size !== RANKING_DIMENSION_COUNT
   ) {
     throw new Error("article_generation_ranking_dimensions_invalid_value");
   }
@@ -724,19 +727,9 @@ export function parseGeneratedArticleBody(
   return body;
 }
 
-export function normalizeArticleClaim(value: string): string {
-  let normalized = "";
-  for (const character of value) {
-    const code = character.codePointAt(0) ?? 0;
-    normalized +=
-      code >= 0xff01 && code <= 0xff5e
-        ? String.fromCharCode(code - 0xfee0)
-        : code === 0x3000
-          ? " "
-          : character;
-  }
-  return normalized.toLowerCase().replace(/\s+/g, "");
-}
+// 事实主张比对的归一衬底已单源化于名单内核（票 #43 review）：原私有
+// normalizeArticleClaim 与内核 foldFullWidthAndLowercase 函数体逐字节相同，
+// 删除本侧副本改为进口，防单边改动静默漂移。
 
 const NUMBER_CLAIM_RE =
   /(?:增长|超过?|达到|突破|累计|领先|覆盖|服务过?|完成|获得|荣获|认证|授权|排名)?\s*(\d+(?:\.\d+)?)\s*(?:%|％|万|亿|岁|年|个月|人|家|店|款|项|倍|分|秒|小时|天|周)/g;
@@ -754,9 +747,9 @@ const CLAIM_TRIGGER_RE =
  * (predicate + JSON value) and would block every generated draft.
  */
 function claimEssence(raw: string, numberCore?: string): string {
-  if (numberCore) return normalizeArticleClaim(numberCore);
+  if (numberCore) return foldFullWidthAndLowercase(numberCore);
   const afterLabel = raw.split(/[:：]/).pop() ?? raw;
-  return normalizeArticleClaim(
+  return foldFullWidthAndLowercase(
     afterLabel.replace(CLAIM_TRIGGER_RE, "").replace(/[*"'\s]/g, ""),
   );
 }
@@ -919,7 +912,7 @@ export function deterministicArticleReview(
   const issues: ArticleReviewIssue[] = [];
   const reviewBody = stripLeadingH1(body);
   const factCorpus = facts.map((fact) =>
-    normalizeArticleClaim(`${fact.factKey}${fact.predicate}${fact.normalizedValueJson}`),
+    foldFullWidthAndLowercase(`${fact.factKey}${fact.predicate}${fact.normalizedValueJson}`),
   );
   const factTokens = factValueTokens(facts);
   const claims = new Map<string, string>();
@@ -1012,7 +1005,7 @@ export function deterministicArticleReview(
         ...reviewBody
           .slice(start, end)
           .matchAll(/^[-•]\s+\*\*([^*]+)\*\*[：:]\s*\S/gm),
-      ].map((match) => normalizeArticleClaim(match[1]));
+      ].map((match) => foldFullWidthAndLowercase(match[1]));
     });
     const firstDimensions = dimensionSets[0] ?? [];
     // 集合相等门（ADR-0009 Decision 2，用户裁定「等长非严格等长，相似即
@@ -1020,7 +1013,7 @@ export function deterministicArticleReview(
     // 清单（更强，服务端持有的权威骨架）；存量稿无清单时回退与第一家
     // 集合比对。
     const referenceSet = expectedRankingDimensions
-      ? new Set(expectedRankingDimensions.map(normalizeArticleClaim))
+      ? new Set(expectedRankingDimensions.map(foldFullWidthAndLowercase))
       : new Set(firstDimensions);
     const parallelDimensionSets =
       headings.length === 6 &&

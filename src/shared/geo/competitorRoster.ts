@@ -46,7 +46,12 @@ export interface RankingCompetitorIdentity {
   relatedBrands: readonly string[];
 }
 
-/** 排行竞品不足五家的 fail-closed 错误码前缀（与 Rust 镜像同串，随内核所有）。 */
+/**
+ * 排行竞品不足五家的 fail-closed 错误码前缀（随内核所有）。值由
+ * rankingCompetitorContract.json 双侧 pin 裁决（ADR-0012：TS 本常量 import
+ * pin 于 competitorRoster.test.ts；Rust articles.rs 的 #[cfg(test)] 用
+ * include_str! 对 validate_ranking_competitors 的错误串做行为等值 pin）。
+ */
 export const RANKING_COMPETITORS_INSUFFICIENT_CODE =
   "article_generation_ranking_competitors_insufficient";
 
@@ -99,11 +104,13 @@ export function toSimplifiedChinese(value: string): string {
 }
 
 /**
- * 全角折叠＋小写＋空白折叠：排行键的归一衬底。语义与文章审校的
- * normalizeArticleClaim 相同（审校侧是事实主张比对衬底，不迁入内核）；
- * 跨语言一致子集由契约向量钉死，超出子集的字符两侧算法分歧挂起台账。
+ * 全角折叠＋小写＋空白折叠：排行键的归一衬底，也是文章审校侧
+ * （articleGeneration）事实主张比对的同一衬底——票 #43 review 起单源化于
+ * 内核导出，审校侧删除私有副本改为进口（体逐字节同，调用点行为零变化）。
+ * 跨语言一致子集由契约向量（keyNormalizationCases）钉死，超出子集的字符
+ * 两侧算法分歧挂起台账。
  */
-function foldFullWidthAndLowercase(value: string): string {
+export function foldFullWidthAndLowercase(value: string): string {
   let normalized = "";
   for (const character of value) {
     const code = character.codePointAt(0) ?? 0;

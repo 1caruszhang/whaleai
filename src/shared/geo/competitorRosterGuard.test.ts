@@ -7,8 +7,10 @@
 //
 // 已知局限（pit_of_success「名单语义只出自内核」规则文字补位）：词法守卫
 // 拦不住「换个名字私建归一/合并逻辑」——改名为 myNormalizeKey 的手抄副本
-// 不含被守卫标识符。对私建的第二道防线是跨语言契约 pin（改 TS 内核或 Rust
-// 镜像任一侧先红）与 code review；守卫只承诺「既有名单语义出口不分裂」。
+// 不含被守卫标识符；也拦不住改定义形态——正则只识别 function 声明与 const
+// 箭头两种形态，class 方法简写、let/var 绑定、对象属性函数均可绕过。对
+// 私建的第二道防线是跨语言契约 pin（改 TS 内核或 Rust 镜像任一侧先红）
+// 与 code review；守卫只承诺「既有名单语义出口不分裂」。
 //
 // 复现命令（与本测试同口径）：
 //   rg -n "function (resolveRankingRoster|filterValidRankingCompetitors|...)\(" src backend/src -g '*.ts' -g '*.tsx'
@@ -67,6 +69,7 @@ describe("名单语义守卫（票 #43：定义处只许内核与测试，零豁
       "rosterIdentityKey",
       "competitorIdentityKey",
       "toSimplifiedChinese",
+      "foldFullWidthAndLowercase",
       "decodeCompetitorEvidence",
       "collectCompetitorDetails",
       "formatCompetitorDisplayNames",

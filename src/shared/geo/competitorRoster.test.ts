@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 
+import rankingCompetitorContract from "./rankingCompetitorContract.json";
 import rankingCompetitorContractCases from "./rankingCompetitorContractCases.json";
 import {
   competitorCardPotentialDividerAt,
@@ -13,6 +14,7 @@ import {
   isCompetitorTierField,
   isSimilarSelfName,
   mergeRankingCompetitorTiers,
+  RANKING_COMPETITORS_INSUFFICIENT_CODE,
   resolveRankingRoster,
   rosterIdentityKey,
   sameBrandIdentity,
@@ -21,6 +23,15 @@ import {
 import { buildArticleGenerationMessages } from "./articleGeneration";
 
 describe("ranking competitor cross-process contract", () => {
+  it("insufficient-code 常量与 rankingCompetitorContract.json 裁判严格相等（票 #43 review 补充 pin）", () => {
+    // Rust 侧 articles.rs #[cfg(test)] 用 include_str! 对
+    // validate_ranking_competitors 的错误串做行为等值 pin；错误码值以本
+    // 裁判 JSON 为唯一权威，双侧常量/字面量不得脱离它各自手写。
+    expect(RANKING_COMPETITORS_INSUFFICIENT_CODE).toBe(
+      rankingCompetitorContract.rankingCompetitorsInsufficientCode,
+    );
+  });
+
   it.each(rankingCompetitorContractCases.mergeCases)("$name", (contractCase) => {
     // 两层联合（与 Rust valid_ranking_competitors 同构）恒为断言主体：
     // 直接层在前、潜在层补位，跨层互斥与身份排除两层共用；expected 是

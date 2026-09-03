@@ -1,0 +1,4 @@
+{
+  "_comment": "排行竞品不足五家 fail-closed 错误码前缀的裁判（票 #43 review 补充，ADR-0012）。TS 侧 RANKING_COMPETITORS_INSUFFICIENT_CODE（src/shared/geo/competitorRoster.ts，resolveRankingRoster 抛错 `:{count}` 后缀）与 Rust 侧 articles.rs `validate_ranking_competitors` 的错误串前缀双侧 pin，禁注释声明同源；TS 工具层 rankingCompetitorRequirement 的正则自内核常量进口（不直接读本裁判）。",
+  "rankingCompetitorsInsufficientCode": "article_generation_ranking_competitors_insufficient"
+}

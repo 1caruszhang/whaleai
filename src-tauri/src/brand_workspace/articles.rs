@@ -2510,10 +2510,37 @@ mod tests {
             } else {
                 assert_eq!(
                     validation.unwrap_err(),
-                    format!("article_generation_ranking_competitors_insufficient:{expected_count}")
+                    format!("{}:{expected_count}", ranking_insufficient_code())
                 );
             }
         }
+    }
+
+    /// 排行竞品不足五家错误码前缀（票 #43 review 补充 pin）：自
+    /// rankingCompetitorContract.json 裁判进口，测试内期望串一律经它拼装，
+    /// 不留第二份手写字面量。
+    fn ranking_insufficient_code() -> String {
+        let contract: Value = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../src/shared/geo/rankingCompetitorContract.json"
+        )))
+        .expect("shared ranking competitor contract");
+        contract
+            .get("rankingCompetitorsInsufficientCode")
+            .and_then(Value::as_str)
+            .expect("rankingCompetitorsInsufficientCode")
+            .to_string()
+    }
+
+    /// 行为等值 pin：生产侧 `validate_ranking_competitors` 的错误串前缀
+    /// （手写 format! 字面量）必须产出裁判值——改动任一侧即红。TS 侧对
+    /// 内核常量 RANKING_COMPETITORS_INSUFFICIENT_CODE 做 import pin
+    /// （competitorRoster.test.ts）。
+    #[test]
+    fn ranking_competitor_insufficient_code_matches_shared_contract() {
+        let error = validate_ranking_competitors(&Value::Array(Vec::new()), "工作区品牌")
+            .expect_err("empty facts must fail closed");
+        assert_eq!(error, format!("{}:0", ranking_insufficient_code()));
     }
 
     /// 票 #43 契约扩容：排序用例（镜像现行返回无序 HashSet，形态不动——与
@@ -2622,10 +2649,7 @@ mod tests {
                 },
             )
             .expect_err("ranking without competitors must fail before persistence");
-        assert_eq!(
-            error,
-            "article_generation_ranking_competitors_insufficient:0"
-        );
+        assert_eq!(error, format!("{}:0", ranking_insufficient_code()));
 
         let connection = open_database(&workspace).expect("db");
         append_competitor_snapshot(
