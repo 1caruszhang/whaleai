@@ -1,6 +1,6 @@
 [package]
 name = "xiaojing"
-version = "0.6.5"
+version = "0.6.6"
 description = "鲸杉geo GEO 营销工作台"
 edition = "2021"
 # MSRV follows the repository-owned toolchain so clippy and release builds use
