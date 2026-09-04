@@ -17,6 +17,7 @@ mod geo_operations;
 mod knowledge;
 mod materials;
 mod notifications;
+mod persistence;
 mod post_publish_monitoring;
 mod publish_scheduler;
 mod question_pools;
@@ -245,7 +246,7 @@ impl BrandWorkspaceStore {
             created_at: now.clone(),
             updated_at: now,
         };
-        initialize_database(&workspace)?;
+        persistence::initialize_database(&workspace)?;
         catalog.workspaces.push(workspace.clone());
         catalog.current_workspace_id = Some(id);
         self.write_catalog_unlocked(&catalog)?;
@@ -953,99 +954,9 @@ fn validate_session_id(value: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn initialize_database(workspace: &BrandWorkspace) -> Result<(), String> {
-    let connection = open_database(workspace)?;
-    connection
-        .execute_batch(
-            "CREATE TABLE IF NOT EXISTS brand_workspace (
-                singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
-                id TEXT NOT NULL UNIQUE,
-                name TEXT NOT NULL,
-                product_lines_json TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
-             );
-             CREATE TABLE IF NOT EXISTS brand_sessions (
-                id TEXT PRIMARY KEY,
-                title TEXT NOT NULL,
-                title_source TEXT NOT NULL CHECK(title_source IN ('default', 'auto', 'user')),
-                created_at TEXT NOT NULL,
-                last_active_at TEXT NOT NULL,
-                archived_at TEXT
-             );
-             CREATE INDEX IF NOT EXISTS brand_sessions_activity
-                ON brand_sessions(archived_at, last_active_at DESC);
-             CREATE TABLE IF NOT EXISTS knowledge_facts (
-                id TEXT PRIMARY KEY,
-                fact_key TEXT NOT NULL,
-                version INTEGER NOT NULL,
-                value_json TEXT NOT NULL,
-                created_at TEXT NOT NULL
-             );
-             CREATE TABLE IF NOT EXISTS geo_operations (
-                id TEXT PRIMARY KEY,
-                session_id TEXT REFERENCES brand_sessions(id) ON DELETE SET NULL,
-                state TEXT NOT NULL,
-                created_at TEXT NOT NULL
-             );
-             CREATE TABLE IF NOT EXISTS geo_artifacts (
-                id TEXT PRIMARY KEY,
-                operation_id TEXT REFERENCES geo_operations(id) ON DELETE SET NULL,
-                session_id TEXT REFERENCES brand_sessions(id) ON DELETE SET NULL,
-                kind TEXT NOT NULL,
-                knowledge_version INTEGER,
-                created_at TEXT NOT NULL
-             );
-             CREATE TABLE IF NOT EXISTS publish_orders (
-                id TEXT PRIMARY KEY,
-                operation_id TEXT REFERENCES geo_operations(id) ON DELETE SET NULL,
-                state TEXT NOT NULL,
-                created_at TEXT NOT NULL
-             );
-             CREATE TABLE IF NOT EXISTS observations (
-                id TEXT PRIMARY KEY,
-                operation_id TEXT REFERENCES geo_operations(id) ON DELETE SET NULL,
-                observed_at TEXT NOT NULL,
-                evidence_json TEXT NOT NULL
-             );
-             CREATE TABLE IF NOT EXISTS session_deletion_intents (
-                token TEXT PRIMARY KEY,
-                session_id TEXT NOT NULL REFERENCES brand_sessions(id) ON DELETE CASCADE,
-                expires_at INTEGER NOT NULL,
-                admitted_at INTEGER,
-                transcript_deleted_at INTEGER
-             );",
-        )
-        .map_err(|error| format!("initialize brand database: {error}"))?;
-    ensure_column(
-        &connection,
-        "session_deletion_intents",
-        "admitted_at",
-        "INTEGER",
-    )?;
-    ensure_column(
-        &connection,
-        "session_deletion_intents",
-        "transcript_deleted_at",
-        "INTEGER",
-    )?;
-    geo_operations::ensure_schema(&connection)?;
-    connection
-        .execute(
-            "INSERT OR REPLACE INTO brand_workspace
-                (singleton, id, name, product_lines_json, created_at, updated_at)
-             VALUES (1, ?1, ?2, ?3, ?4, ?5)",
-            params![
-                workspace.id,
-                workspace.name,
-                serde_json::to_string(&workspace.product_lines).unwrap_or_else(|_| "[]".into()),
-                workspace.created_at,
-                workspace.updated_at,
-            ],
-        )
-        .map_err(|error| format!("write brand identity: {error}"))?;
-    Ok(())
-}
+// initialize_database 已随迁移编排归位持久化内核（ADR-0014 决策 1）；
+// ensure_column/column_exists 是各域 ensure_schema 共用的 schema 机器，
+// 留守本模块。
 
 fn ensure_column(
     connection: &Connection,
