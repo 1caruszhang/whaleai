@@ -406,13 +406,12 @@ impl BrandWorkspaceStore {
         let operation_id = Uuid::new_v4().to_string();
         let plan_id = Uuid::new_v4().to_string();
         let now = Utc::now().to_rfc3339();
-        transaction
-            .execute(
-                "INSERT INTO geo_operations (id, session_id, state, created_at)
-                 VALUES (?1, ?2, 'topic-plan-awaiting-confirmation', ?3)",
-                params![operation_id, session_id, now],
-            )
-            .map_err(|error| format!("create topic plan operation: {error}"))?;
+        open_lineage(
+            &transaction,
+            &operation_id,
+            session_id,
+            "topic-plan-awaiting-confirmation",
+        )?;
         transaction
             .execute(
                 "INSERT INTO geo_artifacts (id, operation_id, session_id, kind, knowledge_version, created_at)
@@ -721,12 +720,9 @@ impl BrandWorkspaceStore {
         if changed != 1 {
             return Err("topic_plan_revision_conflict".to_string());
         }
-        transaction
-            .execute(
-                "UPDATE geo_operations SET state='topic-plan-confirmed' WHERE id=?1",
-                [operation_id],
-            )
-            .map_err(|error| format!("advance topic plan operation: {error}"))?;
+        // 血缘行迁移经唯一 owner（票 04）：首确认与再确认（计划 UPDATE 放行
+        // status IN ('awaiting-confirmation','confirmed')）都重写同一终态。
+        set_lineage_state(&transaction, &operation_id, "topic-plan-confirmed")?;
         transaction
             .commit()
             .map_err(|error| format!("commit topic plan confirmation: {error}"))?;

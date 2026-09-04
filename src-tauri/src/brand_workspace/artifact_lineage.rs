@@ -11,9 +11,9 @@
 // 各域清零票把写点迁到 open_lineage/set_lineage_state 上，并逐族补
 // from-state 迁移规则（错误码约定：artifact_lineage_transition_invalid:{from}，
 // 镜像主链 geo_operation_transition_invalid:{current} 风格）。baseline 族
-// 已随票 02、question-pool 族已随票 03、distribution 族已随票 05、
-// article-generation 族已随票 06 清零（写点迁移＋from 规则钉死），
-// 其余 4 域 17 处直写仍在豁免表。
+// 已随票 02、question-pool 族已随票 03、topic-plan 族已随票 04、
+// distribution 族已随票 05、article-generation 族已随票 06 清零（写点迁移
+// ＋from 规则钉死），其余各族直写仍在豁免表（清零进度以守卫豁免表为准）。
 use std::fmt;
 
 use chrono::Utc;
@@ -201,6 +201,14 @@ impl ArtifactLineageState {
     ///   confirmed 真实可达；generating 池 status='generating' 被 decide
     ///   的 not_selectable 闸挡下，generating→confirmed 不可达。
     ///
+    /// topic-plan 族（票 04，按 topic_plans.rs 真实代码钉）：
+    /// - awaiting-confirmation 只由 open INSERT 开行——create 是该族唯一天
+    ///   生写点，set 无路径，from 集为空（set 到它必拒）；
+    /// - confirmed 的 from 集＝{awaiting-confirmation, confirmed}——confirm
+    ///   的计划 UPDATE 放行 status IN ('awaiting-confirmation','confirmed')：
+    ///   首确认 awaiting→confirmed；再确认（复用停卡重选对已 confirmed 计
+    ///   划的沿用/收窄）重跑同一血缘写点，confirmed→confirmed 重写终态。
+    ///
     /// article-generation 族（票 06，按 articles.rs 真实代码钉）：写点＝
     /// start 开行 running＋refresh 聚合 geo_articles.status（五个 mutation
     /// 调用点共用一处）；claim（initial/regenerate/review）不写血缘行，
@@ -244,6 +252,10 @@ impl ArtifactLineageState {
             ArtifactLineageState::QuestionPoolAwaitingSelection,
             ArtifactLineageState::QuestionPoolConfirmed,
         ];
+        const PLAN_AWAITING_OR_CONFIRMED: &[ArtifactLineageState] = &[
+            ArtifactLineageState::TopicPlanAwaitingConfirmation,
+            ArtifactLineageState::TopicPlanConfirmed,
+        ];
         const ARTICLE_ALL_THREE: &[ArtifactLineageState] = &[
             ArtifactLineageState::ArticleGenerationRunning,
             ArtifactLineageState::ArticleGenerationCompleted,
@@ -264,6 +276,8 @@ impl ArtifactLineageState {
             Self::QuestionPoolGenerating => Some(NO_SET),
             Self::QuestionPoolAwaitingSelection => Some(GENERATING_OR_AWAITING),
             Self::QuestionPoolConfirmed => Some(AWAITING_OR_CONFIRMED),
+            Self::TopicPlanAwaitingConfirmation => Some(NO_SET),
+            Self::TopicPlanConfirmed => Some(PLAN_AWAITING_OR_CONFIRMED),
             Self::ArticleGenerationRunning | Self::ArticleGenerationCompletedWithFailures => {
                 Some(ARTICLE_ALL_THREE)
             }
@@ -611,7 +625,19 @@ mod tests {
                     &[
                         "question-pool-awaiting-selection",
                         "question-pool-confirmed",
-                    ],
+    // topic-plan 族 2×2 迁移矩阵（票 04 按 topic_plans.rs 真实代码钉）：
+    // awaiting-confirmation 只经 open 开行（set 无路径，from 集为空）；
+    // confirm 的计划 UPDATE 放行 awaiting/confirmed 两态——首确认
+    // awaiting→confirmed，再确认（复用停卡重选）confirmed→confirmed 重写终态。
+    #[test]
+    fn topic_plan_family_transitions_follow_the_real_code_matrix() {
+        assert_family_matrix(
+            &["topic-plan-awaiting-confirmation", "topic-plan-confirmed"],
+            &[
+                ("topic-plan-awaiting-confirmation", &[]),
+                (
+                    "topic-plan-confirmed",
+                    &["topic-plan-awaiting-confirmation", "topic-plan-confirmed"],
                 ),
             ],
         );
@@ -637,6 +663,12 @@ mod tests {
                     &["article-generation-running"],
                 ),
                 ("article-generation-completed-with-failures", &ALL_THREE),
+            ],
+        );
+    }
+
+                    ],
+                ),
             ],
         );
     }
