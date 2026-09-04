@@ -1,6 +1,7 @@
-// 跨语言契约守卫（票 #35 建立，票 #41 收尾至零命中终态；ADR-0012）。
+// 跨语言契约守卫（票 #35 建立，票 #41 收尾至零命中终态；规则③ 2026-09-04
+// 架构巡检候选 5 补全；ADR-0012）。
 //
-// 两条断言：
+// 三条断言：
 //  1. 同步注释词汇在非测试源文件中零命中——#35 以「现存命中清单为初始
 //     豁免表」的 ratchet 落地，各迁移票逐项删除，票 #41 清空豁免表并统一
 //     改写剩余自然语言措辞后达成终态：今后任何新增「与 TS 同步」类注释
@@ -10,6 +11,13 @@
 //  2. 每个 `*Contract.json`（不含用例型 `*ContractCases.json`）必须同时被
 //     Rust `include_str!`（src-tauri/src）与 TS import（src / backend）引用，
 //     防止裁判 JSON 落地后无人消费变成孤儿。
+//  3. 每个 `*Contract.json` 的每个顶层键必须被 ≥2 个「引用该 JSON 的文件」
+//     的源文本覆盖（规则③，2026-09-04）：规则②只到文件级——新增键只改一侧
+//     pin 时另一侧静默漏钉照样全绿（serde 默认吞掉未声明键、TS pin 手列键
+//     清单漏加 expect 照样绿），正是 2026-09-01 配图事故类在键粒度的敞口。
+//     ≥2 的语义是「裁判真的在裁决 ≥2 份独立手写副本」；消费方语言组合不
+//     设限——先例 publishOrderRefundStatuses 是 TS 谓词 × 网关 backend 的
+//     两方契约（票 #09），Rust 非消费方。
 //
 // 词汇命中口径：同一行内多个词只算一条命中（与 `rg -n` 行口径一致）；匹配容忍
 // 跨行折行——英文词间允许空白与续行注释装饰（`[\s*]+`），中文词内仅容忍空白。
@@ -123,6 +131,41 @@ function specifierTargets(importingFile: string, specifier: string, contractRelP
 /** Rust include_str! 字面量 / 非 TS 相对式说明符：比对规范化后的仓库相对路径后缀。 */
 function refPathTargets(ref: string, contractRelPath: string): boolean {
   return ref.replace(/\\/g, "/").endsWith(`/${contractRelPath}`);
+}
+
+// ── 规则③：契约键级覆盖（2026-09-04 架构巡检候选 5） ─────────────────
+// Rust pin 的 serde 结构体普遍 #[serde(rename_all = "camelCase")]——字段名是
+// snake_case（如 operation_kinds），assert 标签才带原键名（如 "operationKinds"），
+// 两种形态任一命中即算覆盖。`_` 前缀顶层键是 ADR-0012 的注释键（如 _comment），
+// 不参加覆盖检查。命中是「引用文件内的文本出现」——覆盖性启发式，与规则①②
+// 同级；键的严格相等仍由各 pin 测试的 assert 承担。
+
+/** camelCase 键 → snake_case（Rust serde 字段命名形态）。 */
+function snakeCaseKey(key: string): string {
+  return key.replace(/([a-z0-9])([A-Z])/g, "$1_$2").toLowerCase();
+}
+
+/** 契约键级覆盖的最低独立文件数：裁判必须真的在裁决 ≥2 份手写副本。 */
+const MIN_CONTRACT_KEY_COVERAGE = 2;
+
+/**
+ * 返回覆盖不足的键：refs 为「引用该契约 JSON 的文件」（仓库相对路径＋源文本），
+ * 键在单个文件内命中原键名或 snake_case 形态记一次；`_` 前缀键豁免。
+ */
+function contractKeyCoverageGaps(
+  keys: readonly string[],
+  refs: readonly { file: string; content: string }[],
+): { key: string; coveringFiles: string[] }[] {
+  return keys
+    .filter((key) => !key.startsWith("_"))
+    .map((key) => {
+      const snake = snakeCaseKey(key);
+      const coveringFiles = refs
+        .filter(({ content }) => content.includes(key) || content.includes(snake))
+        .map(({ file }) => file);
+      return { key, coveringFiles };
+    })
+    .filter(({ coveringFiles }) => coveringFiles.length < MIN_CONTRACT_KEY_COVERAGE);
 }
 
 // ═══ 产物血缘直写守卫棘轮（ADR-0013，立项票 2026-09-04） ═══
@@ -261,6 +304,48 @@ describe("跨语言契约守卫（ADR-0012）", () => {
     ).toEqual([]);
   });
 
+  it("每个 *Contract.json 的每个顶层键被 ≥2 个引用文件覆盖（规则③：孤儿键/单侧键防）", () => {
+    const contractAbsFiles = walkFiles("src/shared", (name) => (
+      name.endsWith("Contract.json") && !name.endsWith("ContractCases.json")
+    ));
+    const rustFiles = walkFiles("src-tauri/src", (name) => name.endsWith(".rs"));
+    const tsFiles = [
+      ...walkFiles("src", (name) => name.endsWith(".ts") || name.endsWith(".tsx")),
+      ...walkFiles("backend", (name) => name.endsWith(".ts")),
+    ];
+
+    const failures: string[] = [];
+    for (const contractFile of contractAbsFiles) {
+      const contract = repoRelative(contractFile);
+      const keys = Object.keys(JSON.parse(readText(contractFile)) as Record<string, unknown>);
+      const refs = [
+        ...rustFiles
+          .filter((rustFile) => rustIncludeStrLiterals(readText(rustFile)).some(
+            (literal) => refPathTargets(literal, contract),
+          ))
+          .map((rustFile) => ({ file: repoRelative(rustFile), content: readText(rustFile) })),
+        ...tsFiles
+          .filter((tsFile) => tsJsonSpecifiers(readText(tsFile)).some(
+            (specifier) => specifierTargets(tsFile, specifier, contract),
+          ))
+          .map((tsFile) => ({ file: repoRelative(tsFile), content: readText(tsFile) })),
+      ];
+      for (const gap of contractKeyCoverageGaps(keys, refs)) {
+        failures.push(
+          `${contract} :: ${gap.key}（覆盖 ${gap.coveringFiles.length}/${MIN_CONTRACT_KEY_COVERAGE}：${gap.coveringFiles.join(", ") || "无"}）`,
+        );
+      }
+    }
+
+    expect(
+      failures,
+      "契约键级覆盖不足（规则③）：裁判 JSON 的顶层键必须被 ≥2 个引用文件覆盖"
+        + "（Rust 侧 serde 字段名〔snake_case〕或 assert 标签〔原键名〕任一命中）。"
+        + "单侧覆盖＝裁判失效——另一侧或第三份副本可静默漂移（2026-09-01 配图事故类）。"
+        + "新增键须全部消费方的 pin 测试同步补齐；`_` 前缀是注释键不适用。",
+    ).toEqual([]);
+  });
+
   it("守卫工具函数：include_str! 字面量提取（含 concat!/env! 嵌套）", () => {
     expect(
       rustIncludeStrLiterals(
@@ -285,6 +370,37 @@ describe("跨语言契约守卫（ADR-0012）", () => {
   it("守卫工具函数：跨行折行的英文短语可检出（词汇扫描器能力自检，防跨行漏检）", () => {
     const content = "/** Shared defaults. Rust owns persistence and independently\n * mirrors these values. */";
     expect(/independently[\s*]+mirrors/gi.test(content)).toBe(true);
+  });
+
+  it("守卫工具函数：键级覆盖计数（snake_case 形态命中、_ 前缀键豁免、单文件不重复计数）", () => {
+    const refs = [
+      { file: "src/shared/geo/operation.test.ts", content: "expect(json.operationKinds).toEqual(GEO_OPERATION_KINDS);" },
+      { file: "src-tauri/src/brand_workspace/geo_operations.rs", content: "#[serde(rename_all = \"camelCase\")] struct C { operation_kinds: Vec<String> }" },
+    ];
+    // 原键名＋snake_case 双形态各命中一个文件 → 覆盖足额；注释键豁免。
+    expect(contractKeyCoverageGaps(["operationKinds", "_comment"], refs)).toEqual([]);
+    // 同一文件内命中两次只算一个独立文件（已覆盖文件里长出的第三份副本不算数）。
+    expect(
+      contractKeyCoverageGaps(["maxArticles"], [
+        { file: "a.test.ts", content: "json.maxArticles + maxArticles" },
+      ]),
+    ).toEqual([{ key: "maxArticles", coveringFiles: ["a.test.ts"] }]);
+  });
+
+  it("守卫工具函数：注入孤儿键/单侧键必红（变异演示——新增键漏一侧无法静默漏钉）", () => {
+    // 变异：给裁判 JSON 新增 executionWindows 键，只更新了 TS pin——Rust 侧
+    // serde 默认吞掉未声明键，规则②（双侧引用）全绿，规则③必须红。
+    const refs = [
+      { file: "src/shared/geo/operation.test.ts", content: "expect(json.executionWindows).toEqual([]);" },
+      { file: "src-tauri/src/brand_workspace/geo_operations.rs", content: "operation_kinds: Vec<String>," },
+    ];
+    expect(contractKeyCoverageGaps(["executionWindows"], refs)).toEqual([
+      { key: "executionWindows", coveringFiles: ["src/shared/geo/operation.test.ts"] },
+    ]);
+    // 完全孤儿键（没有任何引用文件提及）覆盖数为 0。
+    expect(contractKeyCoverageGaps(["orphanKey"], refs)).toEqual([
+      { key: "orphanKey", coveringFiles: [] },
+    ]);
   });
 });
 

@@ -41,7 +41,7 @@
 
 ## 跨语言契约
 
-TS↔Rust（含网关）共享的常量契约——枚举集、版本戳、限值与公式——禁止手写镜像或注释声明同源（ADR-0012）。唯一形态：`*Contract.json` 为裁判，Rust `include_str!` pin 测试与 TS import pin 测试断言严格相等（含顺序）；公式类附用例向量，全部实现跑同一 cases。新增跨语言常量先建 Contract.json 再写两侧常量；同步注释词汇在非测试源文件中由守卫测试断言零命中。
+TS↔Rust（含网关）共享的常量契约——枚举集、版本戳、限值与公式——禁止手写镜像或注释声明同源（ADR-0012）。唯一形态：`*Contract.json` 为裁判，Rust `include_str!` pin 测试与 TS import pin 测试断言严格相等（含顺序）；公式类附用例向量，全部实现跑同一 cases。新增跨语言常量先建 Contract.json 再写两侧常量；同步注释词汇在非测试源文件中由守卫测试断言零命中。守卫共三条规则（crossLanguageContractGuard.test.ts）：①同步注释词汇零命中；②每个 `*Contract.json` 被 Rust `include_str!` 与 TS import 双侧引用（防孤儿裁判）；③每个顶层键被 ≥2 个引用该 JSON 的文件覆盖（防孤儿键/单侧键，2026-09-04）——新增键只改一侧时另一侧 serde 静默吞掉未声明键、规则②不红而规则③红；覆盖按「原键名或 snake_case 字段名出现在引用文件源文本」计，`_` 前缀注释键豁免，消费方语言组合不设限（先例 publishOrderRefundStatuses 为 TS×网关两方契约，Rust 非消费方）。
 
 名单语义只出自内核（票 #43）：竞品名单的投影（排行 roster、标题红线、卡面行）、身份判定与归一键只许定义在 `src/shared/geo/competitorRoster.ts`，消费方一律进口，原居所不留转发出口；词法守卫（competitorRosterGuard.test.ts，零豁免）拦「内核导出函数名在别处重定义」，但拦不住换名私建归一/合并逻辑，也拦不住改定义形态——守卫正则只识别 `function X(`／`const X =` 两种形态，class 方法简写、`let`/`var` 绑定、对象属性函数均可绕过；防第二份手抄副本靠跨语言契约 pin 与 review，新增名单语义先改内核再接消费方。
 
