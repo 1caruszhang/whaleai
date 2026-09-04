@@ -145,7 +145,10 @@ const LINEAGE_SQL_WRITE_ALLOWLIST: ReadonlySet<string> = new Set([
   "src-tauri/src/brand_workspace/artifact_lineage.rs",
 ]);
 
-/** 豁免表＝清零进度表：值是域标签（供清零票按域消项），键须与现实写点集严格相等。 */
+/** 豁免表＝清零进度表：值是域标签（供清零票按域消项），键须与现实写点集严格相等。
+ * 初始登记恰 27 项（2026-09-04 立项盘点：2+3+2+2+3+9+6）由该严格相等的传递性
+ * 锁死，不硬编码计数断言——清零票逐项消项时硬编码计数会误红（spec 决策 5
+ * 「逐票清零」与 Testing Decisions「初始恰 27 项」的相容读法）。 */
 const LINEAGE_DIRECT_WRITE_EXEMPTIONS: ReadonlyMap<string, string> = new Map([
   // baseline 族 2 处（geo_baselines.rs：开行＋完成迁移）
   ["src-tauri/src/brand_workspace/geo_baselines.rs::1", "baseline"],

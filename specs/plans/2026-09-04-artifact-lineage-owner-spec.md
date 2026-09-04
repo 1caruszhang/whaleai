@@ -1,6 +1,6 @@
 # Spec：产物血缘 owner 收拢（geo_operations 一表两聚合）
 
-> 状态：ready-for-agent
+> 状态：立项票已落地（4e45b39，分支 geo/artifact-lineage-owner——owner＋守卫棘轮 27 项豁免＋删除原因词表双侧 pin，纯增量全绿）；七域清零票（issues/02-08）待开
 > 关联文档：`docs/adr/0013-artifact-lineage-owner-before-table-split.md`（同日立项）、`specs/tech_docs/geo_operations.md`、`specs/tech_docs/pit_of_success.md`、CONTEXT.md「产物血缘（Artifact Lineage）」（2026-09-04 新登词条）
 > 来源：2026-09-04 架构巡检候选 1（Strong · in-process）。证据经全仓盘点核实：`geo_operations` 表住着两个聚合——主链操作机（`kind!='artifact-lineage'`）与产物血缘行（`kind='artifact-lineage'`，7 域 **27 处**生产 SQL 写点、**31 态**词表内联无源、全库无行级 DELETE、生产写入全部在 Immediate 事务内）。
 
