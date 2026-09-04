@@ -1,3 +1,4 @@
+use super::persistence::{canonical_json, gates, with_immediate_tx};
 use super::*;
 use rusqlite::TransactionBehavior;
 use serde_json::Value;
@@ -254,8 +255,8 @@ impl BrandWorkspaceStore {
         request: TopicPlanLatestRequest,
     ) -> Result<Option<TopicPlanProjection>, String> {
         let workspace = self.workspace(workspace_id)?;
-        let connection = open_database(&workspace)?;
-        require_topic_plan_session(&connection, session_id)?;
+        let connection = BrandWorkspaceStore::open(&workspace)?;
+        gates::TOPIC_PLAN_SESSION.enforce(&connection, session_id)?;
         if request
             .status
             .as_deref()
@@ -286,8 +287,8 @@ impl BrandWorkspaceStore {
         request: TopicPlanGetRequest,
     ) -> Result<Option<TopicPlanProjection>, String> {
         let workspace = self.workspace(workspace_id)?;
-        let connection = open_database(&workspace)?;
-        require_topic_plan_session(&connection, session_id)?;
+        let connection = BrandWorkspaceStore::open(&workspace)?;
+        gates::TOPIC_PLAN_SESSION.enforce(&connection, session_id)?;
         let visibility: Option<(String, String)> = connection
             .query_row(
                 "SELECT created_by_session_id, status FROM geo_topic_plans WHERE id=?1",
@@ -312,8 +313,8 @@ impl BrandWorkspaceStore {
         request: TopicPlanPrepareRequest,
     ) -> Result<TopicPlanPreparation, String> {
         let workspace = self.workspace(workspace_id)?;
-        let connection = open_database(&workspace)?;
-        require_topic_plan_session(&connection, session_id)?;
+        let connection = BrandWorkspaceStore::open(&workspace)?;
+        gates::TOPIC_PLAN_SESSION.enforce(&connection, session_id)?;
         let context =
             read_topic_plan_context(&connection, &workspace, request.question_pool_id.as_deref())?;
         let existing_id: Option<String> = if request.force_regenerate {
@@ -361,8 +362,8 @@ impl BrandWorkspaceStore {
             return Err("topic_plan_provider_audit_invalid".to_string());
         }
         let workspace = self.workspace(workspace_id)?;
-        let mut connection = open_database(&workspace)?;
-        require_topic_plan_session(&connection, session_id)?;
+        let mut connection = BrandWorkspaceStore::open(&workspace)?;
+        gates::TOPIC_PLAN_SESSION.enforce(&connection, session_id)?;
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|error| format!("start topic plan create: {error}"))?;
@@ -439,11 +440,11 @@ impl BrandWorkspaceStore {
                     context.product_line,
                     context.target_region,
                     request.policy_version,
-                    canonical_json(&request.topics)?,
-                    canonical_json(&request.items)?,
-                    canonical_json(&request.model_audit)?,
-                    canonical_json(&request.provider_snapshot)?,
-                    canonical_json(&request.model_attempts)?,
+                    canonical_json(&request.topics, "topic plan JSON")?,
+                    canonical_json(&request.items, "topic plan JSON")?,
+                    canonical_json(&request.model_audit, "topic plan JSON")?,
+                    canonical_json(&request.provider_snapshot, "topic plan JSON")?,
+                    canonical_json(&request.model_attempts, "topic plan JSON")?,
                     now
                 ],
             )
@@ -469,116 +470,118 @@ impl BrandWorkspaceStore {
             return Err("topic_plan_actor_invalid".to_string());
         }
         let workspace = self.workspace(workspace_id)?;
-        let mut connection = open_database(&workspace)?;
-        require_topic_plan_session(&connection, session_id)?;
-        let transaction = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|error| format!("start topic plan mutation: {error}"))?;
-        let (
-            revision,
-            status,
-            current_topics,
-            current_items,
-            knowledge_version,
-            current_attempts,
-            created_by_session_id,
-        ): (i64, String, String, String, i64, String, String) = transaction
-            .query_row(
-                "SELECT revision, status, topics_json, items_json, knowledge_version,
-                        model_attempts_json, created_by_session_id
-                 FROM geo_topic_plans WHERE id=?1",
-                [&request.plan_id],
-                |row| {
-                    Ok((
-                        row.get(0)?,
-                        row.get(1)?,
-                        row.get(2)?,
-                        row.get(3)?,
-                        row.get(4)?,
-                        row.get(5)?,
-                        row.get(6)?,
-                    ))
-                },
-            )
-            .optional()
-            .map_err(|error| format!("read topic plan for mutation: {error}"))?
-            .ok_or_else(|| "topic_plan_not_found".to_string())?;
-        if created_by_session_id != session_id {
-            return Err("topic_plan_draft_session_mismatch".to_string());
-        }
-        if status == "confirmed" {
-            return Err("topic_plan_confirmed_immutable".to_string());
-        }
-        if revision != request.expected_revision {
-            return Err("topic_plan_revision_conflict".to_string());
-        }
-        let topics: Value = serde_json::from_str(&current_topics)
-            .map_err(|error| format!("parse topic plan topics: {error}"))?;
-        validate_topic_plan_payload(&topics, &request.items)?;
-        validate_fixed_fact_keys(&transaction, knowledge_version, &request.items)?;
-        if request.kind == "partial-regeneration" {
-            validate_regeneration_protection(
-                &current_items,
-                &request.items,
-                &request.target_item_ids,
-                &request.preserved_item_ids,
-            )?;
-        }
-        let next_revision = revision + 1;
-        let mutation_id = Uuid::new_v4().to_string();
-        let now = Utc::now().to_rfc3339();
-        let items_json = canonical_json(&request.items)?;
-        let mut attempts: Vec<Value> = serde_json::from_str(&current_attempts)
-            .map_err(|error| format!("parse topic plan model attempts: {error}"))?;
-        let new_attempts = request
-            .model_attempts
-            .as_array()
-            .ok_or_else(|| "topic_plan_model_attempts_invalid".to_string())?;
-        attempts.extend(new_attempts.iter().cloned());
-        let attempts_json = canonical_json(&attempts)?;
-        transaction
-            .execute(
-                "INSERT INTO geo_topic_plan_mutations
-                    (id, plan_id, session_id, kind, expected_revision, revision, items_json,
-                     target_item_ids_json, preserved_item_ids_json, actor_id, reason, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
-                params![
-                    mutation_id,
-                    request.plan_id,
-                    session_id,
-                    request.kind,
+        let mut connection = BrandWorkspaceStore::open(&workspace)?;
+        gates::TOPIC_PLAN_SESSION.enforce(&connection, session_id)?;
+        let mutation_id = with_immediate_tx(
+            &mut connection,
+            "start topic plan mutation",
+            "commit topic plan mutation",
+            |transaction| {
+                let (
                     revision,
-                    next_revision,
-                    items_json,
-                    canonical_json(&request.target_item_ids)?,
-                    canonical_json(&request.preserved_item_ids)?,
-                    request.actor_id,
-                    request.reason,
-                    now
-                ],
-            )
-            .map_err(|error| format!("audit topic plan mutation: {error}"))?;
-        let changed = transaction
-            .execute(
-                "UPDATE geo_topic_plans SET items_json=?2, revision=?3, updated_at=?4,
-                     model_attempts_json=?6
-                 WHERE id=?1 AND revision=?5 AND status='awaiting-confirmation'",
-                params![
-                    request.plan_id,
-                    items_json,
-                    next_revision,
-                    now,
-                    revision,
-                    attempts_json
-                ],
-            )
-            .map_err(|error| format!("apply topic plan mutation: {error}"))?;
-        if changed != 1 {
-            return Err("topic_plan_revision_conflict".to_string());
-        }
-        transaction
-            .commit()
-            .map_err(|error| format!("commit topic plan mutation: {error}"))?;
+                    status,
+                    current_topics,
+                    current_items,
+                    knowledge_version,
+                    current_attempts,
+                    created_by_session_id,
+                ): (i64, String, String, String, i64, String, String) = transaction
+                    .query_row(
+                        "SELECT revision, status, topics_json, items_json, knowledge_version,
+                                model_attempts_json, created_by_session_id
+                         FROM geo_topic_plans WHERE id=?1",
+                        [&request.plan_id],
+                        |row| {
+                            Ok((
+                                row.get(0)?,
+                                row.get(1)?,
+                                row.get(2)?,
+                                row.get(3)?,
+                                row.get(4)?,
+                                row.get(5)?,
+                                row.get(6)?,
+                            ))
+                        },
+                    )
+                    .optional()
+                    .map_err(|error| format!("read topic plan for mutation: {error}"))?
+                    .ok_or_else(|| "topic_plan_not_found".to_string())?;
+                if created_by_session_id != session_id {
+                    return Err("topic_plan_draft_session_mismatch".to_string());
+                }
+                if status == "confirmed" {
+                    return Err("topic_plan_confirmed_immutable".to_string());
+                }
+                if revision != request.expected_revision {
+                    return Err("topic_plan_revision_conflict".to_string());
+                }
+                let topics: Value = serde_json::from_str(&current_topics)
+                    .map_err(|error| format!("parse topic plan topics: {error}"))?;
+                validate_topic_plan_payload(&topics, &request.items)?;
+                validate_fixed_fact_keys(transaction, knowledge_version, &request.items)?;
+                if request.kind == "partial-regeneration" {
+                    validate_regeneration_protection(
+                        &current_items,
+                        &request.items,
+                        &request.target_item_ids,
+                        &request.preserved_item_ids,
+                    )?;
+                }
+                let next_revision = revision + 1;
+                let mutation_id = Uuid::new_v4().to_string();
+                let now = Utc::now().to_rfc3339();
+                let items_json = canonical_json(&request.items, "topic plan JSON")?;
+                let mut attempts: Vec<Value> = serde_json::from_str(&current_attempts)
+                    .map_err(|error| format!("parse topic plan model attempts: {error}"))?;
+                let new_attempts = request
+                    .model_attempts
+                    .as_array()
+                    .ok_or_else(|| "topic_plan_model_attempts_invalid".to_string())?;
+                attempts.extend(new_attempts.iter().cloned());
+                let attempts_json = canonical_json(&attempts, "topic plan JSON")?;
+                transaction
+                    .execute(
+                        "INSERT INTO geo_topic_plan_mutations
+                            (id, plan_id, session_id, kind, expected_revision, revision, items_json,
+                             target_item_ids_json, preserved_item_ids_json, actor_id, reason, created_at)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                        params![
+                            mutation_id,
+                            request.plan_id,
+                            session_id,
+                            request.kind,
+                            revision,
+                            next_revision,
+                            items_json,
+                            canonical_json(&request.target_item_ids, "topic plan JSON")?,
+                            canonical_json(&request.preserved_item_ids, "topic plan JSON")?,
+                            request.actor_id,
+                            request.reason,
+                            now
+                        ],
+                    )
+                    .map_err(|error| format!("audit topic plan mutation: {error}"))?;
+                let changed = transaction
+                    .execute(
+                        "UPDATE geo_topic_plans SET items_json=?2, revision=?3, updated_at=?4,
+                             model_attempts_json=?6
+                         WHERE id=?1 AND revision=?5 AND status='awaiting-confirmation'",
+                        params![
+                            request.plan_id,
+                            items_json,
+                            next_revision,
+                            now,
+                            revision,
+                            attempts_json
+                        ],
+                    )
+                    .map_err(|error| format!("apply topic plan mutation: {error}"))?;
+                if changed != 1 {
+                    return Err("topic_plan_revision_conflict".to_string());
+                }
+                Ok(mutation_id)
+            },
+        )?;
         Ok(TopicPlanMutationResult {
             plan: read_topic_plan(&connection, workspace_id, &request.plan_id, false)?,
             mutation_id,
@@ -596,136 +599,154 @@ impl BrandWorkspaceStore {
             return Err("topic_plan_actor_invalid".to_string());
         }
         let workspace = self.workspace(workspace_id)?;
-        let mut connection = open_database(&workspace)?;
-        require_topic_plan_session(&connection, session_id)?;
-        let transaction = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|error| format!("start topic plan confirmation: {error}"))?;
+        let mut connection = BrandWorkspaceStore::open(&workspace)?;
+        gates::TOPIC_PLAN_SESSION.enforce(&connection, session_id)?;
         let (
+            decision_id,
             revision,
-            status,
-            operation_id,
+            next_revision,
             question_pool_id,
             question_pool_revision,
             knowledge_version,
-            items_json,
-            created_by_session_id,
-        ): (i64, String, String, String, i64, i64, String, String) = transaction
-            .query_row(
-                "SELECT revision, status, operation_id, question_pool_id,
-                        question_pool_revision, knowledge_version, items_json,
-                        created_by_session_id
-                 FROM geo_topic_plans WHERE id=?1",
-                [&request.plan_id],
-                |row| {
-                    Ok((
-                        row.get(0)?,
-                        row.get(1)?,
-                        row.get(2)?,
-                        row.get(3)?,
-                        row.get(4)?,
-                        row.get(5)?,
-                        row.get(6)?,
-                        row.get(7)?,
-                    ))
-                },
-            )
-            .optional()
-            .map_err(|error| format!("read topic plan for confirmation: {error}"))?
-            .ok_or_else(|| "topic_plan_not_found".to_string())?;
-        // 跨会话重选（复用停卡重选，2026-09-01）：confirmed 计划是工作区级
-        // 事实——新一轮 Session 对复用计划的沿用/收窄确认放行（源快照与
-        // revision CAS 仍是护栏）；owner 闸只约束待决计划（草稿编辑冲突）。
-        // 再确认（镜像题库 decide_question_pool 对 confirmed 池的再次裁决）：
-        // 计划内容仍冻结（编辑走 requireMutablePlan 的 immutable 闸），这里
-        // 只允许换本轮的已批准条目子集；源快照校验（下方池版本/知识版本）
-        // 保证复用计划仍锚定当前池状态。
-        if created_by_session_id != session_id && status != "confirmed" {
-            return Err("topic_plan_draft_session_mismatch".to_string());
-        }
-        if !matches!(status.as_str(), "awaiting-confirmation" | "confirmed") {
-            return Err("topic_plan_status_not_confirmable".to_string());
-        }
-        if revision != request.expected_revision {
-            return Err("topic_plan_revision_conflict".to_string());
-        }
-        validate_confirmed_items(&items_json, &request.selected_item_ids)?;
-        let current_knowledge: i64 = transaction
-            .query_row(
-                "SELECT COALESCE(MAX(version), 0) FROM knowledge_versions",
-                [],
-                |row| row.get(0),
-            )
-            .map_err(|error| format!("read current knowledge version: {error}"))?;
-        let (pool_status, pool_revision): (String, i64) = transaction
-            .query_row(
-                "SELECT status, revision FROM geo_question_pools WHERE id=?1",
-                [&question_pool_id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .map_err(|error| format!("read topic plan question pool: {error}"))?;
-        if current_knowledge != knowledge_version
-            || pool_status != "confirmed"
-            || pool_revision != question_pool_revision
-        {
-            return Err("topic_plan_source_snapshot_changed".to_string());
-        }
-        let next_revision = revision + 1;
-        let selected_json = canonical_json(&request.selected_item_ids)?;
-        let now = Utc::now().to_rfc3339();
-        // 决策表对 plan_id 有 UNIQUE 约束（每计划一条决策）：再确认（计划
-        // 已 confirmed）更新既有决策行为本轮最新选择；首次确认才插入。
-        let decision_id: String = transaction
-            .query_row(
-                "SELECT id FROM geo_topic_plan_decisions WHERE plan_id=?1",
-                [&request.plan_id],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(|error| format!("read existing topic plan decision: {error}"))?
-            .unwrap_or_else(|| Uuid::new_v4().to_string());
-        transaction
-            .execute(
-                "INSERT INTO geo_topic_plan_decisions
-                    (id, plan_id, session_id, expected_revision, revision,
-                     selected_item_ids_json, actor_id, decided_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-                 ON CONFLICT(plan_id) DO UPDATE SET
-                    expected_revision=excluded.expected_revision,
-                    revision=excluded.revision,
-                    selected_item_ids_json=excluded.selected_item_ids_json,
-                    actor_id=excluded.actor_id,
-                    decided_at=excluded.decided_at",
-                params![
+            now,
+        ) = with_immediate_tx(
+            &mut connection,
+            "start topic plan confirmation",
+            "commit topic plan confirmation",
+            |transaction| {
+                let (
+                    revision,
+                    status,
+                    operation_id,
+                    question_pool_id,
+                    question_pool_revision,
+                    knowledge_version,
+                    items_json,
+                    created_by_session_id,
+                ): (i64, String, String, String, i64, i64, String, String) = transaction
+                    .query_row(
+                        "SELECT revision, status, operation_id, question_pool_id,
+                                question_pool_revision, knowledge_version, items_json,
+                                created_by_session_id
+                         FROM geo_topic_plans WHERE id=?1",
+                        [&request.plan_id],
+                        |row| {
+                            Ok((
+                                row.get(0)?,
+                                row.get(1)?,
+                                row.get(2)?,
+                                row.get(3)?,
+                                row.get(4)?,
+                                row.get(5)?,
+                                row.get(6)?,
+                                row.get(7)?,
+                            ))
+                        },
+                    )
+                    .optional()
+                    .map_err(|error| format!("read topic plan for confirmation: {error}"))?
+                    .ok_or_else(|| "topic_plan_not_found".to_string())?;
+                // 跨会话重选（复用停卡重选，2026-09-01）：confirmed 计划是工作区级
+                // 事实——新一轮 Session 对复用计划的沿用/收窄确认放行（源快照与
+                // revision CAS 仍是护栏）；owner 闸只约束待决计划（草稿编辑冲突）。
+                // 再确认（镜像题库 decide_question_pool 对 confirmed 池的再次裁决）：
+                // 计划内容仍冻结（编辑走 requireMutablePlan 的 immutable 闸），这里
+                // 只允许换本轮的已批准条目子集；源快照校验（下方池版本/知识版本）
+                // 保证复用计划仍锚定当前池状态。
+                if created_by_session_id != session_id && status != "confirmed" {
+                    return Err("topic_plan_draft_session_mismatch".to_string());
+                }
+                if !matches!(status.as_str(), "awaiting-confirmation" | "confirmed") {
+                    return Err("topic_plan_status_not_confirmable".to_string());
+                }
+                if revision != request.expected_revision {
+                    return Err("topic_plan_revision_conflict".to_string());
+                }
+                validate_confirmed_items(&items_json, &request.selected_item_ids)?;
+                let current_knowledge: i64 = transaction
+                    .query_row(
+                        "SELECT COALESCE(MAX(version), 0) FROM knowledge_versions",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .map_err(|error| format!("read current knowledge version: {error}"))?;
+                let (pool_status, pool_revision): (String, i64) = transaction
+                    .query_row(
+                        "SELECT status, revision FROM geo_question_pools WHERE id=?1",
+                        [&question_pool_id],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .map_err(|error| format!("read topic plan question pool: {error}"))?;
+                if current_knowledge != knowledge_version
+                    || pool_status != "confirmed"
+                    || pool_revision != question_pool_revision
+                {
+                    return Err("topic_plan_source_snapshot_changed".to_string());
+                }
+                let next_revision = revision + 1;
+                let selected_json = canonical_json(&request.selected_item_ids, "topic plan JSON")?;
+                let now = Utc::now().to_rfc3339();
+                // 决策表对 plan_id 有 UNIQUE 约束（每计划一条决策）：再确认（计划
+                // 已 confirmed）更新既有决策行为本轮最新选择；首次确认才插入。
+                let decision_id: String = transaction
+                    .query_row(
+                        "SELECT id FROM geo_topic_plan_decisions WHERE plan_id=?1",
+                        [&request.plan_id],
+                        |row| row.get(0),
+                    )
+                    .optional()
+                    .map_err(|error| format!("read existing topic plan decision: {error}"))?
+                    .unwrap_or_else(|| Uuid::new_v4().to_string());
+                transaction
+                    .execute(
+                        "INSERT INTO geo_topic_plan_decisions
+                            (id, plan_id, session_id, expected_revision, revision,
+                             selected_item_ids_json, actor_id, decided_at)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                         ON CONFLICT(plan_id) DO UPDATE SET
+                            expected_revision=excluded.expected_revision,
+                            revision=excluded.revision,
+                            selected_item_ids_json=excluded.selected_item_ids_json,
+                            actor_id=excluded.actor_id,
+                            decided_at=excluded.decided_at",
+                        params![
+                            decision_id,
+                            request.plan_id,
+                            session_id,
+                            revision,
+                            next_revision,
+                            selected_json,
+                            request.actor_id,
+                            now
+                        ],
+                    )
+                    .map_err(|error| format!("store topic plan confirmation: {error}"))?;
+                let changed = transaction
+                    .execute(
+                        "UPDATE geo_topic_plans SET status='confirmed', revision=?2,
+                             selected_item_ids_json=?3, updated_at=?4
+                         WHERE id=?1 AND revision=?5
+                           AND status IN ('awaiting-confirmation','confirmed')",
+                        params![request.plan_id, next_revision, selected_json, now, revision],
+                    )
+                    .map_err(|error| format!("confirm topic plan: {error}"))?;
+                if changed != 1 {
+                    return Err("topic_plan_revision_conflict".to_string());
+                }
+                // 血缘行迁移经唯一 owner（票 04）：首确认与再确认（计划 UPDATE 放行
+                // status IN ('awaiting-confirmation','confirmed')）都重写同一终态。
+                set_lineage_state(transaction, &operation_id, "topic-plan-confirmed")?;
+                Ok((
                     decision_id,
-                    request.plan_id,
-                    session_id,
                     revision,
                     next_revision,
-                    selected_json,
-                    request.actor_id,
-                    now
-                ],
-            )
-            .map_err(|error| format!("store topic plan confirmation: {error}"))?;
-        let changed = transaction
-            .execute(
-                "UPDATE geo_topic_plans SET status='confirmed', revision=?2,
-                     selected_item_ids_json=?3, updated_at=?4
-                 WHERE id=?1 AND revision=?5
-                   AND status IN ('awaiting-confirmation','confirmed')",
-                params![request.plan_id, next_revision, selected_json, now, revision],
-            )
-            .map_err(|error| format!("confirm topic plan: {error}"))?;
-        if changed != 1 {
-            return Err("topic_plan_revision_conflict".to_string());
-        }
-        // 血缘行迁移经唯一 owner（票 04）：首确认与再确认（计划 UPDATE 放行
-        // status IN ('awaiting-confirmation','confirmed')）都重写同一终态。
-        set_lineage_state(&transaction, &operation_id, "topic-plan-confirmed")?;
-        transaction
-            .commit()
-            .map_err(|error| format!("commit topic plan confirmation: {error}"))?;
+                    question_pool_id,
+                    question_pool_revision,
+                    knowledge_version,
+                    now,
+                ))
+            },
+        )?;
         Ok(TopicPlanConfirmation {
             plan_id: request.plan_id,
             decision_id,
@@ -919,26 +940,6 @@ fn read_topic_plan(
         .optional()
         .map_err(|error| format!("read topic plan: {error}"))?
         .ok_or_else(|| "topic_plan_not_found".to_string())
-}
-
-fn require_topic_plan_session(connection: &Connection, session_id: &str) -> Result<(), String> {
-    validate_session_id(session_id)?;
-    let exists: i64 = connection
-        .query_row(
-            "SELECT COUNT(*) FROM brand_sessions WHERE id=?1",
-            [session_id],
-            |row| row.get(0),
-        )
-        .map_err(|error| format!("validate topic plan session: {error}"))?;
-    if exists == 1 {
-        Ok(())
-    } else {
-        Err("topic_plan_session_not_committed".to_string())
-    }
-}
-
-fn canonical_json<T: ?Sized + Serialize>(value: &T) -> Result<String, String> {
-    serde_json::to_string(value).map_err(|error| format!("serialize topic plan JSON: {error}"))
 }
 
 fn validate_fixed_fact_keys(

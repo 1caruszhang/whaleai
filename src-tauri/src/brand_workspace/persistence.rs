@@ -308,7 +308,9 @@ impl SessionGate {
 /// 10 闸声明（2026-09-04 盘点现状逐字钉；各域清零票把文件内旧变体切到
 /// 这些声明，错误串与 validate 前置随搬家逐字不变。票 02 已消费
 /// MONITOR_SESSION/PUBLISH_SESSION，票 03 已消费 ARTICLE_SESSION/
-/// MATERIALS_SESSION/DISTRIBUTION_SESSION，其余待票 04）。
+/// MATERIALS_SESSION/DISTRIBUTION_SESSION，票 04 已消费 GEO_BASELINE/
+/// DASHBOARD/TOPIC_PLAN/QUESTION_POOL/GEO_OPERATION——10 闸全部接驳完毕，
+/// 域内变体清零）。
 #[allow(dead_code)]
 pub(crate) mod gates {
     use super::{SessionGate, SessionGateSqlError};
@@ -368,7 +370,7 @@ pub(crate) mod gates {
         sql_error: SessionGateSqlError::Context("validate question pool session"),
     };
     /// geo_operations.rs · create_geo_operation 内联闸（无 validate 前置；
-    /// 票 04 随开库后重复 ensure 站点一并收编）。
+    /// 票 04 已随开库后重复 ensure 站点一并收编进闭包首行）。
     pub(crate) const GEO_OPERATION_SESSION: SessionGate = SessionGate {
         error_code: "geo_operation_session_not_committed",
         validate_identity: false,
@@ -397,7 +399,14 @@ pub(crate) mod gates {
 /// `begin_material_processing`/`finish_material_processing`/
 /// `delete_brand_material` 三处 start/commit 错误串吞细节
 /// （`.map_err(|_| "material_...")`，不带 ": {error}" 后缀），helper 的
-/// `format!` 呈现无法逐字复现——均保持内联。
+/// 无法逐字复现——均保持内联。票 04 盘点追加 4 处保持内联的站点：③
+/// geo_baselines `prepare_geo_baseline`（幂等命中出口 "commit idempotent
+/// GEO baseline read" 与主出口 "commit GEO baseline preparation" 两点
+/// commit 且串各异）；④ geo_baselines `claim_geo_baseline_unit` 与 ⑤
+/// question_pools `claim_question_pool_step`（cached/busy 早退 Ok 不经
+/// commit，cached 出口另有专属 commit 串——多出口事务）；⑥ topic_plans
+/// `create_topic_plan`（复用命中出口 "commit topic plan reuse" 与主出口
+/// "commit topic plan create"）。
 pub(crate) fn with_immediate_tx<T>(
     connection: &mut Connection,
     start_context: &'static str,
@@ -448,7 +457,9 @@ pub(crate) fn sha256_hex(value: impl AsRef<[u8]>) -> String {
 
 /// 序列化 JSON 的统一口径：错误串 `serialize {context}: {error}`，context
 /// 传各域既有名词（"GEO baseline JSON" / "distribution plan json"〔小写
-/// json 为既有串原样〕 / "topic plan JSON" / "question pool JSON"）。
+/// json 为既有串原样〕 / "topic plan JSON" / "question pool JSON"）。票 03
+/// 已消 distribution_plans，票 04 已消 geo_baselines/topic_plans/
+/// question_pools——四域副本全部切换内核版。
 pub(crate) fn canonical_json<T: ?Sized + Serialize>(
     value: &T,
     context: &'static str,
@@ -890,8 +901,8 @@ mod tests {
 //     open_in_memory；开库只能经 BrandWorkspaceStore::open / 旧
 //     open_database 过渡态）；
 //  ② 禁新增 require_*_session 变体（会话闸只能引用 super::persistence::
-//     gates 声明；geo_operations 内联闸随票 04 收编，文本守卫不覆盖内联
-//     形态，由票 04 的错误串钉守）；
+//     gates 声明；geo_operations 内联闸已随票 04 收编进 GEO_OPERATION_SESSION
+//     声明，域内变体全部清零）；
 //  ③ 禁 open 路径外直呼 ensure_schema（迁移编排只活在内核
 //     run_migrations/initialize_database 与旧 open_database 过渡态；各域
 //     ensure_schema 的定义行不算直呼）。
@@ -904,9 +915,11 @@ mod tests {
 // 豁免表＝现存直呼的登记在册过渡态（非违规），按票消项：票 02（已结）消
 // post_publish_monitoring/publish_scheduler/brand_workspace.rs 的调用点
 // （闸变体两项随之清零；brand_workspace.rs 的 ①③ 随旧 open_database 本体
-// 归票 05），票 03（已结）消 articles/materials/distribution_plans，票 04 消
-// geo_baselines/geo_dashboard/question_pools/topic_plans/geo_operations，
-// 票 05 清空归零。
+// 归票 05），票 03（已结）消 articles/materials/distribution_plans，票 04
+// （已结）消 geo_baselines/geo_dashboard/question_pools/topic_plans 的闸变体
+// 与 geo_operations 的 8 处 ensure_schema 直呼（7 处开库后重复 ensure＋
+// mark_artifacts_affected_by_knowledge_change 事务内冗余 ensure），票 05 清空
+// 归零。
 //
 // 盘点口径注记：spec/ADR 记「豁免表初始 13 文件」为 2026-09-04 巡检笔数；
 // 按本守卫生产段口径逐文件盘点为 11 文件（knowledge/geo_baselines/
@@ -986,38 +999,14 @@ mod guard {
     fn exemption_table() -> Vec<(&'static str, Vec<Rule>)> {
         vec![
             // 旧 open_database 本体：直呼 Connection::open＋10 处 ensure_schema
-            // 旧开路径（调用点票 02 清零，本体删除归票 05）。
+            // 旧开路径（调用点票 02/04 全部清零，本体删除归票 05；票 04 后
+            // 仅测试段 fixture 引用，已标 allow(dead_code) 过渡）。
             (
                 "src-tauri/src/brand_workspace.rs",
                 vec![
                     Rule::DirectConnectionOpen,
                     Rule::EnsureSchemaOutsideOpenPath,
                 ],
-            ),
-            // 4 个命名会话闸变体（票 02 已消：post_publish_monitoring/
-            // publish_scheduler；票 03 已消：articles/materials/
-            // distribution_plans；票 04：geo_baselines/geo_dashboard/
-            // question_pools/topic_plans）。
-            (
-                "src-tauri/src/brand_workspace/geo_baselines.rs",
-                vec![Rule::SessionGateVariant],
-            ),
-            (
-                "src-tauri/src/brand_workspace/geo_dashboard.rs",
-                vec![Rule::SessionGateVariant],
-            ),
-            (
-                "src-tauri/src/brand_workspace/question_pools.rs",
-                vec![Rule::SessionGateVariant],
-            ),
-            (
-                "src-tauri/src/brand_workspace/topic_plans.rs",
-                vec![Rule::SessionGateVariant],
-            ),
-            // geo_operations：8 处开库后重复 ensure（票 04 随内联闸一并收编）。
-            (
-                "src-tauri/src/brand_workspace/geo_operations.rs",
-                vec![Rule::EnsureSchemaOutsideOpenPath],
             ),
         ]
     }

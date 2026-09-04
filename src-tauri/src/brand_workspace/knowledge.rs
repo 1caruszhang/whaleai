@@ -1,5 +1,6 @@
+use super::persistence::with_immediate_tx;
 use super::*;
-use rusqlite::{params, TransactionBehavior};
+use rusqlite::params;
 use sha2::{Digest, Sha256};
 
 const OPTIMISTIC_CONFLICT: &str = "knowledge_version_conflict";
@@ -342,7 +343,7 @@ impl BrandWorkspaceStore {
     ) -> Result<Option<KnowledgeCurrentFact>, String> {
         validate_session_id(session_id)?;
         let workspace = self.workspace(workspace_id)?;
-        let connection = open_database(&workspace)?;
+        let connection = BrandWorkspaceStore::open(&workspace)?;
         read_current(&connection, fact_key)
     }
 
@@ -352,17 +353,19 @@ impl BrandWorkspaceStore {
     ) -> Result<KnowledgeCandidate, String> {
         validate_submission(&request)?;
         let workspace = self.workspace(&request.workspace_id)?;
-        let mut connection = open_database(&workspace)?;
-        let transaction = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|error| format!("start knowledge candidate transaction: {error}"))?;
-        let current = read_current(&transaction, &request.key.identity)?;
-        require_version(current.as_ref(), request.expected_current_version)?;
+        let mut connection = BrandWorkspaceStore::open(&workspace)?;
+        let candidate_id = with_immediate_tx(
+            &mut connection,
+            "start knowledge candidate transaction",
+            "commit knowledge candidate",
+            |transaction| {
+                let current = read_current(transaction, &request.key.identity)?;
+                require_version(current.as_ref(), request.expected_current_version)?;
 
-        let candidate_id = persist_candidate_submission(&transaction, &request)?;
-        transaction
-            .commit()
-            .map_err(|error| format!("commit knowledge candidate: {error}"))?;
+                let candidate_id = persist_candidate_submission(transaction, &request)?;
+                Ok(candidate_id)
+            },
+        )?;
         self.knowledge_candidate(&request.workspace_id, &request.session_id, &candidate_id)
     }
 
@@ -374,7 +377,7 @@ impl BrandWorkspaceStore {
     ) -> Result<KnowledgeCandidate, String> {
         validate_session_id(session_id)?;
         let workspace = self.workspace(workspace_id)?;
-        let connection = open_database(&workspace)?;
+        let connection = BrandWorkspaceStore::open(&workspace)?;
         read_candidate(&connection, workspace_id, session_id, candidate_id)
     }
 
@@ -387,202 +390,227 @@ impl BrandWorkspaceStore {
             return Err("knowledge decision requires a confirmed actor".to_string());
         }
         let workspace = self.workspace(&request.workspace_id)?;
-        let mut connection = open_database(&workspace)?;
-        let transaction = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|error| format!("start knowledge decision transaction: {error}"))?;
-        let candidate = read_candidate(
-            &transaction,
-            &request.workspace_id,
-            &request.session_id,
-            &request.candidate_id,
-        )?;
-        if !matches!(
-            candidate.status.as_str(),
-            "awaiting-confirmation" | "conflict"
-        ) {
-            return Err("knowledge candidate is no longer pending".to_string());
-        }
-        if request.decision != "adopt-edited" && request.edited_normalized_value_json.is_some() {
-            return Err("edited value is only valid for adopt-edited".to_string());
-        }
-        let before = read_current(&transaction, &candidate.key.identity)?;
-        require_version(before.as_ref(), request.expected_current_version)?;
-        let now = Utc::now().to_rfc3339();
+        let mut connection = BrandWorkspaceStore::open(&workspace)?;
+        let (fact_key, status, now, after, knowledge_version, affected_artifacts) =
+            with_immediate_tx(
+                &mut connection,
+                "start knowledge decision transaction",
+                "commit knowledge decision",
+                |transaction| {
+                    let candidate = read_candidate(
+                        transaction,
+                        &request.workspace_id,
+                        &request.session_id,
+                        &request.candidate_id,
+                    )?;
+                    if !matches!(
+                        candidate.status.as_str(),
+                        "awaiting-confirmation" | "conflict"
+                    ) {
+                        return Err("knowledge candidate is no longer pending".to_string());
+                    }
+                    if request.decision != "adopt-edited"
+                        && request.edited_normalized_value_json.is_some()
+                    {
+                        return Err("edited value is only valid for adopt-edited".to_string());
+                    }
+                    let before = read_current(transaction, &candidate.key.identity)?;
+                    require_version(before.as_ref(), request.expected_current_version)?;
+                    let now = Utc::now().to_rfc3339();
 
-        let (status, after, changed_fact_key) = match request.decision.as_str() {
-            "keep-current" => {
-                if before.is_none() {
-                    return Err("keep-current requires an existing current fact".to_string());
-                }
-                ("kept-current", before.clone(), None)
-            }
-            "reject-candidate" => ("rejected", before.clone(), None),
-            "adopt-new" => {
-                let same_value = before.as_ref().is_some_and(|current| {
-                    current.normalized_value_json == candidate.normalized_value_json
-                        && current.unit == candidate.unit
-                });
-                let next = if same_value {
-                    merge_candidate_source(
-                        &transaction,
-                        &candidate,
-                        before.as_ref().expect("same value requires current"),
-                        &now,
-                    )?
-                } else {
-                    adopt_candidate(
-                        &transaction,
-                        &candidate,
-                        &candidate.key,
-                        before.as_ref(),
-                        &request.actor_id,
-                        &now,
-                    )?
-                };
-                (
-                    "adopted",
-                    Some(next),
-                    (!same_value).then(|| candidate.key.identity.clone()),
-                )
-            }
-            "adopt-edited" => {
-                let edited = request
-                    .edited_normalized_value_json
-                    .as_deref()
-                    .ok_or_else(|| {
-                        "adopt-edited requires an edited normalized value".to_string()
-                    })?;
-                if edited.trim().is_empty() {
-                    return Err("adopt-edited requires an edited normalized value".to_string());
-                }
-                serde_json::from_str::<serde_json::Value>(edited)
-                    .map_err(|_| "adopt-edited value must be valid JSON".to_string())?;
-                // The candidate row keeps the original proposed value; only the
-                // adopted current fact carries the user-edited value, so the
-                // decision audit can always reconstruct original → edited.
-                let same_value = before.as_ref().is_some_and(|current| {
-                    current.normalized_value_json == edited && current.unit == candidate.unit
-                });
-                let edited_candidate = KnowledgeCandidate {
-                    normalized_value_json: edited.to_string(),
-                    ..candidate.clone()
-                };
-                let next = if same_value {
-                    merge_candidate_source(
-                        &transaction,
-                        &candidate,
-                        before.as_ref().expect("same value requires current"),
-                        &now,
-                    )?
-                } else {
-                    adopt_candidate(
-                        &transaction,
-                        &edited_candidate,
-                        &candidate.key,
-                        before.as_ref(),
-                        &request.actor_id,
-                        &now,
-                    )?
-                };
-                (
-                    "adopted",
-                    Some(next),
-                    (!same_value).then(|| candidate.key.identity.clone()),
-                )
-            }
-            "split-scope" => {
-                let split_key = request.split_key.as_ref().ok_or_else(|| {
-                    "split-scope requires a structured replacement key".to_string()
-                })?;
-                if split_key.identity == candidate.key.identity {
-                    return Err("split-scope must change scope or effective time".to_string());
-                }
-                let target = read_current(&transaction, &split_key.identity)?;
-                require_version(
-                    target.as_ref(),
-                    request.split_expected_version.ok_or_else(|| {
-                        "split-scope requires target expected version".to_string()
-                    })?,
-                )?;
-                if target.is_some() {
-                    return Err("split target already has an authoritative value".to_string());
-                }
-                let next = adopt_candidate(
-                    &transaction,
-                    &candidate,
-                    split_key,
-                    None,
-                    &request.actor_id,
-                    &now,
-                )?;
-                ("split-scope", Some(next), Some(split_key.identity.clone()))
-            }
-            _ => return Err("invalid knowledge decision".to_string()),
-        };
-        let changed = transaction
-            .execute(
-                "UPDATE knowledge_fact_candidates SET status = ?1, resolved_at = ?2
-             WHERE id = ?3 AND status IN ('awaiting-confirmation', 'conflict')",
-                params![status, now, request.candidate_id],
-            )
-            .map_err(|error| format!("resolve knowledge candidate: {error}"))?;
-        if changed != 1 {
-            return Err(OPTIMISTIC_CONFLICT.to_string());
-        }
-        let decision_id = insert_audit(
-            &transaction,
-            KnowledgeAuditInsert {
-                candidate_id: &request.candidate_id,
-                decision: &request.decision,
-                actor_id: &request.actor_id,
-                session_id: &request.session_id,
-                expected_version: request.expected_current_version,
-                before: before.as_ref(),
-                after: after.as_ref(),
-                reason: request.reason.as_deref(),
-                now: &now,
-            },
-        )?;
-        let knowledge_version = if matches!(
-            request.decision.as_str(),
-            "adopt-new" | "split-scope" | "adopt-edited"
-        ) {
-            Some(snapshot_brand_knowledge(
-                &transaction,
-                &decision_id,
-                &request.session_id,
-                &now,
-            )?)
-        } else {
-            None
-        };
-        let affected_artifacts = match (knowledge_version, changed_fact_key.as_deref()) {
-            (Some(version), Some(fact_key)) => {
-                mark_artifacts_affected_by_knowledge_change(&transaction, version, fact_key, &now)?
-            }
-            _ => Vec::new(),
-        };
-        if let Some(material_id) = candidate.source.material_id.as_deref() {
-            settle_material_if_resolved(&transaction, material_id, &now)?;
-        }
-        transaction
-            .commit()
-            .map_err(|error| format!("commit knowledge decision: {error}"))?;
+                    let (status, after, changed_fact_key) =
+                        match request.decision.as_str() {
+                            "keep-current" => {
+                                if before.is_none() {
+                                    return Err("keep-current requires an existing current fact"
+                                        .to_string());
+                                }
+                                ("kept-current", before.clone(), None)
+                            }
+                            "reject-candidate" => ("rejected", before.clone(), None),
+                            "adopt-new" => {
+                                let same_value = before.as_ref().is_some_and(|current| {
+                                    current.normalized_value_json == candidate.normalized_value_json
+                                        && current.unit == candidate.unit
+                                });
+                                let next = if same_value {
+                                    merge_candidate_source(
+                                        transaction,
+                                        &candidate,
+                                        before.as_ref().expect("same value requires current"),
+                                        &now,
+                                    )?
+                                } else {
+                                    adopt_candidate(
+                                        transaction,
+                                        &candidate,
+                                        &candidate.key,
+                                        before.as_ref(),
+                                        &request.actor_id,
+                                        &now,
+                                    )?
+                                };
+                                (
+                                    "adopted",
+                                    Some(next),
+                                    (!same_value).then(|| candidate.key.identity.clone()),
+                                )
+                            }
+                            "adopt-edited" => {
+                                let edited = request
+                                    .edited_normalized_value_json
+                                    .as_deref()
+                                    .ok_or_else(|| {
+                                        "adopt-edited requires an edited normalized value"
+                                            .to_string()
+                                    })?;
+                                if edited.trim().is_empty() {
+                                    return Err("adopt-edited requires an edited normalized value"
+                                        .to_string());
+                                }
+                                serde_json::from_str::<serde_json::Value>(edited).map_err(
+                                    |_| "adopt-edited value must be valid JSON".to_string(),
+                                )?;
+                                // The candidate row keeps the original proposed value; only the
+                                // adopted current fact carries the user-edited value, so the
+                                // decision audit can always reconstruct original → edited.
+                                let same_value = before.as_ref().is_some_and(|current| {
+                                    current.normalized_value_json == edited
+                                        && current.unit == candidate.unit
+                                });
+                                let edited_candidate = KnowledgeCandidate {
+                                    normalized_value_json: edited.to_string(),
+                                    ..candidate.clone()
+                                };
+                                let next = if same_value {
+                                    merge_candidate_source(
+                                        transaction,
+                                        &candidate,
+                                        before.as_ref().expect("same value requires current"),
+                                        &now,
+                                    )?
+                                } else {
+                                    adopt_candidate(
+                                        transaction,
+                                        &edited_candidate,
+                                        &candidate.key,
+                                        before.as_ref(),
+                                        &request.actor_id,
+                                        &now,
+                                    )?
+                                };
+                                (
+                                    "adopted",
+                                    Some(next),
+                                    (!same_value).then(|| candidate.key.identity.clone()),
+                                )
+                            }
+                            "split-scope" => {
+                                let split_key = request.split_key.as_ref().ok_or_else(|| {
+                                    "split-scope requires a structured replacement key".to_string()
+                                })?;
+                                if split_key.identity == candidate.key.identity {
+                                    return Err("split-scope must change scope or effective time"
+                                        .to_string());
+                                }
+                                let target = read_current(transaction, &split_key.identity)?;
+                                require_version(
+                                    target.as_ref(),
+                                    request.split_expected_version.ok_or_else(|| {
+                                        "split-scope requires target expected version".to_string()
+                                    })?,
+                                )?;
+                                if target.is_some() {
+                                    return Err("split target already has an authoritative value"
+                                        .to_string());
+                                }
+                                let next = adopt_candidate(
+                                    transaction,
+                                    &candidate,
+                                    split_key,
+                                    None,
+                                    &request.actor_id,
+                                    &now,
+                                )?;
+                                ("split-scope", Some(next), Some(split_key.identity.clone()))
+                            }
+                            _ => return Err("invalid knowledge decision".to_string()),
+                        };
+                    let changed = transaction
+                        .execute(
+                            "UPDATE knowledge_fact_candidates SET status = ?1, resolved_at = ?2
+                         WHERE id = ?3 AND status IN ('awaiting-confirmation', 'conflict')",
+                            params![status, now, request.candidate_id],
+                        )
+                        .map_err(|error| format!("resolve knowledge candidate: {error}"))?;
+                    if changed != 1 {
+                        return Err(OPTIMISTIC_CONFLICT.to_string());
+                    }
+                    let decision_id = insert_audit(
+                        transaction,
+                        KnowledgeAuditInsert {
+                            candidate_id: &request.candidate_id,
+                            decision: &request.decision,
+                            actor_id: &request.actor_id,
+                            session_id: &request.session_id,
+                            expected_version: request.expected_current_version,
+                            before: before.as_ref(),
+                            after: after.as_ref(),
+                            reason: request.reason.as_deref(),
+                            now: &now,
+                        },
+                    )?;
+                    let knowledge_version = if matches!(
+                        request.decision.as_str(),
+                        "adopt-new" | "split-scope" | "adopt-edited"
+                    ) {
+                        Some(snapshot_brand_knowledge(
+                            transaction,
+                            &decision_id,
+                            &request.session_id,
+                            &now,
+                        )?)
+                    } else {
+                        None
+                    };
+                    let affected_artifacts = match (knowledge_version, changed_fact_key.as_deref())
+                    {
+                        (Some(version), Some(fact_key)) => {
+                            mark_artifacts_affected_by_knowledge_change(
+                                transaction,
+                                version,
+                                fact_key,
+                                &now,
+                            )?
+                        }
+                        _ => Vec::new(),
+                    };
+                    if let Some(material_id) = candidate.source.material_id.as_deref() {
+                        settle_material_if_resolved(transaction, material_id, &now)?;
+                    }
+                    Ok((
+                        candidate.key,
+                        status,
+                        now,
+                        after,
+                        knowledge_version,
+                        affected_artifacts,
+                    ))
+                },
+            )?;
         // 方案 D（GD-11）：采纳「行业」事实=用户确认了品牌领域，写回目录中的
         // 产品线（只增不删、去重）。目录独立于事实事务：同步失败不回滚裁决，
         // 下次采纳行业事实会重试；industry 为必填抽取字段，零产品线品牌经
         // 材料导入 → 知识裁决即自愈。
-        let product_line_sync =
-            derive_industry_product_lines(&candidate.key.predicate, after.as_ref())
-                .and_then(|lines| {
-                    self.merge_workspace_product_lines(&request.workspace_id, lines)
-                        .ok()
-                })
-                .filter(|added| !added.is_empty());
+        let product_line_sync = derive_industry_product_lines(&fact_key.predicate, after.as_ref())
+            .and_then(|lines| {
+                self.merge_workspace_product_lines(&request.workspace_id, lines)
+                    .ok()
+            })
+            .filter(|added| !added.is_empty());
         Ok(KnowledgeDecisionResult {
             candidate_id: request.candidate_id,
-            fact_key: candidate.key.identity,
+            fact_key: fact_key.identity,
             decision: request.decision,
             status: status.to_string(),
             resolved_at: now.clone(),
@@ -614,164 +642,173 @@ impl BrandWorkspaceStore {
             return Err("knowledge revision requires the user's explicit instruction".to_string());
         }
         let workspace = self.workspace(&request.workspace_id)?;
-        let mut connection = open_database(&workspace)?;
-        let transaction = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|error| format!("start knowledge revision transaction: {error}"))?;
-        let now = Utc::now().to_rfc3339();
-        let resolved_candidate_id: String = match request.action.as_str() {
-            "modify" => {
-                let candidate_id = request
-                    .candidate_id
-                    .as_deref()
-                    .ok_or_else(|| "knowledge revision requires a candidate id".to_string())?;
-                let value_json = request
-                    .value_json
-                    .clone()
-                    .ok_or_else(|| "knowledge revision modify requires a value".to_string())?;
-                let normalized = request.normalized_value_json.clone().ok_or_else(|| {
-                    "knowledge revision modify requires a normalized value".to_string()
-                })?;
-                if normalized.trim().is_empty() {
-                    return Err("knowledge revision modify requires a normalized value".to_string());
-                }
-                serde_json::from_str::<serde_json::Value>(&normalized)
-                    .map_err(|_| "knowledge revision value must be valid JSON".to_string())?;
-                let candidate = read_candidate(
-                    &transaction,
-                    &request.workspace_id,
-                    &request.session_id,
-                    candidate_id,
-                )?;
-                require_pending(&candidate)?;
-                // 来源只升不降：显式改值至少升到 asked，extracted 保持原级。
-                let upgraded =
-                    if profile_provenance_rank(candidate.source.profile_provenance.as_deref())
-                        >= profile_provenance_rank(Some("asked"))
-                    {
-                        candidate.source.profile_provenance.clone()
-                    } else {
-                        Some("asked".to_string())
-                    };
-                let changed = transaction
-                    .execute(
-                        "UPDATE knowledge_fact_candidates
-                         SET value_json=?1, normalized_value_json=?2, unit=?3,
-                             profile_provenance=?4, status='awaiting-confirmation'
-                         WHERE id=?5 AND status IN ('awaiting-confirmation', 'conflict')",
-                        params![value_json, normalized, request.unit, upgraded, candidate_id],
-                    )
-                    .map_err(|error| format!("revise knowledge candidate: {error}"))?;
-                if changed != 1 {
-                    return Err(OPTIMISTIC_CONFLICT.to_string());
-                }
-                let after = serde_json::json!({
-                    "valueJson": value_json,
-                    "normalizedValueJson": normalized,
-                    "unit": request.unit,
-                    "profileProvenance": upgraded,
-                    "status": "awaiting-confirmation",
-                });
-                insert_revision_audit(
-                    &transaction,
-                    KnowledgeRevisionAuditInsert {
-                        candidate_id,
-                        action: "modify",
-                        actor_id: &request.actor_id,
-                        session_id: &request.session_id,
-                        before: Some(&revision_snapshot(&candidate)),
-                        after: Some(&after),
-                        reason: &request.reason,
-                        now: &now,
-                    },
-                )?;
-                candidate_id.to_string()
-            }
-            "delete" => {
-                let candidate_id = request
-                    .candidate_id
-                    .as_deref()
-                    .ok_or_else(|| "knowledge revision requires a candidate id".to_string())?;
-                let candidate = read_candidate(
-                    &transaction,
-                    &request.workspace_id,
-                    &request.session_id,
-                    candidate_id,
-                )?;
-                require_pending(&candidate)?;
-                let changed = transaction
-                    .execute(
-                        "UPDATE knowledge_fact_candidates SET status='rejected', resolved_at=?1
-                         WHERE id=?2 AND status IN ('awaiting-confirmation', 'conflict')",
-                        params![now, candidate_id],
-                    )
-                    .map_err(|error| format!("delete knowledge candidate: {error}"))?;
-                if changed != 1 {
-                    return Err(OPTIMISTIC_CONFLICT.to_string());
-                }
-                insert_revision_audit(
-                    &transaction,
-                    KnowledgeRevisionAuditInsert {
-                        candidate_id,
-                        action: "delete",
-                        actor_id: &request.actor_id,
-                        session_id: &request.session_id,
-                        before: Some(&revision_snapshot(&candidate)),
-                        after: None,
-                        reason: &request.reason,
-                        now: &now,
-                    },
-                )?;
-                if let Some(material_id) = candidate.source.material_id.as_deref() {
-                    settle_material_if_resolved(&transaction, material_id, &now)?;
-                }
-                candidate_id.to_string()
-            }
-            "add" => {
-                let submission = request.submission.clone().ok_or_else(|| {
-                    "knowledge revision add requires a candidate submission".to_string()
-                })?;
-                // 嵌套 submission 的身份一致性在 management API handler 的
-                // 信任边界校验（与 submit/decide 同构），store 不重复判定。
-                validate_submission(&submission)?;
-                let current = read_current(&transaction, &submission.key.identity)?;
-                require_version(current.as_ref(), submission.expected_current_version)?;
-                let candidate_id = persist_candidate_submission(&transaction, &submission)?;
-                if let Some(material_id) = submission.source.material_id.as_deref() {
-                    append_candidate_to_material_attempt(
-                        &transaction,
-                        &request.session_id,
-                        material_id,
-                        &candidate_id,
-                        &now,
-                    )?;
-                }
-                let candidate = read_candidate(
-                    &transaction,
-                    &request.workspace_id,
-                    &request.session_id,
-                    &candidate_id,
-                )?;
-                insert_revision_audit(
-                    &transaction,
-                    KnowledgeRevisionAuditInsert {
-                        candidate_id: &candidate_id,
-                        action: "add",
-                        actor_id: &request.actor_id,
-                        session_id: &request.session_id,
-                        before: None,
-                        after: Some(&revision_snapshot(&candidate)),
-                        reason: &request.reason,
-                        now: &now,
-                    },
-                )?;
-                candidate_id
-            }
-            _ => return Err("invalid knowledge revision action".to_string()),
-        };
-        transaction
-            .commit()
-            .map_err(|error| format!("commit knowledge revision: {error}"))?;
+        let mut connection = BrandWorkspaceStore::open(&workspace)?;
+        let resolved_candidate_id: String = with_immediate_tx(
+            &mut connection,
+            "start knowledge revision transaction",
+            "commit knowledge revision",
+            |transaction| {
+                let now = Utc::now().to_rfc3339();
+                let resolved_candidate_id: String = match request.action.as_str() {
+                    "modify" => {
+                        let candidate_id = request.candidate_id.as_deref().ok_or_else(|| {
+                            "knowledge revision requires a candidate id".to_string()
+                        })?;
+                        let value_json = request.value_json.clone().ok_or_else(|| {
+                            "knowledge revision modify requires a value".to_string()
+                        })?;
+                        let normalized =
+                            request.normalized_value_json.clone().ok_or_else(|| {
+                                "knowledge revision modify requires a normalized value".to_string()
+                            })?;
+                        if normalized.trim().is_empty() {
+                            return Err(
+                                "knowledge revision modify requires a normalized value".to_string()
+                            );
+                        }
+                        serde_json::from_str::<serde_json::Value>(&normalized).map_err(|_| {
+                            "knowledge revision value must be valid JSON".to_string()
+                        })?;
+                        let candidate = read_candidate(
+                            transaction,
+                            &request.workspace_id,
+                            &request.session_id,
+                            candidate_id,
+                        )?;
+                        require_pending(&candidate)?;
+                        // 来源只升不降：显式改值至少升到 asked，extracted 保持原级。
+                        let upgraded = if profile_provenance_rank(
+                            candidate.source.profile_provenance.as_deref(),
+                        ) >= profile_provenance_rank(Some("asked"))
+                        {
+                            candidate.source.profile_provenance.clone()
+                        } else {
+                            Some("asked".to_string())
+                        };
+                        let changed = transaction
+                            .execute(
+                                "UPDATE knowledge_fact_candidates
+                             SET value_json=?1, normalized_value_json=?2, unit=?3,
+                                 profile_provenance=?4, status='awaiting-confirmation'
+                             WHERE id=?5 AND status IN ('awaiting-confirmation', 'conflict')",
+                                params![
+                                    value_json,
+                                    normalized,
+                                    request.unit,
+                                    upgraded,
+                                    candidate_id
+                                ],
+                            )
+                            .map_err(|error| format!("revise knowledge candidate: {error}"))?;
+                        if changed != 1 {
+                            return Err(OPTIMISTIC_CONFLICT.to_string());
+                        }
+                        let after = serde_json::json!({
+                            "valueJson": value_json,
+                            "normalizedValueJson": normalized,
+                            "unit": request.unit,
+                            "profileProvenance": upgraded,
+                            "status": "awaiting-confirmation",
+                        });
+                        insert_revision_audit(
+                            transaction,
+                            KnowledgeRevisionAuditInsert {
+                                candidate_id,
+                                action: "modify",
+                                actor_id: &request.actor_id,
+                                session_id: &request.session_id,
+                                before: Some(&revision_snapshot(&candidate)),
+                                after: Some(&after),
+                                reason: &request.reason,
+                                now: &now,
+                            },
+                        )?;
+                        candidate_id.to_string()
+                    }
+                    "delete" => {
+                        let candidate_id = request.candidate_id.as_deref().ok_or_else(|| {
+                            "knowledge revision requires a candidate id".to_string()
+                        })?;
+                        let candidate = read_candidate(
+                            transaction,
+                            &request.workspace_id,
+                            &request.session_id,
+                            candidate_id,
+                        )?;
+                        require_pending(&candidate)?;
+                        let changed = transaction
+                        .execute(
+                            "UPDATE knowledge_fact_candidates SET status='rejected', resolved_at=?1
+                             WHERE id=?2 AND status IN ('awaiting-confirmation', 'conflict')",
+                            params![now, candidate_id],
+                        )
+                        .map_err(|error| format!("delete knowledge candidate: {error}"))?;
+                        if changed != 1 {
+                            return Err(OPTIMISTIC_CONFLICT.to_string());
+                        }
+                        insert_revision_audit(
+                            transaction,
+                            KnowledgeRevisionAuditInsert {
+                                candidate_id,
+                                action: "delete",
+                                actor_id: &request.actor_id,
+                                session_id: &request.session_id,
+                                before: Some(&revision_snapshot(&candidate)),
+                                after: None,
+                                reason: &request.reason,
+                                now: &now,
+                            },
+                        )?;
+                        if let Some(material_id) = candidate.source.material_id.as_deref() {
+                            settle_material_if_resolved(transaction, material_id, &now)?;
+                        }
+                        candidate_id.to_string()
+                    }
+                    "add" => {
+                        let submission = request.submission.clone().ok_or_else(|| {
+                            "knowledge revision add requires a candidate submission".to_string()
+                        })?;
+                        // 嵌套 submission 的身份一致性在 management API handler 的
+                        // 信任边界校验（与 submit/decide 同构），store 不重复判定。
+                        validate_submission(&submission)?;
+                        let current = read_current(transaction, &submission.key.identity)?;
+                        require_version(current.as_ref(), submission.expected_current_version)?;
+                        let candidate_id = persist_candidate_submission(transaction, &submission)?;
+                        if let Some(material_id) = submission.source.material_id.as_deref() {
+                            append_candidate_to_material_attempt(
+                                transaction,
+                                &request.session_id,
+                                material_id,
+                                &candidate_id,
+                                &now,
+                            )?;
+                        }
+                        let candidate = read_candidate(
+                            transaction,
+                            &request.workspace_id,
+                            &request.session_id,
+                            &candidate_id,
+                        )?;
+                        insert_revision_audit(
+                            transaction,
+                            KnowledgeRevisionAuditInsert {
+                                candidate_id: &candidate_id,
+                                action: "add",
+                                actor_id: &request.actor_id,
+                                session_id: &request.session_id,
+                                before: None,
+                                after: Some(&revision_snapshot(&candidate)),
+                                reason: &request.reason,
+                                now: &now,
+                            },
+                        )?;
+                        candidate_id
+                    }
+                    _ => return Err("invalid knowledge revision action".to_string()),
+                };
+                Ok(resolved_candidate_id)
+            },
+        )?;
         self.knowledge_candidate(
             &request.workspace_id,
             &request.session_id,

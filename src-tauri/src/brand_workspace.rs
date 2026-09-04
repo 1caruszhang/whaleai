@@ -1084,6 +1084,8 @@ fn rename_table_in_ddl(ddl: &str, from: &str, to: &str) -> Result<String, String
     Ok(format!("CREATE TABLE {to}{rest}"))
 }
 
+// 票 04 清零后生产段零调用，仅测试段 fixture 使用；本体删除归票 05。
+#[allow(dead_code)]
 fn open_database(workspace: &BrandWorkspace) -> Result<Connection, String> {
     let connection = Connection::open(workspace.root_path.join("project.sqlite"))
         .map_err(|error| format!("open brand database: {error}"))?;

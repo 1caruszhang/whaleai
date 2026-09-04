@@ -1,7 +1,7 @@
 use rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
-use super::{open_database, BrandWorkspace, BrandWorkspaceStore};
+use super::{BrandWorkspace, BrandWorkspaceStore};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "kebab-case")]
@@ -172,7 +172,7 @@ impl BrandWorkspaceStore {
                 ));
             }
         };
-        let connection = open_database(&workspace)?;
+        let connection = BrandWorkspaceStore::open(&workspace)?;
         let operation_session: Option<Option<String>> = connection
             .query_row(
                 "SELECT session_id FROM geo_operations WHERE id=?1",
@@ -333,7 +333,7 @@ fn classify_geo_status(value: &str) -> Option<&'static str> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{SessionCommit, SessionTitleSource};
+    use super::super::{open_database, SessionCommit, SessionTitleSource};
     use super::*;
     use rusqlite::params;
     use tempfile::tempdir;

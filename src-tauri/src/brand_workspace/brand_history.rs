@@ -1,7 +1,7 @@
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 
-use super::{open_database, BrandWorkspaceStore};
+use super::BrandWorkspaceStore;
 
 const HISTORY_LIMIT: usize = 100;
 
@@ -694,7 +694,7 @@ fn load_artifact_history(connection: &Connection) -> Result<Vec<BrandArtifactHis
 impl BrandWorkspaceStore {
     pub fn brand_history(&self, workspace_id: &str) -> Result<BrandHistoryProjection, String> {
         let workspace = self.workspace(workspace_id)?;
-        let connection = open_database(&workspace)?;
+        let connection = BrandWorkspaceStore::open(&workspace)?;
         Ok(BrandHistoryProjection {
             workspace_id: workspace_id.to_string(),
             knowledge_versions: load_knowledge_history(&connection)?,
@@ -718,7 +718,9 @@ pub async fn cmd_brand_workspace_history(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::brand_workspace::{BrandWorkspaceStore, SessionCommit, SessionTitleSource};
+    use crate::brand_workspace::{
+        open_database, BrandWorkspaceStore, SessionCommit, SessionTitleSource,
+    };
     use serde_json::json;
     use tempfile::tempdir;
 

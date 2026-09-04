@@ -438,7 +438,6 @@ impl ArtifactLineageState {
             ]),
             Self::MonitorPaused => Some(&[ArtifactLineageState::MonitorActive]),
             Self::MonitorCompleted => Some(MONITOR_ACTIVE_OR_PAUSED),
-            _ => None,
         }
     }
 }
@@ -513,7 +512,7 @@ pub fn set_lineage_state(connection: &Connection, id: &str, state: &str) -> Resu
 mod tests {
     use super::*;
     use crate::brand_workspace::{
-        open_database, BrandWorkspace, BrandWorkspaceStore, SessionCommit, SessionTitleSource,
+        BrandWorkspace, BrandWorkspaceStore, SessionCommit, SessionTitleSource,
     };
     use tempfile::tempdir;
 
@@ -611,7 +610,7 @@ mod tests {
                 },
             )
             .unwrap();
-        let connection = open_database(&workspace).unwrap();
+        let connection = BrandWorkspaceStore::open(&workspace).unwrap();
         (store, workspace, connection)
     }
 

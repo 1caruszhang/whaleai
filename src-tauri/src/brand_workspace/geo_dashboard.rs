@@ -5,7 +5,8 @@ use rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use super::{open_database, BrandWorkspaceStore};
+use super::persistence::gates;
+use super::BrandWorkspaceStore;
 
 const POLICY_VERSION: &str = "xiaojing-real-geo-dashboard-v1";
 const EVIDENCE_LIMIT: usize = 8;
@@ -1585,19 +1586,6 @@ fn build_observation_log(
     non_probe
 }
 
-fn require_dashboard_session(connection: &Connection, session_id: &str) -> Result<(), String> {
-    let exists: bool = connection
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM brand_sessions WHERE id=?1)",
-            [session_id],
-            |row| row.get(0),
-        )
-        .map_err(|error| format!("verify dashboard session: {error}"))?;
-    exists
-        .then_some(())
-        .ok_or_else(|| "geo_dashboard_session_not_found".to_string())
-}
-
 fn build_projection(
     connection: &Connection,
     workspace_id: &str,
@@ -1720,8 +1708,8 @@ impl BrandWorkspaceStore {
         request: GeoDashboardGetRequest,
     ) -> Result<GeoDashboardProjection, String> {
         let workspace = self.workspace(workspace_id)?;
-        let connection = open_database(&workspace)?;
-        require_dashboard_session(&connection, session_id)?;
+        let connection = BrandWorkspaceStore::open(&workspace)?;
+        gates::DASHBOARD_SESSION.enforce(&connection, session_id)?;
         build_projection(
             &connection,
             workspace_id,
@@ -1742,8 +1730,8 @@ impl BrandWorkspaceStore {
             return Err("geo_dashboard_drilldown_id_invalid".to_string());
         }
         let workspace = self.workspace(workspace_id)?;
-        let connection = open_database(&workspace)?;
-        require_dashboard_session(&connection, session_id)?;
+        let connection = BrandWorkspaceStore::open(&workspace)?;
+        gates::DASHBOARD_SESSION.enforce(&connection, session_id)?;
         match request.kind.as_str() {
             "baseline-unit" => {
                 let row = connection
@@ -2008,7 +1996,7 @@ impl BrandWorkspaceStore {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{BrandWorkspace, SessionCommit, SessionTitleSource};
+    use super::super::{open_database, BrandWorkspace, SessionCommit, SessionTitleSource};
     use super::*;
     use rusqlite::params;
     use tempfile::tempdir;
