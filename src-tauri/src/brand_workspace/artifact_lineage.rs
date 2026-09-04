@@ -625,6 +625,12 @@ mod tests {
                     &[
                         "question-pool-awaiting-selection",
                         "question-pool-confirmed",
+                    ],
+                ),
+            ],
+        );
+    }
+
     // topic-plan 族 2×2 迁移矩阵（票 04 按 topic_plans.rs 真实代码钉）：
     // awaiting-confirmation 只经 open 开行（set 无路径，from 集为空）；
     // confirm 的计划 UPDATE 放行 awaiting/confirmed 两态——首确认
@@ -663,12 +669,6 @@ mod tests {
                     &["article-generation-running"],
                 ),
                 ("article-generation-completed-with-failures", &ALL_THREE),
-            ],
-        );
-    }
-
-                    ],
-                ),
             ],
         );
     }
