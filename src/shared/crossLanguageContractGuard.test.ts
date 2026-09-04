@@ -134,8 +134,8 @@ function refPathTargets(ref: string, contractRelPath: string): boolean {
 // 它们是登记在册的过渡态而非违规，各域清零票迁写点经 owner 接口后删除
 // 对应豁免项。baseline 族 2 处已随票 02、question-pool 族 3 处随票 03、
 // topic-plan 族 2 处随票 04、distribution 族 3 处随票 05、
-// article-generation 族 2 处随票 06、monitor 族 6 处随票 07 清零（余
-// publish 1 域 9 处），publish 族（9 处）清零后终态零豁免。
+// article-generation 族 2 处随票 06、monitor 族 6 处随票 07、publish 族
+// 9 处随票 08 清零——七域 27 处全部经 owner 接口，豁免表清空（零豁免终态）。
 //
 // 扫描只看生产段（首个测试模块之前的文本）：测试 fixture 的裸 INSERT
 // 不受约束。豁免键＝`${仓库相对路径}::${n}`，n 为该文件生产段内写点的
@@ -151,22 +151,12 @@ const LINEAGE_SQL_WRITE_ALLOWLIST: ReadonlySet<string> = new Set([
  * 立项初始登记恰 27 项（2026-09-04 盘点：2+3+2+2+3+9+6；baseline 2 处已随
  * 票 02、question-pool 3 处已随票 03、topic-plan 2 处已随票 04、
  * distribution 3 处已随票 05、article-generation 2 处已随票 06、monitor
- * 6 处已随票 07 清零）由该严格相等的传递性锁死，不硬编码
- * 计数断言——清零票逐项消项时硬编码计数会误红（spec 决策 5「逐票清零」与
- * Testing Decisions「初始恰 27 项」的相容读法）。 */
-const LINEAGE_DIRECT_WRITE_EXEMPTIONS: ReadonlyMap<string, string> = new Map([
-  // publish 族 9 处（publish_scheduler.rs：两处旧预览废弃＋开行＋确认＋
-  // 启动＋复活＋取消＋恢复＋聚合刷新）——清零后守卫达成零豁免终态
-  ["src-tauri/src/brand_workspace/publish_scheduler.rs::1", "publish"],
-  ["src-tauri/src/brand_workspace/publish_scheduler.rs::2", "publish"],
-  ["src-tauri/src/brand_workspace/publish_scheduler.rs::3", "publish"],
-  ["src-tauri/src/brand_workspace/publish_scheduler.rs::4", "publish"],
-  ["src-tauri/src/brand_workspace/publish_scheduler.rs::5", "publish"],
-  ["src-tauri/src/brand_workspace/publish_scheduler.rs::6", "publish"],
-  ["src-tauri/src/brand_workspace/publish_scheduler.rs::7", "publish"],
-  ["src-tauri/src/brand_workspace/publish_scheduler.rs::8", "publish"],
-  ["src-tauri/src/brand_workspace/publish_scheduler.rs::9", "publish"],
-]);
+ * 6 处已随票 07、publish 9 处已随票 08 清零）由该严格相等的传递性锁死，
+ * 不硬编码计数断言——清零票逐项消项时硬编码计数会误红（spec 决策 5
+ * 「逐票清零」与 Testing Decisions「初始恰 27 项」的相容读法）。
+ * 棘轮终态（票 08 后）：表空，键集恰为空集；新域血缘写必须落在
+ * artifact_lineage.rs，不允许再登记豁免。 */
+const LINEAGE_DIRECT_WRITE_EXEMPTIONS: ReadonlyMap<string, string> = new Map([]);
 
 const LINEAGE_WRITE_SQL_RES: readonly RegExp[] = [
   /insert\s+into\s+geo_operations\b/gi,

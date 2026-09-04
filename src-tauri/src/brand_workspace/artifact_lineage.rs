@@ -13,8 +13,8 @@
 // 镜像主链 geo_operation_transition_invalid:{current} 风格）。baseline 族
 // 已随票 02、question-pool 族已随票 03、topic-plan 族已随票 04、
 // distribution 族已随票 05、article-generation 族已随票 06、monitor 族已随
-// 票 07 清零（写点迁移＋from 规则钉死），其余各族直写仍在豁免表（清零进度
-// 以守卫豁免表为准）。
+// 票 07、publish 族已随票 08 清零（写点迁移＋from 规则钉死）——七域全部
+// 经 owner 接口，守卫豁免表清空（零豁免终态）。
 use std::fmt;
 
 use chrono::Utc;
@@ -263,6 +263,63 @@ impl ArtifactLineageState {
     ///   写均在计划 active 之后才可达），completed→completed 需要计划
     ///   completed 后仍有 settle（claim 门卫 active 挡死），均不可达。
     ///
+    /// publish 族（票 08，按 publish_scheduler.rs 真实代码钉）：写点＝
+    /// prepare 两处旧预览废弃＋开行、confirm、start、retry 复活、cancel、
+    /// resume、refresh 聚合共 9 处（最大一族）。执行表 status 与血缘态在
+    /// 正常路径同事务成对迁移（镜像不变量），但存在两处真实破口，from 集
+    /// 按真实可达而非镜像想象钉：
+    /// - awaiting-confirmation 只由 open INSERT 开行——from 集为空（沿
+    ///   票 03/04/05 的 open-only 惯例，set 到它必拒）；
+    /// - confirmed←{awaiting-confirmation}（confirm 前置门卫 status==
+    ///   'awaiting-confirmation'，SELECT 与 CAS UPDATE 双保险）；
+    ///   executing←{confirmed}（start 前置门卫 status=='confirmed'；无论
+    ///   执行落 running 还是 scheduled 血缘恒写 executing——not-due 开跑
+    ///   的执行在首次聚合刷新前血缘停在 executing）；preview-superseded←
+    ///   {awaiting-confirmation}（prepare 两处废弃都只对 status==
+    ///   'awaiting-confirmation' 的旧预览动手）；
+    /// - 破口一（payload 冲突翻转不写血缘）：prepare 的幂等键冲突分支把
+    ///   执行 status 直接置 'reconciliation-required'（UPDATE 无 status
+    ///   门卫）而不写血缘行——被翻转执行的血缘停留在原镜像态，可为
+    ///   confirmed/executing/running/scheduled/partially-succeeded/
+    ///   failed/cancelled/reconciliation-required 八种（awaiting 与
+    ///   superseded 执行走废弃分支不翻转；succeeded 执行的冲突条目是
+    ///   submitted，走重复载荷拒绝早退不动行）。resume 只看执行 status
+    ///   对翻转执行照常放行，故 scheduled 的 from 集囊括这八态，再加
+    ///   retry 复活的 cancelled（复活分支门卫执行 status=='cancelled'）
+    ///   与聚合刷新的 {executing, scheduled}（not-due 开跑首扫落
+    ///   scheduled、周期重扫自环）；
+    /// - 破口二（聚合刷新无条件重写血缘）：refresh 的血缘 UPDATE 不看
+    ///   执行 status 是否变化——changed==0（含 refresh_all 周期重扫）也
+    ///   重写。故 scheduled/running/partially-succeeded/failed/
+    ///   reconciliation-required 的 from 集都含自环；succeeded 不含
+    ///   （refresh_all 排除 succeeded 执行，条目全 submitted 无认领或
+    ///   重试可再触发刷新）；
+    /// - 取消后的在途单照常 settle 并触发 refresh（执行保持 cancelled、
+    ///   血缘漂移——现行行为原样保持）：cancelled 是 running/partial/
+    ///   succeeded/failed/reconciliation-required 五个聚合态的真实 from
+    ///   （在途单分别落 failed-retryable、其余已完成或失败、submitted、
+    ///   failed-nonretryable、reconciliation-required 时）；反向
+    ///   cancelled 作为聚合目标不可达——取消执行无 pending 条目可入
+    ///   future 集合，复活路径先经 retry 复活写点把血缘写回 scheduled
+    ///   再进 refresh；
+    /// - cancelled←{executing, running, scheduled, partially-succeeded,
+    ///   failed}：cancel 前置门卫 status IN ('running','scheduled',
+    ///   'partially-succeeded','failed')，running/scheduled 执行的血缘
+    ///   可能仍是 executing（start 之后、首次 refresh 之前）；
+    /// - running 的 from 集＝聚合可见全集（含 partial 与 failed）：partial
+    ///   /failed 的 terminal_failed 并不单调——retry 重置把 failed-
+    ///   nonretryable 条目收回 pending 后，尾随 refresh 在分支 4 之前已
+    ///   无可截胡的计数，多条目场景直接重算回 running（单条目 failed 重置
+    ///   亦回 running；端到端钉见 publish_scheduler 的
+    ///   republish_resets_partially_succeeded_execution_back_to_running）；
+    ///   succeeded 与 failed 互不在对方 from 集、也都不含 recon：
+    ///   succeeded 需全 submitted（failed 执行 0 submitted，条目须逐个经
+    ///   认领与 settle，每次 settle 后的 refresh 必先落 partial），recon
+    ///   条目以最高优先级钉住计算结果；
+    /// - preview-superseded 与 succeeded 是终态，不在任何目标态的 from
+    ///   集里：前者不可确认（confirm 门卫）、不可认领（未开跑）、不可
+    ///   周期重扫（execution_started_at 为 NULL）；后者条目全 submitted
+    ///   不可认领或重试、不可取消（cancel 门卫）、不进 refresh_all。
     fn allowed_from(target: Self) -> Option<&'static [Self]> {
         const RUNNING_PARTIAL_FAILED: &[ArtifactLineageState] = &[
             ArtifactLineageState::BaselineRunning,
@@ -294,10 +351,52 @@ impl ArtifactLineageState {
             ArtifactLineageState::MonitorActive,
             ArtifactLineageState::MonitorPaused,
         ];
-        const MONITOR_DRAFT_PAUSED_OR_COMPLETED: &[ArtifactLineageState] = &[
-            ArtifactLineageState::MonitorDraft,
-            ArtifactLineageState::MonitorPaused,
-            ArtifactLineageState::MonitorCompleted,
+        const PUBLISH_AWAITING_ONLY: &[ArtifactLineageState] =
+            &[ArtifactLineageState::PublishAwaitingConfirmation];
+        const PUBLISH_CONFIRMED_ONLY: &[ArtifactLineageState] =
+            &[ArtifactLineageState::PublishConfirmed];
+        // 聚合 refresh 可见证的执行镜像全集（破口一/二让它对六个聚合目标
+        // 都真实可达；见上方 publish 族注）。
+        const PUBLISH_AGGREGATE_MIX: &[ArtifactLineageState] = &[
+            ArtifactLineageState::PublishExecuting,
+            ArtifactLineageState::PublishRunning,
+            ArtifactLineageState::PublishScheduled,
+            ArtifactLineageState::PublishPartiallySucceeded,
+            ArtifactLineageState::PublishFailed,
+            ArtifactLineageState::PublishCancelled,
+        ];
+        const PUBLISH_CANCELLED_FROM: &[ArtifactLineageState] = &[
+            ArtifactLineageState::PublishExecuting,
+            ArtifactLineageState::PublishRunning,
+            ArtifactLineageState::PublishScheduled,
+            ArtifactLineageState::PublishPartiallySucceeded,
+            ArtifactLineageState::PublishFailed,
+        ];
+        const PUBLISH_SUCCEEDED_FROM: &[ArtifactLineageState] = &[
+            ArtifactLineageState::PublishExecuting,
+            ArtifactLineageState::PublishRunning,
+            ArtifactLineageState::PublishScheduled,
+            ArtifactLineageState::PublishPartiallySucceeded,
+            ArtifactLineageState::PublishCancelled,
+        ];
+        const PUBLISH_RECON_FROM: &[ArtifactLineageState] = &[
+            ArtifactLineageState::PublishExecuting,
+            ArtifactLineageState::PublishRunning,
+            ArtifactLineageState::PublishScheduled,
+            ArtifactLineageState::PublishPartiallySucceeded,
+            ArtifactLineageState::PublishFailed,
+            ArtifactLineageState::PublishCancelled,
+            ArtifactLineageState::PublishReconciliationRequired,
+        ];
+        const PUBLISH_SCHEDULED_FROM: &[ArtifactLineageState] = &[
+            ArtifactLineageState::PublishConfirmed,
+            ArtifactLineageState::PublishExecuting,
+            ArtifactLineageState::PublishRunning,
+            ArtifactLineageState::PublishScheduled,
+            ArtifactLineageState::PublishPartiallySucceeded,
+            ArtifactLineageState::PublishFailed,
+            ArtifactLineageState::PublishCancelled,
+            ArtifactLineageState::PublishReconciliationRequired,
         ];
         match target {
             Self::BaselineRunning | Self::BaselineSucceeded | Self::BaselinePartial => {
@@ -321,8 +420,22 @@ impl ArtifactLineageState {
             Self::DistributionDiscovering => Some(NO_SET),
             Self::DistributionUnavailable | Self::DistributionPlanDraft => Some(DISCOVERING_ONLY),
             Self::DistributionPlanConfirmed => Some(DRAFT_ONLY),
+            Self::PublishAwaitingConfirmation => Some(NO_SET),
+            Self::PublishConfirmed | Self::PublishPreviewSuperseded => Some(PUBLISH_AWAITING_ONLY),
+            Self::PublishExecuting => Some(PUBLISH_CONFIRMED_ONLY),
+            Self::PublishScheduled => Some(PUBLISH_SCHEDULED_FROM),
+            Self::PublishCancelled => Some(PUBLISH_CANCELLED_FROM),
+            Self::PublishReconciliationRequired => Some(PUBLISH_RECON_FROM),
+            Self::PublishSucceeded => Some(PUBLISH_SUCCEEDED_FROM),
+            Self::PublishPartiallySucceeded | Self::PublishFailed | Self::PublishRunning => {
+                Some(PUBLISH_AGGREGATE_MIX)
+            }
             Self::MonitorDraft => Some(NO_SET),
-            Self::MonitorActive => Some(MONITOR_DRAFT_PAUSED_OR_COMPLETED),
+            Self::MonitorActive => Some(&[
+                ArtifactLineageState::MonitorDraft,
+                ArtifactLineageState::MonitorPaused,
+                ArtifactLineageState::MonitorCompleted,
+            ]),
             Self::MonitorPaused => Some(&[ArtifactLineageState::MonitorActive]),
             Self::MonitorCompleted => Some(MONITOR_ACTIVE_OR_PAUSED),
             _ => None,
@@ -762,20 +875,138 @@ mod tests {
         );
     }
 
-    // 未钉规则的族保持立项票的等价搬家语义（无 from 校验），不被 monitor
-    // 规则误伤——publish 逆向 set 亦放行，其 from 规则属票 08 职权。
+    // publish 族 11×11 迁移矩阵（票 08 按 publish_scheduler.rs 真实代码钉）：
+    // 最大一族——写点 9 处、两处真实镜像破口（payload 冲突翻转不写血缘、
+    // 聚合刷新无条件重写）让 from 集远宽于朴素的执行镜像链（见 allowed_from
+    // 注）：awaiting 仅经 open 开行；confirmed/executing/preview-superseded
+    // 单 predecessor；scheduled 的 from 集八态（含 resume 对翻转执行的放行）；
+    // cancelled 漂移进五个聚合目标而在聚合目标中缺席；running 的 from 集＝
+    // 聚合可见全集（retry 重置收回 terminal 计数后 partial/failed 直接回
+    // running）；succeeded/preview-superseded 终态零出边。端到端等价
+    // 由 publish_scheduler 既有测试零改动即绿钉住。
     #[test]
-    fn families_without_pinned_rules_stay_unchecked_until_their_clearing_ticket() {
-        let (_store, _workspace, connection) = connection();
-        open_lineage(
-            &connection,
-            "op-unpinned",
-            "session-lineage",
-            "publish-succeeded",
-        )
-        .unwrap();
-        set_lineage_state(&connection, "op-unpinned", "publish-running").unwrap();
-        assert_eq!(lineage_row(&connection, "op-unpinned").0, "publish-running");
+    fn publish_family_transitions_follow_the_real_code_matrix() {
+        assert_family_matrix(
+            &[
+                "publish-awaiting-confirmation",
+                "publish-confirmed",
+                "publish-executing",
+                "publish-scheduled",
+                "publish-cancelled",
+                "publish-preview-superseded",
+                "publish-reconciliation-required",
+                "publish-succeeded",
+                "publish-partially-succeeded",
+                "publish-failed",
+                "publish-running",
+            ],
+            &[
+                ("publish-awaiting-confirmation", &[]),
+                ("publish-confirmed", &["publish-awaiting-confirmation"]),
+                ("publish-executing", &["publish-confirmed"]),
+                (
+                    "publish-scheduled",
+                    &[
+                        "publish-confirmed",
+                        "publish-executing",
+                        "publish-running",
+                        "publish-scheduled",
+                        "publish-partially-succeeded",
+                        "publish-failed",
+                        "publish-cancelled",
+                        "publish-reconciliation-required",
+                    ],
+                ),
+                (
+                    "publish-cancelled",
+                    &[
+                        "publish-executing",
+                        "publish-running",
+                        "publish-scheduled",
+                        "publish-partially-succeeded",
+                        "publish-failed",
+                    ],
+                ),
+                (
+                    "publish-preview-superseded",
+                    &["publish-awaiting-confirmation"],
+                ),
+                (
+                    "publish-reconciliation-required",
+                    &[
+                        "publish-executing",
+                        "publish-running",
+                        "publish-scheduled",
+                        "publish-partially-succeeded",
+                        "publish-failed",
+                        "publish-cancelled",
+                        "publish-reconciliation-required",
+                    ],
+                ),
+                (
+                    "publish-succeeded",
+                    &[
+                        "publish-executing",
+                        "publish-running",
+                        "publish-scheduled",
+                        "publish-partially-succeeded",
+                        "publish-cancelled",
+                    ],
+                ),
+                (
+                    "publish-partially-succeeded",
+                    &[
+                        "publish-executing",
+                        "publish-running",
+                        "publish-scheduled",
+                        "publish-partially-succeeded",
+                        "publish-failed",
+                        "publish-cancelled",
+                    ],
+                ),
+                (
+                    "publish-failed",
+                    &[
+                        "publish-executing",
+                        "publish-running",
+                        "publish-scheduled",
+                        "publish-partially-succeeded",
+                        "publish-failed",
+                        "publish-cancelled",
+                    ],
+                ),
+                (
+                    "publish-running",
+                    &[
+                        "publish-executing",
+                        "publish-running",
+                        "publish-scheduled",
+                        "publish-partially-succeeded",
+                        "publish-failed",
+                        "publish-cancelled",
+                    ],
+                ),
+            ],
+        );
+    }
+
+    // 棘轮终态钉（票 08 收官）：七域 from 规则全部在位——立项票留下的
+    // 「未钉族无 from 校验」过渡语义已无适用对象；新态若不随迁移它的写点
+    // 登记 from 规则，会落进 `_ => None` 的无校验分支，此测试直接红灯逼
+    // 登记（替代原「未钉族保持无校验」测试——其职责随最后两族（monitor
+    // 07、publish 08）钉毕而消灭）。
+    #[test]
+    fn every_family_has_pinned_from_rules_after_the_ratchet_terminal() {
+        let unpinned = ArtifactLineageState::ALL
+            .iter()
+            .filter(|state| ArtifactLineageState::allowed_from(**state).is_none())
+            .map(|state| state.kebab())
+            .collect::<Vec<_>>();
+        assert!(
+            unpinned.is_empty(),
+            "棘轮终态后不允许无 from 规则的血缘态（漏登记者：{unpinned:?}），\
+             新态必须随迁移它的写点一并钉规则"
+        );
     }
 
     #[test]

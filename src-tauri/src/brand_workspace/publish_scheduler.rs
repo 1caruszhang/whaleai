@@ -17,7 +17,7 @@ use tauri::Manager;
 use tokio::sync::Notify;
 use uuid::Uuid;
 
-use super::{open_database, BrandWorkspace, BrandWorkspaceStore};
+use super::{open_database, open_lineage, set_lineage_state, BrandWorkspace, BrandWorkspaceStore};
 
 const POLICY_VERSION: &str = "js-ai-dev-deterministic-publish-v1";
 /// 单篇正文字节上限（裁判：`src/shared/geo/articleGenerationContract.json`，
@@ -879,13 +879,8 @@ impl BrandWorkspaceStore {
                     [&execution_id],
                 )
                 .map_err(|error| format!("release old publish preview keys: {error}"))?;
-            transaction
-                .execute(
-                    "UPDATE geo_operations SET state='publish-preview-superseded'
-                     WHERE id=(SELECT operation_id FROM geo_publish_executions WHERE id=?1)",
-                    [&execution_id],
-                )
-                .map_err(|error| format!("supersede old publish operation: {error}"))?;
+            // 血缘行迁移经唯一 owner（票 08）。
+            mirror_publish_lineage(&transaction, &execution_id, "publish-preview-superseded")?;
             insert_audit(
                 &transaction,
                 &execution_id,
@@ -1138,13 +1133,12 @@ impl BrandWorkspaceStore {
                             [&existing_execution_id],
                         )
                         .map_err(|error| format!("release superseded publish keys: {error}"))?;
-                    transaction
-                        .execute(
-                            "UPDATE geo_operations SET state='publish-preview-superseded'
-                             WHERE id=(SELECT operation_id FROM geo_publish_executions WHERE id=?1)",
-                            [&existing_execution_id],
-                        )
-                        .map_err(|error| format!("supersede publish operation: {error}"))?;
+                    // 血缘行迁移经唯一 owner（票 08）。
+                    mirror_publish_lineage(
+                        &transaction,
+                        &existing_execution_id,
+                        "publish-preview-superseded",
+                    )?;
                     insert_audit(
                         &transaction,
                         &existing_execution_id,
@@ -1239,13 +1233,13 @@ impl BrandWorkspaceStore {
         let execution_id = format!("publish-execution-{}", &execution_hash[..24]);
         let operation_id = format!("publish-operation-{}", &execution_hash[..24]);
         let now = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
-        transaction
-            .execute(
-                "INSERT INTO geo_operations (id, session_id, state, created_at)
-                 VALUES (?1, ?2, 'publish-awaiting-confirmation', ?3)",
-                params![operation_id, session_id, now],
-            )
-            .map_err(|error| format!("create publish operation: {error}"))?;
+        // 血缘行开行经唯一 owner（票 08）。
+        open_lineage(
+            &transaction,
+            &operation_id,
+            session_id,
+            "publish-awaiting-confirmation",
+        )?;
         transaction
             .execute(
                 "INSERT INTO geo_publish_executions
@@ -1387,13 +1381,8 @@ impl BrandWorkspaceStore {
         if changed != 1 {
             return Err("publish_execution_confirmation_conflict".to_string());
         }
-        transaction
-            .execute(
-                "UPDATE geo_operations SET state='publish-confirmed' WHERE id=(
-                    SELECT operation_id FROM geo_publish_executions WHERE id=?1)",
-                [&request.execution_id],
-            )
-            .map_err(|error| format!("confirm publish operation: {error}"))?;
+        // 血缘行迁移经唯一 owner（票 08）。
+        mirror_publish_lineage(&transaction, &request.execution_id, "publish-confirmed")?;
         insert_audit(
             &transaction,
             &request.execution_id,
@@ -1731,13 +1720,9 @@ impl BrandWorkspaceStore {
         if changed != 1 {
             return Err("publish_execution_revision_conflict".to_string());
         }
-        transaction
-            .execute(
-                "UPDATE geo_operations SET state='publish-executing' WHERE id=(
-                    SELECT operation_id FROM geo_publish_executions WHERE id=?1)",
-                [&request.execution_id],
-            )
-            .map_err(|error| format!("start publish operation: {error}"))?;
+        // 血缘行迁移经唯一 owner（票 08）：无论执行落 running 还是 scheduled，
+        // 血缘恒写 executing（not-due 的漂移由 refresh 聚合收口）。
+        mirror_publish_lineage(&transaction, &request.execution_id, "publish-executing")?;
         insert_audit(
             &transaction,
             &request.execution_id,
@@ -1855,13 +1840,8 @@ impl BrandWorkspaceStore {
                 &json!({"itemId": request.item_id}),
                 &now,
             )?;
-            transaction
-                .execute(
-                    "UPDATE geo_operations SET state='publish-scheduled' WHERE id=(
-                        SELECT operation_id FROM geo_publish_executions WHERE id=?1)",
-                    params![request.execution_id],
-                )
-                .map_err(|error| format!("mirror revived publish operation: {error}"))?;
+            // 血缘行迁移经唯一 owner（票 08）。
+            mirror_publish_lineage(&transaction, &request.execution_id, "publish-scheduled")?;
         }
         transaction
             .execute(
@@ -1948,13 +1928,8 @@ impl BrandWorkspaceStore {
             return Err("publish_execution_revision_conflict".to_string());
         }
         let now = now_iso(now_ms);
-        transaction
-            .execute(
-                "UPDATE geo_operations SET state='publish-cancelled' WHERE id=(
-                    SELECT operation_id FROM geo_publish_executions WHERE id=?1)",
-                params![request.execution_id],
-            )
-            .map_err(|error| format!("mirror cancelled publish operation: {error}"))?;
+        // 血缘行迁移经唯一 owner（票 08）。
+        mirror_publish_lineage(&transaction, &request.execution_id, "publish-cancelled")?;
         insert_audit(
             &transaction,
             &request.execution_id,
@@ -2071,13 +2046,9 @@ impl BrandWorkspaceStore {
         if changed != 1 {
             return Err("publish_execution_revision_conflict".to_string());
         }
-        transaction
-            .execute(
-                "UPDATE geo_operations SET state='publish-scheduled' WHERE id=(
-                    SELECT operation_id FROM geo_publish_executions WHERE id=?1)",
-                [&request.execution_id],
-            )
-            .map_err(|error| format!("resume reconciled operation: {error}"))?;
+        // 血缘行迁移经唯一 owner（票 08）。from 集覆盖 prepare 冲突分支翻转
+        // 执行（翻转不写血缘，行值停留在原镜像态）——见 owner 注的破口一。
+        mirror_publish_lineage(&transaction, &request.execution_id, "publish-scheduled")?;
         insert_audit(
             &transaction,
             &request.execution_id,
@@ -4207,6 +4178,30 @@ fn refresh_all_execution_statuses(workspace: &BrandWorkspace, now_ms: i64) -> Re
     Ok(())
 }
 
+/// 血缘行迁移经唯一 owner（票 08）：operation_id 经执行行解析，再交
+/// set_lineage_state 落值。旧直写 SQL 的 `WHERE id=(SELECT operation_id
+/// FROM geo_publish_executions WHERE id=?1)` 子查询在执行行缺失时落
+/// NULL、UPDATE 影响 0 行被忽略——这里以「执行行缺失即跳过」保持同一
+/// no-op 语义（from 规则与词表校验由 owner 承担）。
+fn mirror_publish_lineage(
+    connection: &Connection,
+    execution_id: &str,
+    state: &str,
+) -> Result<(), String> {
+    let operation_id: Option<String> = connection
+        .query_row(
+            "SELECT operation_id FROM geo_publish_executions WHERE id=?1",
+            [execution_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| format!("read publish operation id: {error}"))?;
+    match operation_id {
+        Some(operation_id) => set_lineage_state(connection, &operation_id, state),
+        None => Ok(()),
+    }
+}
+
 fn refresh_execution_status(
     workspace: &BrandWorkspace,
     execution_id: &str,
@@ -4265,13 +4260,10 @@ fn refresh_execution_status(
             params![execution_id, status, finished, now],
         )
         .map_err(|error| format!("refresh publish execution: {error}"))?;
-    transaction
-        .execute(
-            "UPDATE geo_operations SET state=?2 WHERE id=(
-                SELECT operation_id FROM geo_publish_executions WHERE id=?1)",
-            params![execution_id, format!("publish-{status}")],
-        )
-        .map_err(|error| format!("refresh publish operation: {error}"))?;
+    // 血缘行迁移经唯一 owner（票 08）：保持旧直写的无条件重写语义——执行
+    // status 未变（changed==0，含 refresh_all 周期重扫）也照写，自环与
+    // 取消后漂移均真实可达（owner 注的破口二与 cancelled 漂移边）。
+    mirror_publish_lineage(&transaction, execution_id, &format!("publish-{status}"))?;
     transaction
         .commit()
         .map_err(|error| format!("commit publish execution refresh: {error}"))?;
@@ -5290,6 +5282,78 @@ mod tests {
             .unwrap();
         assert_eq!(done.status, "succeeded");
         assert_eq!(done.items[0].status, "submitted");
+    }
+
+    /// 票 08 等价钉：partial（0 submitted＋1 terminal 失败＋1 活跃）执行上
+    /// 「重新发布」重置 failed-nonretryable 条目后，尾随 refresh 重算回
+    /// running——terminal_failed 不单调（重置把它收回 pending），血缘
+    /// publish-partially-succeeded→publish-running 是真实可达迁移（owner
+    /// from 规则按此放行；矩阵见 artifact_lineage 同族测试）。
+    #[tokio::test(flavor = "current_thread")]
+    async fn republish_resets_partially_succeeded_execution_back_to_running() {
+        let _lock = ENV_LOCK.lock().await;
+        let _env = TestEnvironment::configured();
+        let fixture = setup_fixture(2, 0);
+        let started = confirm_start(&fixture, &preview(&fixture));
+        let lineage_state = |expected_note: &str| {
+            let connection = open_database(&fixture.workspace).unwrap();
+            let state: String = connection
+                .query_row(
+                    "SELECT state FROM geo_operations WHERE id=?1",
+                    [&started.operation_id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(
+                state, expected_note,
+                "血缘态必须与执行镜像一致（票 08 等价搬家）"
+            );
+        };
+        let provider = Arc::new(MockProvider::with_submit_outcomes(vec![
+            PublishProviderOutcome::NonRetryable {
+                code: "distribution-insufficient-balance".to_string(),
+                reason: "余额不足".to_string(),
+            },
+            PublishProviderOutcome::SafeRetryable {
+                code: "distribution-provider-5xx".to_string(),
+                reason: "瞬时故障".to_string(),
+            },
+        ]));
+        scheduler(
+            &fixture,
+            provider.clone(),
+            Arc::new(AtomicI64::new(fixture.now_ms)),
+        )
+        .tick_workspace(&fixture.workspace)
+        .await
+        .unwrap();
+        assert_eq!(provider.counts(), (2, 2));
+        let parked = fixture
+            .store
+            .get_publish_execution(&fixture.workspace.id, "session-13", &started.id)
+            .unwrap();
+        assert_eq!(parked.status, "partially-succeeded");
+        assert_eq!(parked.items[0].status, "failed-nonretryable");
+        assert_eq!(parked.items[1].status, "failed-retryable");
+        lineage_state("publish-partially-succeeded");
+
+        let revived = fixture
+            .store
+            .retry_publish_item(
+                &fixture.workspace.id,
+                "session-13",
+                PublishRetryRequest {
+                    execution_id: started.id.clone(),
+                    item_id: parked.items[0].id.clone(),
+                    expected_item_revision: parked.items[0].revision,
+                },
+                fixture.now_ms + 1_000,
+            )
+            .unwrap();
+        assert_eq!(revived.status, "running");
+        assert_eq!(revived.items[0].status, "pending");
+        assert_eq!(revived.items[1].status, "failed-retryable");
+        lineage_state("publish-running");
     }
 
     /// 存量库迁移：CHECK 约束不含 'cancelled' 的两张表按原文重建后可写
