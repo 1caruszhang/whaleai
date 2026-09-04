@@ -1,4 +1,9 @@
-use super::manager::SessionOwnerRelease;
+use super::manager::{
+    SessionOwnerRelease, SESSION_DELETE_REASON_ACTIVITY_UNAVAILABLE,
+    SESSION_DELETE_REASON_BUSY_REPLYING, SESSION_DELETE_REASON_INVALID_SESSION_ID,
+    SESSION_DELETE_REASON_IN_USE, SESSION_DELETE_REASON_MONITOR_ACTIVE,
+    SESSION_DELETE_REASON_NOT_FOUND,
+};
 use super::*;
 
 pub(crate) type SessionLifecycleGuard = crate::keyed_lifecycle::KeyedLifecycleGuard;
@@ -1062,7 +1067,7 @@ pub async fn cmd_session_has_persistent_owners(
     if has_persisted_session_owner(&sessionId).await? {
         return Ok(SessionPersistentOwnersResult {
             has_persistent_owners: true,
-            reason: Some("monitor-active"),
+            reason: Some(SESSION_DELETE_REASON_MONITOR_ACTIVE),
         });
     }
     Ok(SessionPersistentOwnersResult {
@@ -1109,14 +1114,20 @@ pub async fn cmd_delete_session_if_unowned(
     brandDeletionConfirmationToken: Option<String>,
 ) -> Result<SessionDeleteCommandResult, String> {
     if !is_canonical_session_id(&sessionId) {
-        return Ok(SessionDeleteCommandResult::refused("invalid-session-id"));
+        return Ok(SessionDeleteCommandResult::refused(
+            SESSION_DELETE_REASON_INVALID_SESSION_ID,
+        ));
     }
     if has_persisted_session_owner(&sessionId).await? {
-        return Ok(SessionDeleteCommandResult::refused("monitor-active"));
+        return Ok(SessionDeleteCommandResult::refused(
+            SESSION_DELETE_REASON_MONITOR_ACTIVE,
+        ));
     }
     let _lifecycle = acquire_session_lifecycle(&[&sessionId]).await;
     if has_persisted_session_owner(&sessionId).await? {
-        return Ok(SessionDeleteCommandResult::refused("monitor-active"));
+        return Ok(SessionDeleteCommandResult::refused(
+            SESSION_DELETE_REASON_MONITOR_ACTIVE,
+        ));
     }
     let sidecars = state.inner().clone();
     let releasable_tab_ids = releasableTabIds.into_iter().collect::<HashSet<_>>();
@@ -1137,8 +1148,16 @@ pub async fn cmd_delete_session_if_unowned(
         if let Some(port) = session_port {
             match super::background::check_sidecar_is_busy(port) {
                 Some(false) => {}
-                Some(true) => return Ok(SessionDeleteCommandResult::refused("busy-replying")),
-                None => return Ok(SessionDeleteCommandResult::refused("activity-unavailable")),
+                Some(true) => {
+                    return Ok(SessionDeleteCommandResult::refused(
+                        SESSION_DELETE_REASON_BUSY_REPLYING,
+                    ))
+                }
+                None => {
+                    return Ok(SessionDeleteCommandResult::refused(
+                        SESSION_DELETE_REASON_ACTIVITY_UNAVAILABLE,
+                    ))
+                }
             }
         }
 
@@ -1177,7 +1196,7 @@ pub async fn cmd_delete_session_if_unowned(
         };
         let result = match crate::session_metadata::delete_session_storage(&sessionId) {
             Ok(true) => SessionDeleteCommandResult::deleted(),
-            Ok(false) => SessionDeleteCommandResult::refused("not-found"),
+            Ok(false) => SessionDeleteCommandResult::refused(SESSION_DELETE_REASON_NOT_FOUND),
             Err(error) => {
                 cancel_brand_admission();
                 return Err(error);
@@ -1230,20 +1249,26 @@ pub async fn cmd_brand_workspace_delete(
     let store = crate::brand_workspace::production_store()?;
     let session_ids = store.workspace_session_ids(&workspaceId)?;
     if session_ids.iter().any(|id| !is_canonical_session_id(id)) {
-        return Ok(SessionDeleteCommandResult::refused("invalid-session-id"));
+        return Ok(SessionDeleteCommandResult::refused(
+            SESSION_DELETE_REASON_INVALID_SESSION_ID,
+        ));
     }
     // Preflight before the fence only preserves already-mounted state on
     // refusal; every mutation below re-validates under the lifecycle fence.
     for session_id in &session_ids {
         if has_persisted_session_owner(session_id).await? {
-            return Ok(SessionDeleteCommandResult::refused("in-use"));
+            return Ok(SessionDeleteCommandResult::refused(
+                SESSION_DELETE_REASON_IN_USE,
+            ));
         }
     }
     let session_refs = session_ids.iter().map(String::as_str).collect::<Vec<_>>();
     let _lifecycle = acquire_session_lifecycle(&session_refs).await;
     for session_id in &session_ids {
         if has_persisted_session_owner(session_id).await? {
-            return Ok(SessionDeleteCommandResult::refused("in-use"));
+            return Ok(SessionDeleteCommandResult::refused(
+                SESSION_DELETE_REASON_IN_USE,
+            ));
         }
     }
     let sidecars = state.inner().clone();
@@ -1263,7 +1288,9 @@ pub async fn cmd_brand_workspace_delete(
                     .cloned()
                     .unwrap_or_default();
                 if manager.session_has_unreleasable_owners(session_id, &releasable) {
-                    return Ok(SessionDeleteCommandResult::refused("in-use"));
+                    return Ok(SessionDeleteCommandResult::refused(
+                        SESSION_DELETE_REASON_IN_USE,
+                    ));
                 }
             }
             session_ids
@@ -1280,8 +1307,16 @@ pub async fn cmd_brand_workspace_delete(
         for port in ports {
             match super::background::check_sidecar_is_busy(port) {
                 Some(false) => {}
-                Some(true) => return Ok(SessionDeleteCommandResult::refused("in-use")),
-                None => return Ok(SessionDeleteCommandResult::refused("activity-unavailable")),
+                Some(true) => {
+                    return Ok(SessionDeleteCommandResult::refused(
+                        SESSION_DELETE_REASON_IN_USE,
+                    ))
+                }
+                None => {
+                    return Ok(SessionDeleteCommandResult::refused(
+                        SESSION_DELETE_REASON_ACTIVITY_UNAVAILABLE,
+                    ))
+                }
             }
         }
         // Revalidate owners before the storage mutation while the outer
@@ -1294,7 +1329,9 @@ pub async fn cmd_brand_workspace_delete(
                     .cloned()
                     .unwrap_or_default();
                 if manager.session_has_unreleasable_owners(session_id, &releasable) {
-                    return Ok(SessionDeleteCommandResult::refused("in-use"));
+                    return Ok(SessionDeleteCommandResult::refused(
+                        SESSION_DELETE_REASON_IN_USE,
+                    ));
                 }
             }
         }
@@ -1401,7 +1438,89 @@ mod session_lifecycle_tests {
         acquire_session_lifecycle, is_canonical_session_id, EnsureSidecarResult,
         SessionDeleteCommandResult, SessionPersistentOwnersResult,
     };
+    use crate::sidecar::manager::{
+        SESSION_DELETE_REASON_ACTIVITY_UNAVAILABLE, SESSION_DELETE_REASON_BUSY_REPLYING,
+        SESSION_DELETE_REASON_INVALID_SESSION_ID, SESSION_DELETE_REASON_IN_USE,
+        SESSION_DELETE_REASON_MONITOR_ACTIVE, SESSION_DELETE_REASON_NOT_FOUND,
+    };
     use std::time::Duration;
+
+    // ── 会话删除原因词表 pin（ADR-0012，与 TS 侧
+    // src/renderer/api/tauriClient.deletionReasons.test.ts 同一裁判文件）。
+
+    /// Rust 判定路径的产出全集（跨语言全表的 Rust 子集），由 manager.rs 的
+    /// 具名常量构成——谓词返回值以那些常量为单源，改值先红行为断言、再红
+    /// 下面的跨语言子集检查。
+    const RUST_SESSION_DELETE_REFUSAL_REASONS: [&str; 6] = [
+        SESSION_DELETE_REASON_IN_USE,
+        SESSION_DELETE_REASON_BUSY_REPLYING,
+        SESSION_DELETE_REASON_MONITOR_ACTIVE,
+        SESSION_DELETE_REASON_NOT_FOUND,
+        SESSION_DELETE_REASON_INVALID_SESSION_ID,
+        SESSION_DELETE_REASON_ACTIVITY_UNAVAILABLE,
+    ];
+
+    #[derive(Debug, serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct SessionDeletionReasonContract {
+        session_deletion_failure_reasons: Vec<String>,
+        session_persistent_owner_reasons: Vec<String>,
+    }
+
+    #[test]
+    fn session_deletion_reason_vocabulary_pins_shared_contract() {
+        let contract: SessionDeletionReasonContract = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../src/shared/geo/geoOperationContract.json"
+        )))
+        .expect("shared geo operation contract json");
+        // 10 值全表与 4 值持久 owner 子集逐字 pin（含顺序）——改血缘词表时
+        // 误伤同形串（如 'monitor-active'）会在此红灯。
+        assert_eq!(
+            contract.session_deletion_failure_reasons,
+            [
+                "in-use",
+                "busy-replying",
+                "monitor-active",
+                "not-found",
+                "protected-session",
+                "invalid-session-id",
+                "authority-unavailable",
+                "transition-in-progress",
+                "activity-unavailable",
+                "unexpected",
+            ],
+            "sessionDeletionFailureReasons 与 Rust 侧登记的 10 值全表漂移"
+        );
+        assert_eq!(
+            contract.session_persistent_owner_reasons,
+            [
+                "in-use",
+                "busy-replying",
+                "monitor-active",
+                "activity-unavailable",
+            ],
+            "sessionPersistentOwnerReasons 与 Rust 侧登记的 4 值子集漂移"
+        );
+        // 常量组（谓词返回值的单源）必须落在跨语言全表内：改具名常量的值
+        // 而不动裁判 JSON 时这里先红。
+        for reason in RUST_SESSION_DELETE_REFUSAL_REASONS {
+            assert!(
+                contract
+                    .session_deletion_failure_reasons
+                    .contains(&reason.to_string()),
+                "Rust 删除谓词产出的 {reason} 不在跨语言全表内"
+            );
+        }
+        // 子集不变量：持久 owner 子集里的每个值都必须是删除失败全表成员
+        // ——子集混入全集外的值会让渲染层 `reason ?? 'in-use'` 归并静默失效。
+        for reason in &contract.session_persistent_owner_reasons {
+            assert!(
+                contract.session_deletion_failure_reasons.contains(reason),
+                "持久 owner 子集的 {reason} 不在删除失败全表内"
+            );
+        }
+    }
 
     #[test]
     fn deletion_accepts_only_one_canonical_session_path_segment() {

@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 mod articles;
+mod artifact_lineage;
 mod brand_history;
 mod distribution_plans;
 mod geo_baselines;
@@ -21,6 +22,7 @@ mod publish_scheduler;
 mod question_pools;
 mod topic_plans;
 pub use articles::*;
+pub use artifact_lineage::*;
 pub use brand_history::*;
 pub use distribution_plans::*;
 pub use geo_baselines::*;

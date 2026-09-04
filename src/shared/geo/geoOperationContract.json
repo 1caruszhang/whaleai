@@ -88,6 +88,24 @@
     "publish-scheduler",
     "post-publish-monitor"
   ],
+  "sessionDeletionFailureReasons": [
+    "in-use",
+    "busy-replying",
+    "monitor-active",
+    "not-found",
+    "protected-session",
+    "invalid-session-id",
+    "authority-unavailable",
+    "transition-in-progress",
+    "activity-unavailable",
+    "unexpected"
+  ],
+  "sessionPersistentOwnerReasons": [
+    "in-use",
+    "busy-replying",
+    "monitor-active",
+    "activity-unavailable"
+  ],
   "knowledgeSegmentStepIds": {
     "_comment": "知识段步骤 id 序列（geo-plan-normalization 票 07）：TS 侧由 KNOWLEDGE_STEPS 步骤形状 policy 派生（改知识段形状时本表需一并更新），Rust 侧按 id 判定「知识段剩余步骤」。",
     "values": ["collect-materials", "extract-facts", "confirm-knowledge"]
