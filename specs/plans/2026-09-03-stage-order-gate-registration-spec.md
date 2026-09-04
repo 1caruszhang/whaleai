@@ -1,6 +1,6 @@
 # Spec：阶段顺序闸上移到工具注册层
 
-> 状态：ready-for-agent（架构评审候选 3 + grilling 三轮收敛版，2026-09-03）· 未实现
+> 状态：已实现（2026-09-03 单票＝42fd63b，验收修复 dc27427，合并 64a5230；2026-09-04 验收：npm test 全绿〔classification/unit/dom/integration 156〕＋cargo test 463 绿，五工具经 stageOrderGatedTool 注册、闸表派生钉与 fail-closed/fail-loud 测试均在）· 原 ready-for-agent
 > 关联文档：`specs/plans/2026-09-02-geo-plan-normalization-spec.md`（票 05 顺序闸源头）、`src/server/geo/stage-order-gate.ts`、`src/server/geo/operation-progress.ts`
 > 来源：2026-09-03 架构评审候选 3（Strong · in-process）；证据行号已按当前 HEAD（ed247d1，含组合根票 A/B 合入）重新核实
 
