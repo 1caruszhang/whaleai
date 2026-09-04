@@ -219,6 +219,21 @@ export const MIGRATIONS: readonly Migration[] = [
         ON publish_orders(account_id, execution_id, ledger_status);
     `,
   },
+  {
+    // 悬挂回收第二档（按活跃度）：TTL 判据从 created_at 换成
+    // last_activity_at——reportPermitUnit 每次成功回报（含幂等重放）都
+    // 续活。长批量（文章逐篇回报）跑多久都不会被误回收；真死掉的
+    // permit 从最后一次活跃起算 TTL。存量行按 created_at 回填，行为
+    // 与第一档（纯创建时间判据）完全一致，平滑升级。
+    name: '0008_permit_last_activity',
+    sql: `
+      ALTER TABLE billing_permits ADD COLUMN last_activity_at TEXT NOT NULL DEFAULT '';
+      UPDATE billing_permits SET last_activity_at = created_at WHERE last_activity_at = '';
+      CREATE INDEX idx_billing_permits_account_status_activity
+        ON billing_permits(account_id, status, last_activity_at);
+      DROP INDEX idx_billing_permits_account_status;
+    `,
+  },
 ];
 
 /** 建表只经本 runner：幂等、每条迁移独立事务、记录进 schema_migrations。 */

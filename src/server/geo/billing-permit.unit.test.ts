@@ -168,4 +168,112 @@ describe("gateway billing permit channel", () => {
       channel.reportUnit("pm-replay", 0, "success"),
     ).resolves.toBeUndefined();
   });
+
+  // 回归（2026-09-04 实测）：并发名额被占（429 concurrency_limit）时 apply
+  // 有界退避重试，等别的操作结清释放槽位，而不是立刻以失败终态落库。
+  it("retries apply on concurrency_limit and succeeds once a slot frees up", async () => {
+    let attempts = 0;
+    const fetchImpl = vi.fn(async () => {
+      attempts += 1;
+      if (attempts <= 2) {
+        return jsonResponse({ error: "concurrency_limit", message: "并发计费操作已达上限（2）。", limit: 2, active: 2 }, 429);
+      }
+      return jsonResponse({ permit }, 201);
+    });
+    const sleep = vi.fn(async () => undefined);
+    const channel = createGatewayBillingPermitChannel(
+      { baseUrl: "https://gw.example.test", accessToken: "t" },
+      { fetch: fetchImpl as unknown as typeof fetch, transportRetries: 0, concurrencyRetries: 2, sleep },
+    );
+
+    const applied = await channel.apply({ permitId: "pm-race", operation: "question_pool", units: 1 });
+    expect(applied).toEqual(permit);
+    expect(attempts).toBe(3);
+    expect(sleep).toHaveBeenCalledTimes(2);
+  });
+
+  it("surfaces the typed concurrency rejection after bounded apply retries", async () => {
+    const fetchImpl = vi.fn(async () =>
+      jsonResponse({ error: "concurrency_limit", message: "并发计费操作已达上限（2）。", limit: 2, active: 2 }, 429),
+    );
+    const sleep = vi.fn(async () => undefined);
+    const channel = createGatewayBillingPermitChannel(
+      { baseUrl: "https://gw.example.test", accessToken: "t" },
+      { fetch: fetchImpl as unknown as typeof fetch, transportRetries: 0, concurrencyRetries: 1, sleep },
+    );
+
+    const thrown = await channel
+      .apply({ permitId: "pm-stuck", operation: "question_pool", units: 1 })
+      .then(
+        () => undefined,
+        (failure: unknown) => failure,
+      );
+    expect(thrown).toBeInstanceOf(GatewayBillingError);
+    expect(thrown).toMatchObject({ code: "concurrency_limit", status: 429 });
+    expect(sleep).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not retry apply rejections that are not transient (balance)", async () => {
+    const fetchImpl = vi.fn(async () =>
+      jsonResponse({ error: "insufficient_balance", message: "点数不足。", required: 20, available: 4 }, 402),
+    );
+    const sleep = vi.fn(async () => undefined);
+    const channel = createGatewayBillingPermitChannel(
+      { baseUrl: "https://gw.example.test", accessToken: "t" },
+      { fetch: fetchImpl as unknown as typeof fetch, transportRetries: 0, concurrencyRetries: 2, sleep },
+    );
+
+    await expect(
+      channel.apply({ permitId: "pm-need2", operation: "question_pool", units: 1 }),
+    ).rejects.toMatchObject({ code: "insufficient_balance" });
+    expect(sleep).not.toHaveBeenCalled();
+  });
+
+  it("retries settle calls on gateway 5xx and resolves once the gateway recovers", async () => {
+    let attempts = 0;
+    const fetchImpl = vi.fn(async () => {
+      attempts += 1;
+      return attempts <= 2
+        ? jsonResponse({ error: "internal_error", message: "网关内部错误。" }, 502)
+        : jsonResponse({ permit: { ...permit, status: "settled" } });
+    });
+    const sleep = vi.fn(async () => undefined);
+    const channel = createGatewayBillingPermitChannel(
+      { baseUrl: "https://gw.example.test", accessToken: "t" },
+      { fetch: fetchImpl as unknown as typeof fetch, transportRetries: 0, settleRetries: 2, sleep },
+    );
+
+    await expect(channel.reportUnit("pm-flaky", 0, "success")).resolves.toBeUndefined();
+    await expect(channel.close("pm-flaky")).resolves.toBeUndefined();
+    expect(attempts).toBe(4);
+  });
+
+  // 悬挂 permit 不能静默泄漏：结算重试耗尽后必须留下脱敏日志（类名 +
+  // code/status，自由文本 message 不进日志），给排查与对账留线索。
+  it("logs a sanitized settle-failure line when close keeps failing on 5xx", async () => {
+    const spy = vi.spyOn(console, "log").mockImplementation(() => {});
+    const fetchImpl = vi.fn(async () =>
+      jsonResponse({ error: "internal_error", message: "网关内部错误，含内部细节。" }, 503),
+    );
+    const sleep = vi.fn(async () => undefined);
+    const channel = createGatewayBillingPermitChannel(
+      { baseUrl: "https://gw.example.test", accessToken: "t" },
+      { fetch: fetchImpl as unknown as typeof fetch, transportRetries: 0, settleRetries: 1, sleep },
+    );
+
+    try {
+      await expect(channel.close("pm-leak")).rejects.toMatchObject({ code: "internal_error" });
+      const line = spy.mock.calls
+        .map((call) => String(call[0]))
+        .find((entry) => entry.includes("[billing] settle failed"));
+      expect(line).toBeDefined();
+      expect(line).toContain('"op":"close"');
+      expect(line).toContain("pm-leak");
+      expect(line).toContain("internal_error");
+      // 自由文本 message 不进日志。
+      expect(line).not.toContain("内部细节");
+    } finally {
+      spy.mockRestore();
+    }
+  });
 });

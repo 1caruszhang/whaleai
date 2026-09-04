@@ -522,6 +522,162 @@ describe('ledger and permit billing core HTTP contract', () => {
     const missingFields = await applyPermit(ownerToken, { operation: 'question_pool' });
     expect(missingFields.status).toBe(400);
   });
+
+  // 回归（2026-09-04 实测）：客户端崩溃后 permit 永远停在 open，账号被
+  // 自己的残骸砖死——无人使用仍持续 429 concurrency_limit，冻结点数也不
+  // 回补。超过 TTL 的 open permit 必须在下一次申请前按失败结清：并发名额
+  // 释放、冻结全额回补；TTL 内的活跃 permit 不受影响。
+  // 时钟要推进 90 分钟（> 缺省 TTL 5400s），须自建后端放宽账号 token
+  // 时长（缺省 2h，否则推进后所有请求 401 鉴权失败）。
+  it('reclaims stale open permits on the next apply, freeing concurrency and frozen points', async () => {
+    const start = Date.UTC(2026, 8, 4, 5, 0, 0);
+    const local = await startTestBackend({
+      config: { accessTokenTtlSeconds: 4 * 3_600 },
+      initialNowMs: start,
+    });
+    try {
+      const { accessToken: token } = await provisionLoggedInAccount(local.app);
+
+      // 两份悬挂（客户端崩溃，永远等不到 report/close），占满并发名额。
+      expect((await postJson(local.app, '/billing/permits', { permitId: 'pm-crash-a', operation: 'baseline_probe', units: 1 }, token)).status).toBe(201);
+      expect((await postJson(local.app, '/billing/permits', { permitId: 'pm-crash-b', operation: 'material_import', units: 1 }, token)).status).toBe(201);
+
+      const rejected = await postJson(local.app, '/billing/permits', { permitId: 'pm-crash-c', operation: 'baseline_probe', units: 1 }, token);
+      expect(rejected.status).toBe(429);
+      expect(rejected.body.error).toBe('concurrency_limit');
+
+      // 崩溃后过了 90 分钟（> 缺省 TTL 5400s）：下一次申请先回收悬挂
+      // permit，名额与冻结同时释放，申请直接通过。
+      local.setNow(start + 5_400_000 + 1_000);
+      const afterCrash = await postJson(local.app, '/billing/permits', { permitId: 'pm-crash-c', operation: 'baseline_probe', units: 1 }, token);
+      expect(afterCrash.status).toBe(201);
+
+      // 悬挂两份全额回补（无人消费点数），只剩新 permit 冻结 5 点。
+      const balance = await getJson(local.app, '/billing/balance', token);
+      expect(balance.body.balance).toEqual({ total: 500, frozen: 5, available: 495 });
+      expect(balance.body.openPermits).toHaveLength(1);
+      expect((balance.body.openPermits as Array<{ permitId: string }>)[0].permitId).toBe('pm-crash-c');
+
+      // 回收后的 permit 投影是结清＋全额回补；重复 close 幂等（客户端恢复
+      // 重跑不报错）。
+      const reclaimed = await getJson(local.app, '/billing/permits/pm-crash-b', token);
+      expect(permitOf(reclaimed.body)).toMatchObject({ status: 'settled', frozenPoints: 0, refundedPoints: 20 });
+      expect((await postJson(local.app, '/billing/permits/pm-crash-b/close', {}, token)).status).toBe(200);
+    } finally {
+      await local.cleanup();
+    }
+  });
+
+  it('leaves in-flight permits alone when they are younger than the TTL', async () => {
+    const start = Date.UTC(2026, 8, 4, 5, 0, 0);
+    const local = await startTestBackend({
+      config: { accessTokenTtlSeconds: 4 * 3_600 },
+      initialNowMs: start,
+    });
+    try {
+      const { accessToken: token } = await provisionLoggedInAccount(local.app);
+
+      expect((await postJson(local.app, '/billing/permits', { permitId: 'pm-live-a', operation: 'baseline_probe', units: 1 }, token)).status).toBe(201);
+      expect((await postJson(local.app, '/billing/permits', { permitId: 'pm-live-b', operation: 'baseline_probe', units: 1 }, token)).status).toBe(201);
+
+      // 89 分钟：TTL 内的 open permit 不是悬挂，并发上限照常生效。
+      local.setNow(start + 89 * 60_000);
+      const stillBusy = await postJson(local.app, '/billing/permits', { permitId: 'pm-live-c', operation: 'baseline_probe', units: 1 }, token);
+      expect(stillBusy.status).toBe(429);
+      const balance = await getJson(local.app, '/billing/balance', token);
+      expect(balance.body.openPermits).toHaveLength(2);
+    } finally {
+      await local.cleanup();
+    }
+  });
+
+  // 第二档（按活跃度）的核心行为：批量操作逐单位回报即心跳——permit
+  // 总持证时长超过 TTL 也不被误回收；真正的判据是「最后一次回报之后」
+  // 静默超过 TTL。同时钉住幂等重放也续活（会重放说明客户端活着）。
+  it('keeps a long batch alive while units keep reporting, then reclaims after the last activity', async () => {
+    const start = Date.UTC(2026, 8, 4, 5, 0, 0);
+    const local = await startTestBackend({
+      config: { accessTokenTtlSeconds: 24 * 3_600 },
+      initialNowMs: start,
+    });
+    try {
+      const { accessToken: token } = await provisionLoggedInAccount(local.app);
+      // 5 单位批量（点数 5×20=100，账号 500 够用）。
+      expect((await postJson(local.app, '/billing/permits', { permitId: 'pm-batch', operation: 'article_generation', units: 5 }, token)).status).toBe(201);
+
+      // 每篇生成 45 分钟，逐篇回报：2 小时后（远超 90 分钟 TTL）permit
+      // 仍 open——最后一次回报距今 45 分钟。
+      for (let unit = 0; unit < 3; unit += 1) {
+        local.setNow(start + unit * 45 * 60_000);
+        expect((await postJson(local.app, '/billing/permits/pm-batch/report', { unit, outcome: 'success' }, token)).status).toBe(200);
+      }
+      local.setNow(start + 3 * 45 * 60_000);
+      const heartbeat = await postJson(local.app, '/billing/permits', { permitId: 'pm-after-batch', operation: 'baseline_probe', units: 1 }, token);
+      expect(heartbeat.status).toBe(201);
+      const stillOpen = await getJson(local.app, '/billing/permits/pm-batch', token);
+      expect(permitOf(stillOpen.body).status).toBe('open');
+
+      // 崩溃：unit 3 之后再也没有回报。最后一次活跃 91 分钟后，下一次
+      // 申请回收它（未回报的 unit 3/4 按失败回补）。
+      local.setNow(start + 3 * 45 * 60_000 + 91 * 60_000);
+      const afterDeath = await postJson(local.app, '/billing/permits', { permitId: 'pm-after-death', operation: 'baseline_probe', units: 1 }, token);
+      expect(afterDeath.status).toBe(201);
+      const reclaimed = await getJson(local.app, '/billing/permits/pm-batch', token);
+      expect(permitOf(reclaimed.body)).toMatchObject({
+        status: 'settled',
+        unitsSucceeded: 3,
+        unitsFailed: 0,
+        frozenPoints: 0,
+        refundedPoints: 40,
+      });
+
+      // 回收后的重放不报错：客户端恢复重跑时重放已结清 permit 的单位
+      // 回报必须幂等成功（open 状态下重放续活由下一个测试单独钉）。
+      expect((await postJson(local.app, '/billing/permits/pm-batch/report', { unit: 0, outcome: 'success' }, token)).status).toBe(200);
+    } finally {
+      await local.cleanup();
+    }
+  });
+
+  // 幂等重放续活（第二档判据的补钉）：会重放说明客户端活着——恢复重跑
+  // 的客户端重放已回报单位时，仍 open 的 permit 计时器必须以重放时刻重置，
+  // 否则「真回报→断线→立刻重放」的批量会在重放后仍被按旧活跃时间回收。
+  it('treats an idempotent replay on an open permit as a heartbeat that resets the TTL window', async () => {
+    const start = Date.UTC(2026, 8, 4, 5, 0, 0);
+    const local = await startTestBackend({
+      config: { accessTokenTtlSeconds: 4 * 3_600 },
+      initialNowMs: start,
+    });
+    try {
+      const { accessToken: token } = await provisionLoggedInAccount(local.app);
+      // 2 单位批量：只回报 unit 0，permit 保持 open（unit 1 悬置）。
+      expect((await postJson(local.app, '/billing/permits', { permitId: 'pm-replay', operation: 'article_generation', units: 2 }, token)).status).toBe(201);
+      expect((await postJson(local.app, '/billing/permits/pm-replay/report', { unit: 0, outcome: 'success' }, token)).status).toBe(200);
+
+      // 70 分钟后断线恢复，客户端重放 unit 0（同结果幂等成功）：此刻距
+      // 原始回报 70 分钟（TTL 内），重放把活跃时刻推到「现在」。
+      local.setNow(start + 70 * 60_000);
+      expect((await postJson(local.app, '/billing/permits/pm-replay/report', { unit: 0, outcome: 'success' }, token)).status).toBe(200);
+
+      // 又过 85 分钟：距原始回报已 155 分钟（远超 90 分钟 TTL），若重放
+      // 未续活，这次申请就会把 pm-replay 回收掉——它必须还活着。
+      local.setNow(start + 155 * 60_000);
+      expect((await postJson(local.app, '/billing/permits', { permitId: 'pm-after-replay', operation: 'baseline_probe', units: 1 }, token)).status).toBe(201);
+      expect(permitOf((await getJson(local.app, '/billing/permits/pm-replay', token)).body).status).toBe('open');
+
+      // 重放之后继续静默 91 分钟：按「最后一次活跃＝重放时刻」起算回收，
+      // 悬置的 unit 1 按失败回补。
+      local.setNow(start + 70 * 60_000 + 91 * 60_000);
+      expect((await postJson(local.app, '/billing/permits', { permitId: 'pm-final', operation: 'baseline_probe', units: 1 }, token)).status).toBe(201);
+      expect(permitOf((await getJson(local.app, '/billing/permits/pm-replay', token)).body)).toMatchObject({
+        status: 'settled',
+        unitsSucceeded: 1,
+        refundedPoints: 20,
+      });
+    } finally {
+      await local.cleanup();
+    }
+  });
 });
 
 

@@ -2642,6 +2642,28 @@ describe('MaterialImportService billing permits (ticket 07)', () => {
     expect(port.finishes[0]).toMatchObject({ status: 'failed', errorCode: 'material_billing_failed' });
   });
 
+  // 回归（2026-09-04 实测）：concurrency_limit(429) 是并发名额被占（含
+  // 悬挂 permit），不是扣费故障——单列 material_billing_busy，界面不再
+  // 误导用户以为是计费异常。
+  it('maps concurrency_limit rejection to material_billing_busy', async () => {
+    const port = new FakeMaterialPort();
+    const permits = permitPort({
+      failApplyWith: new GatewayBillingError(
+        'concurrency_limit',
+        '并发计费操作已达上限（2），请等待进行中的操作完成。',
+        429,
+        { limit: 2, active: 2 },
+      ),
+    });
+    const subject = billedService(port, permits.port);
+
+    const result = await subject.value.importPastedText('公司全称：鲸跃科技有限公司');
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.errorCode).toBe('material_billing_busy');
+    expect(port.finishes[0]).toMatchObject({ status: 'failed', errorCode: 'material_billing_busy' });
+  });
+
   it('logs one sanitized diagnostic for every failure code without free-form message text', async () => {
     const spy = vi.spyOn(console, 'log').mockImplementation(() => {});
     try {

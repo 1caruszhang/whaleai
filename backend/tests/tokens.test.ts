@@ -110,6 +110,7 @@ describe('migrations', () => {
         '0005_provider_usage_metering',
         '0006_publish_orders',
         '0007_publish_order_spend_limits',
+        '0008_permit_last_activity',
       ]);
       expect(migrateDatabase(db)).toEqual([]);
 

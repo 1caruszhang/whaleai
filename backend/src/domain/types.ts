@@ -67,6 +67,9 @@ export interface BillingPermitRow {
   status: PermitStatus;
   created_at: string;
   settled_at: string | null;
+  /** 悬挂回收判据（第二档）：apply 时置为创建时刻，此后每次成功回报
+   * （含幂等重放）续活；回收按本列而非 created_at 起算 TTL。 */
+  last_activity_at: string;
 }
 
 export interface PermitUnitReportRow {

@@ -61,6 +61,7 @@ Docker 单容器 + 宝塔 nginx 反代 `api.jingshanai.com`；完整上线手册
 | `ADMIN_MEDIA_POOL_LOW_BALANCE_CNY` | | `500` | /admin 媒介池低余额提醒阈值（元） |
 | `SIGNUP_GRANT_POINTS` | | `500` | 开号赠送点数 |
 | `MAX_CONCURRENT_PERMITS_PER_ACCOUNT` | | `2` | 每账号并发计费准入上限（open permit 数） |
+| `STALE_OPEN_PERMIT_TTL_MS` | | `5400000` | open permit 悬挂回收 TTL（90 分钟，按活跃度）：最后一次活跃（创建或任一次成功回报）超过该时长的 permit 在该账号下一次申请时按失败结清回补；批量逐单位回报即心跳，长任务不误回收 |
 | `DEEPSEEK_BASE_URL` | | `https://api.deepseek.com/anthropic` | DeepSeek Anthropic 兼容上游基地址 |
 | `DEEPSEEK_OPENAI_BASE_URL` | | `https://api.deepseek.com` | DeepSeek OpenAI 兼容上游基地址（extraction/reflection） |
 | `ARK_BASE_URL` | | `https://ark.cn-beijing.volces.com/api/v3` | 火山方舟 paygo 基地址 |

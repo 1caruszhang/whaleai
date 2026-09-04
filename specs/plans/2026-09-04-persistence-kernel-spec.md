@@ -34,10 +34,11 @@ BrandWorkspace 持久化的基建在 130 个调用点上逐字复制：每个 st
 7. **工具族**：now_iso、sha256_hex（含 8 处内联 `format!("{:x}", Sha256::digest(...))`）、canonical_json ×4 收编为内核等价副本收敛；**bounded_* 截断家族排除**（300/500+脱敏等语义各异，非等价副本）。
 8. **守卫棘轮（cargo 文本守卫，与 pin_tests 同居 `cargo test`）**：三条规则——①brand_workspace 内禁直呼 `rusqlite::Connection::open`；②禁新增 `require_*_session` 变体；③禁 open 路径外直呼 `ensure_schema`（geo_operations 7 处开库后重复 ensure 的站点即首批清理对象，随其清零票消）。豁免表初始 **13 文件**、逐票清零、终态零豁免；守卫自测钉「故意注入违例样例必红」。*选 cargo 不选 vitest：本守卫纯 Rust 内部事实，重构发生在 `cargo test` 里，红灯不必等 `npm test`；vitest 留给跨语言事实（0013 先例）。*
 9. **文件红线**：`geo_operations.rs` 与 `artifact_lineage.rs` **不改名不挪窝**（ADR-0013 血缘守卫豁免名单恰好是这两文件，挪动即红灯）；域 SQL 语句一律留在各域文件——内核只收基建，不收 SQL。
-10. **票切分**：立项票（内核落地＋守卫三条＋豁免表 13 文件＋工具族收编＋`open()` 就绪，**零调用点强制迁移**，纯增量全绿）＋ 3 张清零票：
+10. **票切分（expand–contract，`/to-tickets` 修正为五票，票文件在 `.scratch/persistence-kernel/issues/`）**：立项票（内核落地＋守卫三条＋豁免表 13 文件＋工具族收编＋`open()` 就绪，**零调用点强制迁移**，纯增量全绿）＋ 3 张清零票：
     - **票 A**：post_publish_monitoring 21 ＋ publish_scheduler 20 ＋ brand_workspace.rs 16（57 站点，最热 churn 区）
     - **票 B**：articles 13 ＋ materials 13 ＋ distribution_plans 9（35 站点）
-    - **票 C**：geo_operations 8（含 7 处重复 ensure 清理）＋ question_pools 8 ＋ geo_baselines 7 ＋ topic_plans 6 ＋ knowledge 5 ＋ geo_dashboard 2 ＋ brand_history/notifications/artifact_lineage 各 1（38 站点，文件多而浅）
+    - **票 C**：geo_operations 8（含 7 处重复 ensure 清理＋内联闸收编）＋ question_pools 8 ＋ geo_baselines 7 ＋ topic_plans 6 ＋ knowledge 5 ＋ geo_dashboard 2 ＋ brand_history/notifications/artifact_lineage 各 1（38 站点，文件多而浅）
+    ＋ **收缩票**（被 A/B/C 全部阻塞）：删除 `open_database` 旧形态（其体内直呼 `Connection::open`，不删则 brand_workspace.rs 豁免永不清零）＋豁免表清空 0 项严格相等终态钉＋spec 状态头结案。三张清零票各被立项票阻塞、彼此独立（建议 A→B→C 顺序）。
     分支建议 `geo/persistence-kernel`。
 11. **顺序**：血缘 owner（已结案，ADR-0013）→ **本卡** → 候选 1（GeoOperation 主链写路径 owner，生在内核上）→ 候选 8（publish_scheduler 拆分）。
 
@@ -59,6 +60,6 @@ BrandWorkspace 持久化的基建在 130 个调用点上逐字复制：每个 st
 ## Further Notes
 
 - **票依赖骨架**：立项票（零依赖，纯增量）→ 三张清零票（各依赖立项票，彼此独立；建议按 A→B→C 顺序，最热 churn 区先获得局部性）。
-- **决策日志**：grilling 两轮全按推荐锁定。Round 1 九项（范围四件套＋工具族、per-path 登记表、每调用开库、闸等价线、错误映射深度、事务助手、先 2 后 1、0013 打法、命名落点）；Round 2 五项（ADR-0014、cargo 守卫、票切分、组合根出范围、遗留只登记）。
+- **决策日志**：grilling 两轮全按推荐锁定。Round 1 九项（范围四件套＋工具族、per-path 登记表、每调用开库、闸等价线、错误映射深度、事务助手、先 2 后 1、0013 打法、命名落点）；Round 2 五项（ADR-0014、cargo 守卫、票切分、组合根出范围、遗留只登记）。`/to-tickets` 一轮：四票修正为五票——「终态零豁免」需要删除 `open_database` 本体的 contract 步（expand–contract 宽面重构打法），用户确认粒度/阻塞边/第五票全部照拟。
 - **词汇沉淀**：持久化内核（Persistence Kernel）、会话闸（Session Gate，与聊天侧「闸门卡片」消歧）已进 CONTEXT.md（2026-09-04）。
 - **证据底座**：2026-09-04 两路只读勘察——Rust 持久化层全量盘点（130 调用点分文件清点、10 闸三维差异表、923 map_err 计数、60 事务站点、工具族副本定位、10 ensure_schema 幂等性分类、测试 tempdir 形态、进程外访问者）＋ ADR/词汇表/在飞工作核查（0013 全结案无冲突面、backend 另库确认）。

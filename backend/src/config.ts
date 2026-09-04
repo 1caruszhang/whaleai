@@ -27,6 +27,13 @@ export interface BackendConfig {
   signupGrantPoints: number;
   /** 每账号并发计费准入上限（open permit 数，规格决策为 2）。 */
   maxConcurrentPermitsPerAccount: number;
+  /** open permit 的悬挂回收 TTL（第二档·按活跃度）：permit 的最后一次
+   * 活跃（创建或任一次成功回报）超过该时长仍未结清，就在下一次 permit
+   * 申请时按失败结清回补（客户端崩溃/断网不再永久占用并发名额与冻结
+   * 点数）。批量操作逐单位回报即心跳——TTL 只须大于「相邻回报间隔」的
+   * 上界：单单位操作即整个操作时长（材料抽取硬超时 10 分钟），批量即
+   * 单篇生成时长（最坏十余分钟），取 90 分钟留余量。 */
+  staleOpenPermitTtlMs: number;
   /** DeepSeek Anthropic 兼容上游密钥（主 Agent 通道，票 04）。只经环境变量注入。 */
   deepseekApiKey: string;
   /** DeepSeek Anthropic 兼容上游基地址。 */
@@ -167,6 +174,7 @@ export function loadBackendConfig(env: Record<string, string | undefined>): Back
     ),
     signupGrantPoints: readPositiveInt(env, 'SIGNUP_GRANT_POINTS', 500),
     maxConcurrentPermitsPerAccount: readPositiveInt(env, 'MAX_CONCURRENT_PERMITS_PER_ACCOUNT', 2),
+    staleOpenPermitTtlMs: readPositiveInt(env, 'STALE_OPEN_PERMIT_TTL_MS', 5_400_000),
     chatHiddenQuotaPoints: readPositiveInt(env, 'CHAT_HIDDEN_QUOTA_POINTS', 100),
     chatInputCnyPerMtok: readPositiveNumber(env, 'CHAT_INPUT_CNY_PER_MTOK', 2),
     chatInputCacheHitCnyPerMtok: readPositiveNumber(env, 'CHAT_INPUT_CACHE_HIT_CNY_PER_MTOK', 0.2),

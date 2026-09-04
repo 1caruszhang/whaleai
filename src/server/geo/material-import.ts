@@ -1397,8 +1397,15 @@ function dropUnsupportedMaterialCompetitors(
 function errorCode(error: unknown): MaterialErrorCode {
   // GatewayBillingError 是类型化错误，message 是自由中文文本，子串机制会把
   // insufficient_balance / billing_transport_failed 等真实原因掩蔽成泛化
-  // 兜底——先按类型归到登记码 material_billing_failed。
-  if (error instanceof GatewayBillingError) return 'material_billing_failed';
+  // 兜底——先按类型归到登记码 material_billing_failed。concurrency_limit
+  // （429）单列 material_billing_busy：并发名额被占不是扣费故障，界面
+  // 提示与用户的等待/重试动作都不同（2026-09-04 实测：悬挂 permit 让
+  // 空闲账号持续报 material_billing_failed，误导为计费异常）。
+  if (error instanceof GatewayBillingError) {
+    return error.code === 'concurrency_limit'
+      ? 'material_billing_busy'
+      : 'material_billing_failed';
+  }
   const message = error instanceof Error ? error.message : String(error);
   return MATERIAL_ERROR_CODES.find((candidate) => message.includes(candidate))
     ?? 'material_processing_failed';

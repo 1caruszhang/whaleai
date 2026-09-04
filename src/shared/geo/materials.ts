@@ -34,6 +34,9 @@ export const MATERIAL_ERROR_CODES = [
   // 计费预扣/回报的 GatewayBillingError（insufficient_balance、网关不可达等）：
   // message 是自由中文文本，errorCode() 按类型归此码，不落泛化兜底。
   'material_billing_failed',
+  // 网关 concurrency_limit(429)：账号并发计费名额被占（含客户端崩溃后的
+  // 悬挂 permit），不是扣费本身失败；可等待释放后重试。
+  'material_billing_busy',
   'website_url_rejected',
   'website_redirect_rejected',
   'website_too_many_redirects',
