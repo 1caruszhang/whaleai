@@ -14,35 +14,13 @@
 //
 // 复现命令（与本测试同口径）：
 //   rg -n "function (resolveRankingRoster|filterValidRankingCompetitors|...)\(" src backend/src -g '*.ts' -g '*.tsx'
-import { readdirSync, readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
-import { join, relative } from "node:path";
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
+import { repoRelative, walkFiles } from "../repoFileScan";
 import * as competitorRoster from "./competitorRoster";
 
-const REPO_ROOT = fileURLToPath(new URL("../../../", import.meta.url));
 const KERNEL_RELATIVE = "src/shared/geo/competitorRoster.ts";
-
-function walkFiles(rootDir: string, keep: (file: string) => boolean): string[] {
-  const out: string[] = [];
-  const visit = (dir: string) => {
-    for (const entry of readdirSync(dir, { withFileTypes: true })) {
-      if (entry.name === "node_modules" || entry.name === "dist" || entry.name === ".git") {
-        continue;
-      }
-      const path = join(dir, entry.name);
-      if (entry.isDirectory()) visit(path);
-      else if (keep(entry.name)) out.push(path);
-    }
-  };
-  visit(join(REPO_ROOT, rootDir));
-  return out;
-}
-
-function repoRelative(path: string): string {
-  return relative(REPO_ROOT, path).replace(/\\/g, "/");
-}
 
 const isTestFile = (path: string) =>
   path.endsWith(".test.ts") || path.endsWith(".test.tsx");
@@ -60,6 +38,8 @@ describe("名单语义守卫（票 #43：定义处只许内核与测试，零豁
       "mergeRankingCompetitorTiers",
       "titleRedLineCompetitors",
       "isCompetitorTierField",
+      "isDirectCompetitorTierField",
+      "isPotentialCompetitorTierField",
       "competitorCardRowField",
       "competitorCardTierOrder",
       "competitorCardPotentialDividerAt",

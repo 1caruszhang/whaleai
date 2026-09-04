@@ -17,12 +17,11 @@
 // 复现命令（与本测试同口径，外加 .tsx）：
 //   rg -U -i "同\s*源|逐字\s*同步|逐字\s*一致|两处\s*同源|同\s*一\s*序\s*列|keep[\s*]+in[\s*]+sync|independently[\s*]+mirrors" \
 //     src-tauri/src src backend/src -g '*.rs' -g '*.ts' -g '*.tsx' -g '!*.test.ts' -g '!*.test.tsx'
-import { readdirSync, readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
-import { dirname, join, relative, resolve } from "node:path";
+import { readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
-const REPO_ROOT = fileURLToPath(new URL("../../", import.meta.url));
+import { repoRelative, walkFiles } from "./repoFileScan";
 
 const SYNC_TERM_RES: readonly RegExp[] = [
   /同\s*源/g,
@@ -33,26 +32,6 @@ const SYNC_TERM_RES: readonly RegExp[] = [
   /keep[\s*]+in[\s*]+sync/gi,
   /independently[\s*]+mirrors/gi,
 ];
-
-function walkFiles(rootDir: string, keep: (file: string) => boolean): string[] {
-  const out: string[] = [];
-  const visit = (dir: string) => {
-    for (const entry of readdirSync(dir, { withFileTypes: true })) {
-      if (entry.name === "node_modules" || entry.name === "dist" || entry.name === ".git") {
-        continue;
-      }
-      const path = join(dir, entry.name);
-      if (entry.isDirectory()) visit(path);
-      else if (keep(entry.name)) out.push(path);
-    }
-  };
-  visit(join(REPO_ROOT, rootDir));
-  return out;
-}
-
-function repoRelative(path: string): string {
-  return relative(REPO_ROOT, path).replace(/\\/g, "/");
-}
 
 const readCache = new Map<string, string>();
 function readText(path: string): string {
