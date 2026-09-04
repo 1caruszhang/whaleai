@@ -564,13 +564,12 @@ impl BrandWorkspaceStore {
         }
         let operation_id = Uuid::new_v4().to_string();
         let now = Utc::now().to_rfc3339();
-        transaction
-            .execute(
-                "INSERT INTO geo_operations (id, session_id, state, created_at)
-                 VALUES (?1, ?2, 'article-generation-running', ?3)",
-                params![operation_id, session_id, now],
-            )
-            .map_err(|error| format!("create article operation: {error}"))?;
+        open_lineage(
+            &transaction,
+            &operation_id,
+            session_id,
+            "article-generation-running",
+        )?;
         transaction
             .execute(
                 "INSERT INTO geo_article_operations
@@ -2192,12 +2191,13 @@ fn refresh_article_operation_status(
             params![operation_id, status, now],
         )
         .map_err(|error| format!("update article operation status: {error}"))?;
-    connection
-        .execute(
-            "UPDATE geo_operations SET state=?2 WHERE id=?1",
-            params![operation_id, format!("article-generation-{status}")],
-        )
-        .map_err(|error| format!("update article operation state: {error}"))?;
+    // 血缘行迁移经唯一 owner（票 06）：聚合目标态与旧 UPDATE 逐字相同，
+    // 缺失行 no-op 语义由 set_lineage_state 保持。
+    set_lineage_state(
+        connection,
+        operation_id,
+        &format!("article-generation-{status}"),
+    )?;
     Ok(())
 }
 
@@ -3670,6 +3670,215 @@ mod tests {
         assert_eq!(
             start(Some(vec![])).unwrap_err(),
             "article_generation_plan_selection_invalid"
+        );
+    }
+
+    // 票 06：聚合源状态 → 血缘态映射的端到端钉。refresh 的 from 规则面
+    // （owner 矩阵测试）之外，这条经真实 mutation 逐跳断言 geo_operations
+    // 落值：混合未收束→running 自持；批准＋失败→completed-with-failures；
+    // 失败重试收束→running（cwf→running 真实路径）；全批准→completed；
+    // 全批准后编辑→running（completed→running 真实路径）。
+    #[test]
+    fn refresh_maps_article_statuses_onto_lineage_states_end_to_end() {
+        let (_root, store, workspace) = seeded_store();
+        let operation = store
+            .start_article_operation(
+                &workspace.id,
+                "session-article",
+                ArticleOperationStartRequest {
+                    source_kind: "direct".to_string(),
+                    topic_plan_id: None,
+                    item_ids: None,
+                    direct_spec: Some(ArticleDirectSpec {
+                        count: 2,
+                        themes: vec!["知识库指南".to_string()],
+                        content_type: "guide".to_string(),
+                        constraints: "面向企业".to_string(),
+                    }),
+                },
+            )
+            .expect("operation");
+        let lineage = |label: &str| -> String {
+            let connection = open_database(&workspace).expect("db");
+            connection
+                .query_row(
+                    "SELECT state FROM geo_operations WHERE id=?1",
+                    [&operation.id],
+                    |row| row.get(0),
+                )
+                .unwrap_or_else(|_| panic!("lineage row missing at {label}"))
+        };
+        assert_eq!(lineage("open"), "article-generation-running");
+
+        let first = &operation.articles[0];
+        let second = &operation.articles[1];
+        let claim = store
+            .claim_article_generation(
+                &workspace.id,
+                "session-article",
+                ArticleGenerationClaimRequest {
+                    operation_id: operation.id.clone(),
+                    article_id: first.id.clone(),
+                    expected_revision: 0,
+                    mode: "initial".to_string(),
+                },
+            )
+            .expect("claim");
+        store
+            .finish_article_generation(
+                &workspace.id,
+                "session-article",
+                ArticleGenerationFinishRequest {
+                    operation_id: operation.id.clone(),
+                    article_id: first.id.clone(),
+                    expected_revision: 0,
+                    claim_token: claim.claim_token,
+                    title: "知识库指南".to_string(),
+                    body: body("知识库指南"),
+                    ranking_dimensions: None,
+                    model_audit: json!({"model":"mock-generation"}),
+                },
+            )
+            .expect("draft");
+        // {draft_ready, planned} 混合未收束：血缘留在 running。
+        assert_eq!(lineage("mixed"), "article-generation-running");
+
+        let failed_claim = store
+            .claim_article_generation(
+                &workspace.id,
+                "session-article",
+                ArticleGenerationClaimRequest {
+                    operation_id: operation.id.clone(),
+                    article_id: second.id.clone(),
+                    expected_revision: 0,
+                    mode: "initial".to_string(),
+                },
+            )
+            .expect("claim");
+        store
+            .fail_article_generation(
+                &workspace.id,
+                "session-article",
+                ArticleGenerationFailRequest {
+                    operation_id: operation.id.clone(),
+                    article_id: second.id.clone(),
+                    expected_revision: 0,
+                    claim_token: failed_claim.claim_token,
+                    failure_reason: "mock-failure".to_string(),
+                },
+            )
+            .expect("fail");
+        // 仍混合（draft_ready 非收束态）：血缘继续 running。
+        assert_eq!(lineage("still mixed"), "article-generation-running");
+
+        let review = store
+            .claim_article_review(
+                &workspace.id,
+                "session-article",
+                ArticleReviewClaimRequest {
+                    operation_id: operation.id.clone(),
+                    article_id: first.id.clone(),
+                    expected_revision: 1,
+                },
+            )
+            .expect("review claim");
+        store
+            .finish_article_review(
+                &workspace.id,
+                "session-article",
+                ArticleReviewFinishRequest {
+                    operation_id: operation.id.clone(),
+                    article_id: first.id.clone(),
+                    expected_revision: 1,
+                    claim_token: review.0.claim_token,
+                    review: json!({"passed":true,"issues":[]}),
+                    passed: true,
+                },
+            )
+            .expect("approve");
+        // {approved, generation_failed}：收束但非全批准。
+        assert_eq!(
+            lineage("approved with failure"),
+            "article-generation-completed-with-failures"
+        );
+
+        let retry = store
+            .claim_article_generation(
+                &workspace.id,
+                "session-article",
+                ArticleGenerationClaimRequest {
+                    operation_id: operation.id.clone(),
+                    article_id: second.id.clone(),
+                    expected_revision: 0,
+                    mode: "regenerate".to_string(),
+                },
+            )
+            .expect("retry claim");
+        let retried = store
+            .finish_article_generation(
+                &workspace.id,
+                "session-article",
+                ArticleGenerationFinishRequest {
+                    operation_id: operation.id.clone(),
+                    article_id: second.id.clone(),
+                    expected_revision: 0,
+                    claim_token: retry.claim_token,
+                    title: "知识库指南二".to_string(),
+                    body: body("知识库指南二"),
+                    ranking_dimensions: None,
+                    model_audit: json!({"model":"mock-generation"}),
+                },
+            )
+            .expect("retried draft");
+        // 失败重试收束回 draft_ready：血缘自 completed-with-failures 回 running。
+        assert_eq!(lineage("retry in flight"), "article-generation-running");
+
+        let retry_review = store
+            .claim_article_review(
+                &workspace.id,
+                "session-article",
+                ArticleReviewClaimRequest {
+                    operation_id: operation.id.clone(),
+                    article_id: second.id.clone(),
+                    expected_revision: 1,
+                },
+            )
+            .expect("retry review claim");
+        store
+            .finish_article_review(
+                &workspace.id,
+                "session-article",
+                ArticleReviewFinishRequest {
+                    operation_id: operation.id.clone(),
+                    article_id: second.id.clone(),
+                    expected_revision: 1,
+                    claim_token: retry_review.0.claim_token,
+                    review: json!({"passed":true,"issues":[]}),
+                    passed: true,
+                },
+            )
+            .expect("approve retry");
+        // 全批准：血缘落 completed。
+        assert_eq!(lineage("all approved"), "article-generation-completed");
+
+        store
+            .edit_article(
+                &workspace.id,
+                "session-article",
+                ArticleEditRequest {
+                    operation_id: operation.id.clone(),
+                    article_id: second.id.clone(),
+                    expected_revision: retried.revision,
+                    title: "知识库指南二（修订）".to_string(),
+                    body: body("知识库指南二修订"),
+                    reason: None,
+                },
+            )
+            .expect("edit");
+        // 全批准后编辑打破收束：血缘自 completed 回 running。
+        assert_eq!(
+            lineage("edited after completion"),
+            "article-generation-running"
         );
     }
 

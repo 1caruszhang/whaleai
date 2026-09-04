@@ -11,8 +11,9 @@
 // 各域清零票把写点迁到 open_lineage/set_lineage_state 上，并逐族补
 // from-state 迁移规则（错误码约定：artifact_lineage_transition_invalid:{from}，
 // 镜像主链 geo_operation_transition_invalid:{current} 风格）。baseline 族
-// 已随票 02、question-pool 族已随票 03、distribution 族已随票 05 清零
-// （写点迁移＋from 规则钉死），其余 4 域 19 处直写仍在豁免表。
+// 已随票 02、question-pool 族已随票 03、distribution 族已随票 05、
+// article-generation 族已随票 06 清零（写点迁移＋from 规则钉死），
+// 其余 4 域 17 处直写仍在豁免表。
 use std::fmt;
 
 use chrono::Utc;
@@ -200,6 +201,24 @@ impl ArtifactLineageState {
     ///   confirmed 真实可达；generating 池 status='generating' 被 decide
     ///   的 not_selectable 闸挡下，generating→confirmed 不可达。
     ///
+    /// article-generation 族（票 06，按 articles.rs 真实代码钉）：写点＝
+    /// start 开行 running＋refresh 聚合 geo_articles.status（五个 mutation
+    /// 调用点共用一处）；claim（initial/regenerate/review）不写血缘行，
+    /// regenerate 可把 approved/generation_failed 等终态静默打回 drafting，
+    /// 两次 refresh 之间文章集可离开终态而行值不动——可见迁移多对多：
+    /// - running/completed-with-failures 的 from 集＝全三态：completed→
+    ///   running 来自全批准后 edit 或 regenerate＋finish（draft_ready 非
+    ///   终态）；completed→completed-with-failures 来自 regenerate
+    ///   approved＋fail（终态集内换员，行值一步跨过去）；completed-
+    ///   with-failures 自环来自 discard generation_failed（集合形态不变）；
+    /// - completed 只从 running：approved 仅经 finish_review（reviewing→
+    ///   approved）且 reviewing 只能自 draft_ready（非终态）claim 而来，
+    ///   最后一篇翻 approved 时行值必然已是 running；completed→completed
+    ///   需要一次保持全批准的写迁移（写点新状态仅 finish_review 的
+    ///   approved 合法，而它要求 reviewing），completed-with-failures→
+    ///   completed 需要 {generation_failed|discarded}→approved 一步到位
+    ///   （无此边），两者均不可达。
+    ///
     /// distribution 族（票 05，按 distribution_plans.rs 真实代码钉）：
     /// plan.status 与血缘态在同一事务成对迁移（镜像不变量），迁移合法性
     /// 由各写点的 status 前置门卫先行保证：
@@ -225,6 +244,11 @@ impl ArtifactLineageState {
             ArtifactLineageState::QuestionPoolAwaitingSelection,
             ArtifactLineageState::QuestionPoolConfirmed,
         ];
+        const ARTICLE_ALL_THREE: &[ArtifactLineageState] = &[
+            ArtifactLineageState::ArticleGenerationRunning,
+            ArtifactLineageState::ArticleGenerationCompleted,
+            ArtifactLineageState::ArticleGenerationCompletedWithFailures,
+        ];
         const NO_SET: &[ArtifactLineageState] = &[];
         const DISCOVERING_ONLY: &[ArtifactLineageState] =
             &[ArtifactLineageState::DistributionDiscovering];
@@ -240,6 +264,12 @@ impl ArtifactLineageState {
             Self::QuestionPoolGenerating => Some(NO_SET),
             Self::QuestionPoolAwaitingSelection => Some(GENERATING_OR_AWAITING),
             Self::QuestionPoolConfirmed => Some(AWAITING_OR_CONFIRMED),
+            Self::ArticleGenerationRunning | Self::ArticleGenerationCompletedWithFailures => {
+                Some(ARTICLE_ALL_THREE)
+            }
+            Self::ArticleGenerationCompleted => {
+                Some(&[ArtifactLineageState::ArticleGenerationRunning])
+            }
             Self::DistributionDiscovering => Some(NO_SET),
             Self::DistributionUnavailable | Self::DistributionPlanDraft => Some(DISCOVERING_ONLY),
             Self::DistributionPlanConfirmed => Some(DRAFT_ONLY),
@@ -583,6 +613,30 @@ mod tests {
                         "question-pool-confirmed",
                     ],
                 ),
+            ],
+        );
+    }
+
+    // article-generation 族 3×3 迁移矩阵（票 06 按 articles.rs 真实代码钉）：
+    // 聚合驱动的 refresh 不看现态，claim 不写血缘行——合法性由 mutation
+    // 动力学决定（见 allowed_from 注）：running/cwf 双向多对多，completed
+    // 只能自 running 来（approved 唯一经 reviewing，reviewing 非终态）。
+    #[test]
+    fn article_generation_family_transitions_follow_the_real_code_matrix() {
+        const ALL_THREE: [&str; 3] = [
+            "article-generation-running",
+            "article-generation-completed",
+            "article-generation-completed-with-failures",
+        ];
+        assert_family_matrix(
+            &ALL_THREE,
+            &[
+                ("article-generation-running", &ALL_THREE),
+                (
+                    "article-generation-completed",
+                    &["article-generation-running"],
+                ),
+                ("article-generation-completed-with-failures", &ALL_THREE),
             ],
         );
     }
