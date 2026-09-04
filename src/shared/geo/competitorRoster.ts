@@ -242,19 +242,29 @@ export function titleRedLineCompetitors(
   return [...directNames, ...potentialNames];
 }
 
+/** 卡面竞品行的直接层承载字段（competitors）。 */
+export function isDirectCompetitorTierField(field: string): boolean {
+  return field === "competitors";
+}
+
+/** 卡面竞品行的潜在层承载字段（potentialCompetitors）。 */
+export function isPotentialCompetitorTierField(field: string): boolean {
+  return field === "potentialCompetitors";
+}
+
 /** 卡面竞品行的两个事实字段（两层名单在确认卡上的承载字段）。 */
 export function isCompetitorTierField(field: string): boolean {
-  return field === "competitors" || field === "potentialCompetitors";
+  return isDirectCompetitorTierField(field) || isPotentialCompetitorTierField(field);
 }
 
 /** 卡面竞品行分组键：潜在层并入直接层同栏（数据两层、卡面一栏）。 */
 export function competitorCardRowField(field: string): string {
-  return field === "potentialCompetitors" ? "competitors" : field;
+  return isPotentialCompetitorTierField(field) ? "competitors" : field;
 }
 
 /** 卡面竞品行内层级序：直接层在前、潜在层在后（分界标记位置由该序保证）。 */
 export function competitorCardTierOrder(field: string): number {
-  return field === "potentialCompetitors" ? 1 : 0;
+  return isPotentialCompetitorTierField(field) ? 1 : 0;
 }
 
 /**
@@ -265,7 +275,7 @@ export function competitorCardTierOrder(field: string): number {
 export function competitorCardPotentialDividerAt(
   fields: readonly string[],
 ): number | null {
-  const index = fields.findIndex((field) => field === "potentialCompetitors");
+  const index = fields.findIndex(isPotentialCompetitorTierField);
   return index >= 0 ? index : null;
 }
 

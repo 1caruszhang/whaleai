@@ -6,8 +6,9 @@ import { useTabApi } from '@/context/TabContext';
 import { isEnterpriseProfileField } from '../../../shared/geo/enterpriseProfile';
 import {
   competitorCardPotentialDividerAt,
-  competitorCardTierOrder,
   isCompetitorTierField,
+  isDirectCompetitorTierField,
+  isPotentialCompetitorTierField,
 } from '../../../shared/geo/competitorRoster';
 import {
   buildKnowledgeFieldRows,
@@ -159,8 +160,8 @@ function candidateBaseValue(candidate: KnowledgeCardCandidate): unknown {
 /** 候选当前值（或已暂存编辑）→ 编辑框文本：字符串数组顿号连接，标量保持原文。 */
 /** 编辑视图的多候选标签：竞品行按层级（直接/潜在）标注——事实主体标签
  * 在竞品行恒为品牌名（两条候选同主体），显示出来会被误读成竞品值的一部分
- * （用户反馈 2026-08-31）；其他字段仍用主体名区分归属。层级序自名单内核
- * 进口（competitorCardTierOrder：直接 0 / 潜在 1 / 其他 0）。 */
+ * （用户反馈 2026-08-31）；其他字段仍用主体名区分归属。层级判定自名单内核
+ * 进口（isDirectCompetitorTierField / isPotentialCompetitorTierField）。 */
 function editLabelOf(
   candidate: KnowledgeCardCandidate,
   fieldText: string,
@@ -168,10 +169,10 @@ function editLabelOf(
   tierPotential: string,
 ): string {
   const field = knowledgeFieldKeyOfPredicate(candidate.key.predicate);
-  if (competitorCardTierOrder(field) === 1) {
+  if (isPotentialCompetitorTierField(field)) {
     return `${fieldText}·${tierPotential}`;
   }
-  if (field === 'competitors') {
+  if (isDirectCompetitorTierField(field)) {
     return `${fieldText}·${tierDirect}`;
   }
   return candidate.key.subject;
