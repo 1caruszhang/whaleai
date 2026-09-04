@@ -12,12 +12,12 @@ use pulldown_cmark::{html, Options, Parser};
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 use tauri::Manager;
 use tokio::sync::Notify;
 use uuid::Uuid;
 
-use super::{open_database, open_lineage, set_lineage_state, BrandWorkspace, BrandWorkspaceStore};
+use super::persistence::{gates, now_iso, sha256_hex, with_immediate_tx};
+use super::{open_lineage, set_lineage_state, BrandWorkspace, BrandWorkspaceStore};
 
 const POLICY_VERSION: &str = "js-ai-dev-deterministic-publish-v1";
 /// 单篇正文字节上限（裁判：`src/shared/geo/articleGenerationContract.json`，
@@ -467,10 +467,6 @@ fn extend_publish_status_checks(connection: &Connection) -> Result<(), String> {
     Ok(())
 }
 
-fn sha256_hex(value: impl AsRef<[u8]>) -> String {
-    format!("{:x}", Sha256::digest(value.as_ref()))
-}
-
 fn external_request_sn(idempotency_key: &str) -> String {
     format!(
         "publish-order-{}",
@@ -492,31 +488,10 @@ pub(super) fn publish_channel_price_points(price_cny: f64) -> i64 {
     (cents * 4 + 24) / 25
 }
 
-fn now_iso(now_ms: i64) -> String {
-    DateTime::<Utc>::from_timestamp_millis(now_ms)
-        .unwrap_or_else(Utc::now)
-        .to_rfc3339_opts(SecondsFormat::Millis, true)
-}
-
 fn parse_time(value: &str, code: &str) -> Result<i64, String> {
     DateTime::parse_from_rfc3339(value)
         .map(|value| value.timestamp_millis())
         .map_err(|_| code.to_string())
-}
-
-fn require_session(connection: &Connection, session_id: &str) -> Result<(), String> {
-    let exists: bool = connection
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM brand_sessions WHERE id=?1)",
-            [session_id],
-            |row| row.get(0),
-        )
-        .map_err(|error| format!("verify publish session: {error}"))?;
-    if exists {
-        Ok(())
-    } else {
-        Err("publish_scheduler_session_not_found".to_string())
-    }
 }
 
 fn bounded_body(path: &Path) -> Result<Vec<u8>, String> {
@@ -743,8 +718,8 @@ impl BrandWorkspaceStore {
         session_id: &str,
     ) -> Result<Option<PublishExecutionProjection>, String> {
         let workspace = self.workspace(workspace_id)?;
-        let connection = open_database(&workspace)?;
-        require_session(&connection, session_id)?;
+        let connection = BrandWorkspaceStore::open(&workspace)?;
+        gates::PUBLISH_SESSION.enforce(&connection, session_id)?;
         let id = connection
             .query_row(
                 "SELECT id FROM geo_publish_executions ORDER BY updated_at DESC, id DESC LIMIT 1",
@@ -764,8 +739,8 @@ impl BrandWorkspaceStore {
         execution_id: &str,
     ) -> Result<PublishExecutionProjection, String> {
         let workspace = self.workspace(workspace_id)?;
-        let connection = open_database(&workspace)?;
-        require_session(&connection, session_id)?;
+        let connection = BrandWorkspaceStore::open(&workspace)?;
+        gates::PUBLISH_SESSION.enforce(&connection, session_id)?;
         read_execution(&connection, workspace_id, execution_id)
     }
 
@@ -777,7 +752,7 @@ impl BrandWorkspaceStore {
         workspace_id: &str,
     ) -> Result<Option<PublishExecutionProjection>, String> {
         let workspace = self.workspace(workspace_id)?;
-        let connection = open_database(&workspace)?;
+        let connection = BrandWorkspaceStore::open(&workspace)?;
         let id = connection
             .query_row(
                 "SELECT id FROM geo_publish_executions ORDER BY updated_at DESC, id DESC LIMIT 1",
@@ -797,8 +772,8 @@ impl BrandWorkspaceStore {
         request: PublishPreviewRequest,
     ) -> Result<PublishExecutionProjection, String> {
         let workspace = self.workspace(workspace_id)?;
-        let mut connection = open_database(&workspace)?;
-        require_session(&connection, session_id)?;
+        let mut connection = BrandWorkspaceStore::open(&workspace)?;
+        gates::PUBLISH_SESSION.enforce(&connection, session_id)?;
         let provider_context = configured_provider_execution_context()?;
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -1340,61 +1315,64 @@ impl BrandWorkspaceStore {
         request: PublishConfirmRequest,
     ) -> Result<PublishExecutionProjection, String> {
         let workspace = self.workspace(workspace_id)?;
-        let mut connection = open_database(&workspace)?;
-        require_session(&connection, session_id)?;
-        let transaction = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|error| format!("confirm publish execution transaction: {error}"))?;
-        let (revision, status, digest, provider_json): (i64, String, String, String) = transaction
-            .query_row(
-                "SELECT revision, status, confirmation_digest, provider_snapshot_json
-                 FROM geo_publish_executions WHERE id=?1",
-                [&request.execution_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-            )
-            .optional()
-            .map_err(|error| format!("read publish confirmation target: {error}"))?
-            .ok_or_else(|| "publish_execution_not_found".to_string())?;
-        if status != "awaiting-confirmation" {
-            return Err("publish_execution_already_immutable".to_string());
-        }
-        if revision != request.expected_revision || digest != request.confirmation_digest {
-            return Err("publish_execution_confirmation_conflict".to_string());
-        }
-        let provider: PublishProviderSnapshot = serde_json::from_str(&provider_json)
-            .map_err(|_| "publish_provider_snapshot_invalid".to_string())?;
-        if !provider.object_storage.configured || !provider.distribution.configured {
-            return Err("publish_provider_unavailable".to_string());
-        }
-        if provider != configured_provider_snapshot()? {
-            return Err("publish_provider_configuration_changed".to_string());
-        }
-        let now = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
-        let changed = transaction
-            .execute(
-                "UPDATE geo_publish_executions SET status='confirmed', revision=revision+1,
-                 confirmed_at=?2, updated_at=?2 WHERE id=?1 AND revision=?3
-                 AND status='awaiting-confirmation' AND confirmation_digest=?4",
-                params![request.execution_id, now, revision, digest],
-            )
-            .map_err(|error| format!("confirm publish execution: {error}"))?;
-        if changed != 1 {
-            return Err("publish_execution_confirmation_conflict".to_string());
-        }
-        // 血缘行迁移经唯一 owner（票 08）。
-        mirror_publish_lineage(&transaction, &request.execution_id, "publish-confirmed")?;
-        insert_audit(
-            &transaction,
-            &request.execution_id,
-            None,
-            "execution-confirmed",
-            Some(session_id),
-            &json!({"confirmationDigest": digest}),
-            &now,
+        let mut connection = BrandWorkspaceStore::open(&workspace)?;
+        gates::PUBLISH_SESSION.enforce(&connection, session_id)?;
+        with_immediate_tx(
+            &mut connection,
+            "confirm publish execution transaction",
+            "commit publish confirmation",
+            |transaction| {
+                let (revision, status, digest, provider_json): (i64, String, String, String) =
+                    transaction
+                        .query_row(
+                            "SELECT revision, status, confirmation_digest, provider_snapshot_json
+                     FROM geo_publish_executions WHERE id=?1",
+                            [&request.execution_id],
+                            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                        )
+                        .optional()
+                        .map_err(|error| format!("read publish confirmation target: {error}"))?
+                        .ok_or_else(|| "publish_execution_not_found".to_string())?;
+                if status != "awaiting-confirmation" {
+                    return Err("publish_execution_already_immutable".to_string());
+                }
+                if revision != request.expected_revision || digest != request.confirmation_digest {
+                    return Err("publish_execution_confirmation_conflict".to_string());
+                }
+                let provider: PublishProviderSnapshot = serde_json::from_str(&provider_json)
+                    .map_err(|_| "publish_provider_snapshot_invalid".to_string())?;
+                if !provider.object_storage.configured || !provider.distribution.configured {
+                    return Err("publish_provider_unavailable".to_string());
+                }
+                if provider != configured_provider_snapshot()? {
+                    return Err("publish_provider_configuration_changed".to_string());
+                }
+                let now = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
+                let changed = transaction
+                    .execute(
+                        "UPDATE geo_publish_executions SET status='confirmed', revision=revision+1,
+                     confirmed_at=?2, updated_at=?2 WHERE id=?1 AND revision=?3
+                     AND status='awaiting-confirmation' AND confirmation_digest=?4",
+                        params![request.execution_id, now, revision, digest],
+                    )
+                    .map_err(|error| format!("confirm publish execution: {error}"))?;
+                if changed != 1 {
+                    return Err("publish_execution_confirmation_conflict".to_string());
+                }
+                // 血缘行迁移经唯一 owner（票 08）。
+                mirror_publish_lineage(transaction, &request.execution_id, "publish-confirmed")?;
+                insert_audit(
+                    transaction,
+                    &request.execution_id,
+                    None,
+                    "execution-confirmed",
+                    Some(session_id),
+                    &json!({"confirmationDigest": digest}),
+                    &now,
+                )?;
+                Ok(())
+            },
         )?;
-        transaction
-            .commit()
-            .map_err(|error| format!("commit publish confirmation: {error}"))?;
         read_execution(&connection, workspace_id, &request.execution_id)
     }
 
@@ -1428,246 +1406,248 @@ impl BrandWorkspaceStore {
             None => None,
         };
         let workspace = self.workspace(workspace_id)?;
-        let mut connection = open_database(&workspace)?;
-        require_session(&connection, session_id)?;
-        let transaction = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|error| format!("revise publish execution transaction: {error}"))?;
-        let (
-            revision,
-            status,
-            owner_session_id,
-            plan_id,
-            plan_revision,
-            current_budget,
-            spend,
-            current_start_at,
-            provider_snapshot_json,
-        ): (i64, String, String, String, i64, f64, f64, String, String) = transaction
-            .query_row(
-                "SELECT revision, status, created_by_session_id, distribution_plan_id,
-                        distribution_plan_revision, budget_cny, estimated_spend_cny,
-                        publish_start_at, provider_snapshot_json
-                 FROM geo_publish_executions WHERE id=?1",
-                [&request.execution_id],
-                |row| {
-                    Ok((
-                        row.get(0)?,
-                        row.get(1)?,
-                        row.get(2)?,
-                        row.get(3)?,
-                        row.get(4)?,
-                        row.get(5)?,
-                        row.get(6)?,
-                        row.get(7)?,
-                        row.get(8)?,
-                    ))
-                },
-            )
-            .optional()
-            .map_err(|error| format!("read publish revision target: {error}"))?
-            .ok_or_else(|| "publish_execution_not_found".to_string())?;
-        if owner_session_id != session_id {
-            return Err("publish_execution_session_mismatch".to_string());
-        }
-        if status != "awaiting-confirmation" {
-            return Err("publish_execution_already_immutable".to_string());
-        }
-        if revision != request.expected_revision {
-            return Err("publish_execution_revision_conflict".to_string());
-        }
-        let next_budget = budget.unwrap_or(current_budget);
-        if spend > next_budget + 0.000_001 {
-            return Err("publish_budget_exceeded".to_string());
-        }
-        let next_start_at = publish_start_at.clone().unwrap_or(current_start_at);
-        let now = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
+        let mut connection = BrandWorkspaceStore::open(&workspace)?;
+        gates::PUBLISH_SESSION.enforce(&connection, session_id)?;
+        with_immediate_tx(
+            &mut connection,
+            "revise publish execution transaction",
+            "commit publish revision",
+            |transaction| {
+                let (
+                    revision,
+                    status,
+                    owner_session_id,
+                    plan_id,
+                    plan_revision,
+                    current_budget,
+                    spend,
+                    current_start_at,
+                    provider_snapshot_json,
+                ): (i64, String, String, String, i64, f64, f64, String, String) = transaction
+                    .query_row(
+                        "SELECT revision, status, created_by_session_id, distribution_plan_id,
+                            distribution_plan_revision, budget_cny, estimated_spend_cny,
+                            publish_start_at, provider_snapshot_json
+                     FROM geo_publish_executions WHERE id=?1",
+                        [&request.execution_id],
+                        |row| {
+                            Ok((
+                                row.get(0)?,
+                                row.get(1)?,
+                                row.get(2)?,
+                                row.get(3)?,
+                                row.get(4)?,
+                                row.get(5)?,
+                                row.get(6)?,
+                                row.get(7)?,
+                                row.get(8)?,
+                            ))
+                        },
+                    )
+                    .optional()
+                    .map_err(|error| format!("read publish revision target: {error}"))?
+                    .ok_or_else(|| "publish_execution_not_found".to_string())?;
+                if owner_session_id != session_id {
+                    return Err("publish_execution_session_mismatch".to_string());
+                }
+                if status != "awaiting-confirmation" {
+                    return Err("publish_execution_already_immutable".to_string());
+                }
+                if revision != request.expected_revision {
+                    return Err("publish_execution_revision_conflict".to_string());
+                }
+                let next_budget = budget.unwrap_or(current_budget);
+                if spend > next_budget + 0.000_001 {
+                    return Err("publish_budget_exceeded".to_string());
+                }
+                let next_start_at = publish_start_at.clone().unwrap_or(current_start_at);
+                let now = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
 
-        // 逐项排期修订：先按 item id 校验归属与时间合法性。
-        let mut schedule_by_item: std::collections::HashMap<String, (String, i64)> =
-            std::collections::HashMap::new();
-        for update in &request.item_updates {
-            if update.item_id.trim().is_empty() {
-                return Err("publish_revision_item_invalid".to_string());
-            }
-            let scheduled_at_ms =
-                parse_time(update.scheduled_at.trim(), "publish_schedule_invalid")?;
-            let exists: Option<i64> = transaction
-                .query_row(
-                    "SELECT sequence FROM geo_publish_items
-                     WHERE id=?1 AND execution_id=?2 AND status='pending'",
-                    params![update.item_id, request.execution_id],
-                    |row| row.get(0),
-                )
-                .optional()
-                .map_err(|error| format!("read publish revision item: {error}"))?;
-            if exists.is_none() {
-                return Err("publish_revision_item_not_found".to_string());
-            }
-            schedule_by_item.insert(
-                update.item_id.trim().to_string(),
-                (update.scheduled_at.trim().to_string(), scheduled_at_ms),
-            );
-        }
+                // 逐项排期修订：先按 item id 校验归属与时间合法性。
+                let mut schedule_by_item: std::collections::HashMap<String, (String, i64)> =
+                    std::collections::HashMap::new();
+                for update in &request.item_updates {
+                    if update.item_id.trim().is_empty() {
+                        return Err("publish_revision_item_invalid".to_string());
+                    }
+                    let scheduled_at_ms =
+                        parse_time(update.scheduled_at.trim(), "publish_schedule_invalid")?;
+                    let exists: Option<i64> = transaction
+                        .query_row(
+                            "SELECT sequence FROM geo_publish_items
+                         WHERE id=?1 AND execution_id=?2 AND status='pending'",
+                            params![update.item_id, request.execution_id],
+                            |row| row.get(0),
+                        )
+                        .optional()
+                        .map_err(|error| format!("read publish revision item: {error}"))?;
+                    if exists.is_none() {
+                        return Err("publish_revision_item_not_found".to_string());
+                    }
+                    schedule_by_item.insert(
+                        update.item_id.trim().to_string(),
+                        (update.scheduled_at.trim().to_string(), scheduled_at_ms),
+                    );
+                }
 
-        // 读取全部条目快照，按新排期重算确认摘要输入。
-        let mut statement = transaction
-            .prepare(
-                "SELECT item.id, item.article_id, item.approved_revision,
-                        item.approved_body_sha256, item.channel_json,
-                        item.scheduled_at, item.payload_hash, item.request_summary_json
-                 FROM geo_publish_items item
-                 WHERE item.execution_id=?1 ORDER BY item.sequence",
-            )
-            .map_err(|error| format!("read publish revision items: {error}"))?;
-        let rows = statement
-            .query_map([&request.execution_id], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, i64>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, String>(4)?,
-                    row.get::<_, String>(5)?,
-                    row.get::<_, String>(6)?,
-                    row.get::<_, String>(7)?,
-                ))
-            })
-            .map_err(|error| format!("read publish revision items: {error}"))?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|error| format!("read publish revision items: {error}"))?;
-        drop(statement);
+                // 读取全部条目快照，按新排期重算确认摘要输入。
+                let mut statement = transaction
+                    .prepare(
+                        "SELECT item.id, item.article_id, item.approved_revision,
+                            item.approved_body_sha256, item.channel_json,
+                            item.scheduled_at, item.payload_hash, item.request_summary_json
+                     FROM geo_publish_items item
+                     WHERE item.execution_id=?1 ORDER BY item.sequence",
+                    )
+                    .map_err(|error| format!("read publish revision items: {error}"))?;
+                let rows = statement
+                    .query_map([&request.execution_id], |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, i64>(2)?,
+                            row.get::<_, String>(3)?,
+                            row.get::<_, String>(4)?,
+                            row.get::<_, String>(5)?,
+                            row.get::<_, String>(6)?,
+                            row.get::<_, String>(7)?,
+                        ))
+                    })
+                    .map_err(|error| format!("read publish revision items: {error}"))?
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|error| format!("read publish revision items: {error}"))?;
+                drop(statement);
 
-        let mut digest_items: Vec<PublishDigestItem> = Vec::with_capacity(rows.len());
-        // 排期应用复用读取时的请求摘要快照（此刻行尚未被本次事务修改）。
-        let mut summary_by_item: std::collections::HashMap<String, String> =
-            std::collections::HashMap::new();
-        for (
-            item_id,
-            article_id,
-            approved_revision,
-            approved_body_sha256,
-            channel_json,
-            scheduled_at,
-            payload_hash,
-            summary_json,
-        ) in &rows
-        {
-            summary_by_item.insert(item_id.clone(), summary_json.clone());
-            let channel: Value = serde_json::from_str(channel_json)
-                .map_err(|_| "publish_channel_snapshot_invalid".to_string())?;
-            let read_f64 = |key: &str| {
-                channel
-                    .get(key)
-                    .and_then(Value::as_f64)
-                    .filter(|value| value.is_finite() && *value >= 0.0)
-                    .ok_or_else(|| "publish_channel_snapshot_invalid".to_string())
-            };
-            digest_items.push(PublishDigestItem {
-                article_id: article_id.clone(),
-                approved_revision: *approved_revision,
-                approved_body_sha256: approved_body_sha256.clone(),
-                resource_id: channel
-                    .get("resourceId")
-                    .and_then(Value::as_i64)
-                    .ok_or_else(|| "publish_channel_snapshot_invalid".to_string())?,
-                kind: channel
-                    .get("kind")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| "publish_channel_snapshot_invalid".to_string())?
-                    .to_string(),
-                name: channel
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| "publish_channel_snapshot_invalid".to_string())?
-                    .to_string(),
-                estimated_price_cny: read_f64("estimatedPriceCny")?,
-                published_rate: read_f64("publishedRate")?,
-                scheduled_at: schedule_by_item
-                    .get(item_id)
-                    .map(|(scheduled_at, _)| scheduled_at.clone())
-                    .unwrap_or_else(|| scheduled_at.clone()),
-                payload_hash: payload_hash.clone(),
-            });
-        }
-        let confirmation_digest = confirmation_digest_of(
-            &plan_id,
-            plan_revision,
-            next_budget,
-            spend,
-            &next_start_at,
-            &provider_snapshot_json,
-            &digest_items,
-        );
-
-        // 应用逐项排期：排期列、毫秒列与请求摘要中的 scheduledAt 同步更新。
-        for (item_id, (scheduled_at, scheduled_at_ms)) in &schedule_by_item {
-            let raw_summary = summary_by_item
-                .get(item_id)
-                .ok_or_else(|| "publish_revision_item_not_found".to_string())?;
-            let mut summary: Value = serde_json::from_str(raw_summary)
-                .map_err(|_| "publish_request_summary_invalid".to_string())?;
-            summary
-                .as_object_mut()
-                .ok_or_else(|| "publish_request_summary_invalid".to_string())?
-                .insert("scheduledAt".to_string(), json!(scheduled_at));
-            let summary_json = serde_json::to_string(&summary)
-                .map_err(|_| "publish_request_summary_invalid".to_string())?;
-            let changed = transaction
-                .execute(
-                    "UPDATE geo_publish_items SET scheduled_at=?2, scheduled_at_ms=?3,
-                            request_summary_json=?4
-                     WHERE id=?1 AND execution_id=?5 AND status='pending'",
-                    params![
-                        item_id,
-                        scheduled_at,
-                        scheduled_at_ms,
-                        summary_json,
-                        request.execution_id,
-                    ],
-                )
-                .map_err(|error| format!("apply publish item schedule: {error}"))?;
-            if changed != 1 {
-                return Err("publish_revision_item_not_found".to_string());
-            }
-        }
-        let next_revision = revision + 1;
-        let changed = transaction
-            .execute(
-                "UPDATE geo_publish_executions SET budget_cny=?2, publish_start_at=?3,
-                        confirmation_digest=?4, revision=?5, updated_at=?6
-                 WHERE id=?1 AND revision=?7 AND status='awaiting-confirmation'",
-                params![
-                    request.execution_id,
+                let mut digest_items: Vec<PublishDigestItem> = Vec::with_capacity(rows.len());
+                // 排期应用复用读取时的请求摘要快照（此刻行尚未被本次事务修改）。
+                let mut summary_by_item: std::collections::HashMap<String, String> =
+                    std::collections::HashMap::new();
+                for (
+                    item_id,
+                    article_id,
+                    approved_revision,
+                    approved_body_sha256,
+                    channel_json,
+                    scheduled_at,
+                    payload_hash,
+                    summary_json,
+                ) in &rows
+                {
+                    summary_by_item.insert(item_id.clone(), summary_json.clone());
+                    let channel: Value = serde_json::from_str(channel_json)
+                        .map_err(|_| "publish_channel_snapshot_invalid".to_string())?;
+                    let read_f64 = |key: &str| {
+                        channel
+                            .get(key)
+                            .and_then(Value::as_f64)
+                            .filter(|value| value.is_finite() && *value >= 0.0)
+                            .ok_or_else(|| "publish_channel_snapshot_invalid".to_string())
+                    };
+                    digest_items.push(PublishDigestItem {
+                        article_id: article_id.clone(),
+                        approved_revision: *approved_revision,
+                        approved_body_sha256: approved_body_sha256.clone(),
+                        resource_id: channel
+                            .get("resourceId")
+                            .and_then(Value::as_i64)
+                            .ok_or_else(|| "publish_channel_snapshot_invalid".to_string())?,
+                        kind: channel
+                            .get("kind")
+                            .and_then(Value::as_str)
+                            .ok_or_else(|| "publish_channel_snapshot_invalid".to_string())?
+                            .to_string(),
+                        name: channel
+                            .get("name")
+                            .and_then(Value::as_str)
+                            .ok_or_else(|| "publish_channel_snapshot_invalid".to_string())?
+                            .to_string(),
+                        estimated_price_cny: read_f64("estimatedPriceCny")?,
+                        published_rate: read_f64("publishedRate")?,
+                        scheduled_at: schedule_by_item
+                            .get(item_id)
+                            .map(|(scheduled_at, _)| scheduled_at.clone())
+                            .unwrap_or_else(|| scheduled_at.clone()),
+                        payload_hash: payload_hash.clone(),
+                    });
+                }
+                let confirmation_digest = confirmation_digest_of(
+                    &plan_id,
+                    plan_revision,
                     next_budget,
-                    next_start_at,
-                    confirmation_digest,
-                    next_revision,
-                    now,
-                    revision
-                ],
-            )
-            .map_err(|error| format!("apply publish revision: {error}"))?;
-        if changed != 1 {
-            return Err("publish_execution_revision_conflict".to_string());
-        }
-        insert_audit(
-            &transaction,
-            &request.execution_id,
-            None,
-            "revision",
-            Some(session_id),
-            &json!({
-                "reason": request.reason,
-                "budgetCny": budget,
-                "publishStartAt": publish_start_at,
-                "itemUpdates": request.item_updates,
-            }),
-            &now,
+                    spend,
+                    &next_start_at,
+                    &provider_snapshot_json,
+                    &digest_items,
+                );
+
+                // 应用逐项排期：排期列、毫秒列与请求摘要中的 scheduledAt 同步更新。
+                for (item_id, (scheduled_at, scheduled_at_ms)) in &schedule_by_item {
+                    let raw_summary = summary_by_item
+                        .get(item_id)
+                        .ok_or_else(|| "publish_revision_item_not_found".to_string())?;
+                    let mut summary: Value = serde_json::from_str(raw_summary)
+                        .map_err(|_| "publish_request_summary_invalid".to_string())?;
+                    summary
+                        .as_object_mut()
+                        .ok_or_else(|| "publish_request_summary_invalid".to_string())?
+                        .insert("scheduledAt".to_string(), json!(scheduled_at));
+                    let summary_json = serde_json::to_string(&summary)
+                        .map_err(|_| "publish_request_summary_invalid".to_string())?;
+                    let changed = transaction
+                        .execute(
+                            "UPDATE geo_publish_items SET scheduled_at=?2, scheduled_at_ms=?3,
+                                request_summary_json=?4
+                         WHERE id=?1 AND execution_id=?5 AND status='pending'",
+                            params![
+                                item_id,
+                                scheduled_at,
+                                scheduled_at_ms,
+                                summary_json,
+                                request.execution_id,
+                            ],
+                        )
+                        .map_err(|error| format!("apply publish item schedule: {error}"))?;
+                    if changed != 1 {
+                        return Err("publish_revision_item_not_found".to_string());
+                    }
+                }
+                let next_revision = revision + 1;
+                let changed = transaction
+                    .execute(
+                        "UPDATE geo_publish_executions SET budget_cny=?2, publish_start_at=?3,
+                            confirmation_digest=?4, revision=?5, updated_at=?6
+                     WHERE id=?1 AND revision=?7 AND status='awaiting-confirmation'",
+                        params![
+                            request.execution_id,
+                            next_budget,
+                            next_start_at,
+                            confirmation_digest,
+                            next_revision,
+                            now,
+                            revision
+                        ],
+                    )
+                    .map_err(|error| format!("apply publish revision: {error}"))?;
+                if changed != 1 {
+                    return Err("publish_execution_revision_conflict".to_string());
+                }
+                insert_audit(
+                    transaction,
+                    &request.execution_id,
+                    None,
+                    "revision",
+                    Some(session_id),
+                    &json!({
+                        "reason": request.reason,
+                        "budgetCny": budget,
+                        "publishStartAt": publish_start_at,
+                        "itemUpdates": request.item_updates,
+                    }),
+                    &now,
+                )?;
+                Ok(())
+            },
         )?;
-        transaction
-            .commit()
-            .map_err(|error| format!("commit publish revision: {error}"))?;
         read_execution(&connection, workspace_id, &request.execution_id)
     }
 
@@ -1679,62 +1659,64 @@ impl BrandWorkspaceStore {
         now_ms: i64,
     ) -> Result<PublishExecutionProjection, String> {
         let workspace = self.workspace(workspace_id)?;
-        let mut connection = open_database(&workspace)?;
-        require_session(&connection, session_id)?;
-        let transaction = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|error| format!("start publish execution transaction: {error}"))?;
-        let (revision, status): (i64, String) = transaction
-            .query_row(
-                "SELECT revision, status FROM geo_publish_executions WHERE id=?1",
-                [&request.execution_id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .optional()
-            .map_err(|error| format!("read publish start target: {error}"))?
-            .ok_or_else(|| "publish_execution_not_found".to_string())?;
-        if revision != request.expected_revision {
-            return Err("publish_execution_revision_conflict".to_string());
-        }
-        if status != "confirmed" {
-            return Err("publish_execution_not_startable".to_string());
-        }
-        let due: bool = transaction
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM geo_publish_items
-                 WHERE execution_id=?1 AND scheduled_at_ms<=?2)",
-                params![request.execution_id, now_ms],
-                |row| row.get(0),
-            )
-            .map_err(|error| format!("inspect publish due state: {error}"))?;
-        let next_status = if due { "running" } else { "scheduled" };
-        let now = now_iso(now_ms);
-        let changed = transaction
-            .execute(
-                "UPDATE geo_publish_executions SET status=?2, revision=revision+1,
-                 execution_started_at=?3, updated_at=?3
-                 WHERE id=?1 AND revision=?4 AND status='confirmed'",
-                params![request.execution_id, next_status, now, revision],
-            )
-            .map_err(|error| format!("start publish execution: {error}"))?;
-        if changed != 1 {
-            return Err("publish_execution_revision_conflict".to_string());
-        }
-        // 血缘行迁移经唯一 owner（票 08）：无论执行落 running 还是 scheduled，
-        // 血缘恒写 executing（not-due 的漂移由 refresh 聚合收口）。
-        mirror_publish_lineage(&transaction, &request.execution_id, "publish-executing")?;
-        insert_audit(
-            &transaction,
-            &request.execution_id,
-            None,
-            "execution-started",
-            Some(session_id),
-            &json!({"dueNow": due}),
-            &now,
+        let mut connection = BrandWorkspaceStore::open(&workspace)?;
+        gates::PUBLISH_SESSION.enforce(&connection, session_id)?;
+        with_immediate_tx(
+            &mut connection,
+            "start publish execution transaction",
+            "commit publish start",
+            |transaction| {
+                let (revision, status): (i64, String) = transaction
+                    .query_row(
+                        "SELECT revision, status FROM geo_publish_executions WHERE id=?1",
+                        [&request.execution_id],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .optional()
+                    .map_err(|error| format!("read publish start target: {error}"))?
+                    .ok_or_else(|| "publish_execution_not_found".to_string())?;
+                if revision != request.expected_revision {
+                    return Err("publish_execution_revision_conflict".to_string());
+                }
+                if status != "confirmed" {
+                    return Err("publish_execution_not_startable".to_string());
+                }
+                let due: bool = transaction
+                    .query_row(
+                        "SELECT EXISTS(SELECT 1 FROM geo_publish_items
+                     WHERE execution_id=?1 AND scheduled_at_ms<=?2)",
+                        params![request.execution_id, now_ms],
+                        |row| row.get(0),
+                    )
+                    .map_err(|error| format!("inspect publish due state: {error}"))?;
+                let next_status = if due { "running" } else { "scheduled" };
+                let now = now_iso(now_ms);
+                let changed = transaction
+                    .execute(
+                        "UPDATE geo_publish_executions SET status=?2, revision=revision+1,
+                     execution_started_at=?3, updated_at=?3
+                     WHERE id=?1 AND revision=?4 AND status='confirmed'",
+                        params![request.execution_id, next_status, now, revision],
+                    )
+                    .map_err(|error| format!("start publish execution: {error}"))?;
+                if changed != 1 {
+                    return Err("publish_execution_revision_conflict".to_string());
+                }
+                // 血缘行迁移经唯一 owner（票 08）：无论执行落 running 还是 scheduled，
+                // 血缘恒写 executing（not-due 的漂移由 refresh 聚合收口）。
+                mirror_publish_lineage(transaction, &request.execution_id, "publish-executing")?;
+                insert_audit(
+                    transaction,
+                    &request.execution_id,
+                    None,
+                    "execution-started",
+                    Some(session_id),
+                    &json!({"dueNow": due}),
+                    &now,
+                )?;
+                Ok(())
+            },
         )?;
-        transaction
-            .commit()
-            .map_err(|error| format!("commit publish start: {error}"))?;
         read_execution(&connection, workspace_id, &request.execution_id)
     }
 
@@ -1754,115 +1736,121 @@ impl BrandWorkspaceStore {
         now_ms: i64,
     ) -> Result<PublishExecutionProjection, String> {
         let workspace = self.workspace(workspace_id)?;
-        let mut connection = open_database(&workspace)?;
-        require_session(&connection, session_id)?;
-        let transaction = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|error| format!("retry publish item transaction: {error}"))?;
-        let (revision, status, attempts): (i64, String, i64) = transaction
-            .query_row(
-                "SELECT revision, status, attempts FROM geo_publish_items
-                 WHERE id=?1 AND execution_id=?2",
-                params![request.item_id, request.execution_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
-            .optional()
-            .map_err(|error| format!("read publish retry target: {error}"))?
-            .ok_or_else(|| "publish_item_not_found".to_string())?;
-        let execution_status: String = transaction
-            .query_row(
-                "SELECT status FROM geo_publish_executions WHERE id=?1",
-                params![request.execution_id],
-                |row| row.get(0),
-            )
-            .map_err(|error| format!("read publish retry execution: {error}"))?;
-        if revision != request.expected_item_revision {
-            return Err("publish_item_revision_conflict".to_string());
-        }
-        // 「uploaded 仅在执行已取消时可复活」：活跃执行里的 uploaded 是
-        // 管线中段（等待下单认领），不是失败；只有取消执行里它才成了
-        // 孤儿（在途上传在取消后才落库，永远等不到下单认领）。
-        let reset_eligible = matches!(status.as_str(), "failed-nonretryable" | "cancelled")
-            || (status.as_str() == "uploaded" && execution_status == "cancelled");
-        match status.as_str() {
-            "failed-retryable" => {
-                if attempts > RETRY_BACKOFF_MS.len() as i64 {
-                    return Err("publish_item_not_safely_retryable".to_string());
-                }
-                let changed = transaction
-                    .execute(
-                        "UPDATE geo_publish_items SET next_attempt_at_ms=?3, revision=revision+1,
-                         failure_code=NULL, failure_reason=NULL
-                         WHERE id=?1 AND execution_id=?2 AND revision=?4 AND status='failed-retryable'",
-                        params![request.item_id, request.execution_id, now_ms, revision],
+        let mut connection = BrandWorkspaceStore::open(&workspace)?;
+        gates::PUBLISH_SESSION.enforce(&connection, session_id)?;
+        with_immediate_tx(
+            &mut connection,
+            "retry publish item transaction",
+            "commit publish item retry",
+            |transaction| {
+                let (revision, status, attempts): (i64, String, i64) = transaction
+                    .query_row(
+                        "SELECT revision, status, attempts FROM geo_publish_items
+                     WHERE id=?1 AND execution_id=?2",
+                        params![request.item_id, request.execution_id],
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
                     )
-                    .map_err(|error| format!("schedule publish item retry: {error}"))?;
-                if changed != 1 {
+                    .optional()
+                    .map_err(|error| format!("read publish retry target: {error}"))?
+                    .ok_or_else(|| "publish_item_not_found".to_string())?;
+                let execution_status: String = transaction
+                    .query_row(
+                        "SELECT status FROM geo_publish_executions WHERE id=?1",
+                        params![request.execution_id],
+                        |row| row.get(0),
+                    )
+                    .map_err(|error| format!("read publish retry execution: {error}"))?;
+                if revision != request.expected_item_revision {
                     return Err("publish_item_revision_conflict".to_string());
                 }
-            }
-            "failed-nonretryable" | "cancelled" | "uploaded" if reset_eligible => {
-                let changed = transaction
-                    .execute(
-                        "UPDATE geo_publish_items SET status='pending', attempts=0,
-                         upload_attempts=0, next_attempt_at_ms=?3, revision=revision+1,
-                         failure_code=NULL, failure_reason=NULL, finished_at=NULL,
-                         claim_token=NULL, lease_until_ms=NULL
-                         WHERE id=?1 AND execution_id=?2 AND revision=?4
-                           AND status IN ('failed-nonretryable','cancelled','uploaded')",
-                        params![request.item_id, request.execution_id, now_ms, revision],
-                    )
-                    .map_err(|error| format!("republish publish item: {error}"))?;
-                if changed != 1 {
-                    return Err("publish_item_revision_conflict".to_string());
+                // 「uploaded 仅在执行已取消时可复活」：活跃执行里的 uploaded 是
+                // 管线中段（等待下单认领），不是失败；只有取消执行里它才成了
+                // 孤儿（在途上传在取消后才落库，永远等不到下单认领）。
+                let reset_eligible = matches!(status.as_str(), "failed-nonretryable" | "cancelled")
+                    || (status.as_str() == "uploaded" && execution_status == "cancelled");
+                match status.as_str() {
+                    "failed-retryable" => {
+                        if attempts > RETRY_BACKOFF_MS.len() as i64 {
+                            return Err("publish_item_not_safely_retryable".to_string());
+                        }
+                        let changed = transaction
+                        .execute(
+                            "UPDATE geo_publish_items SET next_attempt_at_ms=?3, revision=revision+1,
+                             failure_code=NULL, failure_reason=NULL
+                             WHERE id=?1 AND execution_id=?2 AND revision=?4 AND status='failed-retryable'",
+                            params![request.item_id, request.execution_id, now_ms, revision],
+                        )
+                        .map_err(|error| format!("schedule publish item retry: {error}"))?;
+                        if changed != 1 {
+                            return Err("publish_item_revision_conflict".to_string());
+                        }
+                    }
+                    "failed-nonretryable" | "cancelled" | "uploaded" if reset_eligible => {
+                        let changed = transaction
+                            .execute(
+                                "UPDATE geo_publish_items SET status='pending', attempts=0,
+                             upload_attempts=0, next_attempt_at_ms=?3, revision=revision+1,
+                             failure_code=NULL, failure_reason=NULL, finished_at=NULL,
+                             claim_token=NULL, lease_until_ms=NULL
+                             WHERE id=?1 AND execution_id=?2 AND revision=?4
+                               AND status IN ('failed-nonretryable','cancelled','uploaded')",
+                                params![request.item_id, request.execution_id, now_ms, revision],
+                            )
+                            .map_err(|error| format!("republish publish item: {error}"))?;
+                        if changed != 1 {
+                            return Err("publish_item_revision_conflict".to_string());
+                        }
+                    }
+                    _ => return Err("publish_item_not_safely_retryable".to_string()),
                 }
-            }
-            _ => return Err("publish_item_not_safely_retryable".to_string()),
-        }
-        let now = now_iso(now_ms);
-        // 执行级联动：取消态复活为 scheduled；终态执行清 finished_at（状态
-        // 标签由提交后的 refresh 重算回活跃）。
-        let revived = transaction
-            .execute(
-                "UPDATE geo_publish_executions SET status='scheduled', revision=revision+1,
-                 finished_at=NULL, updated_at=?2
-                 WHERE id=?1 AND status='cancelled'",
-                params![request.execution_id, now],
-            )
-            .map_err(|error| format!("revive cancelled publish execution: {error}"))?;
-        if revived == 1 {
-            insert_audit(
-                &transaction,
-                &request.execution_id,
-                None,
-                "execution-revived",
-                Some(session_id),
-                &json!({"itemId": request.item_id}),
-                &now,
-            )?;
-            // 血缘行迁移经唯一 owner（票 08）。
-            mirror_publish_lineage(&transaction, &request.execution_id, "publish-scheduled")?;
-        }
-        transaction
-            .execute(
-                "UPDATE geo_publish_executions SET finished_at=NULL
-                 WHERE id=?1 AND finished_at IS NOT NULL
-                   AND status IN ('partially-succeeded','failed')",
-                params![request.execution_id],
-            )
-            .map_err(|error| format!("clear finished publish execution: {error}"))?;
-        insert_audit(
-            &transaction,
-            &request.execution_id,
-            Some(&request.item_id),
-            "republish-requested",
-            Some(session_id),
-            &json!({"fromStatus": status, "attempts": attempts}),
-            &now,
+                let now = now_iso(now_ms);
+                // 执行级联动：取消态复活为 scheduled；终态执行清 finished_at（状态
+                // 标签由提交后的 refresh 重算回活跃）。
+                let revived = transaction
+                    .execute(
+                        "UPDATE geo_publish_executions SET status='scheduled', revision=revision+1,
+                     finished_at=NULL, updated_at=?2
+                     WHERE id=?1 AND status='cancelled'",
+                        params![request.execution_id, now],
+                    )
+                    .map_err(|error| format!("revive cancelled publish execution: {error}"))?;
+                if revived == 1 {
+                    insert_audit(
+                        transaction,
+                        &request.execution_id,
+                        None,
+                        "execution-revived",
+                        Some(session_id),
+                        &json!({"itemId": request.item_id}),
+                        &now,
+                    )?;
+                    // 血缘行迁移经唯一 owner（票 08）。
+                    mirror_publish_lineage(
+                        transaction,
+                        &request.execution_id,
+                        "publish-scheduled",
+                    )?;
+                }
+                transaction
+                    .execute(
+                        "UPDATE geo_publish_executions SET finished_at=NULL
+                     WHERE id=?1 AND finished_at IS NOT NULL
+                       AND status IN ('partially-succeeded','failed')",
+                        params![request.execution_id],
+                    )
+                    .map_err(|error| format!("clear finished publish execution: {error}"))?;
+                insert_audit(
+                    transaction,
+                    &request.execution_id,
+                    Some(&request.item_id),
+                    "republish-requested",
+                    Some(session_id),
+                    &json!({"fromStatus": status, "attempts": attempts}),
+                    &now,
+                )?;
+                Ok(())
+            },
         )?;
-        transaction
-            .commit()
-            .map_err(|error| format!("commit publish item retry: {error}"))?;
         refresh_execution_status(&workspace, &request.execution_id, now_ms)?;
         read_execution(&connection, workspace_id, &request.execution_id)
     }
@@ -1882,66 +1870,68 @@ impl BrandWorkspaceStore {
         now_ms: i64,
     ) -> Result<PublishExecutionProjection, String> {
         let workspace = self.workspace(workspace_id)?;
-        let mut connection = open_database(&workspace)?;
-        require_session(&connection, session_id)?;
-        let transaction = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|error| format!("cancel publish execution transaction: {error}"))?;
-        let (revision, status): (i64, String) = transaction
-            .query_row(
-                "SELECT revision, status FROM geo_publish_executions WHERE id=?1",
-                [&request.execution_id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .optional()
-            .map_err(|error| format!("read cancel publish execution: {error}"))?
-            .ok_or_else(|| "publish_execution_not_found".to_string())?;
-        if revision != request.expected_revision {
-            return Err("publish_execution_revision_conflict".to_string());
-        }
-        if !matches!(
-            status.as_str(),
-            "running" | "scheduled" | "partially-succeeded" | "failed"
-        ) {
-            return Err("publish_execution_not_cancellable".to_string());
-        }
-        let cancelled_items = transaction
-            .execute(
-                "UPDATE geo_publish_items SET status='cancelled', revision=revision+1,
-                 next_attempt_at_ms=NULL, claim_token=NULL, lease_until_ms=NULL,
-                 failure_code=NULL, failure_reason=NULL, finished_at=?2
-                 WHERE execution_id=?1
-                   AND status IN ('pending','failed-retryable','failed-nonretryable','uploaded')",
-                params![request.execution_id, now_iso(now_ms)],
-            )
-            .map_err(|error| format!("cancel publish items: {error}"))?;
-        let changed = transaction
-            .execute(
-                "UPDATE geo_publish_executions SET status='cancelled', revision=revision+1,
-                 finished_at=?2, updated_at=?2
-                 WHERE id=?1 AND revision=?3
-                   AND status IN ('running','scheduled','partially-succeeded','failed')",
-                params![request.execution_id, now_iso(now_ms), revision],
-            )
-            .map_err(|error| format!("cancel publish execution: {error}"))?;
-        if changed != 1 {
-            return Err("publish_execution_revision_conflict".to_string());
-        }
-        let now = now_iso(now_ms);
-        // 血缘行迁移经唯一 owner（票 08）。
-        mirror_publish_lineage(&transaction, &request.execution_id, "publish-cancelled")?;
-        insert_audit(
-            &transaction,
-            &request.execution_id,
-            None,
-            "execution-cancelled",
-            Some(session_id),
-            &json!({"cancelledItems": cancelled_items}),
-            &now,
+        let mut connection = BrandWorkspaceStore::open(&workspace)?;
+        gates::PUBLISH_SESSION.enforce(&connection, session_id)?;
+        with_immediate_tx(
+            &mut connection,
+            "cancel publish execution transaction",
+            "commit publish execution cancel",
+            |transaction| {
+                let (revision, status): (i64, String) = transaction
+                    .query_row(
+                        "SELECT revision, status FROM geo_publish_executions WHERE id=?1",
+                        [&request.execution_id],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .optional()
+                    .map_err(|error| format!("read cancel publish execution: {error}"))?
+                    .ok_or_else(|| "publish_execution_not_found".to_string())?;
+                if revision != request.expected_revision {
+                    return Err("publish_execution_revision_conflict".to_string());
+                }
+                if !matches!(
+                    status.as_str(),
+                    "running" | "scheduled" | "partially-succeeded" | "failed"
+                ) {
+                    return Err("publish_execution_not_cancellable".to_string());
+                }
+                let cancelled_items = transaction
+                .execute(
+                    "UPDATE geo_publish_items SET status='cancelled', revision=revision+1,
+                     next_attempt_at_ms=NULL, claim_token=NULL, lease_until_ms=NULL,
+                     failure_code=NULL, failure_reason=NULL, finished_at=?2
+                     WHERE execution_id=?1
+                       AND status IN ('pending','failed-retryable','failed-nonretryable','uploaded')",
+                    params![request.execution_id, now_iso(now_ms)],
+                )
+                .map_err(|error| format!("cancel publish items: {error}"))?;
+                let changed = transaction
+                    .execute(
+                        "UPDATE geo_publish_executions SET status='cancelled', revision=revision+1,
+                     finished_at=?2, updated_at=?2
+                     WHERE id=?1 AND revision=?3
+                       AND status IN ('running','scheduled','partially-succeeded','failed')",
+                        params![request.execution_id, now_iso(now_ms), revision],
+                    )
+                    .map_err(|error| format!("cancel publish execution: {error}"))?;
+                if changed != 1 {
+                    return Err("publish_execution_revision_conflict".to_string());
+                }
+                let now = now_iso(now_ms);
+                // 血缘行迁移经唯一 owner（票 08）。
+                mirror_publish_lineage(transaction, &request.execution_id, "publish-cancelled")?;
+                insert_audit(
+                    transaction,
+                    &request.execution_id,
+                    None,
+                    "execution-cancelled",
+                    Some(session_id),
+                    &json!({"cancelledItems": cancelled_items}),
+                    &now,
+                )?;
+                Ok(())
+            },
         )?;
-        transaction
-            .commit()
-            .map_err(|error| format!("commit publish execution cancel: {error}"))?;
         read_execution(&connection, workspace_id, &request.execution_id)
     }
 
@@ -1967,100 +1957,102 @@ impl BrandWorkspaceStore {
         now_ms: i64,
     ) -> Result<PublishExecutionProjection, String> {
         let workspace = self.workspace(workspace_id)?;
-        let mut connection = open_database(&workspace)?;
-        require_session(&connection, session_id)?;
-        let transaction = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|error| format!("resume reconciled execution transaction: {error}"))?;
-        let (revision, status, provider_json): (i64, String, String) = transaction
-            .query_row(
-                "SELECT revision, status, provider_snapshot_json
-                 FROM geo_publish_executions WHERE id=?1",
-                [&request.execution_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
-            .optional()
-            .map_err(|error| format!("read reconciled execution: {error}"))?
-            .ok_or_else(|| "publish_execution_not_found".to_string())?;
-        if revision != request.expected_revision {
-            return Err("publish_execution_revision_conflict".to_string());
-        }
-        if status != "reconciliation-required" {
-            return Err("publish_execution_not_resumable".to_string());
-        }
-        // 安全闸一：当前必须已登录（两槽位都 configured，拿得到网关指纹），
-        // 未登录时无法证明「配置没变」，拒绝恢复。
-        let current = configured_provider_snapshot()?;
-        if !current.object_storage.configured || !current.distribution.configured {
-            return Err("publish_provider_unavailable".to_string());
-        }
-        // 安全闸二：冻结快照与当前快照构成真实配置变化（双方都 configured
-        // 且指纹不同）时，旧幂等键不得复活。
-        let frozen: PublishProviderSnapshot = serde_json::from_str(&provider_json)
-            .map_err(|_| "publish_provider_snapshot_invalid".to_string())?;
-        if provider_configuration_changed(&frozen, &current) {
-            return Err("publish_provider_configuration_changed".to_string());
-        }
-        // 安全闸三：任一条目已有 external_order_id → 存在外部副作用，整单
-        // 拒绝（保守：已提交项走查单对账，不在本通道）。
-        let has_submitted: bool = transaction
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM geo_publish_items
-                 WHERE execution_id=?1 AND external_order_id IS NOT NULL)",
-                [&request.execution_id],
-                |row| row.get(0),
-            )
-            .map_err(|error| format!("inspect reconciled submitted items: {error}"))?;
-        if has_submitted {
-            return Err("publish_execution_has_submitted_items".to_string());
-        }
-        let now = now_iso(now_ms);
-        // 只回置从未提交的 reconciliation-required 条目：按认领前阶段
-        // （上传阶段→pending；提交阶段→uploaded，与 claim_next_item 的
-        // object_url 判段一致），清失败信息并把 next_attempt 拉到 now，
-        // 让调度器立即可重新认领；claim 租约一并清空（巡检 settle 时已清，
-        // 这里防御性再清一次）。
-        let resumed_items = transaction
-            .execute(
-                "UPDATE geo_publish_items SET
-                    status=CASE WHEN object_url IS NULL THEN 'pending' ELSE 'uploaded' END,
-                    revision=revision+1, failure_code=NULL, failure_reason=NULL,
-                    next_attempt_at_ms=?2, finished_at=NULL,
-                    claim_token=NULL, lease_until_ms=NULL
-                 WHERE execution_id=?1 AND status='reconciliation-required'
-                   AND external_order_id IS NULL",
-                params![request.execution_id, now_ms],
-            )
-            .map_err(|error| format!("resume reconciled publish items: {error}"))?;
-        if resumed_items == 0 {
-            return Err("publish_execution_not_resumable".to_string());
-        }
-        let changed = transaction
-            .execute(
-                "UPDATE geo_publish_executions SET status='scheduled', revision=revision+1,
-                 finished_at=NULL, updated_at=?2
-                 WHERE id=?1 AND revision=?3 AND status='reconciliation-required'",
-                params![request.execution_id, now, revision],
-            )
-            .map_err(|error| format!("resume reconciled execution: {error}"))?;
-        if changed != 1 {
-            return Err("publish_execution_revision_conflict".to_string());
-        }
-        // 血缘行迁移经唯一 owner（票 08）。from 集覆盖 prepare 冲突分支翻转
-        // 执行（翻转不写血缘，行值停留在原镜像态）——见 owner 注的破口一。
-        mirror_publish_lineage(&transaction, &request.execution_id, "publish-scheduled")?;
-        insert_audit(
-            &transaction,
-            &request.execution_id,
-            None,
-            "reconciliation-resumed",
-            Some(session_id),
-            &json!({"resumedItems": resumed_items}),
-            &now,
+        let mut connection = BrandWorkspaceStore::open(&workspace)?;
+        gates::PUBLISH_SESSION.enforce(&connection, session_id)?;
+        with_immediate_tx(
+            &mut connection,
+            "resume reconciled execution transaction",
+            "commit reconciled execution resume",
+            |transaction| {
+                let (revision, status, provider_json): (i64, String, String) = transaction
+                    .query_row(
+                        "SELECT revision, status, provider_snapshot_json
+                     FROM geo_publish_executions WHERE id=?1",
+                        [&request.execution_id],
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                    )
+                    .optional()
+                    .map_err(|error| format!("read reconciled execution: {error}"))?
+                    .ok_or_else(|| "publish_execution_not_found".to_string())?;
+                if revision != request.expected_revision {
+                    return Err("publish_execution_revision_conflict".to_string());
+                }
+                if status != "reconciliation-required" {
+                    return Err("publish_execution_not_resumable".to_string());
+                }
+                // 安全闸一：当前必须已登录（两槽位都 configured，拿得到网关指纹），
+                // 未登录时无法证明「配置没变」，拒绝恢复。
+                let current = configured_provider_snapshot()?;
+                if !current.object_storage.configured || !current.distribution.configured {
+                    return Err("publish_provider_unavailable".to_string());
+                }
+                // 安全闸二：冻结快照与当前快照构成真实配置变化（双方都 configured
+                // 且指纹不同）时，旧幂等键不得复活。
+                let frozen: PublishProviderSnapshot = serde_json::from_str(&provider_json)
+                    .map_err(|_| "publish_provider_snapshot_invalid".to_string())?;
+                if provider_configuration_changed(&frozen, &current) {
+                    return Err("publish_provider_configuration_changed".to_string());
+                }
+                // 安全闸三：任一条目已有 external_order_id → 存在外部副作用，整单
+                // 拒绝（保守：已提交项走查单对账，不在本通道）。
+                let has_submitted: bool = transaction
+                    .query_row(
+                        "SELECT EXISTS(SELECT 1 FROM geo_publish_items
+                     WHERE execution_id=?1 AND external_order_id IS NOT NULL)",
+                        [&request.execution_id],
+                        |row| row.get(0),
+                    )
+                    .map_err(|error| format!("inspect reconciled submitted items: {error}"))?;
+                if has_submitted {
+                    return Err("publish_execution_has_submitted_items".to_string());
+                }
+                let now = now_iso(now_ms);
+                // 只回置从未提交的 reconciliation-required 条目：按认领前阶段
+                // （上传阶段→pending；提交阶段→uploaded，与 claim_next_item 的
+                // object_url 判段一致），清失败信息并把 next_attempt 拉到 now，
+                // 让调度器立即可重新认领；claim 租约一并清空（巡检 settle 时已清，
+                // 这里防御性再清一次）。
+                let resumed_items = transaction
+                    .execute(
+                        "UPDATE geo_publish_items SET
+                        status=CASE WHEN object_url IS NULL THEN 'pending' ELSE 'uploaded' END,
+                        revision=revision+1, failure_code=NULL, failure_reason=NULL,
+                        next_attempt_at_ms=?2, finished_at=NULL,
+                        claim_token=NULL, lease_until_ms=NULL
+                     WHERE execution_id=?1 AND status='reconciliation-required'
+                       AND external_order_id IS NULL",
+                        params![request.execution_id, now_ms],
+                    )
+                    .map_err(|error| format!("resume reconciled publish items: {error}"))?;
+                if resumed_items == 0 {
+                    return Err("publish_execution_not_resumable".to_string());
+                }
+                let changed = transaction
+                    .execute(
+                        "UPDATE geo_publish_executions SET status='scheduled', revision=revision+1,
+                     finished_at=NULL, updated_at=?2
+                     WHERE id=?1 AND revision=?3 AND status='reconciliation-required'",
+                        params![request.execution_id, now, revision],
+                    )
+                    .map_err(|error| format!("resume reconciled execution: {error}"))?;
+                if changed != 1 {
+                    return Err("publish_execution_revision_conflict".to_string());
+                }
+                // 血缘行迁移经唯一 owner（票 08）。from 集覆盖 prepare 冲突分支翻转
+                // 执行（翻转不写血缘，行值停留在原镜像态）——见 owner 注的破口一。
+                mirror_publish_lineage(transaction, &request.execution_id, "publish-scheduled")?;
+                insert_audit(
+                    transaction,
+                    &request.execution_id,
+                    None,
+                    "reconciliation-resumed",
+                    Some(session_id),
+                    &json!({"resumedItems": resumed_items}),
+                    &now,
+                )?;
+                Ok(())
+            },
         )?;
-        transaction
-            .commit()
-            .map_err(|error| format!("commit reconciled execution resume: {error}"))?;
         read_execution(&connection, workspace_id, &request.execution_id)
     }
 }
@@ -3361,75 +3353,81 @@ fn replace_material_image_placeholders(
 }
 
 fn reconcile_provider_configuration(workspace: &BrandWorkspace, now_ms: i64) -> Result<(), String> {
-    let mut connection = open_database(workspace)?;
+    let mut connection = BrandWorkspaceStore::open(workspace)?;
     let current =
         configured_provider_snapshot().unwrap_or_else(|_| unavailable_provider_snapshot());
-    let transaction = connection
-        .transaction_with_behavior(TransactionBehavior::Immediate)
-        .map_err(|error| format!("inspect publish provider configuration: {error}"))?;
-    let executions = {
-        let mut statement = transaction
-            .prepare(
-                "SELECT id, provider_snapshot_json FROM geo_publish_executions
-                 WHERE execution_started_at IS NOT NULL
-                   AND status IN ('running','scheduled','partially-succeeded','failed')",
-            )
-            .map_err(|error| format!("prepare publish provider inspection: {error}"))?;
-        let rows = statement
-            .query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-            })
-            .map_err(|error| format!("read publish provider inspection: {error}"))?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|error| format!("collect publish provider inspection: {error}"))?;
-        rows
-    };
-    let now = now_iso(now_ms);
-    let mut failed_execution_ids = Vec::new();
-    for (execution_id, snapshot_json) in executions {
-        let snapshot = serde_json::from_str::<PublishProviderSnapshot>(&snapshot_json).ok();
-        // 只在「双方都 configured 且指纹不同」时判为配置变化：当前侧未登录
-        // 拿不到网关指纹时跳过本轮巡检，不动这些执行单（快照不可解析的行
-        // 保持旧的 fail-closed 行为）。
-        let unchanged = snapshot
-            .as_ref()
-            .is_some_and(|frozen| !provider_configuration_changed(frozen, &current));
-        if unchanged {
-            continue;
-        }
-        transaction
-            .execute(
-                "UPDATE geo_publish_items SET status='reconciliation-required',
-                 revision=revision+1, failure_code='provider-configuration-changed',
-                 failure_reason='Provider 配置指纹已变化，禁止沿旧幂等键执行',
-                 finished_at=?2, claim_token=NULL, lease_until_ms=NULL
-                 WHERE execution_id=?1 AND status!='submitted'",
-                params![execution_id, now],
-            )
-            .map_err(|error| format!("stop publish items after provider change: {error}"))?;
-        let changed = transaction
-            .execute(
-                "UPDATE geo_publish_executions SET status='reconciliation-required',
-                 revision=revision+1, updated_at=?2 WHERE id=?1",
-                params![execution_id, now],
-            )
-            .map_err(|error| format!("stop publish execution after provider change: {error}"))?;
-        if changed == 1 {
-            failed_execution_ids.push(execution_id.clone());
-        }
-        insert_audit(
-            &transaction,
-            &execution_id,
-            None,
-            "provider-configuration-changed",
-            None,
-            &json!({"action": "reconciliation-required"}),
-            &now,
-        )?;
-    }
-    transaction
-        .commit()
-        .map_err(|error| format!("commit publish provider inspection: {error}"))?;
+    let failed_execution_ids = with_immediate_tx(
+        &mut connection,
+        "inspect publish provider configuration",
+        "commit publish provider inspection",
+        |transaction| {
+            let executions = {
+                let mut statement = transaction
+                    .prepare(
+                        "SELECT id, provider_snapshot_json FROM geo_publish_executions
+                     WHERE execution_started_at IS NOT NULL
+                       AND status IN ('running','scheduled','partially-succeeded','failed')",
+                    )
+                    .map_err(|error| format!("prepare publish provider inspection: {error}"))?;
+                let rows = statement
+                    .query_map([], |row| {
+                        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                    })
+                    .map_err(|error| format!("read publish provider inspection: {error}"))?
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|error| format!("collect publish provider inspection: {error}"))?;
+                rows
+            };
+            let now = now_iso(now_ms);
+            let mut failed_execution_ids = Vec::new();
+            for (execution_id, snapshot_json) in executions {
+                let snapshot = serde_json::from_str::<PublishProviderSnapshot>(&snapshot_json).ok();
+                // 只在「双方都 configured 且指纹不同」时判为配置变化：当前侧未登录
+                // 拿不到网关指纹时跳过本轮巡检，不动这些执行单（快照不可解析的行
+                // 保持旧的 fail-closed 行为）。
+                let unchanged = snapshot
+                    .as_ref()
+                    .is_some_and(|frozen| !provider_configuration_changed(frozen, &current));
+                if unchanged {
+                    continue;
+                }
+                transaction
+                    .execute(
+                        "UPDATE geo_publish_items SET status='reconciliation-required',
+                     revision=revision+1, failure_code='provider-configuration-changed',
+                     failure_reason='Provider 配置指纹已变化，禁止沿旧幂等键执行',
+                     finished_at=?2, claim_token=NULL, lease_until_ms=NULL
+                     WHERE execution_id=?1 AND status!='submitted'",
+                        params![execution_id, now],
+                    )
+                    .map_err(|error| {
+                        format!("stop publish items after provider change: {error}")
+                    })?;
+                let changed = transaction
+                    .execute(
+                        "UPDATE geo_publish_executions SET status='reconciliation-required',
+                     revision=revision+1, updated_at=?2 WHERE id=?1",
+                        params![execution_id, now],
+                    )
+                    .map_err(|error| {
+                        format!("stop publish execution after provider change: {error}")
+                    })?;
+                if changed == 1 {
+                    failed_execution_ids.push(execution_id.clone());
+                }
+                insert_audit(
+                    transaction,
+                    &execution_id,
+                    None,
+                    "provider-configuration-changed",
+                    None,
+                    &json!({"action": "reconciliation-required"}),
+                    &now,
+                )?;
+            }
+            Ok(failed_execution_ids)
+        },
+    )?;
     for execution_id in failed_execution_ids {
         project_publish_execution_status(workspace, &execution_id, true)?;
     }
@@ -3437,51 +3435,53 @@ fn reconcile_provider_configuration(workspace: &BrandWorkspace, now_ms: i64) -> 
 }
 
 fn recover_expired_claims(workspace: &BrandWorkspace, now_ms: i64) -> Result<(), String> {
-    let mut connection = open_database(workspace)?;
-    let transaction = connection
-        .transaction_with_behavior(TransactionBehavior::Immediate)
-        .map_err(|error| format!("recover publish claims transaction: {error}"))?;
-    let expired_submissions = {
-        let mut statement = transaction
-            .prepare(
-                "SELECT id, execution_id FROM geo_publish_items
-                 WHERE status='submitting' AND lease_until_ms IS NOT NULL AND lease_until_ms<=?1",
-            )
-            .map_err(|error| format!("prepare expired publish submissions: {error}"))?;
-        let rows = statement
-            .query_map([now_ms], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-            })
-            .map_err(|error| format!("read expired publish submissions: {error}"))?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|error| format!("collect expired publish submissions: {error}"))?;
-        rows
-    };
-    let now = now_iso(now_ms);
-    for (item_id, execution_id) in expired_submissions {
-        transaction
-            .execute(
-                "UPDATE geo_publish_items SET status='reconciliation-required',
-                 revision=revision+1, failure_code='submission-claim-expired',
-                 failure_reason='下单进程中断，外部受理结果未知，禁止自动重试',
-                 finished_at=?2, claim_token=NULL, lease_until_ms=NULL
-                 WHERE id=?1 AND status='submitting'",
-                params![item_id, now],
-            )
-            .map_err(|error| format!("recover expired publish submission: {error}"))?;
-        insert_audit(
-            &transaction,
-            &execution_id,
-            Some(&item_id),
-            "submission-outcome-unknown",
-            None,
-            &json!({"action": "reconciliation-required"}),
-            &now,
-        )?;
-    }
-    transaction
-        .commit()
-        .map_err(|error| format!("commit publish claim recovery: {error}"))?;
+    let mut connection = BrandWorkspaceStore::open(workspace)?;
+    with_immediate_tx(
+        &mut connection,
+        "recover publish claims transaction",
+        "commit publish claim recovery",
+        |transaction| {
+            let expired_submissions = {
+                let mut statement = transaction
+                .prepare(
+                    "SELECT id, execution_id FROM geo_publish_items
+                     WHERE status='submitting' AND lease_until_ms IS NOT NULL AND lease_until_ms<=?1",
+                )
+                .map_err(|error| format!("prepare expired publish submissions: {error}"))?;
+                let rows = statement
+                    .query_map([now_ms], |row| {
+                        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                    })
+                    .map_err(|error| format!("read expired publish submissions: {error}"))?
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|error| format!("collect expired publish submissions: {error}"))?;
+                rows
+            };
+            let now = now_iso(now_ms);
+            for (item_id, execution_id) in expired_submissions {
+                transaction
+                    .execute(
+                        "UPDATE geo_publish_items SET status='reconciliation-required',
+                     revision=revision+1, failure_code='submission-claim-expired',
+                     failure_reason='下单进程中断，外部受理结果未知，禁止自动重试',
+                     finished_at=?2, claim_token=NULL, lease_until_ms=NULL
+                     WHERE id=?1 AND status='submitting'",
+                        params![item_id, now],
+                    )
+                    .map_err(|error| format!("recover expired publish submission: {error}"))?;
+                insert_audit(
+                    transaction,
+                    &execution_id,
+                    Some(&item_id),
+                    "submission-outcome-unknown",
+                    None,
+                    &json!({"action": "reconciliation-required"}),
+                    &now,
+                )?;
+            }
+            Ok(())
+        },
+    )?;
     refresh_all_execution_statuses(workspace, now_ms)
 }
 
@@ -3489,7 +3489,7 @@ fn claim_next_item(
     workspace: &BrandWorkspace,
     now_ms: i64,
 ) -> Result<Option<ClaimedPublishItem>, String> {
-    let mut connection = open_database(workspace)?;
+    let mut connection = BrandWorkspaceStore::open(workspace)?;
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|error| format!("claim publish item transaction: {error}"))?;
@@ -3708,7 +3708,7 @@ fn settle_upload(
     outcome: PublishProviderOutcome<PublishUploadReceipt>,
     now_ms: i64,
 ) -> Result<(), String> {
-    let mut connection = open_database(workspace)?;
+    let mut connection = BrandWorkspaceStore::open(workspace)?;
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|error| format!("settle publish upload transaction: {error}"))?;
@@ -3886,138 +3886,140 @@ fn settle_submission(
     outcome: PublishProviderOutcome<PublishOrderReceipt>,
     now_ms: i64,
 ) -> Result<(), String> {
-    let mut connection = open_database(workspace)?;
-    let transaction = connection
-        .transaction_with_behavior(TransactionBehavior::Immediate)
-        .map_err(|error| format!("settle publish submission transaction: {error}"))?;
-    let now = now_iso(now_ms);
-    match outcome {
-        PublishProviderOutcome::Success(receipt) => {
-            let changed = transaction
-                .execute(
-                    "UPDATE geo_publish_items SET status='submitted', revision=revision+1,
-                     external_order_id=?3, attempts=attempts+1, finished_at=?4,
-                     claim_token=NULL, lease_until_ms=NULL, next_attempt_at_ms=NULL,
-                     failure_code=NULL, failure_reason=NULL
-                     WHERE id=?1 AND status='submitting' AND claim_token=?2",
-                    params![
-                        claim.item_id,
-                        claim.claim_token,
-                        receipt.external_order_id,
-                        now
-                    ],
-                )
-                .map_err(|error| format!("finish publish submission: {error}"))?;
-            if changed != 1 {
-                return Err("publish_submission_claim_conflict".to_string());
+    let mut connection = BrandWorkspaceStore::open(workspace)?;
+    with_immediate_tx(
+        &mut connection,
+        "settle publish submission transaction",
+        "commit publish submission result",
+        |transaction| {
+            let now = now_iso(now_ms);
+            match outcome {
+                PublishProviderOutcome::Success(receipt) => {
+                    let changed = transaction
+                        .execute(
+                            "UPDATE geo_publish_items SET status='submitted', revision=revision+1,
+                         external_order_id=?3, attempts=attempts+1, finished_at=?4,
+                         claim_token=NULL, lease_until_ms=NULL, next_attempt_at_ms=NULL,
+                         failure_code=NULL, failure_reason=NULL
+                         WHERE id=?1 AND status='submitting' AND claim_token=?2",
+                            params![
+                                claim.item_id,
+                                claim.claim_token,
+                                receipt.external_order_id,
+                                now
+                            ],
+                        )
+                        .map_err(|error| format!("finish publish submission: {error}"))?;
+                    if changed != 1 {
+                        return Err("publish_submission_claim_conflict".to_string());
+                    }
+                    insert_audit(
+                        transaction,
+                        &claim.execution_id,
+                        Some(&claim.item_id),
+                        "order-submitted",
+                        None,
+                        &json!({
+                            "externalOrderId": receipt.external_order_id,
+                            "idempotencyKey": claim.idempotency_key,
+                            "payloadHash": claim.payload_hash,
+                        }),
+                        &now,
+                    )?;
+                }
+                PublishProviderOutcome::SafeRetryable { code, reason } => {
+                    let next_attempt = claim.attempts + 1;
+                    let (status, next_at) = retry_delay(next_attempt)
+                        .map(|delay| ("failed-retryable", Some(now_ms + delay)))
+                        .unwrap_or(("failed-nonretryable", None));
+                    update_failed_claim(
+                        transaction,
+                        FailedClaimUpdate {
+                            claim,
+                            status,
+                            code: &code,
+                            reason: &reason,
+                            next_attempt_at_ms: next_at,
+                            upload: false,
+                            now: &now,
+                        },
+                    )?;
+                    insert_audit(
+                        transaction,
+                        &claim.execution_id,
+                        Some(&claim.item_id),
+                        if status == "failed-retryable" {
+                            "order-safe-retry-scheduled"
+                        } else {
+                            "order-retry-exhausted"
+                        },
+                        None,
+                        &json!({
+                            "code": code,
+                            "attempt": next_attempt,
+                            "nextAttemptAtMs": next_at,
+                            "idempotencyKey": claim.idempotency_key,
+                            "payloadHash": claim.payload_hash,
+                        }),
+                        &now,
+                    )?;
+                }
+                PublishProviderOutcome::NonRetryable { code, reason } => {
+                    update_failed_claim(
+                        transaction,
+                        FailedClaimUpdate {
+                            claim,
+                            status: "failed-nonretryable",
+                            code: &code,
+                            reason: &reason,
+                            next_attempt_at_ms: None,
+                            upload: false,
+                            now: &now,
+                        },
+                    )?;
+                    insert_audit(
+                        transaction,
+                        &claim.execution_id,
+                        Some(&claim.item_id),
+                        "order-failed-nonretryable",
+                        None,
+                        &json!({"code": code}),
+                        &now,
+                    )?;
+                }
+                PublishProviderOutcome::Unknown { code, reason } => {
+                    let changed = transaction
+                        .execute(
+                            "UPDATE geo_publish_items SET status='reconciliation-required',
+                         revision=revision+1, attempts=attempts+1, failure_code=?3,
+                         failure_reason=?4, claim_token=NULL, lease_until_ms=NULL,
+                         next_attempt_at_ms=NULL, finished_at=?5
+                         WHERE id=?1 AND status='submitting' AND claim_token=?2",
+                            params![claim.item_id, claim.claim_token, code, reason, now],
+                        )
+                        .map_err(|error| format!("mark unknown publish outcome: {error}"))?;
+                    if changed != 1 {
+                        return Err("publish_submission_claim_conflict".to_string());
+                    }
+                    insert_audit(
+                        transaction,
+                        &claim.execution_id,
+                        Some(&claim.item_id),
+                        "submission-outcome-unknown",
+                        None,
+                        &json!({
+                            "code": code,
+                            "idempotencyKey": claim.idempotency_key,
+                            "payloadHash": claim.payload_hash,
+                            "action": "reconciliation-required",
+                        }),
+                        &now,
+                    )?;
+                }
             }
-            insert_audit(
-                &transaction,
-                &claim.execution_id,
-                Some(&claim.item_id),
-                "order-submitted",
-                None,
-                &json!({
-                    "externalOrderId": receipt.external_order_id,
-                    "idempotencyKey": claim.idempotency_key,
-                    "payloadHash": claim.payload_hash,
-                }),
-                &now,
-            )?;
-        }
-        PublishProviderOutcome::SafeRetryable { code, reason } => {
-            let next_attempt = claim.attempts + 1;
-            let (status, next_at) = retry_delay(next_attempt)
-                .map(|delay| ("failed-retryable", Some(now_ms + delay)))
-                .unwrap_or(("failed-nonretryable", None));
-            update_failed_claim(
-                &transaction,
-                FailedClaimUpdate {
-                    claim,
-                    status,
-                    code: &code,
-                    reason: &reason,
-                    next_attempt_at_ms: next_at,
-                    upload: false,
-                    now: &now,
-                },
-            )?;
-            insert_audit(
-                &transaction,
-                &claim.execution_id,
-                Some(&claim.item_id),
-                if status == "failed-retryable" {
-                    "order-safe-retry-scheduled"
-                } else {
-                    "order-retry-exhausted"
-                },
-                None,
-                &json!({
-                    "code": code,
-                    "attempt": next_attempt,
-                    "nextAttemptAtMs": next_at,
-                    "idempotencyKey": claim.idempotency_key,
-                    "payloadHash": claim.payload_hash,
-                }),
-                &now,
-            )?;
-        }
-        PublishProviderOutcome::NonRetryable { code, reason } => {
-            update_failed_claim(
-                &transaction,
-                FailedClaimUpdate {
-                    claim,
-                    status: "failed-nonretryable",
-                    code: &code,
-                    reason: &reason,
-                    next_attempt_at_ms: None,
-                    upload: false,
-                    now: &now,
-                },
-            )?;
-            insert_audit(
-                &transaction,
-                &claim.execution_id,
-                Some(&claim.item_id),
-                "order-failed-nonretryable",
-                None,
-                &json!({"code": code}),
-                &now,
-            )?;
-        }
-        PublishProviderOutcome::Unknown { code, reason } => {
-            let changed = transaction
-                .execute(
-                    "UPDATE geo_publish_items SET status='reconciliation-required',
-                     revision=revision+1, attempts=attempts+1, failure_code=?3,
-                     failure_reason=?4, claim_token=NULL, lease_until_ms=NULL,
-                     next_attempt_at_ms=NULL, finished_at=?5
-                     WHERE id=?1 AND status='submitting' AND claim_token=?2",
-                    params![claim.item_id, claim.claim_token, code, reason, now],
-                )
-                .map_err(|error| format!("mark unknown publish outcome: {error}"))?;
-            if changed != 1 {
-                return Err("publish_submission_claim_conflict".to_string());
-            }
-            insert_audit(
-                &transaction,
-                &claim.execution_id,
-                Some(&claim.item_id),
-                "submission-outcome-unknown",
-                None,
-                &json!({
-                    "code": code,
-                    "idempotencyKey": claim.idempotency_key,
-                    "payloadHash": claim.payload_hash,
-                    "action": "reconciliation-required",
-                }),
-                &now,
-            )?;
-        }
-    }
-    transaction
-        .commit()
-        .map_err(|error| format!("commit publish submission result: {error}"))?;
+            Ok(())
+        },
+    )?;
     refresh_execution_status(workspace, &claim.execution_id, now_ms)
 }
 
@@ -4074,45 +4076,47 @@ fn defer_claim_until_login(
     claim: &ClaimedPublishItem,
     now_ms: i64,
 ) -> Result<(), String> {
-    let mut connection = open_database(workspace)?;
-    let transaction = connection
-        .transaction_with_behavior(TransactionBehavior::Immediate)
-        .map_err(|error| format!("defer publish claim transaction: {error}"))?;
-    let now = now_iso(now_ms);
-    let restored_status = if claim.stage == "uploading" {
-        "pending"
-    } else {
-        "uploaded"
-    };
-    let next_attempt_at_ms = now_ms + LOGIN_RESUME_DEFER_MS;
-    let changed = transaction
-        .execute(
-            "UPDATE geo_publish_items SET status=?3, revision=revision+1,
-             claim_token=NULL, lease_until_ms=NULL, next_attempt_at_ms=?4
-             WHERE id=?1 AND claim_token=?2",
-            params![
-                claim.item_id,
-                claim.claim_token,
-                restored_status,
-                next_attempt_at_ms
-            ],
-        )
-        .map_err(|error| format!("persist publish login deferral: {error}"))?;
-    if changed != 1 {
-        return Err("publish_item_claim_conflict".to_string());
-    }
-    insert_audit(
-        &transaction,
-        &claim.execution_id,
-        Some(&claim.item_id),
-        "execution-deferred-login-required",
-        None,
-        &json!({"code": "account-login-required", "nextAttemptAtMs": next_attempt_at_ms}),
-        &now,
+    let mut connection = BrandWorkspaceStore::open(workspace)?;
+    with_immediate_tx(
+        &mut connection,
+        "defer publish claim transaction",
+        "commit publish login deferral",
+        |transaction| {
+            let now = now_iso(now_ms);
+            let restored_status = if claim.stage == "uploading" {
+                "pending"
+            } else {
+                "uploaded"
+            };
+            let next_attempt_at_ms = now_ms + LOGIN_RESUME_DEFER_MS;
+            let changed = transaction
+                .execute(
+                    "UPDATE geo_publish_items SET status=?3, revision=revision+1,
+                 claim_token=NULL, lease_until_ms=NULL, next_attempt_at_ms=?4
+                 WHERE id=?1 AND claim_token=?2",
+                    params![
+                        claim.item_id,
+                        claim.claim_token,
+                        restored_status,
+                        next_attempt_at_ms
+                    ],
+                )
+                .map_err(|error| format!("persist publish login deferral: {error}"))?;
+            if changed != 1 {
+                return Err("publish_item_claim_conflict".to_string());
+            }
+            insert_audit(
+                transaction,
+                &claim.execution_id,
+                Some(&claim.item_id),
+                "execution-deferred-login-required",
+                None,
+                &json!({"code": "account-login-required", "nextAttemptAtMs": next_attempt_at_ms}),
+                &now,
+            )?;
+            Ok(())
+        },
     )?;
-    transaction
-        .commit()
-        .map_err(|error| format!("commit publish login deferral: {error}"))?;
     refresh_execution_status(workspace, &claim.execution_id, now_ms)
 }
 
@@ -4123,40 +4127,42 @@ fn settle_reconciliation(
     reason: &str,
     now_ms: i64,
 ) -> Result<(), String> {
-    let mut connection = open_database(workspace)?;
-    let transaction = connection
-        .transaction_with_behavior(TransactionBehavior::Immediate)
-        .map_err(|error| format!("settle publish reconciliation transaction: {error}"))?;
-    let now = now_iso(now_ms);
-    let changed = transaction
-        .execute(
-            "UPDATE geo_publish_items SET status='reconciliation-required',
-             revision=revision+1, failure_code=?3, failure_reason=?4,
-             finished_at=?5, claim_token=NULL, lease_until_ms=NULL, next_attempt_at_ms=NULL
-             WHERE id=?1 AND claim_token=?2",
-            params![claim.item_id, claim.claim_token, code, reason, now],
-        )
-        .map_err(|error| format!("persist publish reconciliation: {error}"))?;
-    if changed != 1 {
-        return Err("publish_item_claim_conflict".to_string());
-    }
-    insert_audit(
-        &transaction,
-        &claim.execution_id,
-        Some(&claim.item_id),
-        "reconciliation-required",
-        None,
-        &json!({"code": code}),
-        &now,
+    let mut connection = BrandWorkspaceStore::open(workspace)?;
+    with_immediate_tx(
+        &mut connection,
+        "settle publish reconciliation transaction",
+        "commit publish reconciliation",
+        |transaction| {
+            let now = now_iso(now_ms);
+            let changed = transaction
+                .execute(
+                    "UPDATE geo_publish_items SET status='reconciliation-required',
+                 revision=revision+1, failure_code=?3, failure_reason=?4,
+                 finished_at=?5, claim_token=NULL, lease_until_ms=NULL, next_attempt_at_ms=NULL
+                 WHERE id=?1 AND claim_token=?2",
+                    params![claim.item_id, claim.claim_token, code, reason, now],
+                )
+                .map_err(|error| format!("persist publish reconciliation: {error}"))?;
+            if changed != 1 {
+                return Err("publish_item_claim_conflict".to_string());
+            }
+            insert_audit(
+                transaction,
+                &claim.execution_id,
+                Some(&claim.item_id),
+                "reconciliation-required",
+                None,
+                &json!({"code": code}),
+                &now,
+            )?;
+            Ok(())
+        },
     )?;
-    transaction
-        .commit()
-        .map_err(|error| format!("commit publish reconciliation: {error}"))?;
     refresh_execution_status(workspace, &claim.execution_id, now_ms)
 }
 
 fn refresh_all_execution_statuses(workspace: &BrandWorkspace, now_ms: i64) -> Result<(), String> {
-    let connection = open_database(workspace)?;
+    let connection = BrandWorkspaceStore::open(workspace)?;
     let ids = {
         let mut statement = connection
             .prepare(
@@ -4207,66 +4213,69 @@ fn refresh_execution_status(
     execution_id: &str,
     now_ms: i64,
 ) -> Result<(), String> {
-    let mut connection = open_database(workspace)?;
-    let transaction = connection
-        .transaction_with_behavior(TransactionBehavior::Immediate)
-        .map_err(|error| format!("refresh publish execution transaction: {error}"))?;
-    let counts = transaction
-        .query_row(
-            "SELECT COUNT(*),
-                    SUM(CASE WHEN status='submitted' THEN 1 ELSE 0 END),
-                    SUM(CASE WHEN status='reconciliation-required' THEN 1 ELSE 0 END),
-                    SUM(CASE WHEN status='failed-nonretryable' THEN 1 ELSE 0 END),
-                    SUM(CASE WHEN status IN ('pending','uploading','uploaded','submitting','failed-retryable') THEN 1 ELSE 0 END),
-                    SUM(CASE WHEN status='pending' AND scheduled_at_ms>?2 THEN 1 ELSE 0 END)
-             FROM geo_publish_items WHERE execution_id=?1",
-            params![execution_id, now_ms],
-            |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, i64>(2)?,
-                    row.get::<_, i64>(3)?,
-                    row.get::<_, i64>(4)?,
-                    row.get::<_, i64>(5)?,
-                ))
-            },
-        )
-        .map_err(|error| format!("count publish execution items: {error}"))?;
-    let (total, submitted, reconciliation, terminal_failed, active, future_pending) = counts;
-    let (status, finished) = if reconciliation > 0 {
-        ("reconciliation-required", false)
-    } else if total > 0 && submitted == total {
-        ("succeeded", true)
-    } else if active == 0 && terminal_failed > 0 {
-        if submitted > 0 {
-            ("partially-succeeded", true)
-        } else {
-            ("failed", true)
-        }
-    } else if submitted > 0 || terminal_failed > 0 {
-        ("partially-succeeded", false)
-    } else if future_pending == active && active > 0 {
-        ("scheduled", false)
-    } else {
-        ("running", false)
-    };
-    let now = now_iso(now_ms);
-    let changed = transaction
-        .execute(
-            "UPDATE geo_publish_executions SET status=?2, revision=revision+1,
-             finished_at=CASE WHEN ?3 THEN COALESCE(finished_at, ?4) ELSE finished_at END,
-             updated_at=?4 WHERE id=?1 AND status!=?2 AND status!='cancelled'",
-            params![execution_id, status, finished, now],
-        )
-        .map_err(|error| format!("refresh publish execution: {error}"))?;
-    // 血缘行迁移经唯一 owner（票 08）：保持旧直写的无条件重写语义——执行
-    // status 未变（changed==0，含 refresh_all 周期重扫）也照写，自环与
-    // 取消后漂移均真实可达（owner 注的破口二与 cancelled 漂移边）。
-    mirror_publish_lineage(&transaction, execution_id, &format!("publish-{status}"))?;
-    transaction
-        .commit()
-        .map_err(|error| format!("commit publish execution refresh: {error}"))?;
+    let mut connection = BrandWorkspaceStore::open(workspace)?;
+    let (changed, status, finished) = with_immediate_tx(
+        &mut connection,
+        "refresh publish execution transaction",
+        "commit publish execution refresh",
+        |transaction| {
+            let counts = transaction
+            .query_row(
+                "SELECT COUNT(*),
+                        SUM(CASE WHEN status='submitted' THEN 1 ELSE 0 END),
+                        SUM(CASE WHEN status='reconciliation-required' THEN 1 ELSE 0 END),
+                        SUM(CASE WHEN status='failed-nonretryable' THEN 1 ELSE 0 END),
+                        SUM(CASE WHEN status IN ('pending','uploading','uploaded','submitting','failed-retryable') THEN 1 ELSE 0 END),
+                        SUM(CASE WHEN status='pending' AND scheduled_at_ms>?2 THEN 1 ELSE 0 END)
+                 FROM geo_publish_items WHERE execution_id=?1",
+                params![execution_id, now_ms],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, i64>(4)?,
+                        row.get::<_, i64>(5)?,
+                    ))
+                },
+            )
+            .map_err(|error| format!("count publish execution items: {error}"))?;
+            let (total, submitted, reconciliation, terminal_failed, active, future_pending) =
+                counts;
+            let (status, finished) = if reconciliation > 0 {
+                ("reconciliation-required", false)
+            } else if total > 0 && submitted == total {
+                ("succeeded", true)
+            } else if active == 0 && terminal_failed > 0 {
+                if submitted > 0 {
+                    ("partially-succeeded", true)
+                } else {
+                    ("failed", true)
+                }
+            } else if submitted > 0 || terminal_failed > 0 {
+                ("partially-succeeded", false)
+            } else if future_pending == active && active > 0 {
+                ("scheduled", false)
+            } else {
+                ("running", false)
+            };
+            let now = now_iso(now_ms);
+            let changed = transaction
+                .execute(
+                    "UPDATE geo_publish_executions SET status=?2, revision=revision+1,
+                 finished_at=CASE WHEN ?3 THEN COALESCE(finished_at, ?4) ELSE finished_at END,
+                 updated_at=?4 WHERE id=?1 AND status!=?2 AND status!='cancelled'",
+                    params![execution_id, status, finished, now],
+                )
+                .map_err(|error| format!("refresh publish execution: {error}"))?;
+            // 血缘行迁移经唯一 owner（票 08）：保持旧直写的无条件重写语义——执行
+            // status 未变（changed==0，含 refresh_all 周期重扫）也照写，自环与
+            // 取消后漂移均真实可达（owner 注的破口二与 cancelled 漂移边）。
+            mirror_publish_lineage(transaction, execution_id, &format!("publish-{status}"))?;
+            Ok((changed, status, finished))
+        },
+    )?;
     if changed == 1 {
         let failed = matches!(status, "failed" | "reconciliation-required")
             || status == "partially-succeeded" && finished;
@@ -4280,7 +4289,7 @@ fn project_publish_execution_status(
     execution_id: &str,
     failed: bool,
 ) -> Result<(), String> {
-    let connection = open_database(workspace)?;
+    let connection = BrandWorkspaceStore::open(workspace)?;
     let (operation_id, session_id, revision) = connection
         .query_row(
             "SELECT operation_id,created_by_session_id,revision
@@ -4454,7 +4463,7 @@ mod tests {
     use std::sync::atomic::{AtomicI64, Ordering};
     use std::sync::Mutex as StdMutex;
 
-    use super::super::{SessionCommit, SessionTitleSource};
+    use super::super::{open_database, SessionCommit, SessionTitleSource};
     use super::*;
     use tempfile::tempdir;
 
@@ -7040,7 +7049,7 @@ mod tests {
     fn setup_illustrated_fixture() -> IllustratedFixture {
         let fixture = setup_fixture(1, 0);
         let png_bytes: Vec<u8> = vec![0x89, 0x50, 0x4e, 0x47, 1, 2, 3, 4];
-        let png_sha256 = format!("{:x}", Sha256::digest(&png_bytes));
+        let png_sha256 = sha256_hex(&png_bytes);
         let material = fixture
             .store
             .import_brand_text(super::super::ImportBrandTextRequest {

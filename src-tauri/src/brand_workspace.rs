@@ -275,7 +275,7 @@ impl BrandWorkspaceStore {
         validate_session_id(&session.id)?;
         let workspace = self.workspace(workspace_id)?;
         let now = Utc::now().to_rfc3339();
-        let connection = open_database(&workspace)?;
+        let connection = BrandWorkspaceStore::open(&workspace)?;
         connection
             .execute(
                 "INSERT INTO brand_sessions
@@ -309,7 +309,7 @@ impl BrandWorkspaceStore {
         include_archived: bool,
     ) -> Result<Vec<BrandSession>, String> {
         let workspace = self.workspace(workspace_id)?;
-        let connection = open_database(&workspace)?;
+        let connection = BrandWorkspaceStore::open(&workspace)?;
         let sql = if include_archived {
             "SELECT id, title, title_source, created_at, last_active_at, archived_at
              FROM brand_sessions ORDER BY last_active_at DESC"
@@ -345,7 +345,7 @@ impl BrandWorkspaceStore {
             return Err("会话标题须为 1–120 个字符".to_string());
         }
         let workspace = self.workspace(workspace_id)?;
-        let connection = open_database(&workspace)?;
+        let connection = BrandWorkspaceStore::open(&workspace)?;
         let changed = connection
             .execute(
                 "UPDATE brand_sessions
@@ -369,7 +369,7 @@ impl BrandWorkspaceStore {
     ) -> Result<BrandSession, String> {
         validate_session_id(session_id)?;
         let workspace = self.workspace(workspace_id)?;
-        let connection = open_database(&workspace)?;
+        let connection = BrandWorkspaceStore::open(&workspace)?;
         let archived_at = archived.then(|| Utc::now().to_rfc3339());
         let changed = connection
             .execute(
@@ -391,7 +391,7 @@ impl BrandWorkspaceStore {
     ) -> Result<SessionDeletionPreview, String> {
         validate_session_id(session_id)?;
         let workspace = self.workspace(workspace_id)?;
-        let mut connection = open_database(&workspace)?;
+        let mut connection = BrandWorkspaceStore::open(&workspace)?;
         let session = self
             .session(&workspace, session_id)?
             .ok_or_else(|| "会话不存在".to_string())?;
@@ -473,7 +473,7 @@ impl BrandWorkspaceStore {
     ) -> Result<(), String> {
         validate_session_id(session_id)?;
         let workspace = self.workspace(workspace_id)?;
-        let connection = open_database(&workspace)?;
+        let connection = BrandWorkspaceStore::open(&workspace)?;
         let admitted = connection
             .execute(
                 "UPDATE session_deletion_intents
@@ -496,7 +496,7 @@ impl BrandWorkspaceStore {
         confirmation_token: &str,
     ) -> Result<(), String> {
         let workspace = self.workspace(workspace_id)?;
-        let connection = open_database(&workspace)?;
+        let connection = BrandWorkspaceStore::open(&workspace)?;
         connection
             .execute(
                 "DELETE FROM session_deletion_intents
@@ -514,7 +514,7 @@ impl BrandWorkspaceStore {
         confirmation_token: &str,
     ) -> Result<(), String> {
         let workspace = self.workspace(workspace_id)?;
-        let connection = open_database(&workspace)?;
+        let connection = BrandWorkspaceStore::open(&workspace)?;
         let changed = connection
             .execute(
                 "UPDATE session_deletion_intents
@@ -536,7 +536,7 @@ impl BrandWorkspaceStore {
         confirmation_token: &str,
     ) -> Result<(), String> {
         let workspace = self.workspace(workspace_id)?;
-        let mut connection = open_database(&workspace)?;
+        let mut connection = BrandWorkspaceStore::open(&workspace)?;
         let transaction = connection
             .transaction()
             .map_err(|error| format!("start brand deletion finalize: {error}"))?;
@@ -581,7 +581,7 @@ impl BrandWorkspaceStore {
 
     pub fn workspace_session_ids(&self, workspace_id: &str) -> Result<Vec<String>, String> {
         let workspace = self.workspace(workspace_id)?;
-        let connection = open_database(&workspace)?;
+        let connection = BrandWorkspaceStore::open(&workspace)?;
         let mut statement = connection
             .prepare("SELECT id FROM brand_sessions")
             .map_err(|error| format!("list brand sessions for deletion: {error}"))?;
@@ -598,7 +598,7 @@ impl BrandWorkspaceStore {
         workspace_id: &str,
     ) -> Result<WorkspaceDeletionPreview, String> {
         let workspace = self.workspace(workspace_id)?;
-        let mut connection = open_database(&workspace)?;
+        let mut connection = BrandWorkspaceStore::open(&workspace)?;
         Self::ensure_workspace_deletion_intents(&connection)?;
         let transaction = connection
             .transaction()
@@ -673,7 +673,7 @@ impl BrandWorkspaceStore {
         confirmation_token: &str,
     ) -> Result<(), String> {
         let workspace = self.workspace(workspace_id)?;
-        let connection = open_database(&workspace)?;
+        let connection = BrandWorkspaceStore::open(&workspace)?;
         Self::ensure_workspace_deletion_intents(&connection)?;
         let admitted = connection
             .execute(
@@ -696,7 +696,7 @@ impl BrandWorkspaceStore {
         confirmation_token: &str,
     ) -> Result<(), String> {
         let workspace = self.workspace(workspace_id)?;
-        let connection = open_database(&workspace)?;
+        let connection = BrandWorkspaceStore::open(&workspace)?;
         Self::ensure_workspace_deletion_intents(&connection)?;
         connection
             .execute(
@@ -725,7 +725,7 @@ impl BrandWorkspaceStore {
             .ok_or_else(|| "品牌工作区不存在".to_string())?;
         let workspace = catalog.workspaces.remove(index);
         {
-            let connection = open_database(&workspace)?;
+            let connection = BrandWorkspaceStore::open(&workspace)?;
             Self::ensure_workspace_deletion_intents(&connection)?;
             let admitted: i64 = connection
                 .query_row(
@@ -752,7 +752,7 @@ impl BrandWorkspaceStore {
         workspace: &BrandWorkspace,
         session_id: &str,
     ) -> Result<Option<BrandSession>, String> {
-        let connection = open_database(workspace)?;
+        let connection = BrandWorkspaceStore::open(workspace)?;
         let mut session = connection
             .query_row(
                 "SELECT id, title, title_source, created_at, last_active_at, archived_at

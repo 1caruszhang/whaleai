@@ -267,7 +267,6 @@ pub(super) fn initialize_database(workspace: &BrandWorkspace) -> Result<(), Stri
 
 /// 会话闸 SQL 错误的呈现口径：绝大多数闸带上下文串；materials 吞细节
 /// 映射固定码（现状逐字保留）。
-// 本票纯增量：生产调用点零迁移，消费方在清零票 02–04（立项票内仅测试引用）。
 #[allow(dead_code)]
 pub(crate) enum SessionGateSqlError {
     /// `format!("{context}: {error}")`。
@@ -277,7 +276,6 @@ pub(crate) enum SessionGateSqlError {
 }
 
 /// 会话闸声明：声明＝错误码＋有无 validate 前置＋SQL 错误呈现。
-// 本票纯增量：生产调用点零迁移，消费方在清零票 02–04（立项票内仅测试引用）。
 #[allow(dead_code)]
 pub(crate) struct SessionGate {
     pub error_code: &'static str,
@@ -285,7 +283,6 @@ pub(crate) struct SessionGate {
     pub sql_error: SessionGateSqlError,
 }
 
-// 本票纯增量：生产调用点零迁移，消费方在清零票 02–04（立项票内仅测试引用）。
 #[allow(dead_code)]
 impl SessionGate {
     pub(crate) fn enforce(&self, connection: &Connection, session_id: &str) -> Result<(), String> {
@@ -309,8 +306,8 @@ impl SessionGate {
 }
 
 /// 10 闸声明（2026-09-04 盘点现状逐字钉；各域清零票把文件内旧变体切到
-/// 这些声明，错误串与 validate 前置随搬家逐字不变）。
-// 本票纯增量：生产调用点零迁移，消费方在清零票 02–04（立项票内仅测试引用）。
+/// 这些声明，错误串与 validate 前置随搬家逐字不变。票 02 已消费
+/// MONITOR_SESSION/PUBLISH_SESSION，其余待票 03/04）。
 #[allow(dead_code)]
 pub(crate) mod gates {
     use super::{SessionGate, SessionGateSqlError};
@@ -381,15 +378,21 @@ pub(crate) mod gates {
 // ═══ 事务助手（spec 实施决策 5；ADR-0014 裁决 3） ═══
 
 /// Immediate 事务助手：收 60 处 `transaction_with_behavior(Immediate)`
-/// 内联样板。start/commit 上下文由调用点传入旧串后缀（如
-/// `with_immediate_tx(&mut c, "article operation transaction", "article
-/// operation", …)` 产出 "start article operation transaction: {error}" /
-/// "commit article operation: {error}"，与内联版逐字相同）；body 出错即
-/// 返回、事务随 Drop 回滚（同内联版 `?` 早退语义）。收 `&Transaction` 的
-/// 14 个内部 helper 不经此助手；影子重建内裸 BEGIN/COMMIT 属 schema
-/// 机器，不适用。
-// 本票纯增量：生产调用点零迁移，消费方在清零票 02–04（立项票内仅测试引用）。
-#[allow(dead_code)]
+/// 内联样板。start/commit 上下文由调用点传入旧串**全文**（如
+/// `with_immediate_tx(&mut c, "start article operation transaction",
+/// "commit article operation", …)` 产出 "start article operation
+/// transaction: {error}" / "commit article operation: {error}"，与内联版
+/// 逐字相同）；body 出错即返回、事务随 Drop 回滚（同内联版 `?` 早退
+/// 语义）。收 `&Transaction` 的 14 个内部 helper 不经此助手；影子重建内
+/// 裸 BEGIN/COMMIT 属 schema 机器，不适用。
+///
+/// 票 02 现场修正：helper 不内建 "start "/"commit " 前缀——各域旧串形态
+/// 不一（articles 带 "start " 前缀，ppm/publish_scheduler 是
+/// "prepare monitoring plan transaction" 这类动词开头的整串），前缀内建
+/// 无法逐字复现；调用点一律传完整旧串。体内多出口分别 commit 且错误串
+/// 各异的站点（票 02 盘点：ppm `create_due_run`、publish_scheduler
+/// `prepare_publish_execution`/`claim_next_item`/`settle_upload`）不经
+/// 此助手——单 commit 上下文无法逐字复现多出口串，保持内联。
 pub(crate) fn with_immediate_tx<T>(
     connection: &mut Connection,
     start_context: &'static str,
@@ -398,11 +401,11 @@ pub(crate) fn with_immediate_tx<T>(
 ) -> Result<T, String> {
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
-        .map_err(|error| format!("start {start_context}: {error}"))?;
+        .map_err(|error| format!("{start_context}: {error}"))?;
     let result = body(&transaction)?;
     transaction
         .commit()
-        .map_err(|error| format!("commit {commit_context}: {error}"))?;
+        .map_err(|error| format!("{commit_context}: {error}"))?;
     Ok(result)
 }
 
@@ -427,8 +430,6 @@ pub(crate) fn sql_err(context: &'static str) -> impl Fn(rusqlite::Error) -> Stri
 // 内核等价副本；bounded_* 截断家族语义各异，明确排除。
 
 /// 毫秒时间戳 → RFC3339 毫秒精度 Z 串（无效/越界回退当前时刻）。
-// 本票纯增量：生产调用点零迁移，消费方在清零票 02–04（立项票内仅测试引用）。
-#[allow(dead_code)]
 pub(crate) fn now_iso(now_ms: i64) -> String {
     DateTime::<Utc>::from_timestamp_millis(now_ms)
         .unwrap_or_else(Utc::now)
@@ -436,8 +437,6 @@ pub(crate) fn now_iso(now_ms: i64) -> String {
 }
 
 /// SHA-256 十六进制小写摘要（各域内联 `format!("{:x}", …)` 的等价副本）。
-// 本票纯增量：生产调用点零迁移，消费方在清零票 02–04（立项票内仅测试引用）。
-#[allow(dead_code)]
 pub(crate) fn sha256_hex(value: impl AsRef<[u8]>) -> String {
     format!("{:x}", Sha256::digest(value.as_ref()))
 }
@@ -780,8 +779,8 @@ mod tests {
         let mut helper_conn = BrandWorkspaceStore::open(&workspace).unwrap();
         with_immediate_tx(
             &mut helper_conn,
-            "topic plan mutation",
-            "topic plan mutation",
+            "start topic plan mutation",
+            "commit topic plan mutation",
             |tx| {
                 tx.execute(
                     "CREATE TABLE tx_probe (id INTEGER PRIMARY KEY, value TEXT)",
@@ -819,8 +818,8 @@ mod tests {
         // body 出错：助手与内联 `?` 早退同样随 Drop 回滚，行不可见且连接可用。
         let error = with_immediate_tx(
             &mut helper_conn,
-            "topic plan create",
-            "topic plan create",
+            "start topic plan create",
+            "commit topic plan create",
             |tx| -> Result<(), String> {
                 tx.execute("INSERT INTO tx_probe (value) VALUES ('doomed')", [])
                     .map_err(|error| format!("probe: {error}"))?;
@@ -851,7 +850,8 @@ mod tests {
         let mut helper_conn = Connection::open(workspace.root_path.join("project.sqlite")).unwrap();
         helper_conn.busy_timeout(std::time::Duration::ZERO).unwrap();
         let helper_error =
-            with_immediate_tx(&mut helper_conn, "probe", "probe", |_| Ok(())).unwrap_err();
+            with_immediate_tx(&mut helper_conn, "start probe", "commit probe", |_| Ok(()))
+                .unwrap_err();
         let mut inline_conn = Connection::open(workspace.root_path.join("project.sqlite")).unwrap();
         inline_conn.busy_timeout(std::time::Duration::ZERO).unwrap();
         let inline_error = inline_conn
@@ -898,11 +898,12 @@ mod tests {
 // 三条规则管的是生产代码。内核 persistence.rs 对 ①③ 是结构性放行（它
 // 就是 open 路径本体，不进豁免表——终态零豁免的前提），对 ② 照扫。
 //
-// 豁免表＝现存直呼的登记在册过渡态（非违规），按票消项：票 02 消
+// 豁免表＝现存直呼的登记在册过渡态（非违规），按票消项：票 02（已结）消
 // post_publish_monitoring/publish_scheduler/brand_workspace.rs 的调用点
-// （brand_workspace.rs 的 ①③ 随旧 open_database 本体归票 05），票 03 消
-// articles/materials/distribution_plans，票 04 消 geo_baselines/
-// geo_dashboard/question_pools/topic_plans/geo_operations，票 05 清空归零。
+// （闸变体两项随之清零；brand_workspace.rs 的 ①③ 随旧 open_database 本体
+// 归票 05），票 03 消 articles/materials/distribution_plans，票 04 消
+// geo_baselines/geo_dashboard/question_pools/topic_plans/geo_operations，
+// 票 05 清空归零。
 //
 // 盘点口径注记：spec/ADR 记「豁免表初始 13 文件」为 2026-09-04 巡检笔数；
 // 按本守卫生产段口径逐文件盘点为 11 文件（knowledge/geo_baselines/
@@ -990,7 +991,7 @@ mod guard {
                     Rule::EnsureSchemaOutsideOpenPath,
                 ],
             ),
-            // 9 个命名会话闸变体（票 02：post_publish_monitoring/
+            // 7 个命名会话闸变体（票 02 已消：post_publish_monitoring/
             // publish_scheduler；票 03：articles/materials/
             // distribution_plans；票 04：geo_baselines/geo_dashboard/
             // question_pools/topic_plans）。
@@ -1012,14 +1013,6 @@ mod guard {
             ),
             (
                 "src-tauri/src/brand_workspace/geo_dashboard.rs",
-                vec![Rule::SessionGateVariant],
-            ),
-            (
-                "src-tauri/src/brand_workspace/post_publish_monitoring.rs",
-                vec![Rule::SessionGateVariant],
-            ),
-            (
-                "src-tauri/src/brand_workspace/publish_scheduler.rs",
                 vec![Rule::SessionGateVariant],
             ),
             (
