@@ -2057,7 +2057,7 @@ mod tests {
     }
 
     fn seed_authority(workspace: &BrandWorkspace) {
-        let connection = open_database(workspace).unwrap();
+        let connection = BrandWorkspaceStore::open(workspace).unwrap();
         let now = Utc::now().to_rfc3339();
         connection.execute("INSERT INTO knowledge_raw_inputs (id, session_id, input_text, origin, intent, created_at) VALUES ('raw-12','session-12','汽车行业','user-stated','knowledge-update',?1)", [&now]).unwrap();
         connection.execute("INSERT INTO knowledge_fact_candidates (id,raw_input_id,session_id,subject,predicate,scope_json,fact_key,value_json,normalized_value_json,excerpt,confidence,profile_provenance,origin,intent,status,base_version,proposed_at,resolved_at) VALUES ('candidate-12','raw-12','session-12','鲸跃','enterprise-profile.industry','{}','industry','\"汽车\"','\"汽车\"','汽车',1.0,'asked','user-stated','knowledge-update','adopted',0,?1,?1)", [&now]).unwrap();
@@ -2271,7 +2271,7 @@ mod tests {
     #[test]
     fn direct_articles_do_not_invent_per_article_question_hits() {
         let (store, workspace) = setup();
-        let connection = open_database(&workspace).unwrap();
+        let connection = BrandWorkspaceStore::open(&workspace).unwrap();
         connection.execute("UPDATE geo_article_operations SET source_kind='direct', topic_plan_id=NULL, topic_plan_revision=NULL WHERE operation_id='operation-articles'", []).unwrap();
         let context = store
             .distribution_planning_context(

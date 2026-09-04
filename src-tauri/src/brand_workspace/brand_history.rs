@@ -718,9 +718,7 @@ pub async fn cmd_brand_workspace_history(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::brand_workspace::{
-        open_database, BrandWorkspaceStore, SessionCommit, SessionTitleSource,
-    };
+    use crate::brand_workspace::{BrandWorkspaceStore, SessionCommit, SessionTitleSource};
     use serde_json::json;
     use tempfile::tempdir;
 
@@ -739,7 +737,7 @@ mod tests {
                 },
             )
             .unwrap();
-        let connection = open_database(&workspace).unwrap();
+        let connection = BrandWorkspaceStore::open(&workspace).unwrap();
         connection
             .execute_batch("PRAGMA foreign_keys=OFF;")
             .unwrap();

@@ -2826,7 +2826,7 @@ pub fn has_active_post_publish_monitor_for_session(session_id: &str) -> Result<b
 
 #[cfg(test)]
 mod tests {
-    use super::super::{open_database, SessionCommit, SessionTitleSource};
+    use super::super::{SessionCommit, SessionTitleSource};
     use super::*;
     use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
     use tempfile::tempdir;
@@ -3138,7 +3138,7 @@ mod tests {
             "actual-b"
         );
         assert_eq!(baseline_evidence["rawEvidence"], json!({"output":[]}));
-        let connection = open_database(&fixture.workspace).unwrap();
+        let connection = BrandWorkspaceStore::open(&fixture.workspace).unwrap();
         let item: (String,String,String,String,String) = connection.query_row(
             "SELECT external_request_sn,external_order_id,idempotency_key,object_url,article_id FROM geo_post_publish_monitor_items WHERE plan_id=?1",
             [&plan.id],
@@ -3172,7 +3172,7 @@ mod tests {
         let (fixture, plan) = fixture(2);
         // 监测 item 快照在 prepare 时即从冻结基线带走竞品名单（v1 基线行
         //  competitors_json 走列缺省 '[]'，本 fixture 显式携带一名竞品）。
-        let connection = open_database(&fixture.workspace).unwrap();
+        let connection = BrandWorkspaceStore::open(&fixture.workspace).unwrap();
         let snapshot: String = connection
             .query_row(
                 "SELECT snapshot_json FROM geo_post_publish_monitor_items WHERE plan_id=?1",
@@ -3198,7 +3198,7 @@ mod tests {
             .await
             .unwrap();
 
-        let connection = open_database(&fixture.workspace).unwrap();
+        let connection = BrandWorkspaceStore::open(&fixture.workspace).unwrap();
         let payload: String = connection
             .query_row(
                 "SELECT payload_json FROM geo_post_publish_monitor_units
@@ -3231,7 +3231,7 @@ mod tests {
         assert!(executor.accept(monitor_context.clone()));
         hook.first_pass_reached.notified().await;
 
-        let connection = open_database(&fixture.workspace).unwrap();
+        let connection = BrandWorkspaceStore::open(&fixture.workspace).unwrap();
         connection
             .execute(
                 "UPDATE geo_post_publish_monitor_units
@@ -3380,7 +3380,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(second.id, first.id);
-        let connection = open_database(&fixture.workspace).unwrap();
+        let connection = BrandWorkspaceStore::open(&fixture.workspace).unwrap();
         let attempts: Vec<String> = {
             let mut statement = connection.prepare("SELECT status FROM geo_post_publish_monitor_attempts WHERE unit_id=?1 ORDER BY attempt_number").unwrap();
             statement
@@ -3397,7 +3397,7 @@ mod tests {
         let (fixture, plan) = fixture(2);
         let due = fixture.now_ms + 15 * 60 * 1_000;
         create_due_run(&fixture.workspace, &context(&fixture, &plan.id), due).unwrap();
-        let connection = open_database(&fixture.workspace).unwrap();
+        let connection = BrandWorkspaceStore::open(&fixture.workspace).unwrap();
         connection.execute("UPDATE geo_post_publish_monitor_units SET status='failed',revision=2,error_code='fixture',error_message='fixture' WHERE kind IN ('publish-status','access-indexing')", []).unwrap();
         let units: Vec<(String, String)> = {
             let mut statement = connection.prepare("SELECT id,kind FROM geo_post_publish_monitor_units WHERE kind IN ('publish-status','access-indexing') ORDER BY kind").unwrap();
@@ -3423,7 +3423,7 @@ mod tests {
                 due + 1,
             )
             .unwrap();
-        let connection = open_database(&fixture.workspace).unwrap();
+        let connection = BrandWorkspaceStore::open(&fixture.workspace).unwrap();
         let target_state: (i64,Option<i64>) = connection.query_row("SELECT revision,next_attempt_at_ms FROM geo_post_publish_monitor_units WHERE id=?1", [&target.0], |row| Ok((row.get(0)?,row.get(1)?))).unwrap();
         let sibling_state: (i64,Option<i64>) = connection.query_row("SELECT revision,next_attempt_at_ms FROM geo_post_publish_monitor_units WHERE id=?1", [&sibling.0], |row| Ok((row.get(0)?,row.get(1)?))).unwrap();
         assert_eq!(target_state, (3, Some(due + 1)));
@@ -3462,7 +3462,7 @@ mod tests {
         )
         .unwrap()
         .is_none());
-        let connection = open_database(&fixture.workspace).unwrap();
+        let connection = BrandWorkspaceStore::open(&fixture.workspace).unwrap();
         let count: i64 = connection
             .query_row(
                 "SELECT COUNT(*) FROM geo_post_publish_monitor_runs WHERE plan_id=?1",
@@ -3477,7 +3477,7 @@ mod tests {
     async fn deadline_stops_task_without_arming_an_observation_run() {
         let (fixture, plan) = fixture(9);
         let due = fixture.now_ms + 15 * 60 * 1_000;
-        let connection = open_database(&fixture.workspace).unwrap();
+        let connection = BrandWorkspaceStore::open(&fixture.workspace).unwrap();
         connection
             .execute(
                 "UPDATE geo_post_publish_monitor_plans SET end_conditions_json=?2 WHERE id=?1",
@@ -3508,7 +3508,7 @@ mod tests {
             schedule_completion.completed.lock().unwrap().as_slice(),
             ["managed-task-14"]
         );
-        let connection = open_database(&fixture.workspace).unwrap();
+        let connection = BrandWorkspaceStore::open(&fixture.workspace).unwrap();
         let run_count: i64 = connection
             .query_row(
                 "SELECT COUNT(*) FROM geo_post_publish_monitor_runs WHERE plan_id=?1",
@@ -3681,7 +3681,7 @@ mod tests {
             .unwrap();
         assert_eq!(still_paused.status, "paused");
         assert_eq!(still_paused.run_count, 1);
-        let connection = open_database(&fixture.workspace).unwrap();
+        let connection = BrandWorkspaceStore::open(&fixture.workspace).unwrap();
         let patrol_attempts: i64 = connection
             .query_row(
                 "SELECT COUNT(*) FROM geo_post_publish_monitor_attempts
@@ -3741,7 +3741,7 @@ mod tests {
         assert_eq!(resumed.run_count, 2);
         assert_eq!(provider.calls.lock().unwrap().len(), 6);
         assert_eq!(resumed.latest_run.as_ref().unwrap().status, "succeeded");
-        let connection = open_database(&fixture.workspace).unwrap();
+        let connection = BrandWorkspaceStore::open(&fixture.workspace).unwrap();
         let operation_state: String = connection
             .query_row(
                 "SELECT state FROM geo_operations WHERE id=?1",
@@ -3779,7 +3779,7 @@ mod tests {
         let monitor_context = context(&fixture, &plan.id);
 
         let lineage_state = |plan_id: &str| -> String {
-            let connection = open_database(&fixture.workspace).unwrap();
+            let connection = BrandWorkspaceStore::open(&fixture.workspace).unwrap();
             connection
                 .query_row(
                     "SELECT state FROM geo_operations WHERE id=(

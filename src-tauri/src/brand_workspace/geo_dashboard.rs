@@ -1996,7 +1996,7 @@ impl BrandWorkspaceStore {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{open_database, BrandWorkspace, SessionCommit, SessionTitleSource};
+    use super::super::{BrandWorkspace, SessionCommit, SessionTitleSource};
     use super::*;
     use rusqlite::params;
     use tempfile::tempdir;
@@ -2246,7 +2246,7 @@ mod tests {
     }
 
     fn seed_full(fixture: &Fixture, baseline_mentioned: bool) {
-        let connection = open_database(&fixture.workspace).unwrap();
+        let connection = BrandWorkspaceStore::open(&fixture.workspace).unwrap();
         connection
             .execute_batch("PRAGMA foreign_keys=OFF;")
             .unwrap();
@@ -2527,7 +2527,7 @@ mod tests {
         let brand_a = fixture("品牌 A");
         let brand_b = fixture("品牌 B");
         seed_full(&brand_a, false);
-        let connection_b = open_database(&brand_b.workspace).unwrap();
+        let connection_b = BrandWorkspaceStore::open(&brand_b.workspace).unwrap();
         connection_b
             .execute_batch("PRAGMA foreign_keys=OFF;")
             .unwrap();
@@ -2571,7 +2571,7 @@ mod tests {
     fn monitor_run_drilldown_is_bounded_and_raw_evidence_requires_exact_unit() {
         let fixture = fixture("下钻品牌");
         seed_full(&fixture, false);
-        let connection = open_database(&fixture.workspace).unwrap();
+        let connection = BrandWorkspaceStore::open(&fixture.workspace).unwrap();
         connection
             .execute_batch("PRAGMA foreign_keys=OFF;")
             .unwrap();

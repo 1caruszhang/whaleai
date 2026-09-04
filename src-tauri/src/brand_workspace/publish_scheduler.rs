@@ -4463,7 +4463,7 @@ mod tests {
     use std::sync::atomic::{AtomicI64, Ordering};
     use std::sync::Mutex as StdMutex;
 
-    use super::super::{open_database, SessionCommit, SessionTitleSource};
+    use super::super::{SessionCommit, SessionTitleSource};
     use super::*;
     use tempfile::tempdir;
 
@@ -4652,7 +4652,7 @@ mod tests {
         let now = now_iso(now_ms);
         let scheduled_at = now_iso(now_ms + scheduled_offset_ms);
         let body_marker = "TICKET13_APPROVED_BODY_MUST_NOT_ENTER_AUDIT".to_string();
-        let connection = open_database(&workspace).unwrap();
+        let connection = BrandWorkspaceStore::open(&workspace).unwrap();
         connection.execute("INSERT INTO knowledge_raw_inputs (id,session_id,input_text,origin,intent,created_at) VALUES ('raw-13','session-13','行业事实','user-stated','knowledge-update',?1)", [&now]).unwrap();
         connection.execute("INSERT INTO knowledge_fact_candidates (id,raw_input_id,session_id,subject,predicate,scope_json,fact_key,value_json,normalized_value_json,excerpt,confidence,profile_provenance,origin,intent,status,base_version,proposed_at,resolved_at) VALUES ('candidate-13','raw-13','session-13','品牌','enterprise-profile.industry','{}','industry','\"科技\"','\"科技\"','科技',1.0,'asked','user-stated','knowledge-update','adopted',0,?1,?1)", [&now]).unwrap();
         connection.execute("INSERT INTO knowledge_decisions (id,candidate_id,decision,actor_id,actor_session_id,expected_version,before_json,after_json,reason,decided_at) VALUES ('decision-13','candidate-13','adopt-new','desktop-user','session-13',0,NULL,'\"科技\"','fixture',?1)", [&now]).unwrap();
@@ -4752,7 +4752,7 @@ mod tests {
     }
 
     fn insert_replacement_plan(fixture: &Fixture, plan_id: &str, scheduled_offset_ms: i64) {
-        let connection = open_database(&fixture.workspace).unwrap();
+        let connection = BrandWorkspaceStore::open(&fixture.workspace).unwrap();
         let original: String = connection
             .query_row(
                 "SELECT projection_json FROM geo_distribution_plans WHERE id=?1",
@@ -4817,7 +4817,7 @@ mod tests {
         let execution = preview(&fixture);
         // 模拟票 09 之前落库的 channel_json（无 pricePoints 字段）：读取投影
         // 时按媒介价重算回填，旧执行不因缺字段丢失单价与总价。
-        let connection = open_database(&fixture.workspace).unwrap();
+        let connection = BrandWorkspaceStore::open(&fixture.workspace).unwrap();
         let channel_json: String = connection
             .query_row(
                 "SELECT channel_json FROM geo_publish_items WHERE execution_id=?1",
@@ -4974,7 +4974,7 @@ mod tests {
             exact.items[0].external_order_id.as_deref(),
             Some("provider-order-13")
         );
-        let connection = open_database(&fixture.workspace).unwrap();
+        let connection = BrandWorkspaceStore::open(&fixture.workspace).unwrap();
         let audit: String = connection
             .query_row(
                 "SELECT GROUP_CONCAT(detail_json, '') FROM geo_publish_audit",
@@ -5048,7 +5048,7 @@ mod tests {
         // 手工复现 2026-09-01 事故落库形态：sequence=1 的 item 上传失败
         // 进入退避停车（next_attempt 在 21 分钟后）。
         let parked_until = fixture.now_ms + 21 * 60_000;
-        let connection = open_database(&fixture.workspace).unwrap();
+        let connection = BrandWorkspaceStore::open(&fixture.workspace).unwrap();
         connection
             .execute(
                 "UPDATE geo_publish_items SET status='failed-retryable',
@@ -5305,7 +5305,7 @@ mod tests {
         let fixture = setup_fixture(2, 0);
         let started = confirm_start(&fixture, &preview(&fixture));
         let lineage_state = |expected_note: &str| {
-            let connection = open_database(&fixture.workspace).unwrap();
+            let connection = BrandWorkspaceStore::open(&fixture.workspace).unwrap();
             let state: String = connection
                 .query_row(
                     "SELECT state FROM geo_operations WHERE id=?1",
@@ -5436,7 +5436,7 @@ mod tests {
 
         let second = setup_fixture(1, 0);
         let second_started = confirm_start(&second, &preview(&second));
-        open_database(&second.workspace)
+        BrandWorkspaceStore::open(&second.workspace)
             .unwrap()
             .execute(
                 "UPDATE geo_publish_items SET status='submitting',
@@ -5498,7 +5498,7 @@ mod tests {
 
         let changed = setup_fixture(1, 0);
         let changed_started = confirm_start(&changed, &preview(&changed));
-        let body_path: String = open_database(&changed.workspace)
+        let body_path: String = BrandWorkspaceStore::open(&changed.workspace)
             .unwrap()
             .query_row(
                 "SELECT approved_body_path FROM geo_publish_items WHERE execution_id=?1",
@@ -5762,15 +5762,16 @@ mod tests {
         assert_ne!(revised.confirmation_digest, execution.confirmation_digest);
 
         // 修订审计携带用户指令原文。
-        let (audit_rows, audit_detail): (i64, String) = open_database(&fixture.workspace)
-            .unwrap()
-            .query_row(
-                "SELECT COUNT(*), MAX(detail_json) FROM geo_publish_audit
+        let (audit_rows, audit_detail): (i64, String) =
+            BrandWorkspaceStore::open(&fixture.workspace)
+                .unwrap()
+                .query_row(
+                    "SELECT COUNT(*), MAX(detail_json) FROM geo_publish_audit
                  WHERE execution_id=?1 AND event_type='revision'",
-                [&execution.id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .unwrap();
+                    [&execution.id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap();
         assert_eq!(audit_rows, 1);
         assert!(audit_detail.contains("第一篇推迟两小时，预算提到 600"));
 
@@ -5910,7 +5911,7 @@ mod tests {
             .tick_workspace(&fixture.workspace)
             .await
             .unwrap();
-        open_database(&fixture.workspace)
+        BrandWorkspaceStore::open(&fixture.workspace)
             .unwrap()
             .execute(
                 "UPDATE geo_article_versions SET title='被改变的外部标题' WHERE article_id=(SELECT article_id FROM geo_publish_items WHERE execution_id=?1)",
@@ -6207,7 +6208,7 @@ mod tests {
         // 登录恢复、指纹匹配，但任一条目已有 external_order_id（存在外部
         // 副作用）：整单拒绝，已提交项必须走查单对账。
         set_test_gateway_base(Some(TEST_GATEWAY_BASE));
-        let connection = open_database(&fixture.workspace).unwrap();
+        let connection = BrandWorkspaceStore::open(&fixture.workspace).unwrap();
         connection
             .execute(
                 "UPDATE geo_publish_items SET external_order_id='order-1'
@@ -6240,7 +6241,7 @@ mod tests {
             assert_eq!(item.failure_reason, None);
             assert!(item.next_attempt_at.is_some());
         }
-        let connection = open_database(&fixture.workspace).unwrap();
+        let connection = BrandWorkspaceStore::open(&fixture.workspace).unwrap();
         let audit: String = connection
             .query_row(
                 "SELECT GROUP_CONCAT(event_type, '|') FROM geo_publish_audit",
@@ -7090,7 +7091,7 @@ mod tests {
             .root_path
             .join(format!("articles/approved/{ARTICLE_ID}/v1.md"));
         std::fs::write(&approved_path, body.as_bytes()).unwrap();
-        let connection = open_database(&fixture.workspace).unwrap();
+        let connection = BrandWorkspaceStore::open(&fixture.workspace).unwrap();
         connection
             .execute(
                 "UPDATE geo_article_versions SET body_sha256=?1 WHERE article_id=?2",
@@ -7215,7 +7216,7 @@ mod tests {
             .root_path
             .join(format!("articles/approved/{ARTICLE_ID}/v1.md"));
         std::fs::write(&approved_path, body.as_bytes()).unwrap();
-        let connection = open_database(&fixture.workspace).unwrap();
+        let connection = BrandWorkspaceStore::open(&fixture.workspace).unwrap();
         connection
             .execute(
                 "UPDATE geo_article_versions SET body_sha256=?1 WHERE article_id=?2",

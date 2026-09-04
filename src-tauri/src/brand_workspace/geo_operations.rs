@@ -2252,8 +2252,8 @@ pub async fn cmd_geo_operation_attest_external_gate_ui(
 mod tests {
     use super::*;
     use crate::brand_workspace::{
-        open_database, ArticleOperationGetRequest, BrandWorkspace, QuestionPoolLatestRequest,
-        SessionCommit, SessionTitleSource,
+        ArticleOperationGetRequest, BrandWorkspace, QuestionPoolLatestRequest, SessionCommit,
+        SessionTitleSource,
     };
     use tempfile::tempdir;
 
@@ -2591,7 +2591,7 @@ mod tests {
 
         // session-operation 名下的文章工作：5 篇 draft_ready，其中 2 篇已批准，
         // 待审 3 篇。标题只写敏感标记，证明元信息列表不携带标题/正文。
-        let connection = open_database(&workspace).unwrap();
+        let connection = BrandWorkspaceStore::open(&workspace).unwrap();
         connection
             .pragma_update(None, "foreign_keys", "OFF")
             .unwrap();
@@ -2838,7 +2838,7 @@ mod tests {
         );
 
         // 存量旧轮（列存在之前落库）：NULL 读回 None，摘要不臆断。
-        let connection = open_database(&workspace).unwrap();
+        let connection = BrandWorkspaceStore::open(&workspace).unwrap();
         connection
             .execute(
                 "INSERT INTO geo_operations(id,session_id,state,created_at,kind,goal,
@@ -3411,7 +3411,7 @@ mod tests {
             })
             .unwrap();
 
-        let connection = open_database(&workspace).unwrap();
+        let connection = BrandWorkspaceStore::open(&workspace).unwrap();
         connection
             .pragma_update(None, "foreign_keys", "OFF")
             .unwrap();
@@ -3941,7 +3941,7 @@ mod tests {
         // A 的未批准工作集：3 篇未批准草稿 + 2 篇已批准文章。
         // 另有：全批准的文章操作（品牌产物，不转移）、B 自己的草稿（不动）、
         // awaiting-selection 池（随行）与 confirmed 池（不转移）。
-        let connection = open_database(&workspace).unwrap();
+        let connection = BrandWorkspaceStore::open(&workspace).unwrap();
         connection
             .pragma_update(None, "foreign_keys", "OFF")
             .unwrap();
@@ -4130,7 +4130,7 @@ mod tests {
         // A→B 转移不误伤他人工作集：B 自己原生的草稿操作（row 7）不在
         // A 的转移范围内，owner 覆盖仍为空。
         {
-            let connection = open_database(&workspace).unwrap();
+            let connection = BrandWorkspaceStore::open(&workspace).unwrap();
             let foreign_owner: Option<String> = connection
                 .query_row(
                     "SELECT owner_session_id FROM geo_article_operations
@@ -4315,7 +4315,7 @@ mod tests {
 
         // 转移不误伤：全批准操作与 confirmed 池不转移（品牌产物，历次
         // 接管后 owner 覆盖仍为空）。
-        let connection = open_database(&workspace).unwrap();
+        let connection = BrandWorkspaceStore::open(&workspace).unwrap();
         for (sql, label) in [
             (
                 "SELECT owner_session_id FROM geo_article_operations
@@ -4385,7 +4385,7 @@ mod tests {
 
         // 原会话删除：轮次保留、引用置空（brand_workspace.rs 的 SET NULL 语义）。
         {
-            let connection = open_database(&workspace).unwrap();
+            let connection = BrandWorkspaceStore::open(&workspace).unwrap();
             connection
                 .execute(
                     "DELETE FROM brand_sessions WHERE id='session-operation'",

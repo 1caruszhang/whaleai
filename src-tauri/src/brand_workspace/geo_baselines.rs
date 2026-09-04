@@ -1451,7 +1451,7 @@ mod tests {
             )
             .unwrap();
         seed_confirmed_pool(&brand);
-        let connection = open_database(&brand).unwrap();
+        let connection = BrandWorkspaceStore::open(&brand).unwrap();
         // 竞品事实只需要 current + version snapshot 两行（读取侧 join 面），
         // 关闭 FK 以免为测试补齐整条 candidate/decision 血缘。
         connection
@@ -1544,7 +1544,7 @@ mod tests {
             )
             .unwrap();
         seed_confirmed_pool(&brand);
-        let connection = open_database(&brand).unwrap();
+        let connection = BrandWorkspaceStore::open(&brand).unwrap();
         // 手工落一行 v1 基线（不带 competitors_json 列值，走列缺省）。
         connection
             .execute(
@@ -1635,7 +1635,7 @@ mod tests {
     }
 
     fn seed_confirmed_pool(brand: &BrandWorkspace) {
-        let connection = open_database(brand).unwrap();
+        let connection = BrandWorkspaceStore::open(brand).unwrap();
         // Seed only the immutable snapshot rows needed by this owner; foreign
         // keys require a real candidate/raw-input/decision lineage.
         connection.execute(

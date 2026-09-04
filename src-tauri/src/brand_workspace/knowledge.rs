@@ -1800,7 +1800,7 @@ mod tests {
         let first_result = adopt(&store, &workspace, first);
         assert_eq!(first_result.knowledge_version, Some(1));
 
-        let connection = open_database(&workspace).unwrap();
+        let connection = BrandWorkspaceStore::open(&workspace).unwrap();
         connection
             .execute(
                 "INSERT INTO geo_artifacts
@@ -1844,7 +1844,7 @@ mod tests {
             .iter()
             .all(|artifact| artifact.status == "needs-confirmation"));
 
-        let connection = open_database(&workspace).unwrap();
+        let connection = BrandWorkspaceStore::open(&workspace).unwrap();
         let versions: i64 = connection
             .query_row("SELECT COUNT(*) FROM knowledge_versions", [], |row| {
                 row.get(0)
@@ -1916,7 +1916,7 @@ mod tests {
                 .unwrap();
             adopt(&store, &workspace, candidate);
         }
-        let connection = open_database(&workspace).unwrap();
+        let connection = BrandWorkspaceStore::open(&workspace).unwrap();
         let count: i64 = connection
             .query_row("SELECT COUNT(*) FROM knowledge_current_facts", [], |row| {
                 row.get(0)
@@ -1949,7 +1949,7 @@ mod tests {
             )
             .unwrap()
             .is_none());
-        let connection = open_database(&workspace).unwrap();
+        let connection = BrandWorkspaceStore::open(&workspace).unwrap();
         let raw_count: i64 = connection
             .query_row("SELECT COUNT(*) FROM knowledge_raw_inputs", [], |row| {
                 row.get(0)
@@ -1988,7 +1988,7 @@ mod tests {
             Some("extracted")
         );
         assert_eq!(retried.source.excerpt, "官网明确标价 100 元");
-        let connection = open_database(&workspace).unwrap();
+        let connection = BrandWorkspaceStore::open(&workspace).unwrap();
         let counts: (i64, i64) = (
             connection
                 .query_row("SELECT COUNT(*) FROM knowledge_raw_inputs", [], |row| {
@@ -2123,7 +2123,7 @@ mod tests {
             ))
             .unwrap();
         decide(adopt_new, "adopt-new", None, 1);
-        let connection = open_database(&workspace).unwrap();
+        let connection = BrandWorkspaceStore::open(&workspace).unwrap();
         let decision_kinds: i64 = connection.query_row("SELECT COUNT(DISTINCT decision) FROM knowledge_decisions WHERE decision IN ('keep-current','reject-candidate','split-scope','adopt-new')", [], |row| row.get(0)).unwrap();
         let history: i64 = connection
             .query_row("SELECT COUNT(*) FROM knowledge_fact_versions", [], |row| {
@@ -2175,7 +2175,7 @@ mod tests {
             ))
             .unwrap();
         adopt(&store, &workspace, candidate);
-        let connection = open_database(&workspace).unwrap();
+        let connection = BrandWorkspaceStore::open(&workspace).unwrap();
         // 模拟首版 schema：把 CHECK 退回不含 adopt-edited 的旧表，保留审计行。
         connection
             .execute_batch("PRAGMA foreign_keys=OFF;")
@@ -2285,7 +2285,7 @@ mod tests {
             .unwrap();
         assert_eq!(stored.normalized_value_json, "\"100\"");
         assert_eq!(stored.status, "adopted");
-        let connection = open_database(&workspace).unwrap();
+        let connection = BrandWorkspaceStore::open(&workspace).unwrap();
         let (decision, after_json): (String, String) = connection
             .query_row(
                 "SELECT decision, after_json FROM knowledge_decisions WHERE candidate_id = ?1",
@@ -2337,7 +2337,7 @@ mod tests {
         let current = result.current.expect("merge keeps current");
         assert_eq!(current.version, 1);
         assert_eq!(current.normalized_value_json, "\"100\"");
-        let connection = open_database(&workspace).unwrap();
+        let connection = BrandWorkspaceStore::open(&workspace).unwrap();
         let sources: i64 = connection
             .query_row(
                 "SELECT COUNT(*) FROM knowledge_fact_sources WHERE fact_version = 1",
@@ -2554,7 +2554,7 @@ mod tests {
         workspace: &BrandWorkspace,
         candidate_id: &str,
     ) -> Vec<(String, String)> {
-        let connection = open_database(workspace).unwrap();
+        let connection = BrandWorkspaceStore::open(workspace).unwrap();
         let mut statement = connection
             .prepare(
                 "SELECT action, reason FROM knowledge_candidate_revisions
@@ -2602,7 +2602,7 @@ mod tests {
             )
             .unwrap()
             .is_none());
-        let connection = open_database(&workspace).unwrap();
+        let connection = BrandWorkspaceStore::open(&workspace).unwrap();
         let decisions: i64 = connection
             .query_row("SELECT COUNT(*) FROM knowledge_decisions", [], |row| {
                 row.get(0)
@@ -2676,7 +2676,7 @@ mod tests {
     #[test]
     fn chat_revision_add_creates_user_stated_candidate_and_joins_material_card() {
         let (store, workspace) = fixture();
-        let connection = open_database(&workspace).unwrap();
+        let connection = BrandWorkspaceStore::open(&workspace).unwrap();
         connection
             .execute(
                 "INSERT INTO brand_materials
@@ -2724,7 +2724,7 @@ mod tests {
 
         // 新候选挂回材料最新 attempt：复核卡轮询据此重渲染出新行；
         // 已 processed 的材料被拉回 awaiting-confirmation。
-        let connection = open_database(&workspace).unwrap();
+        let connection = BrandWorkspaceStore::open(&workspace).unwrap();
         let ids_json: String = connection
             .query_row(
                 "SELECT candidate_ids_json FROM brand_material_processing WHERE id='attempt-1'",
@@ -2755,7 +2755,7 @@ mod tests {
         assert_eq!(first.id, second.id);
         // 两次显式新增各写一条审计；候选行仍只有一条。
         assert_eq!(revision_audit_rows(&workspace, &first.id).len(), 2);
-        let connection = open_database(&workspace).unwrap();
+        let connection = BrandWorkspaceStore::open(&workspace).unwrap();
         let candidates: i64 = connection
             .query_row(
                 "SELECT COUNT(*) FROM knowledge_fact_candidates",

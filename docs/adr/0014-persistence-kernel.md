@@ -2,7 +2,7 @@
 
 ## Context
 
-BrandWorkspace 持久化没有深模块挡在 SQL 之前：`open_database`（brand_workspace.rs:1176-1226）每次打开都串行重跑 10 个 `ensure_schema`（6 个含影子表重建探测）＋2 个内联 `ensure_column` 迁移；全目录 **130 处**非测试调用点（axum 每 HTTP 请求经 `production_store()` 重建 Store 再开库——**每个请求都重演全部 schema 探测**）；会话闸 **10 个**同构变体（9 个命名 `require_*_session` ＋ geo_operations 1 处内联）散在 9 个文件；≈923 处 `map_err` 目标全是 `Result<T, String>`，无中央错误层；60 处 `transaction_with_behavior(Immediate)` 内联样板；now_iso ×2、sha256 2 命名＋≥8 内联、canonical_json ×4 同签名复制。2026-09-04 架构巡检立为候选 2（Strong），grilling 两轮锁定范围后裁决。
+BrandWorkspace 持久化没有深模块挡在 SQL 之前：旧开库函数（立项时居 brand_workspace.rs:1176-1226，票 05 收缩删除）每次打开都串行重跑 10 个 `ensure_schema`（6 个含影子表重建探测）＋2 个内联 `ensure_column` 迁移；全目录 **130 处**非测试调用点（axum 每 HTTP 请求经 `production_store()` 重建 Store 再开库——**每个请求都重演全部 schema 探测**）；会话闸 **10 个**同构变体（9 个命名 `require_*_session` ＋ geo_operations 1 处内联）散在 9 个文件；≈923 处 `map_err` 目标全是 `Result<T, String>`，无中央错误层；60 处 `transaction_with_behavior(Immediate)` 内联样板；now_iso ×2、sha256 2 命名＋≥8 内联、canonical_json ×4 同签名复制。2026-09-04 架构巡检立为候选 2（Strong），grilling 两轮锁定范围后裁决。
 
 ## Decision
 

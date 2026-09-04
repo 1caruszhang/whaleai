@@ -1664,7 +1664,7 @@ mod tests {
     }
 
     fn seed_knowledge(workspace: &BrandWorkspace, version: i64, value: &str) {
-        let connection = open_database(workspace).unwrap();
+        let connection = BrandWorkspaceStore::open(workspace).unwrap();
         let now = Utc::now().to_rfc3339();
         let raw_input_id = format!("raw-{version}");
         let candidate_id = format!("candidate-{version}");
@@ -1869,7 +1869,7 @@ mod tests {
         assert_eq!(revised.questions.as_array().unwrap().len(), 2);
 
         // 逐条审计携带用户指令原文。
-        let connection = open_database(&workspace).unwrap();
+        let connection = BrandWorkspaceStore::open(&workspace).unwrap();
         let (audit_count, audit_reason, audit_action): (i64, String, String) = connection
             .query_row(
                 "SELECT COUNT(*), MAX(reason), MAX(action) FROM geo_question_pool_revisions
@@ -2127,7 +2127,7 @@ mod tests {
         // 同 Session 再有一个 awaiting 池（如跨产品线并行挖掘）时，普通
         // latest 会被排在前面的 confirmed 池遮蔽，pending_only 必须解析到
         // 本 Session 的待决池。
-        let connection = open_database(&workspace).unwrap();
+        let connection = BrandWorkspaceStore::open(&workspace).unwrap();
         connection
             .execute(
                 "INSERT INTO geo_operations (id, session_id, state, created_at)

@@ -6,7 +6,7 @@
 
 ## Problem Statement
 
-BrandWorkspace 持久化的基建在 130 个调用点上逐字复制：每个 store 方法手工重演「开库 `open_database` → PRAGMA（busy_timeout 5s / WAL / foreign_keys）→ 10 个 `ensure_schema` 串行探测（6 个含影子表重建探测）→ 2 个内联 `ensure_column` 迁移 → 会话闸 → map_err 样板」。axum 每个 HTTP 请求经 `production_store()` 重建 Store 再开库——**每个请求都重演全部 schema 探测**。会话闸 10 个同构变体（9 命名＋geo_operations 1 处内联）散在 9 文件，差异藏在 COUNT/EXISTS、validate 前置、错误码三个维度；60 处 Immediate 事务内联样板；≈923 处 `map_err` 目标全是 `String`；now_iso ×2、sha256 2 命名＋≥8 内联、canonical_json ×4。基建不在任何模块的接口后面——改一处 PRAGMA 或迁移语义要 grep 全目录，新域只能复制粘贴整副骨架。
+BrandWorkspace 持久化的基建在 130 个调用点上逐字复制：每个 store 方法手工重演「开库（旧开库函数，票 05 收缩删除）→ PRAGMA（busy_timeout 5s / WAL / foreign_keys）→ 10 个 `ensure_schema` 串行探测（6 个含影子表重建探测）→ 2 个内联 `ensure_column` 迁移 → 会话闸 → map_err 样板」。axum 每个 HTTP 请求经 `production_store()` 重建 Store 再开库——**每个请求都重演全部 schema 探测**。会话闸 10 个同构变体（9 命名＋geo_operations 1 处内联）散在 9 文件，差异藏在 COUNT/EXISTS、validate 前置、错误码三个维度；60 处 Immediate 事务内联样板；≈923 处 `map_err` 目标全是 `String`；now_iso ×2、sha256 2 命名＋≥8 内联、canonical_json ×4。基建不在任何模块的接口后面——改一处 PRAGMA 或迁移语义要 grep 全目录，新域只能复制粘贴整副骨架。
 
 ## Solution
 
@@ -25,7 +25,7 @@ BrandWorkspace 持久化的基建在 130 个调用点上逐字复制：每个 st
 
 ## Implementation Decisions
 
-1. **内核形态**：单文件 `persistence.rs` 起步（长再说拆目录）；`BrandWorkspaceStore::open()` 唯一开库入口，签名等价替换 130 处 `open_database(...)` 调用（机械改写）；`initialize_database`（建库路径，含 `INSERT OR REPLACE INTO brand_workspace` 数据行）随迁移编排一并归内核。
+1. **内核形态**：单文件 `persistence.rs` 起步（长再说拆目录）；`BrandWorkspaceStore::open()` 唯一开库入口，签名等价替换 130 处旧开库函数调用（机械改写）；`initialize_database`（建库路径，含 `INSERT OR REPLACE INTO brand_workspace` 数据行）随迁移编排一并归内核。
 2. **连接形态**：**保持每调用开新连接**——现状零池、WAL 下开库便宜、rusqlite `Connection` 非 Sync、tauri 走 `spawn_blocking`，无并发痛点证据；PRAGMA 每连接必设（journal_mode/foreign_keys/busy_timeout 原样）。*否决：共享连接/池*——组合根层面改动，与候选 4 纠缠。*否决：`production_store()` 缓存*——Store 只是 PathBuf 结构，无收益，spec 登记归候选 4。*
 3. **迁移登记表**：`static Mutex<HashSet<PathBuf>>`（canonical path），**持锁期间执行首开迁移**（进程内并发首开串行化、避免重复迁移）；后续 open 跳过全部探测。幂等探测保留作跨进程兜底（`cancel-legacy-geo-operations.mjs` 可写、e2e 验收只读，均不跑迁移；app 进程首开必跑）。测试进程内 HashSet 随 tempdir 增长可忽略。*否决：OnceLock 全局单次*——测试每用例新 tempdir、同进程多 workspace、Store 每请求重建，三处全碎。*否决：append-only 版本表*（backend/ 范型）——换范型超本卡，留未来独立案。
 4. **会话闸收敛**：单实现＋每闸声明结构（表固定 `brand_sessions`、列固定 `id`；声明＝错误码＋有无 `validate_session_id` 前置）。**10 个错误串逐字保留**（`article_generation_session_not_committed` … `publish_scheduler_session_not_found`，TS 侧 pin 不红）；COUNT→EXISTS（主键 id 可观测等价）；materials 两段错误（not found vs `brand_session_unavailable`）保留，吞细节行为逐字保持；geo_operations 内联闸（`geo_operation_session_not_committed`）一并收编。*否决：统一 validate 口径、合并错误码*——行为变更，登记遗留另议。
@@ -38,7 +38,7 @@ BrandWorkspace 持久化的基建在 130 个调用点上逐字复制：每个 st
     - **票 A**：post_publish_monitoring 21 ＋ publish_scheduler 20 ＋ brand_workspace.rs 16（57 站点，最热 churn 区）
     - **票 B**：articles 13 ＋ materials 13 ＋ distribution_plans 9（35 站点）
     - **票 C**：geo_operations 8（含 7 处重复 ensure 清理＋内联闸收编）＋ question_pools 8 ＋ geo_baselines 7 ＋ topic_plans 6 ＋ knowledge 5 ＋ geo_dashboard 2 ＋ brand_history/notifications/artifact_lineage 各 1（38 站点，文件多而浅）
-    ＋ **收缩票**（被 A/B/C 全部阻塞）：删除 `open_database` 旧形态（其体内直呼 `Connection::open`，不删则 brand_workspace.rs 豁免永不清零）＋豁免表清空 0 项严格相等终态钉＋spec 状态头结案。三张清零票各被立项票阻塞、彼此独立（建议 A→B→C 顺序）。
+    ＋ **收缩票**（被 A/B/C 全部阻塞）：删除旧开库函数形态（其体内直呼 `Connection::open`，不删则 brand_workspace.rs 豁免永不清零）＋豁免表清空 0 项严格相等终态钉＋spec 状态头结案。三张清零票各被立项票阻塞、彼此独立（建议 A→B→C 顺序）。
     分支建议 `geo/persistence-kernel`。
 11. **顺序**：血缘 owner（已结案，ADR-0013）→ **本卡** → 候选 1（GeoOperation 主链写路径 owner，生在内核上）→ 候选 8（publish_scheduler 拆分）。
 
@@ -60,6 +60,6 @@ BrandWorkspace 持久化的基建在 130 个调用点上逐字复制：每个 st
 ## Further Notes
 
 - **票依赖骨架**：立项票（零依赖，纯增量）→ 三张清零票（各依赖立项票，彼此独立；建议按 A→B→C 顺序，最热 churn 区先获得局部性）。
-- **决策日志**：grilling 两轮全按推荐锁定。Round 1 九项（范围四件套＋工具族、per-path 登记表、每调用开库、闸等价线、错误映射深度、事务助手、先 2 后 1、0013 打法、命名落点）；Round 2 五项（ADR-0014、cargo 守卫、票切分、组合根出范围、遗留只登记）。`/to-tickets` 一轮：四票修正为五票——「终态零豁免」需要删除 `open_database` 本体的 contract 步（expand–contract 宽面重构打法），用户确认粒度/阻塞边/第五票全部照拟。
+- **决策日志**：grilling 两轮全按推荐锁定。Round 1 九项（范围四件套＋工具族、per-path 登记表、每调用开库、闸等价线、错误映射深度、事务助手、先 2 后 1、0013 打法、命名落点）；Round 2 五项（ADR-0014、cargo 守卫、票切分、组合根出范围、遗留只登记）。`/to-tickets` 一轮：四票修正为五票——「终态零豁免」需要删除旧开库函数本体的 contract 步（expand–contract 宽面重构打法），用户确认粒度/阻塞边/第五票全部照拟。
 - **词汇沉淀**：持久化内核（Persistence Kernel）、会话闸（Session Gate，与聊天侧「闸门卡片」消歧）已进 CONTEXT.md（2026-09-04）。
 - **证据底座**：2026-09-04 两路只读勘察——Rust 持久化层全量盘点（130 调用点分文件清点、10 闸三维差异表、923 map_err 计数、60 事务站点、工具族副本定位、10 ensure_schema 幂等性分类、测试 tempdir 形态、进程外访问者）＋ ADR/词汇表/在飞工作核查（0013 全结案无冲突面、backend 另库确认）。

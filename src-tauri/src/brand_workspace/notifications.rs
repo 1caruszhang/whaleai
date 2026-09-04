@@ -333,7 +333,7 @@ fn classify_geo_status(value: &str) -> Option<&'static str> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{open_database, SessionCommit, SessionTitleSource};
+    use super::super::{SessionCommit, SessionTitleSource};
     use super::*;
     use rusqlite::params;
     use tempfile::tempdir;
@@ -370,7 +370,7 @@ mod tests {
                 },
             )
             .unwrap();
-        let connection = open_database(&workspace).unwrap();
+        let connection = BrandWorkspaceStore::open(&workspace).unwrap();
         connection
             .execute(
                 "INSERT INTO geo_operations

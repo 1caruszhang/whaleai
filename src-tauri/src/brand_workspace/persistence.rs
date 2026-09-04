@@ -1,12 +1,13 @@
-//! 持久化内核（ADR-0014，票 01 立项）：BrandWorkspace 持久化基建的唯一
-//! 居所——开库入口、per-path 迁移登记、会话闸单实现＋每闸声明、
-//! Immediate 事务助手、错误映射助手与纯等价工具族。域 SQL 留在各域文件，
-//! 本文件只收基建不收 SQL（唯一例外：initialize_database 随编排归内核，
-//! 自带建库基础表 DDL 与身份行——spec 实施决策 1 钦定的等价搬家）。
+//! 持久化内核（ADR-0014，票 01 立项、票 05 收缩收终态）：BrandWorkspace
+//! 持久化基建的唯一居所——开库入口、per-path 迁移登记、会话闸单实现＋
+//! 每闸声明、Immediate 事务助手、错误映射助手与纯等价工具族。域 SQL 留在
+//! 各域文件，本文件只收基建不收 SQL（唯一例外：initialize_database 随编排
+//! 归内核，自带建库基础表 DDL 与身份行——spec 实施决策 1 钦定的等价搬家）。
 //!
-//! 本票为 expand 阶段（纯增量）：旧 `open_database` 及其 130 个调用点
-//! 原样存活，三张清零票（02/03/04）逐文件改走 [`BrandWorkspaceStore::open`]
-//! 后由收缩票（05）删除旧形态。守卫棘轮见文末 `mod guard`。
+//! 旧开库函数已随收缩票删除：生产与测试段的全部开库统一经
+//! [`BrandWorkspaceStore::open`]（测试段直查库走同一入口；存量迁移测试
+//! 的重探测经 `forget_migration` 测试钩子重走「新进程首开」路径）。
+//! 守卫棘轮自票 05 起零豁免终态，见文末 `mod guard`。
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -69,11 +70,11 @@ fn canonical_db_path(db_path: &Path) -> PathBuf {
 // ═══ 唯一开库入口（spec 实施决策 1、2） ═══
 
 impl BrandWorkspaceStore {
-    /// 唯一开库入口：行为等价旧 `open_database`——保持每调用开新连接
-    /// （rusqlite `Connection` 非 Sync、tauri 走 spawn_blocking，无池化
-    /// 证据，spec 实施决策 2），PRAGMA 每连接必设（busy_timeout 5s / WAL /
-    /// foreign_keys 原样），错误串逐字同旧实现；差异仅一处：迁移按
-    /// 登记表每路径每进程只跑一遍。
+    /// 唯一开库入口：保持每调用开新连接（rusqlite `Connection` 非
+    /// Sync、tauri 走 spawn_blocking，无池化证据，spec 实施决策 2），
+    /// PRAGMA 每连接必设（busy_timeout 5s / WAL / foreign_keys 原样），
+    /// 错误串逐字承旧开库函数；差异仅一处：迁移按登记表每路径每进程
+    /// 只跑一遍。
     pub(crate) fn open(workspace: &BrandWorkspace) -> Result<Connection, String> {
         let db_path = workspace.root_path.join(DATABASE_FILE);
         let connection =
@@ -108,9 +109,28 @@ fn migrate_once(connection: &Connection, db_path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// 迁移编排（等价旧 `open_database` 体内的探测序列）：10 个 ensure_schema
-/// 串行（全幂等，sqlite_master 探测，重跑无正确性破口）＋2 个内联列迁移
-/// （按表存在性条件触发）。跨进程首开的兜底路径。
+/// 测试支持钩子（票 05）：从登记表移除该 workspace 路径，使本进程内下次
+/// `open()` 重走全套迁移探测——语义等价「新进程首开」。存量迁移测试在
+/// 测试中段把表降级成旧版形态后需要重探测触发重建：旧开库函数「每开
+/// 必探测」的形态已删，此钩子是其进程内等价替身（跨进程兜底语义的可测
+/// 面）。只活在测试编译段（`#[cfg(test)]`），不污染生产面。
+#[cfg(test)]
+pub(crate) fn forget_migration(workspace: &BrandWorkspace) {
+    let canonical = canonical_db_path(&workspace.root_path.join(DATABASE_FILE));
+    migration_registry()
+        .lock()
+        .expect("lock brand database migration registry in forget_migration")
+        .migrated
+        .remove(&canonical);
+    // run_log 是「run_migrations 每执行一次记一条」的执行日志，forget 只
+    // 动去重登记集、不改写执行历史；并发首开钉按各自 tempdir 路径过滤，
+    // 不受其它路径的忘却影响。
+}
+
+/// 迁移编排（承自旧开库函数体内的探测序列，票 05 删旧形态后为唯一
+/// 编排）：10 个 ensure_schema 串行（全幂等，sqlite_master 探测，重跑无
+/// 正确性破口）＋2 个内联列迁移（按表存在性条件触发）。跨进程首开的
+/// 兜底路径。
 fn run_migrations(connection: &Connection) -> Result<(), String> {
     geo_operations::ensure_schema(connection)?;
     knowledge::ensure_schema(connection)?;
@@ -478,7 +498,7 @@ mod tests {
         canonical_json, gates, initialize_database, now_iso, sha256_hex, with_immediate_tx,
         BrandWorkspaceStore,
     };
-    use crate::brand_workspace::{open_database, BrandWorkspace};
+    use crate::brand_workspace::BrandWorkspace;
 
     fn workspace_under(root: &std::path::Path) -> BrandWorkspace {
         BrandWorkspace {
@@ -614,7 +634,7 @@ mod tests {
         let (_root, workspace) = migrated_workspace();
         let connection = BrandWorkspaceStore::open(&workspace).unwrap();
         // 探测可见性反转：删一张 ensure_schema 管理的表后再次开库——
-        // 登记表命中则不重建（旧 open_database 每开必重建，两者分叉点）。
+        // 登记表命中则不重建（每开必跑探测的旧开库形态已删，两者分叉点）。
         connection
             .execute_batch("DROP TABLE geo_artifact_freshness;")
             .unwrap();
@@ -625,12 +645,15 @@ mod tests {
             "登记表命中后不应重跑 schema 探测"
         );
         drop(second);
-        let legacy = open_database(&workspace).unwrap();
+        // 测试钩子忘掉登记后，open() 重走全套迁移探测——「新进程首开」
+        // 的进程内等价路径（跨进程兜底语义的可测替身），幂等 ensure_schema
+        // 把删掉的表重建回来。
+        super::forget_migration(&workspace);
+        let reprobe = BrandWorkspaceStore::open(&workspace).unwrap();
         assert!(
-            table_exists(&legacy, "geo_artifact_freshness"),
-            "旧 open_database 保持每开必探测的现状（行为未搬动）"
+            table_exists(&reprobe, "geo_artifact_freshness"),
+            "忘掉登记后的 open() 应重走全套迁移探测（幂等兜底）"
         );
-        drop(legacy);
     }
 
     #[test]
@@ -640,8 +663,8 @@ mod tests {
         std::fs::create_dir_all(&workspace.root_path).unwrap();
         let canonical = super::canonical_db_path(&workspace.root_path.join("project.sqlite"));
         // 预热 WAL：journal_mode 切换在非 WAL 库上不排队等 busy_timeout，
-        // 两个「史上首开」赛跑会先在 PRAGMA 上炸（旧 open_database 同曝，
-        // 非本内核语义）。预热后两线程的竞争点恰是登记表互斥——被钉对象。
+        // 两个「史上首开」赛跑会先在 PRAGMA 上炸（旧开库形态同曝，非本
+        // 内核语义）。预热后两线程的竞争点恰是登记表互斥——被钉对象。
         let warm = Connection::open(workspace.root_path.join("project.sqlite")).unwrap();
         warm.execute_batch("PRAGMA journal_mode = WAL;").unwrap();
         drop(warm);
@@ -898,34 +921,33 @@ mod tests {
 // 三条规则（与 vitest 血缘守卫同哲学：豁免表即清零进度表，键须与现实
 // 违例集严格相等，不硬编码计数——清零票逐项消项时计数断言会误红）：
 //  ① brand_workspace 内禁直呼 rusqlite::Connection::open（前缀口径涵盖
-//     open_in_memory；开库只能经 BrandWorkspaceStore::open / 旧
-//     open_database 过渡态）；
+//     open_in_memory；开库只能经 BrandWorkspaceStore::open——旧开库
+//     函数已随票 05 删除，仓内再无其它开库形态）；
 //  ② 禁新增 require_*_session 变体（会话闸只能引用 super::persistence::
 //     gates 声明；geo_operations 内联闸已随票 04 收编进 GEO_OPERATION_SESSION
 //     声明，域内变体全部清零）；
 //  ③ 禁 open 路径外直呼 ensure_schema（迁移编排只活在内核
-//     run_migrations/initialize_database 与旧 open_database 过渡态；各域
-//     ensure_schema 的定义行不算直呼）。
+//     run_migrations/initialize_database；各域 ensure_schema 的定义行
+//     不算直呼）。
 //
 // 扫描只看生产段（首个 `#[cfg(test)]` 后紧跟 mod 声明之前的文本，沿
 // ADR-0013 vitest 守卫先例）：测试 fixture 直开库/补 schema 不受约束——
 // 三条规则管的是生产代码。内核 persistence.rs 对 ①③ 是结构性放行（它
 // 就是 open 路径本体，不进豁免表——终态零豁免的前提），对 ② 照扫。
 //
-// 豁免表＝现存直呼的登记在册过渡态（非违规），按票消项：票 02（已结）消
-// post_publish_monitoring/publish_scheduler/brand_workspace.rs 的调用点
-// （闸变体两项随之清零；brand_workspace.rs 的 ①③ 随旧 open_database 本体
-// 归票 05），票 03（已结）消 articles/materials/distribution_plans，票 04
-// （已结）消 geo_baselines/geo_dashboard/question_pools/topic_plans 的闸变体
-// 与 geo_operations 的 8 处 ensure_schema 直呼（7 处开库后重复 ensure＋
-// mark_artifacts_affected_by_knowledge_change 事务内冗余 ensure），票 05 清空
-// 归零。
+// 终态（票 05 起）：旧开库函数本体删除、豁免表清空——**0 项严格相等**。
+// 此后任何新增的直开库、require_*_session 变体、open 路径外 ensure_schema
+// 直呼均永久红灯（无豁免通道）。收敛轨迹：立项票 01 登记现实基线 11 文件
+// → 票 02 消 post_publish_monitoring/publish_scheduler（余 9）→ 票 03 消
+// articles/materials/distribution_plans（余 6）→ 票 04 消 geo_baselines/
+// geo_dashboard/question_pools/topic_plans/geo_operations（余 1）→ 票 05
+// 删旧开库本体清余 1 归 0。
 //
 // 盘点口径注记：spec/ADR 记「豁免表初始 13 文件」为 2026-09-04 巡检笔数；
 // 按本守卫生产段口径逐文件盘点为 11 文件（knowledge/geo_baselines/
 // post_publish_monitoring 的 ensure_schema 直呼与 articles/materials 等 5
 // 文件的 Connection::open 均只出现在测试段；巡检 13 另含 kernel 文件自身
-// 与测试段命中）。表与现实严格相等由测试钉死，数目随清零单调下降。
+// 与测试段命中）。表与现实严格相等由测试钉死。
 #[cfg(test)]
 mod guard {
     use std::fs;
@@ -995,20 +1017,11 @@ mod guard {
         .collect()
     }
 
-    /// 豁免表＝清零进度表：值按票消项，键须与现实违例集严格相等。
+    /// 豁免表＝清零进度表：**票 05 终态为空**（旧开库函数删除后现实违例
+    /// 集＝空集，0 项严格相等钉死）。此后任何新增违例无通道登记——三条
+    /// 规则永久红灯。
     fn exemption_table() -> Vec<(&'static str, Vec<Rule>)> {
-        vec![
-            // 旧 open_database 本体：直呼 Connection::open＋10 处 ensure_schema
-            // 旧开路径（调用点票 02/04 全部清零，本体删除归票 05；票 04 后
-            // 仅测试段 fixture 引用，已标 allow(dead_code) 过渡）。
-            (
-                "src-tauri/src/brand_workspace.rs",
-                vec![
-                    Rule::DirectConnectionOpen,
-                    Rule::EnsureSchemaOutsideOpenPath,
-                ],
-            ),
-        ]
+        Vec::new()
     }
 
     fn brand_workspace_sources() -> Vec<(String, String)> {

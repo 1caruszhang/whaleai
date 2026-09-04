@@ -1646,7 +1646,7 @@ mod tests {
         assert!(file_path.exists());
 
         // 一条未决候选 + 一条已采纳候选（裁决历史）。
-        let connection = open_database(&workspace).expect("db");
+        let connection = BrandWorkspaceStore::open(&workspace).expect("db");
         let now = Utc::now().to_rfc3339();
         connection
             .execute(
@@ -2208,9 +2208,11 @@ mod tests {
         }
 
         // 内核 open() 的迁移登记表按进程去重：前面的 store 调用已登记本
-        // 路径，这里经旧 open_database 重走探测（新进程首开的等价路径）：
-        // 迁移把 'processed' 放进 CHECK，随后旧库也能落 processed 终态。
-        drop(open_database(&workspace).expect("reprobe"));
+        // 路径，这里先用测试钩子忘掉登记（「新进程首开」的进程内等价
+        // 路径）再经 open() 重走全套探测：迁移把 'processed' 放进 CHECK，
+        // 随后旧库也能落 processed 终态。
+        super::super::persistence::forget_migration(&workspace);
+        drop(BrandWorkspaceStore::open(&workspace).expect("reprobe"));
         let attempt = store
             .begin_material_processing(&workspace.id, &session_id, &material.id)
             .expect("begin");
@@ -2229,7 +2231,7 @@ mod tests {
             .expect("finish after migration");
         assert_eq!(finished.status, "processed");
 
-        let connection = open_database(&workspace).expect("reopen");
+        let connection = BrandWorkspaceStore::open(&workspace).expect("reopen");
         let sql: String = connection
             .query_row(
                 "SELECT sql FROM sqlite_master

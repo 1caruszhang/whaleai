@@ -2403,7 +2403,7 @@ mod tests {
                 },
             )
             .expect("session");
-        let connection = open_database(&workspace).expect("db");
+        let connection = BrandWorkspaceStore::open(&workspace).expect("db");
         connection
             .execute_batch(
                 r#"INSERT INTO knowledge_raw_inputs
@@ -2695,7 +2695,7 @@ mod tests {
             .expect_err("ranking without competitors must fail before persistence");
         assert_eq!(error, format!("{}:0", ranking_insufficient_code()));
 
-        let connection = open_database(&workspace).expect("db");
+        let connection = BrandWorkspaceStore::open(&workspace).expect("db");
         append_competitor_snapshot(
             &connection,
             &["竞品甲", "竞品乙", "竞品丙", "竞品丁", "竞品戊"],
@@ -2724,7 +2724,7 @@ mod tests {
     #[test]
     fn confirmed_ranking_plan_overlays_a_later_natural_language_competitor_snapshot() {
         let (_root, store, workspace) = seeded_store();
-        let connection = open_database(&workspace).expect("db");
+        let connection = BrandWorkspaceStore::open(&workspace).expect("db");
         let topics = json!([{
             "id": "topic-ranking",
             "name": "本地服务对比",
@@ -2819,7 +2819,7 @@ mod tests {
             .articles
             .iter()
             .all(|article| article.knowledge_version == 1));
-        let connection = open_database(&workspace).expect("db");
+        let connection = BrandWorkspaceStore::open(&workspace).expect("db");
         let operation_spec: String = connection
             .query_row(
                 "SELECT operation_spec_json FROM geo_article_operations WHERE operation_id=?1",
@@ -3008,7 +3008,7 @@ mod tests {
             .expect("approved body after regeneration");
         assert_eq!(approved_body_before.body, approved_body_after.body);
         assert_eq!(approved_body_after.revision, 1);
-        let connection = open_database(&workspace).expect("db");
+        let connection = BrandWorkspaceStore::open(&workspace).expect("db");
         let approved_artifact_count: i64 = connection
             .query_row(
                 "SELECT COUNT(*) FROM geo_artifacts WHERE operation_id=?1 AND kind='approved-article'",
@@ -3240,7 +3240,7 @@ mod tests {
     #[test]
     fn confirmed_plan_uses_only_selected_approved_items_and_fixed_revision() {
         let (_root, store, workspace) = seeded_store();
-        let connection = open_database(&workspace).expect("db");
+        let connection = BrandWorkspaceStore::open(&workspace).expect("db");
         let topics = json!([{
             "id": "topic-1",
             "name": "知识库选型",
@@ -3323,7 +3323,7 @@ mod tests {
             1
         );
 
-        let connection = open_database(&workspace).expect("db");
+        let connection = BrandWorkspaceStore::open(&workspace).expect("db");
         let spec: String = connection
             .query_row(
                 "SELECT operation_spec_json FROM geo_article_operations WHERE operation_id=?1",
@@ -3560,7 +3560,7 @@ mod tests {
 
     /// 票 #34 夹具：三项全 approved 的 confirmed plan，selectedItemIds 全选。
     fn seed_confirmed_plan_with_three_items(workspace: &BrandWorkspace, plan_id: &str) {
-        let connection = open_database(workspace).expect("db");
+        let connection = BrandWorkspaceStore::open(workspace).expect("db");
         let topics = json!([{
             "id": "topic-1",
             "name": "知识库选型",
@@ -3645,7 +3645,7 @@ mod tests {
                 .collect::<HashSet<_>>()
         );
 
-        let connection = open_database(&workspace).expect("db");
+        let connection = BrandWorkspaceStore::open(&workspace).expect("db");
         let spec: String = connection
             .query_row(
                 "SELECT operation_spec_json FROM geo_article_operations WHERE operation_id=?1",
@@ -3743,7 +3743,7 @@ mod tests {
             )
             .expect("operation");
         let lineage = |label: &str| -> String {
-            let connection = open_database(&workspace).expect("db");
+            let connection = BrandWorkspaceStore::open(&workspace).expect("db");
             connection
                 .query_row(
                     "SELECT state FROM geo_operations WHERE id=?1",
@@ -4287,9 +4287,10 @@ mod tests {
         }
 
         // 内核 open() 的迁移登记表按进程去重：fixture 的 store 调用已登记
-        // 本路径，这里经旧 open_database 重走探测（新进程首开的等价路径）
-        // 触发重建。
-        drop(open_database(&workspace).expect("reprobe"));
+        // 本路径，这里先用测试钩子忘掉登记（「新进程首开」的进程内等价
+        // 路径）再经 open() 重走全套探测触发重建。
+        super::super::persistence::forget_migration(&workspace);
+        drop(BrandWorkspaceStore::open(&workspace).expect("reprobe"));
 
         // ensure_schema 已完成重建，INSERT 落在新表上；随后弃用一个失败
         // 稿，旧 CHECK 会拒绝的 UPDATE 现在成立。
@@ -4349,7 +4350,7 @@ mod tests {
             .expect("discard after migration");
         assert_eq!(discarded.status, "discarded");
 
-        let connection = open_database(&workspace).expect("db");
+        let connection = BrandWorkspaceStore::open(&workspace).expect("db");
         let ddl: String = connection
             .query_row(
                 "SELECT sql FROM sqlite_master WHERE type='table' AND name='geo_articles'",

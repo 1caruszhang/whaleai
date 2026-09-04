@@ -1084,62 +1084,6 @@ fn rename_table_in_ddl(ddl: &str, from: &str, to: &str) -> Result<String, String
     Ok(format!("CREATE TABLE {to}{rest}"))
 }
 
-// 票 04 清零后生产段零调用，仅测试段 fixture 使用；本体删除归票 05。
-#[allow(dead_code)]
-fn open_database(workspace: &BrandWorkspace) -> Result<Connection, String> {
-    let connection = Connection::open(workspace.root_path.join("project.sqlite"))
-        .map_err(|error| format!("open brand database: {error}"))?;
-    connection
-        .busy_timeout(std::time::Duration::from_secs(5))
-        .map_err(|error| format!("configure brand database timeout: {error}"))?;
-    connection
-        .execute_batch("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;")
-        .map_err(|error| format!("configure brand database: {error}"))?;
-    geo_operations::ensure_schema(&connection)?;
-    knowledge::ensure_schema(&connection)?;
-    materials::ensure_schema(&connection)?;
-    question_pools::ensure_schema(&connection)?;
-    geo_baselines::ensure_schema(&connection)?;
-    topic_plans::ensure_schema(&connection)?;
-    articles::ensure_schema(&connection)?;
-    distribution_plans::ensure_schema(&connection)?;
-    publish_scheduler::ensure_schema(&connection)?;
-    post_publish_monitoring::ensure_schema(&connection)?;
-    let has_geo_artifacts: i64 = connection
-        .query_row(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='geo_artifacts'",
-            [],
-            |row| row.get(0),
-        )
-        .map_err(|error| format!("inspect artifact schema state: {error}"))?;
-    if has_geo_artifacts == 1 {
-        ensure_column(&connection, "geo_artifacts", "knowledge_version", "INTEGER")?;
-    }
-    let has_deletion_intents: i64 = connection
-        .query_row(
-            "SELECT COUNT(*) FROM sqlite_master
-             WHERE type = 'table' AND name = 'session_deletion_intents'",
-            [],
-            |row| row.get(0),
-        )
-        .map_err(|error| format!("inspect brand database migration state: {error}"))?;
-    if has_deletion_intents == 1 {
-        ensure_column(
-            &connection,
-            "session_deletion_intents",
-            "admitted_at",
-            "INTEGER",
-        )?;
-        ensure_column(
-            &connection,
-            "session_deletion_intents",
-            "transcript_deleted_at",
-            "INTEGER",
-        )?;
-    }
-    Ok(connection)
-}
-
 fn session_from_row(row: &rusqlite::Row<'_>, workspace_id: &str) -> rusqlite::Result<BrandSession> {
     let title_source: String = row.get(2)?;
     Ok(BrandSession {
@@ -1595,7 +1539,7 @@ mod tests {
             .unwrap();
 
         assert!(store.list_sessions(&brand.id, true).unwrap().is_empty());
-        let connection = open_database(&brand).unwrap();
+        let connection = BrandWorkspaceStore::open(&brand).unwrap();
         let count = |sql: String| {
             connection
                 .query_row(&sql, [], |row| row.get::<_, i64>(0))
@@ -1683,10 +1627,12 @@ mod tests {
             .unwrap();
         drop(legacy);
 
-        // 任意一次数据库打开都会执行 ensure_schema 迁移。
+        // 忘掉登记＝「新进程首开」的进程内等价路径：下一次 open() 重走
+        // 全套 ensure_schema 迁移，把旧外键形态重建掉。
+        super::persistence::forget_migration(&brand);
         store.list_sessions(&brand.id, false).unwrap();
 
-        let connection = open_database(&brand).unwrap();
+        let connection = BrandWorkspaceStore::open(&brand).unwrap();
         let schema: String = connection
             .query_row(
                 "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'geo_question_pools'",
@@ -1798,7 +1744,7 @@ mod tests {
     }
 
     fn seed_knowledge_chain(brand: &BrandWorkspace) {
-        let connection = open_database(brand).unwrap();
+        let connection = BrandWorkspaceStore::open(brand).unwrap();
         let now = Utc::now().to_rfc3339();
         connection
             .execute(
@@ -1840,7 +1786,7 @@ mod tests {
 
     fn seed_geo_provenance_rows(brand: &BrandWorkspace, session_id: &str) {
         seed_knowledge_chain(brand);
-        let connection = open_database(brand).unwrap();
+        let connection = BrandWorkspaceStore::open(brand).unwrap();
         let now = Utc::now().to_rfc3339();
         for (id, state) in [
             ("operation-pool", "question-pool-confirmed"),
@@ -2007,7 +1953,7 @@ mod tests {
     }
 
     fn seed_shared_data(brand: &BrandWorkspace, session_id: &str) {
-        let connection = open_database(brand).unwrap();
+        let connection = BrandWorkspaceStore::open(brand).unwrap();
         connection
             .execute(
                 "INSERT INTO knowledge_facts (id, fact_key, version, value_json, created_at)
@@ -2046,7 +1992,7 @@ mod tests {
     }
 
     fn shared_row_counts(brand: &BrandWorkspace) -> [i64; 5] {
-        let connection = open_database(brand).unwrap();
+        let connection = BrandWorkspaceStore::open(brand).unwrap();
         let count = |table: &str| {
             connection
                 .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {

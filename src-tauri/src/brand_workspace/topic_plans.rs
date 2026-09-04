@@ -1268,7 +1268,7 @@ mod tests {
     }
 
     fn seed_source(workspace: &BrandWorkspace) {
-        let connection = open_database(workspace).unwrap();
+        let connection = BrandWorkspaceStore::open(workspace).unwrap();
         let now = Utc::now().to_rfc3339();
         connection.execute("INSERT INTO knowledge_raw_inputs (id, session_id, input_text, origin, intent, created_at) VALUES ('raw-10','session-10','汽车音响改装','user-stated','knowledge-update',?1)", [&now]).unwrap();
         connection.execute("INSERT INTO knowledge_fact_candidates (id,raw_input_id,session_id,subject,predicate,scope_json,fact_key,value_json,normalized_value_json,excerpt,confidence,profile_provenance,origin,intent,status,base_version,proposed_at,resolved_at) VALUES ('candidate-10','raw-10','session-10','鲸跃','enterprise-profile.industry','{}','industry','\"汽车音响改装\"','\"汽车音响改装\"','汽车音响改装',1.0,'asked','user-stated','knowledge-update','adopted',0,?1,?1)", [&now]).unwrap();
