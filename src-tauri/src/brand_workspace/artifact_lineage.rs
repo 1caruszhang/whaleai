@@ -12,8 +12,9 @@
 // from-state 迁移规则（错误码约定：artifact_lineage_transition_invalid:{from}，
 // 镜像主链 geo_operation_transition_invalid:{current} 风格）。baseline 族
 // 已随票 02、question-pool 族已随票 03、topic-plan 族已随票 04、
-// distribution 族已随票 05、article-generation 族已随票 06 清零（写点迁移
-// ＋from 规则钉死），其余各族直写仍在豁免表（清零进度以守卫豁免表为准）。
+// distribution 族已随票 05、article-generation 族已随票 06、monitor 族已随
+// 票 07 清零（写点迁移＋from 规则钉死），其余各族直写仍在豁免表（清零进度
+// 以守卫豁免表为准）。
 use std::fmt;
 
 use chrono::Utc;
@@ -238,6 +239,30 @@ impl ArtifactLineageState {
     /// - confirmed 只自 draft——confirm 前置门卫 status=='draft'（其余
     ///   落 not_confirmable / already_confirmed）。unavailable 是终态：
     ///   finish 不可二跑、unavailable 计划不进 confirm；confirmed 亦终态。
+    ///
+    /// monitor 族（票 07，按 post_publish_monitoring.rs 真实代码钉）：写点
+    /// 六处＝prepare 开行＋activate 迁移＋create_due_run/refresh_run_and_plan
+    /// 两处终局＋settle_unit_failure 余额暂停＋resume_or_defer 恢复。计划态
+    /// 与血缘态成对迁移，但**镜像不总成立**——refresh 的终局写不看计划门，
+    /// 两条破裂边按真实代码如实登记（端到端钉：
+    /// paused_final_settle_completes_lineage_then_resume_recovers_end_to_end）：
+    /// - draft 只经 open 开行（prepare 仅新建分支 INSERT，编辑既有草稿不写
+    ///   血缘），set 无路径，from 集为空；
+    /// - active 的 from 集＝{draft, paused, completed}——activate 门卫计划
+    ///   'draft'（draft→active）；resume 门卫计划 'paused'，正常自 paused
+    ///   来，但末单元余额不足的终局破裂（见下）后计划 paused 而血缘已是
+    ///   completed，余额恢复即 completed→active；
+    /// - paused 只自 active——settle_unit_failure 的暂停分支门卫计划
+    ///   'active'（claim 本身要求 active，单遍串行使 claim 与 settle 之间
+    ///   计划不变）；
+    /// - completed 的 from 集＝{active, paused}——create_due_run 的 ended
+    ///   分支先读计划 status='active'（active→completed）；refresh 的终局
+    ///   分支在 end 条件满足时无条件写血缘：settle_unit_failure 先落
+    ///   paused 再尾随 refresh，计划 UPDATE 已 0 行 no-op 而血缘仍被推到
+    ///   completed（镜像破裂：计划留 paused）。draft 无终局路径（两处终局
+    ///   写均在计划 active 之后才可达），completed→completed 需要计划
+    ///   completed 后仍有 settle（claim 门卫 active 挡死），均不可达。
+    ///
     fn allowed_from(target: Self) -> Option<&'static [Self]> {
         const RUNNING_PARTIAL_FAILED: &[ArtifactLineageState] = &[
             ArtifactLineageState::BaselineRunning,
@@ -265,6 +290,15 @@ impl ArtifactLineageState {
         const DISCOVERING_ONLY: &[ArtifactLineageState] =
             &[ArtifactLineageState::DistributionDiscovering];
         const DRAFT_ONLY: &[ArtifactLineageState] = &[ArtifactLineageState::DistributionPlanDraft];
+        const MONITOR_ACTIVE_OR_PAUSED: &[ArtifactLineageState] = &[
+            ArtifactLineageState::MonitorActive,
+            ArtifactLineageState::MonitorPaused,
+        ];
+        const MONITOR_DRAFT_PAUSED_OR_COMPLETED: &[ArtifactLineageState] = &[
+            ArtifactLineageState::MonitorDraft,
+            ArtifactLineageState::MonitorPaused,
+            ArtifactLineageState::MonitorCompleted,
+        ];
         match target {
             Self::BaselineRunning | Self::BaselineSucceeded | Self::BaselinePartial => {
                 Some(RUNNING_PARTIAL_FAILED)
@@ -287,6 +321,10 @@ impl ArtifactLineageState {
             Self::DistributionDiscovering => Some(NO_SET),
             Self::DistributionUnavailable | Self::DistributionPlanDraft => Some(DISCOVERING_ONLY),
             Self::DistributionPlanConfirmed => Some(DRAFT_ONLY),
+            Self::MonitorDraft => Some(NO_SET),
+            Self::MonitorActive => Some(MONITOR_DRAFT_PAUSED_OR_COMPLETED),
+            Self::MonitorPaused => Some(&[ArtifactLineageState::MonitorActive]),
+            Self::MonitorCompleted => Some(MONITOR_ACTIVE_OR_PAUSED),
             _ => None,
         }
     }
@@ -696,8 +734,36 @@ mod tests {
         );
     }
 
-    // 未钉规则的族保持立项票的等价搬家语义（无 from 校验），不被 baseline
-    // 规则误伤——monitor 逆向 set 亦放行，其 from 规则属票 07 职权。
+    // monitor 族 4×4 迁移矩阵（票 07 按 post_publish_monitoring.rs 真实代码
+    // 钉）：draft 仅经 open 开行（from 集空）；paused 只自 active（暂停分支
+    // 门卫计划 active）；active 自 {draft, paused, completed} 与 completed 自
+    // {active, paused} 各含一条镜像破裂边——末单元余额不足时 settle 先落
+    // paused、尾随 refresh 的终局写不看计划门把血缘推到 completed（计划留
+    // paused），余额恢复后 resume 只门卫计划 paused 即 completed→active。端
+    // 到端钉见 post_publish_monitoring 同名测试（真实执行流逐步落值）。
+    #[test]
+    fn monitor_family_transitions_follow_the_real_code_matrix() {
+        assert_family_matrix(
+            &[
+                "monitor-draft",
+                "monitor-active",
+                "monitor-paused",
+                "monitor-completed",
+            ],
+            &[
+                ("monitor-draft", &[]),
+                (
+                    "monitor-active",
+                    &["monitor-draft", "monitor-paused", "monitor-completed"],
+                ),
+                ("monitor-paused", &["monitor-active"]),
+                ("monitor-completed", &["monitor-active", "monitor-paused"]),
+            ],
+        );
+    }
+
+    // 未钉规则的族保持立项票的等价搬家语义（无 from 校验），不被 monitor
+    // 规则误伤——publish 逆向 set 亦放行，其 from 规则属票 08 职权。
     #[test]
     fn families_without_pinned_rules_stay_unchecked_until_their_clearing_ticket() {
         let (_store, _workspace, connection) = connection();
@@ -705,11 +771,11 @@ mod tests {
             &connection,
             "op-unpinned",
             "session-lineage",
-            "monitor-active",
+            "publish-succeeded",
         )
         .unwrap();
-        set_lineage_state(&connection, "op-unpinned", "monitor-draft").unwrap();
-        assert_eq!(lineage_row(&connection, "op-unpinned").0, "monitor-draft");
+        set_lineage_state(&connection, "op-unpinned", "publish-running").unwrap();
+        assert_eq!(lineage_row(&connection, "op-unpinned").0, "publish-running");
     }
 
     #[test]

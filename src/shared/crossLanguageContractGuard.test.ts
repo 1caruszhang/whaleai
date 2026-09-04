@@ -132,10 +132,10 @@ function refPathTargets(ref: string, contractRelPath: string): boolean {
 // set_lineage_state），生产代码里对 geo_operations 的 INSERT/UPDATE SQL
 // 只允许出现在这两个模块；其余现存直写按「域×写点」登记在下方豁免表——
 // 它们是登记在册的过渡态而非违规，各域清零票迁写点经 owner 接口后删除
-// 对应豁免项。baseline 族 2 处已随票 02、question-pool 族 3 处已随票 03、
-// topic-plan 族 2 处已随票 04、distribution 族 3 处已随票 05、
-// article-generation 族 2 处已随票 06 清零（余 2 域 15 处），publish 族
-// （9 处）清零后终态零豁免。
+// 对应豁免项。baseline 族 2 处已随票 02、question-pool 族 3 处随票 03、
+// topic-plan 族 2 处随票 04、distribution 族 3 处随票 05、
+// article-generation 族 2 处随票 06、monitor 族 6 处随票 07 清零（余
+// publish 1 域 9 处），publish 族（9 处）清零后终态零豁免。
 //
 // 扫描只看生产段（首个测试模块之前的文本）：测试 fixture 的裸 INSERT
 // 不受约束。豁免键＝`${仓库相对路径}::${n}`，n 为该文件生产段内写点的
@@ -150,8 +150,8 @@ const LINEAGE_SQL_WRITE_ALLOWLIST: ReadonlySet<string> = new Set([
 /** 豁免表＝清零进度表：值是域标签（供清零票按域消项），键须与现实写点集严格相等。
  * 立项初始登记恰 27 项（2026-09-04 盘点：2+3+2+2+3+9+6；baseline 2 处已随
  * 票 02、question-pool 3 处已随票 03、topic-plan 2 处已随票 04、
- * distribution 3 处已随票 05、article-generation 2 处已随票 06 清零）由该
- * 严格相等的传递性锁死，不硬编码
+ * distribution 3 处已随票 05、article-generation 2 处已随票 06、monitor
+ * 6 处已随票 07 清零）由该严格相等的传递性锁死，不硬编码
  * 计数断言——清零票逐项消项时硬编码计数会误红（spec 决策 5「逐票清零」与
  * Testing Decisions「初始恰 27 项」的相容读法）。 */
 const LINEAGE_DIRECT_WRITE_EXEMPTIONS: ReadonlyMap<string, string> = new Map([
@@ -166,14 +166,6 @@ const LINEAGE_DIRECT_WRITE_EXEMPTIONS: ReadonlyMap<string, string> = new Map([
   ["src-tauri/src/brand_workspace/publish_scheduler.rs::7", "publish"],
   ["src-tauri/src/brand_workspace/publish_scheduler.rs::8", "publish"],
   ["src-tauri/src/brand_workspace/publish_scheduler.rs::9", "publish"],
-  // monitor 族 6 处（post_publish_monitoring.rs：开行＋激活＋两处终局＋
-  // 暂停＋恢复，含 paused↔active 循环回路）
-  ["src-tauri/src/brand_workspace/post_publish_monitoring.rs::1", "monitor"],
-  ["src-tauri/src/brand_workspace/post_publish_monitoring.rs::2", "monitor"],
-  ["src-tauri/src/brand_workspace/post_publish_monitoring.rs::3", "monitor"],
-  ["src-tauri/src/brand_workspace/post_publish_monitoring.rs::4", "monitor"],
-  ["src-tauri/src/brand_workspace/post_publish_monitoring.rs::5", "monitor"],
-  ["src-tauri/src/brand_workspace/post_publish_monitoring.rs::6", "monitor"],
 ]);
 
 const LINEAGE_WRITE_SQL_RES: readonly RegExp[] = [

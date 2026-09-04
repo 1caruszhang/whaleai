@@ -5,13 +5,13 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use chrono::{DateTime, SecondsFormat, Utc};
-use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
+use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use tauri::Manager;
 
-use super::{open_database, BrandWorkspace, BrandWorkspaceStore};
+use super::{open_database, open_lineage, set_lineage_state, BrandWorkspace, BrandWorkspaceStore};
 
 /// 发布后监测策略版本戳（裁判：src/shared/geo/postPublishMonitoringContract.json，
 /// ADR-0012 双侧 pin）：只钉当前值等值。WAKE_SCHEMA 是 Rust 单源常量，不入契约。
@@ -1005,6 +1005,30 @@ fn require_monitor_session(connection: &Connection, session_id: &str) -> Result<
         .ok_or_else(|| "post_publish_monitor_session_not_found".to_string())
 }
 
+/// 血缘行迁移经唯一 owner（票 07）：旧五处按计划行派生 operation_id 的
+/// 子查询直写，其 0 行 no-op 语义（计划行缺失 → 子查询 NULL → 无行可更）
+/// 经 optional 读取逐位保持（沿票 02 惯例）；monitor 族 from 规则已在
+/// owner 按本文件真实代码钉死。
+fn set_monitor_operation_state(
+    transaction: &Transaction<'_>,
+    plan_id: &str,
+    state: &str,
+    context: &str,
+) -> Result<(), String> {
+    let operation_id: Option<String> = transaction
+        .query_row(
+            "SELECT operation_id FROM geo_post_publish_monitor_plans WHERE id=?1",
+            [plan_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| format!("{context}: {error}"))?;
+    if let Some(operation_id) = operation_id {
+        set_lineage_state(transaction, &operation_id, state)?;
+    }
+    Ok(())
+}
+
 impl BrandWorkspaceStore {
     pub fn prepare_post_publish_monitor_plan(
         &self,
@@ -1204,13 +1228,9 @@ impl BrandWorkspaceStore {
                 .map_err(|error| format!("update monitoring plan: {error}"))?;
             request.expected_revision.unwrap_or(0) + 1
         } else {
-            transaction
-                .execute(
-                    "INSERT INTO geo_operations(id,session_id,state,created_at)
-                     VALUES (?1,?2,'monitor-draft',?3)",
-                    params![operation_id, session_id, now],
-                )
-                .map_err(|error| format!("create monitoring operation: {error}"))?;
+            // 血缘开行经唯一 owner（票 07）：仅新建分支开行，编辑既有草稿
+            // 不写血缘行；重复 id 报错（现主键冲突行为）由 owner 保持。
+            open_lineage(&transaction, &operation_id, session_id, "monitor-draft")?;
             transaction
                 .execute(
                     "INSERT INTO geo_post_publish_monitor_plans(
@@ -1417,13 +1437,14 @@ impl BrandWorkspaceStore {
         if changed != 1 {
             return Err("post_publish_monitor_revision_conflict".to_string());
         }
-        transaction
-            .execute(
-                "UPDATE geo_operations SET state='monitor-active' WHERE id=(
-                    SELECT operation_id FROM geo_post_publish_monitor_plans WHERE id=?1)",
-                [&request.plan_id],
-            )
-            .map_err(|error| format!("activate monitoring operation: {error}"))?;
+        // 血缘行迁移经唯一 owner（票 07）：计划 UPDATE 的 status='draft' 门卫
+        // 已保证现态 monitor-draft 在 from 集内。
+        set_monitor_operation_state(
+            &transaction,
+            &request.plan_id,
+            "monitor-active",
+            "activate monitoring operation",
+        )?;
         transaction
             .commit()
             .map_err(|error| format!("commit monitoring activation: {error}"))?;
@@ -1964,13 +1985,14 @@ fn create_due_run(
                 params![context.plan_id, now],
             )
             .map_err(|error| format!("complete ended monitoring plan: {error}"))?;
-        transaction
-            .execute(
-                "UPDATE geo_operations SET state='monitor-completed' WHERE id=(
-                    SELECT operation_id FROM geo_post_publish_monitor_plans WHERE id=?1)",
-                [&context.plan_id],
-            )
-            .map_err(|error| format!("complete monitoring operation: {error}"))?;
+        // 血缘行迁移经唯一 owner（票 07）：函数开头的 status='active' 门卫
+        // 已保证现态 monitor-active 在 from 集内。
+        set_monitor_operation_state(
+            &transaction,
+            &context.plan_id,
+            "monitor-completed",
+            "complete monitoring operation",
+        )?;
         transaction
             .commit()
             .map_err(|error| format!("commit ended monitoring plan: {error}"))?;
@@ -2339,13 +2361,14 @@ fn settle_unit_failure(
                 params![claim.plan_id, now_iso(now_ms)],
             )
             .map_err(|error| format!("pause monitoring plan: {error}"))?;
-        transaction
-            .execute(
-                "UPDATE geo_operations SET state='monitor-paused' WHERE id=(
-                    SELECT operation_id FROM geo_post_publish_monitor_plans WHERE id=?1)",
-                [&claim.plan_id],
-            )
-            .map_err(|error| format!("pause monitoring operation: {error}"))?;
+        // 血缘行迁移经唯一 owner（票 07）：暂停分支门卫计划 'active'——
+        // claim 本身要求 active 且单遍串行，现态必为 monitor-active。
+        set_monitor_operation_state(
+            &transaction,
+            &claim.plan_id,
+            "monitor-paused",
+            "pause monitoring operation",
+        )?;
     }
     transaction
         .commit()
@@ -2411,13 +2434,16 @@ fn refresh_run_and_plan(
                     params![plan_id, now],
                 )
                 .map_err(|error| format!("complete monitoring plan: {error}"))?;
-            transaction
-                .execute(
-                    "UPDATE geo_operations SET state='monitor-completed' WHERE id=(
-                        SELECT operation_id FROM geo_post_publish_monitor_plans WHERE id=?1)",
-                    [plan_id],
-                )
-                .map_err(|error| format!("complete monitoring operation: {error}"))?;
+            // 血缘行迁移经唯一 owner（票 07）：此写不看计划门——末单元余额
+            // 不足时本函数经 settle_unit_failure 尾随进入，计划已落 paused
+            // （上方 UPDATE 0 行 no-op）而血缘仍被推到 completed（镜像破裂，
+            // from 集按真实代码含 paused）。
+            set_monitor_operation_state(
+                &transaction,
+                plan_id,
+                "monitor-completed",
+                "complete monitoring operation",
+            )?;
         }
     }
     transaction
@@ -2518,13 +2544,15 @@ fn resume_or_defer_paused_monitor_plan(
                 params![context.plan_id, now],
             )
             .map_err(|error| format!("resume monitoring plan: {error}"))?;
-        transaction
-            .execute(
-                "UPDATE geo_operations SET state='monitor-active' WHERE id=(
-                    SELECT operation_id FROM geo_post_publish_monitor_plans WHERE id=?1)",
-                [&context.plan_id],
-            )
-            .map_err(|error| format!("resume monitoring operation: {error}"))?;
+        // 血缘行迁移经唯一 owner（票 07）：resume 只门卫计划 'paused'——
+        // 正常自 monitor-paused 来；末单元余额不足的镜像破裂后计划
+        // paused 而血缘已是 completed，余额恢复即 completed→active。
+        set_monitor_operation_state(
+            &transaction,
+            &context.plan_id,
+            "monitor-active",
+            "resume monitoring operation",
+        )?;
     } else {
         let mut next_anchor = next_run_at_ms
             .unwrap_or(now_ms)
@@ -3719,6 +3747,85 @@ mod tests {
             )
             .unwrap();
         assert_eq!(operation_state, "monitor-active");
+    }
+
+    /// 票 07 端到端钉：血缘态按真实代码逐步落值——activate 走 draft→active；
+    /// 巡检余额不足恰为末单元时 settle 先落 paused，尾随 refresh 的终局写
+    /// 不看计划门（计划 UPDATE 已 0 行 no-op）把血缘推到 completed（镜像
+    /// 破裂：计划仍 paused）；余额恢复后 resume 只门卫 plan.status='paused'，
+    /// 血缘 completed→active；随后 create_due_run 的 ended 分支走正常
+    /// active→completed。owner from 规则（票 07）须放行全部四段迁移。
+    #[tokio::test]
+    async fn paused_final_settle_completes_lineage_then_resume_recovers_end_to_end() {
+        let (fixture, plan) = fixture(1);
+        let first_due = fixture.now_ms + 15 * 60_000;
+        let clock = Arc::new(AtomicI64::new(first_due));
+        let provider = Arc::new(PatrolGatedProvider {
+            calls: Mutex::new(Vec::new()),
+            insufficient: AtomicBool::new(true),
+        });
+        let balance = Arc::new(SwitchableBalanceProbe(AtomicBool::new(false)));
+        let clock_for_executor = Arc::clone(&clock);
+        let executor = PostPublishMonitorExecutor::new(
+            fixture.store.clone(),
+            provider.clone(),
+            Arc::new(MockTaskCompletion::default()),
+            Arc::new(move || clock_for_executor.load(Ordering::SeqCst)),
+        )
+        .with_balance_probe(balance.clone());
+        let monitor_context = context(&fixture, &plan.id);
+
+        let lineage_state = |plan_id: &str| -> String {
+            let connection = open_database(&fixture.workspace).unwrap();
+            connection
+                .query_row(
+                    "SELECT state FROM geo_operations WHERE id=(
+                        SELECT operation_id FROM geo_post_publish_monitor_plans WHERE id=?1)",
+                    [plan_id],
+                    |row| row.get(0),
+                )
+                .unwrap()
+        };
+        // fixture 激活即 draft→active。
+        assert_eq!(lineage_state(&plan.id), "monitor-active");
+
+        // 末单元余额不足：计划落 paused，尾随 refresh 的终局写不看计划门，
+        // 血缘一步推到 completed（镜像破裂的真实形态，票 07 from 规则如实钉）。
+        executor.run_context(&monitor_context).await.unwrap();
+        let paused = fixture
+            .store
+            .get_post_publish_monitor_plan(
+                &fixture.workspace.id,
+                "session-14",
+                PostPublishMonitorGetRequest {
+                    plan_id: plan.id.clone(),
+                },
+                clock.load(Ordering::SeqCst),
+            )
+            .unwrap();
+        assert_eq!(paused.status, "paused");
+        assert_eq!(lineage_state(&plan.id), "monitor-completed");
+
+        // 余额恢复：resume 只门卫计划态，血缘 completed→active；同轮
+        // create_due_run 的 ended 分支（max_runs 已满）再走 active→completed。
+        balance.0.store(true, Ordering::SeqCst);
+        provider.insufficient.store(false, Ordering::SeqCst);
+        clock.store(fixture.now_ms + 30 * 60_000 + 1_000, Ordering::SeqCst);
+        executor.run_context(&monitor_context).await.unwrap();
+        let completed = fixture
+            .store
+            .get_post_publish_monitor_plan(
+                &fixture.workspace.id,
+                "session-14",
+                PostPublishMonitorGetRequest {
+                    plan_id: plan.id.clone(),
+                },
+                clock.load(Ordering::SeqCst),
+            )
+            .unwrap();
+        assert_eq!(completed.status, "completed");
+        // 最终态经正常 active→completed 终局写（create_due_run ended 分支）。
+        assert_eq!(lineage_state(&plan.id), "monitor-completed");
     }
 
     #[test]
