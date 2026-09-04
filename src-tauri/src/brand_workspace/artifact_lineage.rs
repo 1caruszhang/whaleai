@@ -11,7 +11,8 @@
 // 各域清零票把写点迁到 open_lineage/set_lineage_state 上，并逐族补
 // from-state 迁移规则（错误码约定：artifact_lineage_transition_invalid:{from}，
 // 镜像主链 geo_operation_transition_invalid:{current} 风格）。baseline 族
-// 已随票 02 清零（写点迁移＋from 规则钉死），其余 6 域 25 处直写仍在豁免表。
+// 已随票 02、question-pool 族已随票 03 清零（写点迁移＋from 规则钉死），
+// 其余 5 域 22 处直写仍在豁免表。
 use std::fmt;
 
 use chrono::Utc;
@@ -187,12 +188,32 @@ impl ArtifactLineageState {
     ///   且不可复活，聚合回不到全败；
     /// - succeeded 是终态，不在任何目标态的 from 集里——全成后所有
     ///   claim 均 cached，无 finish 可再迁移。
+    ///
+    /// question-pool 族（票 03，按 question_pools.rs 真实代码钉）：
+    /// - generating 只由 open INSERT 开行——三写点无一 set 它，from 集
+    ///   为空（set 到 generating 必拒）；
+    /// - awaiting-selection 的 from 集＝{generating, awaiting-selection}
+    ///   ——persist 无 attempt 终态闸：同 attempt 重复 persist 与 retry
+    ///   复活后再 persist 都真实存在，awaiting→awaiting 是幂等重写；
+    /// - confirmed 的 from 集＝{awaiting-selection, confirmed}——跨会话
+    ///   重选（复用停卡重选）对 confirmed 池再次 decide，confirmed→
+    ///   confirmed 真实可达；generating 池 status='generating' 被 decide
+    ///   的 not_selectable 闸挡下，generating→confirmed 不可达。
     fn allowed_from(target: Self) -> Option<&'static [Self]> {
         const RUNNING_PARTIAL_FAILED: &[ArtifactLineageState] = &[
             ArtifactLineageState::BaselineRunning,
             ArtifactLineageState::BaselinePartial,
             ArtifactLineageState::BaselineFailed,
         ];
+        const GENERATING_OR_AWAITING: &[ArtifactLineageState] = &[
+            ArtifactLineageState::QuestionPoolGenerating,
+            ArtifactLineageState::QuestionPoolAwaitingSelection,
+        ];
+        const AWAITING_OR_CONFIRMED: &[ArtifactLineageState] = &[
+            ArtifactLineageState::QuestionPoolAwaitingSelection,
+            ArtifactLineageState::QuestionPoolConfirmed,
+        ];
+        const NO_SET: &[ArtifactLineageState] = &[];
         match target {
             Self::BaselineRunning | Self::BaselineSucceeded | Self::BaselinePartial => {
                 Some(RUNNING_PARTIAL_FAILED)
@@ -201,6 +222,9 @@ impl ArtifactLineageState {
                 ArtifactLineageState::BaselineRunning,
                 ArtifactLineageState::BaselineFailed,
             ]),
+            Self::QuestionPoolGenerating => Some(NO_SET),
+            Self::QuestionPoolAwaitingSelection => Some(GENERATING_OR_AWAITING),
+            Self::QuestionPoolConfirmed => Some(AWAITING_OR_CONFIRMED),
             _ => None,
         }
     }
@@ -450,39 +474,17 @@ mod tests {
         );
     }
 
-    // baseline 族 4×4 迁移矩阵（票 02 按 geo_baselines.rs 真实代码钉，不编
-    // 规则）：行先经 open 落在 from 态，再 set 目标态——聚合驱动的 finish
-    // 不看现态，合法性完全由 claim/finish 动力学决定（见 allowed_from 注）。
-    #[test]
-    fn baseline_family_transitions_follow_the_real_code_matrix() {
-        const FAMILY: [&str; 4] = [
-            "baseline-running",
-            "baseline-succeeded",
-            "baseline-partial",
-            "baseline-failed",
-        ];
-        let matrix: &[(&str, &[&str])] = &[
-            (
-                "baseline-running",
-                &["baseline-running", "baseline-partial", "baseline-failed"],
-            ),
-            (
-                "baseline-succeeded",
-                &["baseline-running", "baseline-partial", "baseline-failed"],
-            ),
-            (
-                "baseline-partial",
-                &["baseline-running", "baseline-partial", "baseline-failed"],
-            ),
-            ("baseline-failed", &["baseline-running", "baseline-failed"]),
-        ];
+    // 族迁移矩阵断言（票 02 起的清零票共享）：行先经 open 落在 from 态，
+    // 再 set 目标态——allowed 集外的组合必须以 transition_invalid 拒绝且
+    // 不改写现态，allowed 集内必须放行。规则面在各族清零票按真实代码钉。
+    fn assert_family_matrix(family: &[&str], matrix: &[(&str, &[&str])]) {
         let (_store, _workspace, connection) = connection();
         for &(target, allowed) in matrix {
-            for from in FAMILY {
+            for from in family {
                 let id = format!("op-{from}-{target}");
                 open_lineage(&connection, &id, "session-lineage", from).unwrap();
                 let result = set_lineage_state(&connection, &id, target);
-                if allowed.contains(&from) {
+                if allowed.contains(from) {
                     result.unwrap();
                     assert_eq!(
                         lineage_row(&connection, &id).0,
@@ -497,12 +499,68 @@ mod tests {
                     );
                     assert_eq!(
                         lineage_row(&connection, &id).0,
-                        from,
+                        *from,
                         "被拒迁移不得改写现态"
                     );
                 }
             }
         }
+    }
+
+    // baseline 族 4×4 迁移矩阵（票 02 按 geo_baselines.rs 真实代码钉，不编
+    // 规则）：聚合驱动的 finish 不看现态，合法性完全由 claim/finish 动力学
+    // 决定（见 allowed_from 注）。
+    #[test]
+    fn baseline_family_transitions_follow_the_real_code_matrix() {
+        assert_family_matrix(
+            &[
+                "baseline-running",
+                "baseline-succeeded",
+                "baseline-partial",
+                "baseline-failed",
+            ],
+            &[
+                (
+                    "baseline-running",
+                    &["baseline-running", "baseline-partial", "baseline-failed"],
+                ),
+                (
+                    "baseline-succeeded",
+                    &["baseline-running", "baseline-partial", "baseline-failed"],
+                ),
+                (
+                    "baseline-partial",
+                    &["baseline-running", "baseline-partial", "baseline-failed"],
+                ),
+                ("baseline-failed", &["baseline-running", "baseline-failed"]),
+            ],
+        );
+    }
+
+    // question-pool 族 3×3 迁移矩阵（票 03 按 question_pools.rs 真实代码钉）：
+    // generating 只经 open 开行（set 无路径，from 集为空）；persist 无 attempt
+    // 终态闸，awaiting→awaiting 幂等重写；跨会话重选让 confirmed→confirmed
+    // 可达，而 generating 池被 decide 的 not_selectable 闸挡在门外。
+    #[test]
+    fn question_pool_family_transitions_follow_the_real_code_matrix() {
+        assert_family_matrix(
+            &[
+                "question-pool-generating",
+                "question-pool-awaiting-selection",
+                "question-pool-confirmed",
+            ],
+            &[
+                ("question-pool-generating", &[]),
+                (
+                    "question-pool-awaiting-selection",
+                    &["question-pool-generating", "question-pool-awaiting-selection"],
+                ),
+                (
+                    "question-pool-confirmed",
+                    &["question-pool-awaiting-selection", "question-pool-confirmed"],
+                ),
+            ],
+        );
     }
 
     // 未钉规则的族保持立项票的等价搬家语义（无 from 校验），不被 baseline

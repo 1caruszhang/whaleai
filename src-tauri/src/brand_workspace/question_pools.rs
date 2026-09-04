@@ -506,13 +506,12 @@ impl BrandWorkspaceStore {
         let pool_id = Uuid::new_v4().to_string();
         let attempt_id = Uuid::new_v4().to_string();
         let now = Utc::now().to_rfc3339();
-        transaction
-            .execute(
-                "INSERT INTO geo_operations (id, session_id, state, created_at)
-                 VALUES (?1, ?2, 'question-pool-generating', ?3)",
-                params![operation_id, request.session_id, now],
-            )
-            .map_err(|error| format!("create question pool operation: {error}"))?;
+        open_lineage(
+            &transaction,
+            &operation_id,
+            &request.session_id,
+            "question-pool-generating",
+        )?;
         transaction
             .execute(
                 "INSERT INTO geo_artifacts (id, operation_id, session_id, kind, knowledge_version, created_at)
@@ -846,13 +845,19 @@ impl BrandWorkspaceStore {
                 params![request.attempt_id, now],
             )
             .map_err(|error| format!("finish question pool attempt: {error}"))?;
-        transaction
-            .execute(
-                "UPDATE geo_operations SET state='question-pool-awaiting-selection'
-                 WHERE id=(SELECT operation_id FROM geo_question_pools WHERE id=?1)",
+        // 血缘行迁移经唯一 owner（票 03）；旧子查询 UPDATE 在池行缺失时影响
+        // 0 行被忽略——optional 读取保持同一 no-op。
+        let operation_id: Option<String> = transaction
+            .query_row(
+                "SELECT operation_id FROM geo_question_pools WHERE id=?1",
                 [&pool_id],
+                |row| row.get(0),
             )
-            .map_err(|error| format!("advance question pool operation: {error}"))?;
+            .optional()
+            .map_err(|error| format!("read question pool operation: {error}"))?;
+        if let Some(operation_id) = operation_id {
+            set_lineage_state(&transaction, &operation_id, "question-pool-awaiting-selection")?;
+        }
         transaction
             .commit()
             .map_err(|error| format!("commit question pool artifact: {error}"))?;
@@ -1014,12 +1019,7 @@ impl BrandWorkspaceStore {
                 params![request.pool_id, now],
             )
             .map_err(|error| format!("confirm question pool attempt: {error}"))?;
-        transaction
-            .execute(
-                "UPDATE geo_operations SET state='question-pool-confirmed' WHERE id=?1",
-                [operation_id],
-            )
-            .map_err(|error| format!("confirm question pool operation: {error}"))?;
+        set_lineage_state(&transaction, &operation_id, "question-pool-confirmed")?;
         persist_keywords_to_library(
             &transaction,
             &workspace.id,
