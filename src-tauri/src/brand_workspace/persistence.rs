@@ -307,7 +307,8 @@ impl SessionGate {
 
 /// 10 闸声明（2026-09-04 盘点现状逐字钉；各域清零票把文件内旧变体切到
 /// 这些声明，错误串与 validate 前置随搬家逐字不变。票 02 已消费
-/// MONITOR_SESSION/PUBLISH_SESSION，其余待票 03/04）。
+/// MONITOR_SESSION/PUBLISH_SESSION，票 03 已消费 ARTICLE_SESSION/
+/// MATERIALS_SESSION/DISTRIBUTION_SESSION，其余待票 04）。
 #[allow(dead_code)]
 pub(crate) mod gates {
     use super::{SessionGate, SessionGateSqlError};
@@ -389,10 +390,14 @@ pub(crate) mod gates {
 /// 票 02 现场修正：helper 不内建 "start "/"commit " 前缀——各域旧串形态
 /// 不一（articles 带 "start " 前缀，ppm/publish_scheduler 是
 /// "prepare monitoring plan transaction" 这类动词开头的整串），前缀内建
-/// 无法逐字复现；调用点一律传完整旧串。体内多出口分别 commit 且错误串
-/// 各异的站点（票 02 盘点：ppm `create_due_run`、publish_scheduler
-/// `prepare_publish_execution`/`claim_next_item`/`settle_upload`）不经
-/// 此助手——单 commit 上下文无法逐字复现多出口串，保持内联。
+/// 无法逐字复现；调用点一律传完整旧串。不经此助手的站点（等价红线优先，
+/// 切换数不追求 100%）：①体内多出口分别 commit 且错误串各异（票 02 盘
+/// 点：ppm `create_due_run`、publish_scheduler `prepare_publish_execution`/
+/// `claim_next_item`/`settle_upload`）；②票 03 盘点：materials 的
+/// `begin_material_processing`/`finish_material_processing`/
+/// `delete_brand_material` 三处 start/commit 错误串吞细节
+/// （`.map_err(|_| "material_...")`，不带 ": {error}" 后缀），helper 的
+/// `format!` 呈现无法逐字复现——均保持内联。
 pub(crate) fn with_immediate_tx<T>(
     connection: &mut Connection,
     start_context: &'static str,
@@ -444,8 +449,6 @@ pub(crate) fn sha256_hex(value: impl AsRef<[u8]>) -> String {
 /// 序列化 JSON 的统一口径：错误串 `serialize {context}: {error}`，context
 /// 传各域既有名词（"GEO baseline JSON" / "distribution plan json"〔小写
 /// json 为既有串原样〕 / "topic plan JSON" / "question pool JSON"）。
-// 本票纯增量：生产调用点零迁移，消费方在清零票 02–04（立项票内仅测试引用）。
-#[allow(dead_code)]
 pub(crate) fn canonical_json<T: ?Sized + Serialize>(
     value: &T,
     context: &'static str,
@@ -901,7 +904,7 @@ mod tests {
 // 豁免表＝现存直呼的登记在册过渡态（非违规），按票消项：票 02（已结）消
 // post_publish_monitoring/publish_scheduler/brand_workspace.rs 的调用点
 // （闸变体两项随之清零；brand_workspace.rs 的 ①③ 随旧 open_database 本体
-// 归票 05），票 03 消 articles/materials/distribution_plans，票 04 消
+// 归票 05），票 03（已结）消 articles/materials/distribution_plans，票 04 消
 // geo_baselines/geo_dashboard/question_pools/topic_plans/geo_operations，
 // 票 05 清空归零。
 //
@@ -991,22 +994,10 @@ mod guard {
                     Rule::EnsureSchemaOutsideOpenPath,
                 ],
             ),
-            // 7 个命名会话闸变体（票 02 已消：post_publish_monitoring/
-            // publish_scheduler；票 03：articles/materials/
+            // 4 个命名会话闸变体（票 02 已消：post_publish_monitoring/
+            // publish_scheduler；票 03 已消：articles/materials/
             // distribution_plans；票 04：geo_baselines/geo_dashboard/
             // question_pools/topic_plans）。
-            (
-                "src-tauri/src/brand_workspace/articles.rs",
-                vec![Rule::SessionGateVariant],
-            ),
-            (
-                "src-tauri/src/brand_workspace/materials.rs",
-                vec![Rule::SessionGateVariant],
-            ),
-            (
-                "src-tauri/src/brand_workspace/distribution_plans.rs",
-                vec![Rule::SessionGateVariant],
-            ),
             (
                 "src-tauri/src/brand_workspace/geo_baselines.rs",
                 vec![Rule::SessionGateVariant],

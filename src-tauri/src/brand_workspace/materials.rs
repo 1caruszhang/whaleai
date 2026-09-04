@@ -1,3 +1,4 @@
+use super::persistence::{gates, sha256_hex};
 use super::*;
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
@@ -289,8 +290,8 @@ impl BrandWorkspaceStore {
         session_id: &str,
     ) -> Result<BrandMaterialContext, String> {
         let workspace = self.workspace(workspace_id)?;
-        let connection = open_database(&workspace)?;
-        require_committed_session(&connection, session_id)?;
+        let connection = BrandWorkspaceStore::open(&workspace)?;
+        gates::MATERIALS_SESSION.enforce(&connection, session_id)?;
         Ok(BrandMaterialContext {
             workspace_id: workspace.id,
             brand_name: workspace.name,
@@ -304,8 +305,8 @@ impl BrandWorkspaceStore {
     ) -> Result<BrandMaterial, String> {
         validate_session_id(&request.session_id)?;
         let workspace = self.workspace(&request.workspace_id)?;
-        let connection = open_database(&workspace)?;
-        require_committed_session(&connection, &request.session_id)?;
+        let connection = BrandWorkspaceStore::open(&workspace)?;
+        gates::MATERIALS_SESSION.enforce(&connection, &request.session_id)?;
 
         let lexical =
             crate::workspace_files::path_safety::validate_external_read_path(&request.source_path)
@@ -392,8 +393,8 @@ impl BrandWorkspaceStore {
             return Err("material_text_size_invalid".to_string());
         }
         let workspace = self.workspace(&request.workspace_id)?;
-        let connection = open_database(&workspace)?;
-        require_committed_session(&connection, &request.session_id)?;
+        let connection = BrandWorkspaceStore::open(&workspace)?;
+        gates::MATERIALS_SESSION.enforce(&connection, &request.session_id)?;
         let display_name = validate_display_name(&request.display_name)?;
         let file_ext = if request.input_kind == "website-url" {
             "html"
@@ -408,7 +409,7 @@ impl BrandWorkspaceStore {
             .join("materials")
             .join(format!(".{id}.part"));
         let bytes = request.text.as_bytes();
-        let sha256 = format!("{:x}", Sha256::digest(bytes));
+        let sha256 = sha256_hex(bytes);
         let mut target = fs::OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -462,8 +463,8 @@ impl BrandWorkspaceStore {
         material_id: &str,
     ) -> Result<BrandMaterial, String> {
         let workspace = self.workspace(workspace_id)?;
-        let connection = open_database(&workspace)?;
-        require_committed_session(&connection, session_id)?;
+        let connection = BrandWorkspaceStore::open(&workspace)?;
+        gates::MATERIALS_SESSION.enforce(&connection, session_id)?;
         read_material(&connection, &workspace.id, material_id)
     }
 
@@ -474,8 +475,8 @@ impl BrandWorkspaceStore {
         material_id: &str,
     ) -> Result<(BrandMaterial, Vec<u8>), String> {
         let workspace = self.workspace(workspace_id)?;
-        let connection = open_database(&workspace)?;
-        require_committed_session(&connection, session_id)?;
+        let connection = BrandWorkspaceStore::open(&workspace)?;
+        gates::MATERIALS_SESSION.enforce(&connection, session_id)?;
         let material = read_material(&connection, &workspace.id, material_id)?;
         let bytes = read_material_bytes(&workspace, &material)?;
         Ok((material, bytes))
@@ -489,8 +490,8 @@ impl BrandWorkspaceStore {
     ) -> Result<MaterialProcessingAttempt, String> {
         validate_session_id(session_id)?;
         let workspace = self.workspace(workspace_id)?;
-        let mut connection = open_database(&workspace)?;
-        require_committed_session(&connection, session_id)?;
+        let mut connection = BrandWorkspaceStore::open(&workspace)?;
+        gates::MATERIALS_SESSION.enforce(&connection, session_id)?;
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|_| "material_processing_unavailable".to_string())?;
@@ -564,8 +565,8 @@ impl BrandWorkspaceStore {
             return Err("material_candidate_ids_invalid".to_string());
         }
         let workspace = self.workspace(workspace_id)?;
-        let mut connection = open_database(&workspace)?;
-        require_committed_session(&connection, session_id)?;
+        let mut connection = BrandWorkspaceStore::open(&workspace)?;
+        gates::MATERIALS_SESSION.enforce(&connection, session_id)?;
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|_| "material_processing_unavailable".to_string())?;
@@ -614,8 +615,8 @@ impl BrandWorkspaceStore {
         material_id: &str,
     ) -> Result<(), String> {
         let workspace = self.workspace(workspace_id)?;
-        let mut connection = open_database(&workspace)?;
-        require_committed_session(&connection, session_id)?;
+        let mut connection = BrandWorkspaceStore::open(&workspace)?;
+        gates::MATERIALS_SESSION.enforce(&connection, session_id)?;
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|_| "material_delete_failed".to_string())?;
@@ -695,8 +696,8 @@ impl BrandWorkspaceStore {
         limit: usize,
     ) -> Result<Vec<BrandMaterialListItem>, String> {
         let workspace = self.workspace(workspace_id)?;
-        let connection = open_database(&workspace)?;
-        require_committed_session(&connection, session_id)?;
+        let connection = BrandWorkspaceStore::open(&workspace)?;
+        gates::MATERIALS_SESSION.enforce(&connection, session_id)?;
         let limit = limit.clamp(1, 20);
         let mut materials: Vec<BrandMaterial> = Vec::new();
         match material_ids {
@@ -787,8 +788,8 @@ impl BrandWorkspaceStore {
     ) -> Result<Vec<BrandMaterial>, String> {
         validate_session_id(session_id)?;
         let workspace = self.workspace(workspace_id)?;
-        let connection = open_database(&workspace)?;
-        require_committed_session(&connection, session_id)?;
+        let connection = BrandWorkspaceStore::open(&workspace)?;
+        gates::MATERIALS_SESSION.enforce(&connection, session_id)?;
         let limit = limit.clamp(1, 100);
         let mut statement = connection
             .prepare(
@@ -833,8 +834,8 @@ impl BrandWorkspaceStore {
             return Err("material_image_invalid".to_string());
         }
         let workspace = self.workspace(workspace_id)?;
-        let connection = open_database(&workspace)?;
-        require_committed_session(&connection, session_id)?;
+        let connection = BrandWorkspaceStore::open(&workspace)?;
+        gates::MATERIALS_SESSION.enforce(&connection, session_id)?;
         if let Some(existing) = read_material_image_by_sha256(&connection, &workspace.id, &sha256)?
         {
             return Ok(MaterialImageSaveResult {
@@ -864,7 +865,7 @@ impl BrandWorkspaceStore {
                 if decoded.len() as u64 > MAX_MATERIAL_BYTES {
                     return Err("material_too_large".to_string());
                 }
-                if format!("{:x}", Sha256::digest(&decoded)) != sha256 {
+                if sha256_hex(&decoded) != sha256 {
                     return Err("material_hash_mismatch".to_string());
                 }
                 decoded
@@ -957,8 +958,8 @@ impl BrandWorkspaceStore {
     ) -> Result<Vec<MaterialImage>, String> {
         validate_session_id(session_id)?;
         let workspace = self.workspace(workspace_id)?;
-        let connection = open_database(&workspace)?;
-        require_committed_session(&connection, session_id)?;
+        let connection = BrandWorkspaceStore::open(&workspace)?;
+        gates::MATERIALS_SESSION.enforce(&connection, session_id)?;
         let limit = limit.unwrap_or(100).clamp(1, 200);
         let mut statement = connection
             .prepare(&format!(
@@ -986,8 +987,8 @@ impl BrandWorkspaceStore {
     ) -> Result<(MaterialImage, Vec<u8>), String> {
         validate_session_id(session_id)?;
         let workspace = self.workspace(workspace_id)?;
-        let connection = open_database(&workspace)?;
-        require_committed_session(&connection, session_id)?;
+        let connection = BrandWorkspaceStore::open(&workspace)?;
+        gates::MATERIALS_SESSION.enforce(&connection, session_id)?;
         let image = read_material_image_by_id(&connection, &workspace.id, image_id)?;
         let path = resolve_media_image_path(&workspace, &image.relative_path)?;
         let mut file = crate::workspace_files::path_safety::open_regular_file_no_follow(
@@ -1003,27 +1004,12 @@ impl BrandWorkspaceStore {
         if bytes.len() as u64 > MAX_MATERIAL_BYTES {
             return Err("material_too_large".to_string());
         }
-        let actual_hash = format!("{:x}", Sha256::digest(&bytes));
+        let actual_hash = sha256_hex(&bytes);
         if actual_hash != image.sha256 {
             return Err("material_hash_mismatch".to_string());
         }
         Ok((image, bytes))
     }
-}
-
-fn require_committed_session(connection: &Connection, session_id: &str) -> Result<(), String> {
-    validate_session_id(session_id)?;
-    let count: i64 = connection
-        .query_row(
-            "SELECT COUNT(*) FROM brand_sessions WHERE id=?1",
-            [session_id],
-            |row| row.get(0),
-        )
-        .map_err(|_| "brand_session_unavailable".to_string())?;
-    if count != 1 {
-        return Err("brand_session_not_committed".to_string());
-    }
-    Ok(())
 }
 
 fn validate_display_name(value: &str) -> Result<String, String> {
@@ -1235,7 +1221,7 @@ fn read_material_bytes(
     if bytes.len() as u64 > MAX_MATERIAL_BYTES {
         return Err("material_too_large".to_string());
     }
-    let actual_hash = format!("{:x}", Sha256::digest(&bytes));
+    let actual_hash = sha256_hex(&bytes);
     if actual_hash != material.sha256 {
         return Err("material_hash_mismatch".to_string());
     }
@@ -2221,8 +2207,10 @@ mod tests {
                 .expect("restore");
         }
 
-        // 下一次 store 调用经 open_database 重走 ensure_schema：迁移把
-        // 'processed' 放进 CHECK，随后旧库也能落 processed 终态。
+        // 内核 open() 的迁移登记表按进程去重：前面的 store 调用已登记本
+        // 路径，这里经旧 open_database 重走探测（新进程首开的等价路径）：
+        // 迁移把 'processed' 放进 CHECK，随后旧库也能落 processed 终态。
+        drop(open_database(&workspace).expect("reprobe"));
         let attempt = store
             .begin_material_processing(&workspace.id, &session_id, &material.id)
             .expect("begin");
