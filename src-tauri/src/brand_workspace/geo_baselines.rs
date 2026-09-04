@@ -384,13 +384,12 @@ impl BrandWorkspaceStore {
         let now = Utc::now().to_rfc3339();
         let baseline_id = Uuid::new_v4().to_string();
         let operation_id = Uuid::new_v4().to_string();
-        transaction
-            .execute(
-                "INSERT INTO geo_operations (id, session_id, state, created_at)
-                 VALUES (?1, ?2, 'baseline-running', ?3)",
-                params![operation_id, request.session_id, now],
-            )
-            .map_err(|error| format!("create baseline operation: {error}"))?;
+        open_lineage(
+            &transaction,
+            &operation_id,
+            &request.session_id,
+            "baseline-running",
+        )?;
         transaction
             .execute(
                 "INSERT INTO geo_artifacts
@@ -648,13 +647,19 @@ impl BrandWorkspaceStore {
                 params![request.baseline_id, baseline_status, now],
             )
             .map_err(|error| format!("update baseline aggregate state: {error}"))?;
-        transaction
-            .execute(
-                "UPDATE geo_operations SET state=?2
-                 WHERE id=(SELECT operation_id FROM geo_baselines WHERE id=?1)",
-                params![request.baseline_id, operation_state],
+        // 血缘行迁移经唯一 owner（票 02）；旧子查询 UPDATE 在 baseline 行
+        // 缺失时影响 0 行被忽略——optional 读取保持同一 no-op。
+        let operation_id: Option<String> = transaction
+            .query_row(
+                "SELECT operation_id FROM geo_baselines WHERE id=?1",
+                [&request.baseline_id],
+                |row| row.get(0),
             )
-            .map_err(|error| format!("update baseline operation state: {error}"))?;
+            .optional()
+            .map_err(|error| format!("read baseline operation: {error}"))?;
+        if let Some(operation_id) = operation_id {
+            set_lineage_state(&transaction, &operation_id, &operation_state)?;
+        }
         transaction
             .commit()
             .map_err(|error| format!("commit baseline unit finish: {error}"))?;

@@ -10,11 +10,12 @@
 // 本模块是等价搬家的第一站：31 态词表首次单源，数据库值一字不改；
 // 各域清零票把写点迁到 open_lineage/set_lineage_state 上，并逐族补
 // from-state 迁移规则（错误码约定：artifact_lineage_transition_invalid:{from}，
-// 镜像主链 geo_operation_transition_invalid:{current} 风格）。
+// 镜像主链 geo_operation_transition_invalid:{current} 风格）。baseline 族
+// 已随票 02 清零（写点迁移＋from 规则钉死），其余 6 域 25 处直写仍在豁免表。
 use std::fmt;
 
 use chrono::Utc;
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 
 /// 血缘状态词表：7 域 31 态单源枚举（域前缀 PascalCase 变体），kebab 串
 /// 与现状逐字相同（数据库值一字不改——ADR-0013 等价搬家红线，词表钉测试
@@ -172,6 +173,37 @@ impl ArtifactLineageState {
             .copied()
             .find(|state| state.kebab() == value)
     }
+
+    /// 目标态的合法 from 集：已钉 from-state 规则的族返回 Some，未登记族
+    /// 返回 None＝暂无 from 校验（spec 决策 6：谁迁移谁钉，规则来自真实
+    /// 代码；None 族随各自清零票转 Some，不预先编规则）。
+    ///
+    /// baseline 族（票 02，按 geo_baselines.rs 真实代码钉）：
+    /// - running/succeeded/partial 的 from 集＝{running, partial, failed}
+    ///   ——claim 不写血缘行，retry 期间行仍留 partial/failed，下一次
+    ///   finish 聚合直接覆盖（partial→succeeded 真实存在：唯一失败单元
+    ///   重试成功即全成；partial/failed→running 来自多失败单元并行重试）；
+    /// - failed 额外排除 from partial——partial 蕴含 ≥1 单元已 succeeded
+    ///   且不可复活，聚合回不到全败；
+    /// - succeeded 是终态，不在任何目标态的 from 集里——全成后所有
+    ///   claim 均 cached，无 finish 可再迁移。
+    fn allowed_from(target: Self) -> Option<&'static [Self]> {
+        const RUNNING_PARTIAL_FAILED: &[ArtifactLineageState] = &[
+            ArtifactLineageState::BaselineRunning,
+            ArtifactLineageState::BaselinePartial,
+            ArtifactLineageState::BaselineFailed,
+        ];
+        match target {
+            Self::BaselineRunning | Self::BaselineSucceeded | Self::BaselinePartial => {
+                Some(RUNNING_PARTIAL_FAILED)
+            }
+            Self::BaselineFailed => Some(&[
+                ArtifactLineageState::BaselineRunning,
+                ArtifactLineageState::BaselineFailed,
+            ]),
+            _ => None,
+        }
+    }
 }
 
 impl fmt::Display for ArtifactLineageState {
@@ -209,13 +241,32 @@ pub fn open_lineage(
 /// 等价搬家语义：缺失行 no-op（现 UPDATE 影响 0 行被忽略的行为，如
 /// retry 复活分支）；状态串必须是词表成员，否则
 /// `artifact_lineage_state_invalid:{state}`。from-state 规则随各域清零票
-/// 逐族补齐（谁迁移谁钉，规则来自真实代码）。
+/// 逐族补齐（谁迁移谁钉，规则来自真实代码）；已钉族迁错方向报
+/// `artifact_lineage_transition_invalid:{current}`，未钉族保持无 from 校验。
 pub fn set_lineage_state(connection: &Connection, id: &str, state: &str) -> Result<(), String> {
-    let state = parse_lineage_state(state)?;
+    let target = parse_lineage_state(state)?;
+    if let Some(allowed) = ArtifactLineageState::allowed_from(target) {
+        // 缺失行 no-op 先于 from 校验（保持 UPDATE 0 行被忽略的行为）；
+        // 现态非词表成员（含跨族串）自然落出 from 集 → transition_invalid。
+        let current: Option<String> = connection
+            .query_row(
+                "SELECT state FROM geo_operations WHERE id=?1",
+                [id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|error| format!("read artifact lineage state: {error}"))?;
+        let Some(current) = current else {
+            return Ok(());
+        };
+        if !allowed.iter().any(|from| from.kebab() == current) {
+            return Err(format!("artifact_lineage_transition_invalid:{current}"));
+        }
+    }
     connection
         .execute(
             "UPDATE geo_operations SET state=?2 WHERE id=?1",
-            params![id, state.kebab()],
+            params![id, target.kebab()],
         )
         .map_err(|error| format!("set artifact lineage state: {error}"))?;
     Ok(())
@@ -397,5 +448,90 @@ mod tests {
             "monitor-active",
             "非法串不得半途写入"
         );
+    }
+
+    // baseline 族 4×4 迁移矩阵（票 02 按 geo_baselines.rs 真实代码钉，不编
+    // 规则）：行先经 open 落在 from 态，再 set 目标态——聚合驱动的 finish
+    // 不看现态，合法性完全由 claim/finish 动力学决定（见 allowed_from 注）。
+    #[test]
+    fn baseline_family_transitions_follow_the_real_code_matrix() {
+        const FAMILY: [&str; 4] = [
+            "baseline-running",
+            "baseline-succeeded",
+            "baseline-partial",
+            "baseline-failed",
+        ];
+        let matrix: &[(&str, &[&str])] = &[
+            (
+                "baseline-running",
+                &["baseline-running", "baseline-partial", "baseline-failed"],
+            ),
+            (
+                "baseline-succeeded",
+                &["baseline-running", "baseline-partial", "baseline-failed"],
+            ),
+            (
+                "baseline-partial",
+                &["baseline-running", "baseline-partial", "baseline-failed"],
+            ),
+            ("baseline-failed", &["baseline-running", "baseline-failed"]),
+        ];
+        let (_store, _workspace, connection) = connection();
+        for &(target, allowed) in matrix {
+            for from in FAMILY {
+                let id = format!("op-{from}-{target}");
+                open_lineage(&connection, &id, "session-lineage", from).unwrap();
+                let result = set_lineage_state(&connection, &id, target);
+                if allowed.contains(&from) {
+                    result.unwrap();
+                    assert_eq!(
+                        lineage_row(&connection, &id).0,
+                        target,
+                        "{from} → {target} 是真实可达迁移，必须放行"
+                    );
+                } else {
+                    assert_eq!(
+                        result.unwrap_err(),
+                        format!("artifact_lineage_transition_invalid:{from}"),
+                        "{from} → {target} 按真实代码不可达，错误码须串明现态"
+                    );
+                    assert_eq!(
+                        lineage_row(&connection, &id).0,
+                        from,
+                        "被拒迁移不得改写现态"
+                    );
+                }
+            }
+        }
+    }
+
+    // 未钉规则的族保持立项票的等价搬家语义（无 from 校验），不被 baseline
+    // 规则误伤——monitor 逆向 set 亦放行，其 from 规则属票 07 职权。
+    #[test]
+    fn families_without_pinned_rules_stay_unchecked_until_their_clearing_ticket() {
+        let (_store, _workspace, connection) = connection();
+        open_lineage(
+            &connection,
+            "op-unpinned",
+            "session-lineage",
+            "monitor-active",
+        )
+        .unwrap();
+        set_lineage_state(&connection, "op-unpinned", "monitor-draft").unwrap();
+        assert_eq!(lineage_row(&connection, "op-unpinned").0, "monitor-draft");
+    }
+
+    #[test]
+    fn baseline_rules_reject_cross_family_currents_and_missing_rows_stay_noop() {
+        let (_store, _workspace, connection) = connection();
+        open_lineage(&connection, "op-cross", "session-lineage", "monitor-active").unwrap();
+        assert_eq!(
+            set_lineage_state(&connection, "op-cross", "baseline-succeeded").unwrap_err(),
+            "artifact_lineage_transition_invalid:monitor-active",
+            "跨族现态自然落出 from 集，错误码串明现态"
+        );
+        assert_eq!(lineage_row(&connection, "op-cross").0, "monitor-active");
+        // 缺失行 no-op 对已钉规则的族同样成立，且先于 from 校验。
+        set_lineage_state(&connection, "missing-op", "baseline-succeeded").unwrap();
     }
 }
