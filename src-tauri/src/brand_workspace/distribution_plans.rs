@@ -504,13 +504,13 @@ impl BrandWorkspaceStore {
             "confirmedAt": Value::Null,
         });
         reject_secret_shaped_data(&projection)?;
-        transaction
-            .execute(
-                "INSERT INTO geo_operations (id, session_id, state, created_at)
-                 VALUES (?1, ?2, 'distribution-discovering', ?3)",
-                params![operation_id, session_id, now],
-            )
-            .map_err(|error| format!("create distribution operation: {error}"))?;
+        // 血缘行开行经唯一 owner（票 05）。
+        open_lineage(
+            &transaction,
+            &operation_id,
+            session_id,
+            "distribution-discovering",
+        )?;
         transaction
             .execute(
                 "INSERT INTO geo_artifacts
@@ -724,19 +724,17 @@ impl BrandWorkspaceStore {
                 ],
             )
             .map_err(|error| format!("finish distribution discovery: {error}"))?;
-        transaction
-            .execute(
-                "UPDATE geo_operations SET state=?2 WHERE id=?1",
-                params![
-                    operation_id,
-                    if next_status == "draft" {
-                        "distribution-plan-draft"
-                    } else {
-                        "distribution-unavailable"
-                    }
-                ],
-            )
-            .map_err(|error| format!("finish distribution operation: {error}"))?;
+        // 血缘行迁移经唯一 owner（票 05）；operation_id 已随 plan 行读出，
+        // 行缺失时 owner 保持缺失行 no-op（旧 UPDATE 0 行被忽略的语义）。
+        set_lineage_state(
+            &transaction,
+            &operation_id,
+            if next_status == "draft" {
+                "distribution-plan-draft"
+            } else {
+                "distribution-unavailable"
+            },
+        )?;
         insert_distribution_audit(
             &transaction,
             &request.plan_id,
@@ -912,12 +910,9 @@ impl BrandWorkspaceStore {
         if changed != 1 {
             return Err("distribution_plan_revision_conflict".to_string());
         }
-        transaction
-            .execute(
-                "UPDATE geo_operations SET state='distribution-plan-confirmed' WHERE id=?1",
-                [&operation_id],
-            )
-            .map_err(|error| format!("confirm distribution operation: {error}"))?;
+        // 血缘行迁移经唯一 owner（票 05）；镜像不变量——confirm 的 status
+        // 门卫（='draft'）已保证现态 distribution-plan-draft 在 from 集内。
+        set_lineage_state(&transaction, &operation_id, "distribution-plan-confirmed")?;
         insert_distribution_audit(
             &transaction,
             &request.plan_id,

@@ -11,8 +11,8 @@
 // 各域清零票把写点迁到 open_lineage/set_lineage_state 上，并逐族补
 // from-state 迁移规则（错误码约定：artifact_lineage_transition_invalid:{from}，
 // 镜像主链 geo_operation_transition_invalid:{current} 风格）。baseline 族
-// 已随票 02、question-pool 族已随票 03 清零（写点迁移＋from 规则钉死），
-// 其余 5 域 22 处直写仍在豁免表。
+// 已随票 02、question-pool 族已随票 03、distribution 族已随票 05 清零
+// （写点迁移＋from 规则钉死），其余 4 域 19 处直写仍在豁免表。
 use std::fmt;
 
 use chrono::Utc;
@@ -199,6 +199,18 @@ impl ArtifactLineageState {
     ///   重选（复用停卡重选）对 confirmed 池再次 decide，confirmed→
     ///   confirmed 真实可达；generating 池 status='generating' 被 decide
     ///   的 not_selectable 闸挡下，generating→confirmed 不可达。
+    ///
+    /// distribution 族（票 05，按 distribution_plans.rs 真实代码钉）：
+    /// plan.status 与血缘态在同一事务成对迁移（镜像不变量），迁移合法性
+    /// 由各写点的 status 前置门卫先行保证：
+    /// - discovering 是 open 独占态，from 集为空——prepare 每次新开行
+    ///   （新 operation_id），三写点无一 set 它；
+    /// - draft/unavailable 只自 discovering——finish 前置门卫 status==
+    ///   'discovering'（否则 discovery_already_finished 拒），同一事务按
+    ///   探测结果（available 且候选非空 ⇔ draft，否则 unavailable）分叉；
+    /// - confirmed 只自 draft——confirm 前置门卫 status=='draft'（其余
+    ///   落 not_confirmable / already_confirmed）。unavailable 是终态：
+    ///   finish 不可二跑、unavailable 计划不进 confirm；confirmed 亦终态。
     fn allowed_from(target: Self) -> Option<&'static [Self]> {
         const RUNNING_PARTIAL_FAILED: &[ArtifactLineageState] = &[
             ArtifactLineageState::BaselineRunning,
@@ -214,6 +226,9 @@ impl ArtifactLineageState {
             ArtifactLineageState::QuestionPoolConfirmed,
         ];
         const NO_SET: &[ArtifactLineageState] = &[];
+        const DISCOVERING_ONLY: &[ArtifactLineageState] =
+            &[ArtifactLineageState::DistributionDiscovering];
+        const DRAFT_ONLY: &[ArtifactLineageState] = &[ArtifactLineageState::DistributionPlanDraft];
         match target {
             Self::BaselineRunning | Self::BaselineSucceeded | Self::BaselinePartial => {
                 Some(RUNNING_PARTIAL_FAILED)
@@ -225,6 +240,9 @@ impl ArtifactLineageState {
             Self::QuestionPoolGenerating => Some(NO_SET),
             Self::QuestionPoolAwaitingSelection => Some(GENERATING_OR_AWAITING),
             Self::QuestionPoolConfirmed => Some(AWAITING_OR_CONFIRMED),
+            Self::DistributionDiscovering => Some(NO_SET),
+            Self::DistributionUnavailable | Self::DistributionPlanDraft => Some(DISCOVERING_ONLY),
+            Self::DistributionPlanConfirmed => Some(DRAFT_ONLY),
             _ => None,
         }
     }
@@ -553,12 +571,41 @@ mod tests {
                 ("question-pool-generating", &[]),
                 (
                     "question-pool-awaiting-selection",
-                    &["question-pool-generating", "question-pool-awaiting-selection"],
+                    &[
+                        "question-pool-generating",
+                        "question-pool-awaiting-selection",
+                    ],
                 ),
                 (
                     "question-pool-confirmed",
-                    &["question-pool-awaiting-selection", "question-pool-confirmed"],
+                    &[
+                        "question-pool-awaiting-selection",
+                        "question-pool-confirmed",
+                    ],
                 ),
+            ],
+        );
+    }
+
+    // distribution 族 4×4 迁移矩阵（票 05 按 distribution_plans.rs 真实代码
+    // 钉）：plan.status 与血缘态在同一事务成对迁移（镜像不变量），迁移合法
+    // 性由各写点的 status 前置门卫先行保证——镜像链 discovering→draft|
+    // unavailable→confirmed 单向无环；discovering 仅经 open 开行（from 集
+    // 空）；unavailable 与 confirmed 均终态（finish 不可二跑、前者不可确认）。
+    #[test]
+    fn distribution_family_transitions_follow_the_real_code_matrix() {
+        assert_family_matrix(
+            &[
+                "distribution-discovering",
+                "distribution-unavailable",
+                "distribution-plan-draft",
+                "distribution-plan-confirmed",
+            ],
+            &[
+                ("distribution-discovering", &[]),
+                ("distribution-unavailable", &["distribution-discovering"]),
+                ("distribution-plan-draft", &["distribution-discovering"]),
+                ("distribution-plan-confirmed", &["distribution-plan-draft"]),
             ],
         );
     }
