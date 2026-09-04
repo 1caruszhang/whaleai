@@ -9,6 +9,7 @@ import {
   ARTICLE_NARRATIVE_SEEDS,
   ARTICLE_IMAGE_CANDIDATE_INJECTION_LIMIT,
   autoBoldBrandMentions,
+  autoBoldListLabels,
   buildArticleGenerationMessages,
   buildArticleRepairMessages,
   buildRankingDimensionMessages,
@@ -203,10 +204,69 @@ describe("direct article generation contract", () => {
     expect(messages.system).toContain("「总—分—总」");
     expect(messages.system).toContain("引言只承担总览功能");
     expect(messages.system).toContain("六家陈列结束后写选型建议段");
-    expect(messages.system).toContain("80–150 字的总结");
-    expect(messages.system).toContain("不与选型建议混为一段");
+    // 收束总结：全文最后一个独立小节、固定「总结」小标题（顺序语义：选型
+    // 建议之后单独成节，不与选型建议混写）。
+    expect(messages.system).toContain("全文最后一个独立小节");
+    expect(messages.system).toContain("单独设「总结」小标题");
+    expect(messages.system).toContain("正文 80–150 字");
+    expect(messages.system).toContain("回扣主题、提示读者如何根据本文信息做下一步判断");
+    expect(messages.system).toContain("不得与选型建议混写");
     // 选型建议位置已改顺序语义，「倒数第三段」旧措辞不得残留。
     expect(messages.system).not.toContain("倒数第三段");
+  });
+
+  // 2026-09-03 裁决：五类统一以最后一个独立小节收束，固定「总结」小标题。
+  it("requires the closing 总结 section across all five content types", () => {
+    const build = (
+      contentType: "guide" | "showcase" | "ranking" | "news" | "news_light",
+    ) =>
+      buildArticleGenerationMessages({
+        brandName: "小鲸",
+        productLine: "知识服务",
+        targetRegion: "中国",
+        contentType,
+        topic: "企业知识库指南",
+        requestedTitle: "企业知识库指南",
+        constraints: "",
+        plannedFacts:
+          contentType === "ranking"
+            ? [
+                ...facts,
+                {
+                  factKey: "competitors",
+                  predicate: "enterprise-profile.competitors",
+                  normalizedValueJson:
+                    '["竞品甲","竞品乙","竞品丙","竞品丁","竞品戊"]',
+                },
+              ]
+            : facts,
+        ...(contentType === "ranking"
+          ? {
+              rankingDimensions: [
+                "服务范围",
+                "核心项目",
+                "适用人群",
+                "服务方式",
+                "区域覆盖",
+                "选择要点",
+              ],
+            }
+          : {}),
+      });
+    for (const contentType of [
+      "guide",
+      "showcase",
+      "news",
+      "news_light",
+    ] as const) {
+      expect(build(contentType).system).toContain("最后一个独立小节");
+      expect(build(contentType).system).toContain("单独设「总结」小标题");
+    }
+    const news = build("news").system;
+    expect(news).toContain("不计入主体 3–4 个递进小标题");
+    const ranking = build("ranking").system;
+    expect(ranking).toContain("单独设「总结」小标题");
+    expect(ranking).toContain("不得与选型建议混写");
   });
 
   it("requires five confirmed competitors and injects the fixed ranking roster", () => {
@@ -269,6 +329,105 @@ describe("direct article generation contract", () => {
         "工作区名称",
       ),
     ).toThrow("article_generation_ranking_competitors_insufficient:2");
+  });
+
+  it("resolves the ranking slot-1 brand to the confirmed short name first", () => {
+    // 用户裁决 2026-09-03：陈列位 1 是篇内展示位，指称用已确认简称（与标题
+    // 简称优先同哲学）；无已确认简称回退全称，身份事实都没有才回退
+    // workspace 名。确定性门的小节标题校验是全称∪简称超集，简称标题照常过门。
+    const rankingFacts = [
+      {
+        factKey: "brand-name",
+        predicate: "enterprise-profile.fullname",
+        normalizedValueJson: '"广州造卤先生有限公司"',
+      },
+      {
+        factKey: "brand-short",
+        predicate: "enterprise-profile.shortnames",
+        normalizedValueJson: '["炊班主干蒸菜"]',
+      },
+      {
+        factKey: "competitors",
+        predicate: "enterprise-profile.competitors",
+        normalizedValueJson: '["竞品甲","竞品乙","竞品丙","竞品丁","竞品戊"]',
+      },
+    ];
+    const roster = resolveRankingRoster(rankingFacts, "工作区名称");
+    expect(roster.targetBrand).toBe("炊班主干蒸菜");
+    const messages = buildArticleGenerationMessages({
+      brandName: "广州造卤先生有限公司",
+      productLine: "本地服务",
+      targetRegion: "成都",
+      contentType: "ranking",
+      topic: "本地服务怎么选",
+      requestedTitle: "本地服务六家对比",
+      constraints: "",
+      plannedFacts: rankingFacts,
+      rankingDimensions: [
+        "服务范围",
+        "核心项目",
+        "适用人群",
+        "服务方式",
+        "区域覆盖",
+        "选择要点",
+      ],
+    });
+    expect(messages.user).toContain("目标品牌固定为陈列位 1：炊班主干蒸菜");
+    // 无已确认简称：回退全称，行为与现状一致。
+    expect(
+      resolveRankingRoster(
+        rankingFacts.filter((fact) => fact.factKey !== "brand-short"),
+        "工作区名称",
+      ).targetBrand,
+    ).toBe("广州造卤先生有限公司");
+    // 身份事实都没有：回退 workspace 名。
+    expect(
+      resolveRankingRoster(
+        [
+          {
+            factKey: "competitors",
+            predicate: "enterprise-profile.competitors",
+            normalizedValueJson:
+              '["竞品甲","竞品乙","竞品丙","竞品丁","竞品戊"]',
+          },
+        ],
+        "工作区名称",
+      ).targetBrand,
+    ).toBe("工作区名称");
+    // 陈列位 1 小节标题用简称：门的实体校验是全称∪简称超集，照常过门。
+    const dimensions = [
+      "服务范围",
+      "核心项目",
+      "适用人群",
+      "服务方式",
+      "区域覆盖",
+      "选择要点",
+    ];
+    const section = (name: string) => [
+      name,
+      ...dimensions.map((dimension) => `- **${dimension}**：信息`),
+    ];
+    const shortHeadingBody = [
+      "# 本地服务六家对比",
+      "",
+      ...[
+        "炊班主干蒸菜",
+        "竞品甲",
+        "竞品乙",
+        "竞品丙",
+        "竞品丁",
+        "竞品戊",
+      ].flatMap((name, index) => section(`## ${index + 1}. ${name}`)),
+    ].join("\n");
+    expect(
+      deterministicArticleReview(
+        shortHeadingBody,
+        rankingFacts,
+        "ranking",
+        "工作区名称",
+        dimensions,
+      ).filter((issue) => issue.severity === "blocking"),
+    ).toEqual([]);
   });
 
   it("excludes workspace self names and related brands from the ranking roster", () => {
@@ -588,6 +747,98 @@ describe("brand mention auto-bolding (ADR-0009)", () => {
         (issue) => issue.category === "output-contract",
       ),
     ).toEqual([]);
+  });
+});
+
+describe("list-item label auto-bolding（用户裁决 2026-09-04）", () => {
+  it("bolds colon-form labels in unordered and ordered items, colon stays outside", () => {
+    expect(
+      autoBoldListLabels(
+        ["- 服务优势：免费上门测量。", "1. 产品特点：全屋定制。", "- 交付周期: 半角也认"].join(
+          "\n",
+        ),
+      ),
+    ).toBe(
+      ["- **服务优势**：免费上门测量。", "1. **产品特点**：全屋定制。", "- **交付周期**: 半角也认"].join(
+        "\n",
+      ),
+    );
+  });
+
+  it("bolds space-form labels without rewriting the separator", () => {
+    expect(autoBoldListLabels("- 服务优势 免费上门测量，覆盖全城。")).toBe(
+      "- **服务优势** 免费上门测量，覆盖全城。",
+    );
+  });
+
+  it("bolds labels after leading symbol prefixes without wrapping the symbols", () => {
+    expect(autoBoldListLabels("- ✅ 免费上门测量：大户型也适用。")).toBe(
+      "- ✅ **免费上门测量**：大户型也适用。",
+    );
+  });
+
+  it("skips stop-word-led narrative items in space form", () => {
+    const body = ["- 我们 先看预算再看工艺。", "- 首先 明确需求。"].join("\n");
+    expect(autoBoldListLabels(body)).toBe(body);
+  });
+
+  it("skips pure-number labels and sentence-like long labels", () => {
+    const body = [
+      "- 2024 年行业报告显示增长。",
+      "- 免费上门测量与安装售后服务：超过十二字的标签不动。",
+      "- 短：一字标签不动",
+    ].join("\n");
+    expect(autoBoldListLabels(body)).toBe(body);
+  });
+
+  it("does not double-wrap ranking dimension items that are already bold", () => {
+    const body = "- **维度名**：已有加粗不双重包裹。";
+    expect(autoBoldListLabels(body)).toBe(body);
+  });
+
+  it("hits nested list items", () => {
+    expect(autoBoldListLabels("  - 适用场景：三口之家。")).toBe(
+      "  - **适用场景**：三口之家。",
+    );
+  });
+
+  it("skips fenced code blocks and heading lines", () => {
+    const body = [
+      "## - 服务优势：标题行不动",
+      "",
+      "```",
+      "- 服务优势：代码块里不动。",
+      "```",
+    ].join("\n");
+    expect(autoBoldListLabels(body)).toBe(body);
+  });
+
+  it("skips labels containing links, images or inline code", () => {
+    const body = [
+      "- [官网](https://example.com)：链接标签不动。",
+      "- 看图![示例](material-image://abc)：图片标签不动。",
+      "- 用`code`示例：行内代码标签不动。",
+    ].join("\n");
+    expect(autoBoldListLabels(body)).toBe(body);
+  });
+
+  it("bolds a label containing a brand name before brand auto-bolding, no nesting", () => {
+    const brandFacts = [
+      {
+        factKey: "brand-fullname",
+        predicate: "enterprise-profile.fullname",
+        normalizedValueJson: '"成都鲸鱼家居有限公司"',
+      },
+      {
+        factKey: "brand-shortnames",
+        predicate: "enterprise-profile.shortnames",
+        normalizedValueJson: '["鲸鱼家居"]',
+      },
+    ];
+    const labeled = autoBoldListLabels("- 鲸鱼家居服务优势：全屋定制。");
+    expect(labeled).toBe("- **鲸鱼家居服务优势**：全屋定制。");
+    // 品牌加粗把加粗块当盲区：标签内品牌名不再嵌套包裹。
+    expect(autoBoldBrandMentions(labeled, brandFacts)).toBe(labeled);
   });
 });
 
@@ -1195,7 +1446,7 @@ describe("deterministic format-contract additions", () => {
     "",
     "## 怎么判断门店专业度",
     "",
-    "**鲸鱼音响** 师傅经验扎实。要点说明一。",
+    "**锦江区鲸鱼汽车音响经营部**师傅经验扎实。要点说明一。",
     "",
     "- 核对事实一",
     "- 核对事实二",
@@ -1216,8 +1467,8 @@ describe("deterministic format-contract additions", () => {
 
   it("blocks unbolded brand mentions outside headings", () => {
     const body = cleanGuide.replace(
-      "**鲸鱼音响** 师傅经验扎实。",
-      "鲸鱼音响的师傅经验扎实。",
+      "**锦江区鲸鱼汽车音响经营部**师傅经验扎实。",
+      "锦江区鲸鱼汽车音响经营部的师傅经验扎实。",
     );
     const issues = deterministicArticleReview(body, identityFacts, "guide");
     expect(
@@ -1242,5 +1493,240 @@ describe("deterministic format-contract additions", () => {
         issue.message.includes("guide 类型至少需要 3 个 H2"),
       ),
     ).toBe(true);
+  });
+});
+
+describe("brand name mention order（用户裁决 2026-09-03：首次全称、其后简称）", () => {
+  const orderFacts = [
+    {
+      factKey: "f1",
+      predicate: "brand.fullName",
+      normalizedValueJson: '"锦江区鲸鱼汽车音响经营部"',
+    },
+    {
+      factKey: "f2",
+      predicate: "brand.shortNames",
+      normalizedValueJson: '["鲸鱼音响"]',
+    },
+  ];
+  // 「鲸鱼家居」是「成都鲸鱼家居有限公司」的子串：长名优先不得把全称
+  // 拦腰计成「一次全称 + 内部简称」两次命中。
+  const substringFacts = [
+    {
+      factKey: "f1",
+      predicate: "brand.fullName",
+      normalizedValueJson: '"成都鲸鱼家居有限公司"',
+    },
+    {
+      factKey: "f2",
+      predicate: "brand.shortNames",
+      normalizedValueJson: '["鲸鱼家居"]',
+    },
+  ];
+  const orderIssues = (
+    body: string,
+    facts: readonly (typeof orderFacts)[number][] = orderFacts,
+    options?: { brandNameOrderEnforced?: boolean },
+  ) =>
+    deterministicArticleReview(body, facts, "guide", "", undefined, options)
+      .filter((issue) => issue.message.includes("品牌指称序违约"));
+
+  it("blocks when a short name appears before the full name", () => {
+    const body = [
+      "# 标题",
+      "",
+      "## 一段",
+      "",
+      "**鲸鱼音响**口碑不错。",
+      "",
+      "## 二段",
+      "",
+      "**锦江区鲸鱼汽车音响经营部**是本地老店。",
+      "",
+      "## 三段",
+      "",
+      "结尾说明。",
+    ].join("\n");
+    const issues = orderIssues(body);
+    expect(issues).toHaveLength(1);
+    expect(issues[0].severity).toBe("blocking");
+    expect(issues[0].message).toContain("锦江区鲸鱼汽车音响经营部");
+    expect(issues[0].message).toContain("鲸鱼音响");
+  });
+
+  it("blocks when the full name repeats after its first occurrence", () => {
+    const body = [
+      "# 标题",
+      "",
+      "## 一段",
+      "",
+      "**锦江区鲸鱼汽车音响经营部**是本地老店。",
+      "",
+      "## 二段",
+      "",
+      "**锦江区鲸鱼汽车音响经营部**报价透明。",
+      "",
+      "## 三段",
+      "",
+      "**鲸鱼音响**收尾。",
+    ].join("\n");
+    const issues = orderIssues(body);
+    expect(issues).toHaveLength(1);
+    expect(issues[0].message).toContain("之后应统一使用已确认简称");
+    expect(issues[0].message).toContain("鲸鱼音响");
+  });
+
+  it("accepts full name first and the confirmed short name afterwards", () => {
+    const body = [
+      "# 标题",
+      "",
+      "## 一段",
+      "",
+      "**锦江区鲸鱼汽车音响经营部**是本地老店。",
+      "",
+      "## 二段",
+      "",
+      "**鲸鱼音响**报价透明。",
+      "",
+      "## 三段",
+      "",
+      "**鲸鱼音响**收尾。",
+    ].join("\n");
+    expect(orderIssues(body)).toEqual([]);
+  });
+
+  it("requires the full name when the brand appears only once", () => {
+    const body = [
+      "# 标题",
+      "",
+      "## 一段",
+      "",
+      "**鲸鱼音响**口碑不错。",
+      "",
+      "## 二段",
+      "",
+      "无关说明。",
+      "",
+      "## 三段",
+      "",
+      "结尾说明。",
+    ].join("\n");
+    const issues = orderIssues(body);
+    expect(issues).toHaveLength(1);
+    expect(issues[0].message).toContain("首次出现品牌指称必须使用全称");
+  });
+
+  it("counts a full-name mention once when the short name is its substring", () => {
+    const body = [
+      "# 标题",
+      "",
+      "## 一段",
+      "",
+      "**成都鲸鱼家居有限公司**是行业老兵。",
+      "",
+      "## 二段",
+      "",
+      "**鲸鱼家居**口碑不错。",
+      "",
+      "## 三段",
+      "",
+      "结尾说明。",
+    ].join("\n");
+    expect(orderIssues(body, substringFacts)).toEqual([]);
+  });
+
+  it("ignores headings, fenced code and image alt text", () => {
+    const body = [
+      "# 锦江区鲸鱼汽车音响经营部选购指南",
+      "",
+      "## 鲸鱼音响怎么样",
+      "",
+      "```",
+      "锦江区鲸鱼汽车音响经营部",
+      "```",
+      "",
+      "![鲸鱼音响门头](material-image://img-1)",
+      "",
+      "配图见上。",
+    ].join("\n");
+    expect(orderIssues(body)).toEqual([]);
+  });
+
+  it("does not apply when the profile lacks a full name", () => {
+    const shortOnlyFacts = [
+      {
+        factKey: "f2",
+        predicate: "brand.shortNames",
+        normalizedValueJson: '["鲸鱼音响"]',
+      },
+    ];
+    const body = [
+      "# 标题",
+      "",
+      "## 一段",
+      "",
+      "**鲸鱼音响**口碑不错。",
+      "",
+      "## 二段",
+      "",
+      "**鲸鱼音响**收尾。",
+      "",
+      "## 三段",
+      "",
+      "结尾说明。",
+    ].join("\n");
+    expect(orderIssues(body, shortOnlyFacts)).toEqual([]);
+  });
+
+  it("does not apply when the full name equals the first short name", () => {
+    const sameNameFacts = [
+      {
+        factKey: "f1",
+        predicate: "brand.fullName",
+        normalizedValueJson: '"造卤先生"',
+      },
+      {
+        factKey: "f2",
+        predicate: "brand.shortNames",
+        normalizedValueJson: '["造卤先生"]',
+      },
+    ];
+    const body = [
+      "# 标题",
+      "",
+      "## 一段",
+      "",
+      "**造卤先生**口碑不错。",
+      "",
+      "## 二段",
+      "",
+      "**造卤先生**收尾。",
+      "",
+      "## 三段",
+      "",
+      "结尾说明。",
+    ].join("\n");
+    expect(orderIssues(body, sameNameFacts)).toEqual([]);
+  });
+
+  it("can be exempted for legacy articles via brandNameOrderEnforced: false", () => {
+    const body = [
+      "# 标题",
+      "",
+      "## 一段",
+      "",
+      "**鲸鱼音响**口碑不错。",
+      "",
+      "## 二段",
+      "",
+      "**锦江区鲸鱼汽车音响经营部**是本地老店。",
+      "",
+      "## 三段",
+      "",
+      "结尾说明。",
+    ].join("\n");
+    expect(
+      orderIssues(body, orderFacts, { brandNameOrderEnforced: false }),
+    ).toEqual([]);
   });
 });

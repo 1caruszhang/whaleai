@@ -4,6 +4,7 @@ import {
   ARTICLE_IMAGE_CANDIDATE_INJECTION_LIMIT,
   ARTICLE_IMAGE_QUOTA_BY_TYPE,
   autoBoldBrandMentions,
+  autoBoldListLabels,
   buildArticleGenerationMessages,
   buildArticleReflectionMessages,
   buildArticleRepairMessages,
@@ -39,9 +40,29 @@ import {
 } from "../../shared/geo/profileInjection";
 import { validateTitleCandidates } from "../../shared/geo/topicPlan";
 import { XIAOJING_GEO_PROVIDER_DEFAULTS } from "../../shared/geo/providerCapabilities";
+import { writeFileSync } from "fs";
+import { join } from "path";
+import { ensureLogsDir, LOGS_DIR } from "../logUtils";
 
 /** 反思 LLM 审核开关：用户裁定（2026-08-18）先只审格式，暂停语义反思。 */
 const REFLECTION_REVIEW_ENABLED = false;
+
+/**
+ * 临时诊断（2026-09-04 品牌指称序排查，定位后移除）：blocking 判失败时把
+ * 初稿/修复稿全文与上下文 dump 到 logs/article-gen-debug-*.json。草稿属
+ * 正文内容，按 unified_logging 数据边界不能进统一日志，故单独落文件，
+ * 统一日志只留一行有界指针。
+ */
+function dumpArticleGenerationDebug(payload: Record<string, unknown>): void {
+  try {
+    ensureLogsDir();
+    const file = join(LOGS_DIR, `article-gen-debug-${Date.now()}.json`);
+    writeFileSync(file, JSON.stringify(payload, null, 2));
+    console.log(`[article-gen-debug] failure draft dump: ${file}`);
+  } catch {
+    // 诊断写盘失败不影响失败判定主链。
+  }
+}
 import { managementApi } from "../utils/management-api-client";
 import { warnCompoundAnchorValues } from "./anchor-patrol";
 import type { GeoBillingPermitPort } from "./billing-permit";
@@ -673,15 +694,18 @@ export class ArticleGenerationService {
         requestedTitle,
       );
       // ADR-0009 生成期管线：parse → 确定性修复 → 确定性审核 →（blocking
-      // 时）一次有界修复 → 复检 → 落库/失败。确定性修复（品牌自动加粗、
-      // 配图超限裁剪）对初稿与修复稿各跑一遍；预检从 ranking 扩展到全部
-      // 类型（§5），格式违约在生成期就地消解，不再漏到批准门爆出。人工
-      // 编辑路径（claimReview）不走本管线——审核门仍是人工编辑唯一防线。
+      // 时）一次有界修复 → 复检 → 落库/失败。确定性修复（列表标签自动加粗、
+      // 品牌自动加粗、配图超限裁剪）对初稿与修复稿各跑一遍；预检从 ranking
+      // 扩展到全部类型（§5），格式违约在生成期就地消解，不再漏到批准门爆出。
+      // 人工编辑路径（claimReview）不走本管线——审核门仍是人工编辑唯一防线。
       const imageQuota =
         ARTICLE_IMAGE_QUOTA_BY_TYPE[context.article.contentType];
       const deterministicallyRepaired = (candidate: string) =>
         trimMaterialImagePlaceholders(
-          autoBoldBrandMentions(candidate, context.article.plannedFacts),
+          autoBoldBrandMentions(
+            autoBoldListLabels(candidate),
+            context.article.plannedFacts,
+          ),
           imageQuota,
         );
       const blockingIssuesOf = (candidate: string) =>
@@ -695,6 +719,9 @@ export class ArticleGenerationService {
       let body = deterministicallyRepaired(parsed);
       let blocking = blockingIssuesOf(body);
       let repairUsed = false;
+      // 临时诊断（2026-09-04 指称序排查，定位后移除）：留存修复稿与修复异常。
+      let debugRepairedBody: string | undefined;
+      let debugRepairError: string | undefined;
       if (blocking.length > 0) {
         // 有界修复（Decision 3）：条件触发、一次为限；修复输出同样过
         // parse 门与确定性修复，修不好才判失败。修复是精确改写不是创作：
@@ -738,11 +765,14 @@ export class ArticleGenerationService {
           const repaired = deterministicallyRepaired(
             parseGeneratedArticleBody(repairedRaw, requestedTitle),
           );
+          debugRepairedBody = repaired;
           blocking = blockingIssuesOf(repaired);
           if (blocking.length === 0) body = repaired;
-        } catch {
+        } catch (error) {
           // 修复调用失败（provider/parse 抛错）不掩盖原始违规：仍按
           // blocking 判失败，让 failReason 直指真实问题。
+          debugRepairError =
+            error instanceof Error ? error.message : String(error);
         }
       }
       if (blocking.length > 0) {
@@ -750,6 +780,21 @@ export class ArticleGenerationService {
           context.article.contentType === "ranking"
             ? "article_generation_ranking_output_invalid"
             : "article_generation_output_invalid";
+        // 临时诊断（2026-09-04 指称序排查，定位后移除）。
+        dumpArticleGenerationDebug({
+          operationId: context.article.operationId,
+          articleId: context.article.id,
+          contentType: context.article.contentType,
+          generationAttempt: context.article.generationAttempt,
+          requestedTitle,
+          brandFullNames: articleProfile.fullName ?? [],
+          brandShortNames: articleProfile.shortNames ?? [],
+          blocking: blocking.map((issue) => issue.message),
+          repairUsed,
+          repairError: debugRepairError ?? null,
+          initialBody: body,
+          repairedBody: debugRepairedBody ?? null,
+        });
         throw new Error(
           `${code}:${blocking.map((issue) => issue.message).join("；")}`,
         );
@@ -920,6 +965,10 @@ export class ArticleGenerationService {
       // 注入清单随文落库（ADR-0009 Decision 2）：批准门对照清单复检；
       // 存量稿无清单时门内回退与第一家集合比对。
       context.article.rankingDimensions ?? undefined,
+      // 指称序豁免（用户裁决 2026-09-03）：品牌指称序规则（首次全称、
+      // 其后简称）不追诉 v8 及更早生成的存量稿；新生成稿已在生成期
+      // 管线（含一次有界修复 pass）执行过本检查。
+      { brandNameOrderEnforced: false },
     );
     // 用户裁定（2026-08-18）：审核先只做格式确定性检查，反思 LLM 审核暂停
     // （省一次 LLM 调用与等待；恢复时改回 REFLECTION_REVIEW_ENABLED=true）。

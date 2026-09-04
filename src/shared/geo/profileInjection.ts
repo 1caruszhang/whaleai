@@ -321,6 +321,24 @@ export function resolveBrandName(
   );
 }
 
+/**
+ * ranking 陈列位 1 指称裁决（用户裁决 2026-09-03）：简称优先——陈列位 1
+ * 的小节标题与篇内指称用已确认简称（展示位省字数，与标题简称优先同哲学；
+ * 全称留在首段全称/简称关系句，若该约定启用）。无已确认简称回退全称，
+ * 身份事实都没有才回退 workspace 名。正文注入的「品牌：」行仍用
+ * resolveBrandName（全称优先），两者分工不同，勿混用。
+ */
+export function resolveRankingTargetBrand(
+  profile: BrandProfile,
+  workspaceName: string,
+): string {
+  return (
+    firstProfileValue(profile, "shortNames") ??
+    firstProfileValue(profile, "fullName") ??
+    workspaceName
+  );
+}
+
 /** 挖词阶段的业务画像块：只喂业务信号，不给品牌名（ADR-0028 禁品牌名不变量）。 */
 export function renderMiningProfileBlock(profile: BrandProfile): string {
   const lines: string[] = [];
@@ -370,12 +388,23 @@ export function renderBrandIdentityBlock(profile: BrandProfile): string {
   if (serviceArea) lines.push(`- 服务区域：${serviceArea}`);
   if (industry) lines.push(`- 行业：${industry}`);
   if (lines.length === 0) return "";
+  // 指称序（用户裁决 2026-09-03）：全称与已确认简称同存时，正文首次指称
+  // 必须全称、其后统一钉第一个简称、全文仅一次也用全称；缺全称（仅简称
+  // 事实）时不注入——没有全称可指，裁决序不适用。
+  const firstShort = shortNames[0];
+  const orderRule =
+    fullName && firstShort && fullName !== firstShort
+      ? `正文首次出现品牌指称必须使用全称；其后统一使用简称「${firstShort}」；全文仅出现一次时也必须用全称。`
+      : "";
   return [
     "## 品牌身份（实体信息，必须原样使用，不得转述或改写）",
     ...lines,
     // ADR-0009 Decision 1：加粗从模型纪律降格为管线保证（autoBoldBrandMentions
     // 在 parse 后统一补粗），prompt 不再要求手动加粗；实体纪律（简称白名单、
     // 逐字使用）保留——管线只包已确认名字，自造简称不会被自动加粗。
-    "品牌指称规则：简称只能取上表已列出的，未列出的一律用全称，不得自造简称；加粗无需手动处理，发布管线会自动补全。",
+    ...[
+      orderRule,
+      "品牌指称规则：简称只能取上表已列出的，未列出的一律用全称，不得自造简称；加粗无需手动处理，发布管线会自动补全。",
+    ].filter((rule) => rule.length > 0),
   ].join("\n");
 }

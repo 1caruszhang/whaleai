@@ -5,7 +5,12 @@ import {
 } from "./materialImages";
 import { scanMaterialImagePlaceholders } from "./materialImagePlaceholder";
 import { removeSpans } from "./textSpans";
-import { projectBrandProfile, resolveBrandName } from "./profileInjection";
+import {
+  firstProfileValue,
+  profileValues,
+  projectBrandProfile,
+  resolveRankingTargetBrand,
+} from "./profileInjection";
 import {
   rankingBrandBanRule,
   TITLE_STYLE_DEFINITIONS,
@@ -14,7 +19,7 @@ import {
 } from "./topicPlan";
 
 export const ARTICLE_GENERATION_POLICY_VERSION =
-  "xiaojing-content-prompt-v8";
+  "xiaojing-content-prompt-v10";
 export const ARTICLE_GENERATION_CONCURRENCY =
   GEO_PORT_CONTRACT.concurrency.perArticleLifecycle.limit;
 export const ARTICLE_GENERATION_MAX_ARTICLES = 20;
@@ -182,6 +187,7 @@ const CONTENT_TYPE_CONTRACTS: Record<
       "以问题—答案、步骤或清单组织内容，正文至少 3 个 H2 小标题。",
       "小标题口语化、直击读者疑问，不使用书面腔。",
       "关键词与核心结论适度加粗（每屏至多 1–2 处）。",
+      "全文以最后一个独立小节收束：单独设「总结」小标题，回扣主题、提示读者如何根据本文信息做下一步判断。",
     ],
     expression: [
       "约 70% 干货（痛点科普、选型方法、可执行清单）+ 约 30% 品牌信息，品牌以「内行人」身份出现。",
@@ -197,6 +203,7 @@ const CONTENT_TYPE_CONTRACTS: Record<
     format: [
       "以品牌详情页方式组织：核心卖点、服务范围、服务流程、门店/适用场景等栏目，正文至少 3 个 H2。",
       "卖点用 ✅ 或列表逐条呈现，颗粒度一致。",
+      "全文以最后一个独立小节收束：单独设「总结」小标题，回扣主题、提示读者如何根据本文信息做下一步判断。",
     ],
     expression: [
       "结构化展示品牌全貌，语言具体可感——把每条卖点写成一个可验证的细节，而不是口号。",
@@ -226,7 +233,7 @@ const CONTENT_TYPE_CONTRACTS: Record<
       "每家叙述约 320 字、每条维度 50–55 字（单条不短于 45 字以保证证据可核验），六家颗粒度一致。",
       "首段嵌入 1–2 个关键词；关键词变体每 300 字自然出现 1 次并加粗。",
       "六家陈列结束后写选型建议段：先列出「选型应重点考察的维度」（与目标品牌的强项维度对齐），再用条件句点首位（「若你的需求是 XX，陈列首位的 XX 在证据完整度上更扎实」），并给出「需求偏垂直/单一场景时对照各家专精程度权衡」；目标品牌在选型段引用的数字/资质须与陈列位 1 一致。",
-      "结尾在选型建议之后再单独写一个 80–150 字的总结部分：回扣主题、提示读者如何根据本文信息做下一步判断，不与选型建议混为一段",
+      "收束必须是全文最后一个独立小节：单独设「总结」小标题，正文 80–150 字——回扣主题、提示读者如何根据本文信息做下一步判断，不得与选型建议混写。",
       "短段落与留白，全文控制在 2500 字以内。",
     ],
     fact: [],
@@ -234,7 +241,7 @@ const CONTENT_TYPE_CONTRACTS: Record<
   news: {
     format: [
       "倒金字塔结构：最重要的已确认事实放首段，其后按重要性递减。",
-      "导语完整包含 5W1H（时间、地点、人物、事件、原因、结果）；主体分 3–4 个小标题递进，小标题简洁（8 字以内）；结尾总结事件价值。",
+      "导语完整包含 5W1H（时间、地点、人物、事件、原因、结果）；主体分 3–4 个小标题递进，小标题简洁（8 字以内）；结尾以最后一个独立小节总结事件价值：单独设「总结」小标题，不计入主体 3–4 个递进小标题。",
       "正文至少 2 个 H2；关键事实前置。",
     ],
     expression: [
@@ -253,6 +260,7 @@ const CONTENT_TYPE_CONTRACTS: Record<
       "倒金字塔 + 移动端短段落（每段不超过 3 句）。",
       "导语完整包含 5W1H 要素，详细细节后置。",
       "正文至少 2 个 H2 或清晰分节。",
+      "全文以最后一个独立小节收束：单独设「总结」小标题，回扣主题、提示读者如何根据本文信息做下一步判断。",
     ],
     expression: [
       "便民、服务升级或知识普及的轻新闻口吻，贴近日常表达。",
@@ -502,19 +510,23 @@ export function mergeRankingCompetitorTiers(
 }
 
 /**
- * ranking 的唯一名单投影：目标品牌来自身份事实（无身份事实才回退 workspace
- * 名），竞品来自 immutable plannedFacts 中已确认的 competitors（直接层），
- * 不足 5 家时用 potentialCompetitors（潜在层，相近场景/替代品类）按序补足
- * ——两层都只含真实检索来源的名称（ADR-0007 两层名单，用户裁决 2026-08-30）。
- * 选五家时保持「直接层在前、补位在后」的顺序；正文可自由调整这五家在
- * 陈列位 2–6 的顺序。
+ * ranking 的唯一名单投影：目标品牌用 resolveRankingTargetBrand（简称优先，
+ * 无已确认简称回退全称、都无才回退 workspace 名——陈列位 1 是篇内展示位，
+ * 用户裁决 2026-09-03），竞品来自 immutable plannedFacts 中已确认的
+ * competitors（直接层），不足 5 家时用 potentialCompetitors（潜在层，相近
+ * 场景/替代品类）按序补足——两层都只含真实检索来源的名称（ADR-0007 两层
+ * 名单，用户裁决 2026-08-30）。选五家时保持「直接层在前、补位在后」的顺序；
+ * 正文可自由调整这五家在陈列位 2–6 的顺序。
  */
 export function resolveRankingRoster(
   facts: readonly TopicPlanKnowledgeFact[],
   workspaceBrandName: string,
 ): RankingRoster {
   const profile = projectBrandProfile(facts);
-  const targetBrand = resolveBrandName(profile, workspaceBrandName).trim();
+  const targetBrand = resolveRankingTargetBrand(
+    profile,
+    workspaceBrandName,
+  ).trim();
   const competitors = mergeRankingCompetitorTiers(
     profile.competitors ?? [],
     profile.potentialCompetitors ?? [],
@@ -584,7 +596,7 @@ export function buildArticleGenerationMessages(input: {
     "- 实体-关系-属性表达：核心实体（品牌、产品、服务、地域、资质、场景）在正文中显式出现；实体之间用清晰谓词连接（如「提供」「覆盖」「适用于」「由…组成」）；每个实体尽量带可验证的属性描述（范围、能力、条件、数量），避免孤立名词或模糊指代。",
     "保持可读节奏：每约 200 字变换角度或推进下一个点，不把多个意思挤在同一段。",
     "遵守中国广告法，不使用最、第一、唯一、首选、头部、榜首、权威、领先等绝对化或无法证实的宣传。",
-    "目标品牌每次出现在正文时使用 Markdown 加粗；地域与核心关键词在首次出现及作为关键论据时适度加粗，核心关键词全文自然分布（约每 300 字 1 次，类型规范另有频率的从其规定）；除品牌名与对比清单的维度名外，单一加粗实体全文不超过 3 次；H2 小标题不加粗（用 ## 即可）。",
+    "目标品牌每次出现在正文时使用 Markdown 加粗；地域与核心关键词在首次出现及作为关键论据时适度加粗，核心关键词全文自然分布（约每 300 字 1 次，类型规范另有频率的从其规定）；列表项以「标签+内容」组织时标签加粗（优先 `- **标签**：内容` 形态，冒号在加粗外，漏写由管线自动补全）；除品牌名、对比清单维度名与列表项标签外，单一加粗实体全文不超过 3 次；H2 小标题不加粗（用 ## 即可）。",
     "最终不得保留任何【】占位符。",
     "直接输出 Markdown，不要 JSON，不要代码围栏，不要解释。第一行必须是指定标题的 H1。",
     "列表必须用标准 Markdown 语法（行首 `- ` 或 `1. `）；禁止用 •、●、· 等圆点字符起行模拟列表——圆点起行在渲染器里只是密集段落。",
@@ -926,10 +938,11 @@ function lineBrandMentionBlindSpots(line: string): Array<[number, number]> {
 }
 
 /**
- * 品牌指称的行分类（门与自动加粗共用同一遍历，防两侧盲区语义漂移）：
- * 围栏代码块（含围栏行自身）与标题行整体跳过，其余为可检查行。
+ * 正文行分类（加粗门、指称序门、品牌/列表标签自动加粗共用同一遍历，
+ * 防两侧盲区语义漂移）：围栏代码块（含围栏行自身）与标题行整体跳过，
+ * 其余为可检查行。
  */
-function brandMentionLines(
+function classifyBodyLines(
   body: string,
 ): Array<{ line: string; checkable: boolean }> {
   let inFence = false;
@@ -945,11 +958,69 @@ function brandMentionLines(
   });
 }
 
+/**
+ * 指称序扫描的盲区间（用户裁决 2026-09-03）：与加粗门同一行分类、同一
+ * 套图片/链接 URL 盲区，但不屏蔽加粗块——加粗是指称的合法排版，序判定
+ * 必须能看到加粗块内的名字（加粗门反查「未加粗」时才把加粗块抹除）。
+ */
+function lineMentionTextBlindSpots(line: string): Array<[number, number]> {
+  const spots: Array<[number, number]> = [];
+  for (const match of line.matchAll(IMAGE_SYNTAX_RE)) {
+    const start = match.index ?? 0;
+    spots.push([start, start + match[0].length]);
+  }
+  for (const match of line.matchAll(LINK_SYNTAX_RE)) {
+    const start = match.index ?? 0;
+    // 只护 URL 括号段（与 lineBrandMentionBlindSpots 同口径）：链接文本
+    // 仍是指称面，链接内品牌名参与序判定。
+    spots.push([start + match[0].lastIndexOf("("), start + match[0].length]);
+  }
+  return spots;
+}
+
+/** 可检正文的指称文本（序判定用）：标题行/围栏块剔除，图片与链接 URL 抹除。 */
+function reviewableBrandMentionText(body: string): string {
+  return classifyBodyLines(body)
+    .filter((entry) => entry.checkable)
+    .map((entry) =>
+      removeSpans(entry.line, lineMentionTextBlindSpots(entry.line)),
+    )
+    .join("\n");
+}
+
+/**
+ * 有序品牌指称命中（2026-09-03 指称序裁决）：按出现顺序产出名字命中
+ * 序列。逐位置最长名优先——简称是全称子串时全称整体计一次命中，内部
+ * 不再重复计简称（与 autoBoldBrandMentions 长名优先同哲学）。
+ */
+function orderedBrandNameOccurrences(
+  text: string,
+  names: readonly string[],
+): Array<{ name: string; index: number }> {
+  const ordered = [
+    ...new Set(
+      names.map((name) => name.trim()).filter((name) => name.length >= 2),
+    ),
+  ].sort((left, right) => right.length - left.length);
+  const occurrences: Array<{ name: string; index: number }> = [];
+  let cursor = 0;
+  while (cursor < text.length) {
+    const hit = ordered.find((name) => text.startsWith(name, cursor));
+    if (hit) {
+      occurrences.push({ name: hit, index: cursor });
+      cursor += hit.length;
+    } else {
+      cursor += 1;
+    }
+  }
+  return occurrences;
+}
+
 function unboldedBrandMentions(
   body: string,
   brandNames: readonly string[],
 ): string[] {
-  const remainder = brandMentionLines(body)
+  const remainder = classifyBodyLines(body)
     .filter((entry) => entry.checkable)
     .map((entry) =>
       removeSpans(entry.line, lineBrandMentionBlindSpots(entry.line)),
@@ -990,7 +1061,7 @@ export function autoBoldBrandMentions(
 }
 
 function boldNameOutsideBlindSpots(body: string, name: string): string {
-  return brandMentionLines(body)
+  return classifyBodyLines(body)
     .map(({ line, checkable }) => {
       if (!checkable) return line;
       const blind = lineBrandMentionBlindSpots(line);
@@ -1010,12 +1081,95 @@ function boldNameOutsideBlindSpots(body: string, name: string): string {
     .join("\n");
 }
 
+/**
+ * 列表项标签自动加粗（用户裁决 2026-09-04）：与品牌加粗同属「管线保证」，
+ * 「标签+内容」组织的列表项把标签包 `**`。两种形态：
+ * - 冒号型（优先）：到第一个全/半角冒号为止，冒号留在加粗块外
+ *   （与 ranking「- **维度名**：内容」契约同口径）；
+ * - 空格型：第一个空白前的连续 token，空格保留原位——管线只加 `**`
+ *   四个字符，不改写原文结构。
+ * 候选标签约束 2–12 字、无句读标点、不含 `*[]()`` 或 http（已加粗/链接/
+ * 代码不碰）、不纯数字/纯拉丁；空格型额外过停用词闸（叙述句开头的
+ * 「我们/首先/注意…」不是标签）。盲区与品牌加粗同源：标题行/围栏代码块
+ * 整行跳过。行首允许 ✅ 等前置符号段，符号不进加粗块。
+ */
+const LIST_ITEM_LINE_RE = /^(\s*(?:[-*+]|\d{1,2}[.)])\s+)(.*)$/;
+const LIST_LABEL_SYMBOL_PREFIX_RE = /^[✅✔✓★☆▪◆◇●○•·\s]+/;
+const LIST_LABEL_SENTENCE_PUNCT_RE = /[。！？；，、,.!?;]/;
+const LIST_LABEL_FORBIDDEN_CHAR_RE = /[*[\]()`]/;
+const LIST_LABEL_STOP_WORDS: ReadonlySet<string> = new Set([
+  "我们",
+  "你",
+  "您",
+  "大家",
+  "首先",
+  "其次",
+  "再次",
+  "然后",
+  "接着",
+  "最后",
+  "另外",
+  "同时",
+  "总之",
+  "综上",
+  "注意",
+  "建议",
+  "需要",
+  "可以",
+]);
+
+export function autoBoldListLabels(body: string): string {
+  return classifyBodyLines(body)
+    .map(({ line, checkable }) => {
+      if (!checkable) return line;
+      const item = LIST_ITEM_LINE_RE.exec(line);
+      if (!item) return line;
+      const symbols = LIST_LABEL_SYMBOL_PREFIX_RE.exec(item[2])?.[0] ?? "";
+      const content = item[2].slice(symbols.length);
+      const colonAt = content.search(/[：:]/);
+      const spaceAt = content.search(/\s/);
+      let label: string;
+      let spaceForm = false;
+      if (colonAt > 0 && (spaceAt < 0 || colonAt < spaceAt)) {
+        label = content.slice(0, colonAt);
+      } else if (spaceAt > 0) {
+        label = content.slice(0, spaceAt);
+        spaceForm = true;
+      } else {
+        return line;
+      }
+      if (!isBoldableListLabel(label, spaceForm)) return line;
+      if (spaceForm && content.slice(spaceAt).trim().length === 0) return line;
+      const rest = content.slice(label.length);
+      return `${item[1]}${symbols}**${label}**${rest}`;
+    })
+    .join("\n");
+}
+
+function isBoldableListLabel(label: string, spaceForm: boolean): boolean {
+  const length = [...label].length;
+  if (length < 2 || length > 12) return false;
+  if (LIST_LABEL_SENTENCE_PUNCT_RE.test(label)) return false;
+  if (LIST_LABEL_FORBIDDEN_CHAR_RE.test(label)) return false;
+  if (/^[\d\s]+$/.test(label) || /^[A-Za-z]+$/.test(label)) return false;
+  if (/https?/i.test(label)) return false;
+  if (spaceForm && LIST_LABEL_STOP_WORDS.has(label)) return false;
+  return true;
+}
+
 export function deterministicArticleReview(
   body: string,
   facts: readonly TopicPlanKnowledgeFact[],
   contentType: GeoContentType = "guide",
   workspaceBrandName = "",
   expectedRankingDimensions?: readonly string[],
+  /**
+   * 品牌指称序检查开关（用户裁决 2026-09-03）：缺省强制执行（fail-closed）。
+   * 人工批准路径对存量稿传 `brandNameOrderEnforced: false` 豁免——v8 及更早
+   * 生成的稿子形态不受新规则追诉；新生成稿已在生成期管线（含一次有界
+   * 修复 pass）执行过本检查。
+   */
+  options: { brandNameOrderEnforced?: boolean } = {},
 ): ArticleReviewIssue[] {
   const issues: ArticleReviewIssue[] = [];
   const reviewBody = stripLeadingH1(body);
@@ -1098,6 +1252,46 @@ export function deterministicArticleReview(
       severity: "blocking",
       message: `品牌名出现时必须逐字使用并加粗（未加粗或被转述）：${unbolded.join("、")}`,
     });
+  }
+  // 品牌指称序裁决（用户裁决 2026-09-03）：首次全称、其后钉第一个已确认
+  // 简称，全文仅一次也用全称。门只校验两个机械点——首个指称不是全称、
+  // 全称在首次之后复现；白名单内其他简称形态不拦（提示词纪律管得比门宽）。
+  if (options.brandNameOrderEnforced !== false) {
+    const fullName = firstProfileValue(profile, "fullName");
+    const preferredShort = firstProfileValue(profile, "shortNames");
+    if (fullName && preferredShort && fullName !== preferredShort) {
+      const mentionText = reviewableBrandMentionText(reviewBody);
+      const occurrences = orderedBrandNameOccurrences(mentionText, [
+        fullName,
+        ...profileValues(profile, "shortNames"),
+      ]);
+      if (occurrences.length > 0 && occurrences[0].name !== fullName) {
+        issues.push({
+          source: "deterministic",
+          category: "output-contract",
+          severity: "blocking",
+          message:
+            `品牌指称序违约：正文首次出现品牌指称必须使用全称` +
+            `「${fullName}」（当前第一次出现的是「${occurrences[0].name}」）。`,
+        });
+      }
+      const firstFullIndex = occurrences.findIndex(
+        (hit) => hit.name === fullName,
+      );
+      if (
+        firstFullIndex >= 0 &&
+        occurrences.slice(firstFullIndex + 1).some((hit) => hit.name === fullName)
+      ) {
+        issues.push({
+          source: "deterministic",
+          category: "output-contract",
+          severity: "blocking",
+          message:
+            `品牌指称序违约：首次全称「${fullName}」之后应统一使用已确认简称` +
+            `「${preferredShort}」，请勿在后文再次使用全称。`,
+        });
+      }
+    }
   }
   if (contentType === "ranking") {
     const headings = [

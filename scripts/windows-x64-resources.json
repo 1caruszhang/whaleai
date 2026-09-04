@@ -44,10 +44,10 @@
       "cacheFile": "PortableGit-2.55.0.4-64-bit.7z.exe"
     },
     "webview2": {
-      "version": "evergreen-bootstrapper-eb04ea38-2026-08-14",
+      "version": "evergreen-bootstrapper-17debf79-2026-09-02",
       "url": "https://go.microsoft.com/fwlink/p/?LinkId=2124703",
-      "sha256": "be695eb3732a94e181f008ab5cf6ee650f8644676e87f9e02b6ab0d02f2ea08e",
-      "cacheFile": "MicrosoftEdgeWebview2Setup-eb04ea38.exe"
+      "sha256": "17debf797a6c737959bc588236e897936ffac1af5f7e515e674ab32f9edfe719",
+      "cacheFile": "MicrosoftEdgeWebview2Setup-17debf79.exe"
     }
   },
   "npmPackages": {

@@ -507,4 +507,43 @@ describe("renderBrandIdentityBlock", () => {
     expect(block).toContain("不得自造简称");
     expect(block).not.toContain("产品与服务");
   });
+
+  // 指称序（用户裁决 2026-09-03）：全称+简称同存时注入「首次全称、其后
+  // 钉第一个简称」；缺全称或缺简称时序裁决不适用，不注入该句。
+  it("injects the mention-order rule when full name and short name coexist", () => {
+    const block = renderBrandIdentityBlock(
+      projectBrandProfile([
+        fact("brand.fullName", "锦江区鲸鱼汽车音响经营部"),
+        fact("brand.shortNames", ["鲸鱼音响", "鲸鱼改声"]),
+      ]),
+    );
+    expect(block).toContain("正文首次出现品牌指称必须使用全称");
+    expect(block).toContain("其后统一使用简称「鲸鱼音响」");
+    expect(block).toContain("全文仅出现一次时也必须用全称");
+  });
+
+  it("omits the mention-order rule without a confirmed short name", () => {
+    const block = renderBrandIdentityBlock(
+      projectBrandProfile([fact("brand.fullName", "锦江区鲸鱼汽车音响经营部")]),
+    );
+    expect(block).not.toContain("正文首次出现品牌指称必须使用全称");
+    expect(block).toContain("不得自造简称");
+  });
+
+  it("omits the mention-order rule when only short-name identity exists", () => {
+    const block = renderBrandIdentityBlock(
+      projectBrandProfile([fact("brand.shortNames", ["鲸鱼音响"])]),
+    );
+    expect(block).not.toContain("正文首次出现品牌指称必须使用全称");
+  });
+
+  it("omits the mention-order rule when full name equals the first short name", () => {
+    const block = renderBrandIdentityBlock(
+      projectBrandProfile([
+        fact("brand.fullName", "造卤先生"),
+        fact("brand.shortNames", ["造卤先生"]),
+      ]),
+    );
+    expect(block).not.toContain("正文首次出现品牌指称必须使用全称");
+  });
 });
