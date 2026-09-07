@@ -235,6 +235,8 @@ OSS 账单对账，不动 `ledger_entries`（Σdelta == balance 不变量）；�
 | `POST /admin/ui/accounts/:accountId/status` | 会话 cookie | 停用/启用；停用即时吊销账号全部会话（`revoked_reason=admin_disabled`），余额与流水不动 |
 | `POST /admin/ui/accounts/:accountId/topup` | 会话 cookie | 充值对账确认：金额（元，最小粒度 0.1 元 = 1 点）+ 来源备注同落 `topup` 流水（`充值 ¥X：备注`） |
 | `POST /admin/ui/accounts/:accountId/adjust` | 会话 cookie | 调点（正负整数 ≠0，备注必填），落 `adjust` 流水 |
+| `POST /admin/ui/accounts/:accountId/note` | 会话 cookie | 设置/清除账号备注（运营内部标识「这是谁的号」，≤500 字，空串即清除；存 `accounts.admin_note`，不进用户投影、不落流水） |
+| `POST /admin/ui/accounts/:accountId/reset-password` | 会话 cookie | 重置密码（新密码 ≥8 位 + 确认输入防手误）：`password_version+1`（旧 access JWT 即失效）、`must_change_password=1`（用户下次登录强制改成自己的密码）、吊销全部会话（`revoked_reason=admin_password_reset`）；不校验旧密码、不签发用户会话 |
 | `GET /admin/accounts/:accountId` | 会话 cookie | 账号对账页：余额三口径 + 点数流水 + 计费操作（permit 扣点口径）+ 发布订单 + Provider 计量 + 对话计量 |
 
 形态与安全：纯模板字符串渲染 + 统一 `esc()` 转义（手机号/备注等一切回显），
@@ -384,13 +386,16 @@ curl -s "$B/gw/distribution/media/resource?page=1&size=20" -H "authorization: Be
 curl -s "$B/gw/distribution/we-media/resource?page=2&size=15" -H "authorization: Bearer $ACCESS"
 ```
 
-## 数据表（迁移 `0001_accounts_sessions_ledger` + `0002_billing_permits` + `0003_ledger_entry_seq` + `0004_chat_usage_metering` + `0005_provider_usage_metering`）
+## 数据表（迁移 `0001_accounts_sessions_ledger` + `0002_billing_permits` + `0003_ledger_entry_seq` + `0004_chat_usage_metering` + `0005_provider_usage_metering` + `0006_publish_orders` + `0007_publish_order_spend_limits` + `0008_permit_last_activity` + `0009_accounts_admin_note`）
 
 - `accounts`：手机号唯一、scrypt 哈希、`password_version`（JWT `pv` 对账）、
   `status`（active/disabled）、`must_change_password`、`balance`（账面总余额，
   含冻结）。
+- `accounts.admin_note`（0009）：运营备注（账号归属标识）；只经 /admin 读写，
+  不进用户投影。
 - `auth_sessions`：一次登录一个会话；30 天滑动 `expires_at`；吊销留
-  `revoked_reason`（logout / password_changed / refresh_reuse / admin_disabled）。
+  `revoked_reason`（logout / password_changed / refresh_reuse / admin_disabled /
+  admin_password_reset）。
 - `refresh_tokens`：哈希唯一、`consumed_at`/`replaced_by` 记录轮换链。
 - `ledger_entries`：点数流水（`delta` + `balance_after` 成对出现），
   kind ∈ grant / topup / adjust / consume；建号 `grant` 是第一条，

@@ -9,9 +9,11 @@ import type { AdminLoginThrottle } from '../auth/admin-login-throttle';
 import { timingSafeStringEqual } from '../auth/passwords';
 import { signAdminToken, verifyAdminToken } from '../auth/tokens';
 import {
+  adminResetAccountPassword,
   createAccountWithGrant,
   findAccountById,
   listAccounts,
+  setAccountNote,
   setAccountStatus,
 } from '../domain/accounts';
 import { applyAccountLedgerDelta, balanceSnapshot, listLedgerEntries } from '../domain/ledger';
@@ -178,6 +180,9 @@ function dashboardHtml(
       const nextStatus = account.status === 'active' ? 'disabled' : 'active';
       return `    <tr>
       <td>${esc(account.phone)}</td>
+      <td class="wrap">${
+        account.adminNote === '' ? '<span class="muted">-</span>' : esc(account.adminNote)
+      }</td>
       <td>${account.status === 'active' ? '正常' : '<span class="neg">已停用</span>'}</td>
       <td>${esc(account.balance)}</td>
       <td>${account.mustChangePassword ? '是' : '否'}</td>
@@ -196,7 +201,7 @@ function dashboardHtml(
     accounts.length === 0
       ? '<p class="muted">还没有账号，用下方表单开通第一个。</p>'
       : `<table>
-  <thead><tr><th>手机号</th><th>状态</th><th>余额（点）</th><th>待改密</th><th>建号时间</th><th>流水</th><th>操作</th></tr></thead>
+  <thead><tr><th>手机号</th><th>备注</th><th>状态</th><th>余额（点）</th><th>待改密</th><th>建号时间</th><th>流水</th><th>操作</th></tr></thead>
   <tbody>
 ${rows}
   </tbody>
@@ -328,6 +333,25 @@ ${headerHtml()}
   </form>
 </section>
 <section class="card">
+  <h2>账号备注</h2>
+  <form method="post" action="/admin/ui/accounts/${encodeURIComponent(account.id)}/note">
+    <label for="adminNote">运营内部标识（这是谁的号，最长 500 字；留空保存即清除）</label>
+    <input id="adminNote" name="note" maxlength="500" value="${esc(account.admin_note)}">
+    <button type="submit">保存备注</button>
+  </form>
+</section>
+<section class="card">
+  <h2>重置密码</h2>
+  <form method="post" action="/admin/ui/accounts/${encodeURIComponent(account.id)}/reset-password">
+    <label for="newPassword">新密码（至少 8 位）</label>
+    <input id="newPassword" name="newPassword" type="password" autocomplete="new-password" minlength="8" required>
+    <label for="confirmPassword">确认新密码</label>
+    <input id="confirmPassword" name="confirmPassword" type="password" autocomplete="new-password" minlength="8" required>
+    <button type="submit">重置密码</button>
+  </form>
+  <p class="muted">重置后该账号全部登录立即失效，用户须用新密码重新登录，且首次登录会被要求改成自己的密码。</p>
+</section>
+<section class="card">
   <h2>点数流水</h2>
   <table>
     <thead><tr><th>时间</th><th>类型</th><th>变动</th><th>余额</th><th>备注</th></tr></thead>
@@ -400,6 +424,21 @@ const adjustFormSchema = z.object({
   delta: z.string().trim().regex(/^[+-]?\d{1,8}$/, '调整点数必须是整数（可带 +/-）。'),
   note: z.string().trim().min(1, '调点必须带备注。').max(500),
 });
+
+/** 账号备注：可空（空串即清除），上限对齐账本备注。 */
+const noteFormSchema = z.object({
+  note: z.string().trim().max(500, '备注最长 500 字。'),
+});
+
+/** 重置密码：双输入防手误（零客户端 JS，只能提交后服务端裁决）。 */
+const resetPasswordFormSchema = z
+  .object({
+    newPassword: z.string().min(8, '新密码至少 8 位').max(128),
+    confirmPassword: z.string(),
+  })
+  .refine(data => data.newPassword === data.confirmPassword, {
+    message: '两次输入的密码不一致。',
+  });
 
 const accountIdParamSchema = z.string().min(1, 'accountId 不能为空').max(64);
 
@@ -588,6 +627,46 @@ export function createAdminPageRoutes(deps: BackendDeps, throttle: AdminLoginThr
         return htmlError(c, '单次调整不能超过 10,000,000 点。', backHref, 400);
       }
       applyAccountLedgerDelta(deps, accountId.data, delta, 'adjust', parsed.data.note);
+      return c.redirect(backHref, 303);
+    } catch (error) {
+      if (error instanceof AppError) return htmlError(c, error.message, backHref, error.status);
+      throw error;
+    }
+  });
+
+  routes.post('/admin/ui/accounts/:accountId/note', requireAdminPage, async c => {
+    const accountId = accountIdParamSchema.safeParse(c.req.param('accountId'));
+    if (!accountId.success) {
+      return htmlError(c, '账号 id 无效。', '/admin', 404);
+    }
+    const backHref = `/admin/accounts/${encodeURIComponent(accountId.data)}`;
+    try {
+      const form = await parseFormBody(c);
+      const parsed = noteFormSchema.safeParse(form);
+      if (!parsed.success) {
+        return htmlError(c, parsed.error.issues[0]?.message ?? '表单参数无效。', backHref, 400);
+      }
+      setAccountNote(deps, accountId.data, parsed.data.note);
+      return c.redirect(backHref, 303);
+    } catch (error) {
+      if (error instanceof AppError) return htmlError(c, error.message, backHref, error.status);
+      throw error;
+    }
+  });
+
+  routes.post('/admin/ui/accounts/:accountId/reset-password', requireAdminPage, async c => {
+    const accountId = accountIdParamSchema.safeParse(c.req.param('accountId'));
+    if (!accountId.success) {
+      return htmlError(c, '账号 id 无效。', '/admin', 404);
+    }
+    const backHref = `/admin/accounts/${encodeURIComponent(accountId.data)}`;
+    try {
+      const form = await parseFormBody(c);
+      const parsed = resetPasswordFormSchema.safeParse(form);
+      if (!parsed.success) {
+        return htmlError(c, parsed.error.issues[0]?.message ?? '表单参数无效。', backHref, 400);
+      }
+      adminResetAccountPassword(deps, accountId.data, parsed.data.newPassword);
       return c.redirect(backHref, 303);
     } catch (error) {
       if (error instanceof AppError) return htmlError(c, error.message, backHref, error.status);

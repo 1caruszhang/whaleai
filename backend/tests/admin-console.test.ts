@@ -244,6 +244,144 @@ describe('admin console SSR pages', () => {
     expect((await loginAccount(app, '13800000234', 'initial-pass-2')).status).toBe(200);
   });
 
+  it('sets, escapes and clears the account note from the page', async () => {
+    const { app, db } = tb;
+    const { cookie } = await pageLogin(app);
+    await postForm(app, '/admin/ui/accounts', {
+      phone: '13800000567',
+      initialPassword: 'initial-pass-5',
+    }, cookie);
+    const account = db.get<{ id: string }>('SELECT id FROM accounts WHERE phone = ?', [
+      '13800000567',
+    ])!;
+
+    // 仪表盘有备注列；无备注账号渲染空占位。
+    const dashBefore = await (await getHtml(app, '/admin', cookie)).text();
+    expect(dashBefore).toContain('<th>备注</th>');
+    expect(dashBefore).toContain('<span class="muted">-</span>');
+
+    // 设置备注（含 HTML 载荷）：303 回详情页，原文落库。
+    const payload = `<script>alert('x')</script> 张三 · 景杉文化`;
+    const set = await postForm(app, `/admin/ui/accounts/${account.id}/note`, { note: payload }, cookie);
+    expect(set.status).toBe(303);
+    expect(set.headers.get('location')).toBe(`/admin/accounts/${account.id}`);
+    expect(
+      db.get<{ admin_note: string }>('SELECT admin_note FROM accounts WHERE id = ?', [account.id]),
+    ).toMatchObject({ admin_note: payload });
+
+    // 仪表盘与详情页回显全转义。
+    const dash = await (await getHtml(app, '/admin', cookie)).text();
+    expect(dash).toContain('&lt;script&gt;alert(&#39;x&#39;)&lt;/script&gt;');
+    expect(dash).not.toContain('<script');
+    const detail = await (await getHtml(app, `/admin/accounts/${account.id}`, cookie)).text();
+    expect(detail).toContain('<h2>账号备注</h2>');
+    expect(detail).toContain('value="&lt;script&gt;alert(&#39;x&#39;)&lt;/script&gt; 张三 · 景杉文化"');
+    expect(detail).not.toContain('<script');
+
+    // 超长（501 字）备注：400 错误页，库里保留原值。
+    const rejected = await postForm(
+      app,
+      `/admin/ui/accounts/${account.id}/note`,
+      { note: 'x'.repeat(501) },
+      cookie,
+    );
+    expect(rejected.status).toBe(400);
+    expect(
+      db.get<{ admin_note: string }>('SELECT admin_note FROM accounts WHERE id = ?', [account.id]),
+    ).toMatchObject({ admin_note: payload });
+
+    // 空串提交即清除。
+    const cleared = await postForm(app, `/admin/ui/accounts/${account.id}/note`, { note: '' }, cookie);
+    expect(cleared.status).toBe(303);
+    expect(
+      db.get<{ admin_note: string }>('SELECT admin_note FROM accounts WHERE id = ?', [account.id]),
+    ).toMatchObject({ admin_note: '' });
+  });
+
+  it('resets a forgotten password from the page: old credentials die, new login forces a change', async () => {
+    const { app, db } = tb;
+    const { cookie } = await pageLogin(app);
+    await postForm(app, '/admin/ui/accounts', {
+      phone: '13800000678',
+      initialPassword: 'initial-pass-6',
+    }, cookie);
+    const account = db.get<{ id: string; password_version: number }>(
+      'SELECT id, password_version FROM accounts WHERE phone = ?',
+      ['13800000678'],
+    )!;
+
+    // 用户完成一次首登改密：must_change_password 清零，拿到自己的密码。
+    const firstLogin = await loginAccount(app, '13800000678', 'initial-pass-6');
+    expect(firstLogin.status).toBe(200);
+    const changed = await postJson(
+      app,
+      '/auth/change-password',
+      { currentPassword: 'initial-pass-6', newPassword: 'user-own-pass-6' },
+      str(firstLogin.body.accessToken),
+    );
+    expect(changed.status).toBe(200);
+    expect(
+      db.get<{ must_change_password: number }>(
+        'SELECT must_change_password FROM accounts WHERE id = ?',
+        [account.id],
+      ),
+    ).toMatchObject({ must_change_password: 0 });
+    const versionBefore = db.get<{ password_version: number }>(
+      'SELECT password_version FROM accounts WHERE id = ?',
+      [account.id],
+    )!.password_version;
+
+    // 形态校验：短密码 / 两次输入不一致 → 400，库里不动。
+    for (const fields of [
+      { newPassword: 'short', confirmPassword: 'short' },
+      { newPassword: 'reset-pass-6', confirmPassword: 'reset-pass-7' },
+    ]) {
+      const rejected = await postForm(
+        app,
+        `/admin/ui/accounts/${account.id}/reset-password`,
+        fields,
+        cookie,
+      );
+      expect(rejected.status).toBe(400);
+    }
+    expect(
+      db.get<{ password_version: number; must_change_password: number }>(
+        'SELECT password_version, must_change_password FROM accounts WHERE id = ?',
+        [account.id],
+      ),
+    ).toMatchObject({ password_version: versionBefore, must_change_password: 0 });
+
+    // 重置成功：303 回详情页，版本 +1、重新置首登改密、既有会话全吊销。
+    const reset = await postForm(
+      app,
+      `/admin/ui/accounts/${account.id}/reset-password`,
+      { newPassword: 'reset-pass-6', confirmPassword: 'reset-pass-6' },
+      cookie,
+    );
+    expect(reset.status).toBe(303);
+    expect(reset.headers.get('location')).toBe(`/admin/accounts/${account.id}`);
+    expect(
+      db.get<{ password_version: number; must_change_password: number }>(
+        'SELECT password_version, must_change_password FROM accounts WHERE id = ?',
+        [account.id],
+      ),
+    ).toMatchObject({ password_version: versionBefore + 1, must_change_password: 1 });
+    // 该账号此时有两段已吊销会话（首登改密 + 本次重置）：按 reason 精确断言。
+    expect(
+      db.get<{ revoked_reason: string }>(
+        'SELECT revoked_reason FROM auth_sessions WHERE account_id = ? AND revoked_reason = ?',
+        [account.id, 'admin_password_reset'],
+      ),
+    ).toMatchObject({ revoked_reason: 'admin_password_reset' });
+
+    // 用户旧密码（含自己改的那版）401；临时密码登录 200 且被要求再改密。
+    expect((await loginAccount(app, '13800000678', 'user-own-pass-6')).status).toBe(401);
+    expect((await loginAccount(app, '13800000678', 'initial-pass-6')).status).toBe(401);
+    const relogin = await loginAccount(app, '13800000678', 'reset-pass-6');
+    expect(relogin.status).toBe(200);
+    expect(relogin.body.account).toMatchObject({ mustChangePassword: true });
+  });
+
   it('shows the measured media pool balance via a signed /profile proxy and warns below the threshold', async () => {
     const mock = profileUpstream({ money: '320.50' });
     const tbLow = await startTestBackend({ fetch: mock.fetch, config: { adminLoginThrottleUnitMs: 1 } });
@@ -335,6 +473,13 @@ describe('admin console SSR pages', () => {
       .count;
     const ledgerBefore = db.get<{ count: number }>('SELECT COUNT(*) AS count FROM ledger_entries', [])!
       .count;
+    const accountBefore = db.get<{
+      password_version: number;
+      must_change_password: number;
+      admin_note: string;
+    }>('SELECT password_version, must_change_password, admin_note FROM accounts WHERE id = ?', [
+      account.id,
+    ])!;
 
     // 登录页不泄露任何账号数据。
     const anonymous = await (await getHtml(app, '/admin')).text();
@@ -350,6 +495,8 @@ describe('admin console SSR pages', () => {
       [`/admin/ui/accounts/${account.id}/status`, { status: 'disabled' }],
       [`/admin/ui/accounts/${account.id}/topup`, { amountYuan: '500', note: 'x' }],
       [`/admin/ui/accounts/${account.id}/adjust`, { delta: '10', note: 'x' }],
+      [`/admin/ui/accounts/${account.id}/note`, { note: 'x' }],
+      [`/admin/ui/accounts/${account.id}/reset-password`, { newPassword: 'blocked-pass', confirmPassword: 'blocked-pass' }],
     ] as const) {
       const blocked = await postForm(app, path, { ...fields });
       expect(blocked.status).toBe(303);
@@ -361,6 +508,19 @@ describe('admin console SSR pages', () => {
     expect(db.get<{ count: number }>('SELECT COUNT(*) AS count FROM ledger_entries', [])!.count).toBe(
       ledgerBefore,
     );
+    // 零写入到字段级：被拦截的 note / reset-password POST 不改备注、不动密码族字段、不吊销/新建会话。
+    expect(
+      db.get<{ password_version: number; must_change_password: number; admin_note: string }>(
+        'SELECT password_version, must_change_password, admin_note FROM accounts WHERE id = ?',
+        [account.id],
+      ),
+    ).toEqual(accountBefore);
+    expect(
+      db.get<{ count: number }>(
+        'SELECT COUNT(*) AS count FROM auth_sessions WHERE account_id = ?',
+        [account.id],
+      )!.count,
+    ).toBe(0);
 
     // 用户 access token（客户端 audience）塞进运营 cookie 不构成会话。
     const userLogin = await loginAccount(app, '13800000999', 'initial-pass-9');

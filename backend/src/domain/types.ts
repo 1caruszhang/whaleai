@@ -13,6 +13,8 @@ export interface AccountRow {
   updated_at: string;
   /** 对话隐藏额度累计（千分之一点，票 04）；topup 入账时清零。 */
   chat_quota_used_milli: number;
+  /** 运营备注（账号归属标识，0009）；仅 /admin 读写，不进用户投影。 */
+  admin_note: string;
 }
 
 export interface AuthSessionRow {

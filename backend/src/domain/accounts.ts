@@ -31,6 +31,7 @@ export interface AdminAccountListItem {
   balance: number;
   mustChangePassword: boolean;
   createdAt: string;
+  adminNote: string;
 }
 
 /** 运营列表视图：最新建号在前，内测期量级小，单页上限由调用方定。 */
@@ -43,8 +44,9 @@ export function listAccounts(db: SqlClient, limit: number): AdminAccountListItem
       balance: number;
       must_change_password: number;
       created_at: string;
+      admin_note: string;
     }>(
-      'SELECT id, phone, status, balance, must_change_password, created_at FROM accounts ORDER BY created_at DESC, id DESC LIMIT ?',
+      'SELECT id, phone, status, balance, must_change_password, created_at, admin_note FROM accounts ORDER BY created_at DESC, id DESC LIMIT ?',
       [limit],
     )
     .map(row => ({
@@ -54,6 +56,7 @@ export function listAccounts(db: SqlClient, limit: number): AdminAccountListItem
       balance: row.balance,
       mustChangePassword: row.must_change_password === 1,
       createdAt: row.created_at,
+      adminNote: row.admin_note,
     }));
 }
 
@@ -80,6 +83,21 @@ export function setAccountStatus(
   const updated = findAccountById(deps.db, accountId);
   if (!updated) throw new AppError('internal_error', '状态更新后读不到账号行。', 500);
   return updated;
+}
+
+/** 运营备注：账号归属标识的设置/清除（空串即清除），不动其余任何字段。 */
+export function setAccountNote(deps: BackendDeps, accountId: string, note: string): void {
+  const account = findAccountById(deps.db, accountId);
+  if (!account) throw new AppError('account_not_found', '账号不存在。', 404);
+  const nowIso = new Date(deps.now()).toISOString();
+  deps.db.run('UPDATE accounts SET admin_note = ?, updated_at = ? WHERE id = ?', [
+    note,
+    nowIso,
+    accountId,
+  ]);
+  if (!findAccountById(deps.db, accountId)) {
+    throw new AppError('internal_error', '备注更新后读不到账号行。', 500);
+  }
 }
 
 /** 对外账号投影：密码哈希/版本等内部字段不出领域层。 */
@@ -175,4 +193,33 @@ export function changeAccountPassword(
   const updated = findAccountById(deps.db, accountId);
   if (!updated) throw new AppError('internal_error', '改密后读不到账号行。', 500);
   return { account: updated, session: startSession(deps, accountId) };
+}
+
+/**
+ * 运营重置密码：不校验旧密码（运营本就不持有），也不做新旧相同检查
+ * （那等于给运营一个试探用户当前密码的预言机）。与用户自助改密同参地
+ * 换哈希、password_version+1（旧 JWT 的 pv 失配即拒绝）、吊销全部会话；
+ * 区别在于置 must_change_password=1——复用建号即有的「下次登录强制改密」
+ * 语义，运营告知的临时密码用一次即换。运营侧不签发用户会话。
+ */
+export function adminResetAccountPassword(
+  deps: BackendDeps,
+  accountId: string,
+  newPassword: string,
+): void {
+  const account = findAccountById(deps.db, accountId);
+  if (!account) throw new AppError('account_not_found', '账号不存在。', 404);
+  const nowIso = new Date(deps.now()).toISOString();
+  deps.db.transaction(() => {
+    deps.db.run(
+      `UPDATE accounts
+       SET password_hash = ?, password_version = password_version + 1, must_change_password = 1, updated_at = ?
+       WHERE id = ?`,
+      [hashPassword(newPassword), nowIso, accountId],
+    );
+    revokeAccountSessions(deps, accountId, 'admin_password_reset');
+  });
+  if (!findAccountById(deps.db, accountId)) {
+    throw new AppError('internal_error', '重置密码后读不到账号行。', 500);
+  }
 }

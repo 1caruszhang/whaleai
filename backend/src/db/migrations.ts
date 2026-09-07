@@ -234,6 +234,15 @@ export const MIGRATIONS: readonly Migration[] = [
       DROP INDEX idx_billing_permits_account_status;
     `,
   },
+  {
+    // 运营备注：运营台给账号挂的内部标识（「这是谁的号」），只经 /admin
+    // 读写，不进面向终端用户的 accountProjection。与账本 note、订单
+    // remark 语义互不相干，故独立命名 admin_note。
+    name: '0009_accounts_admin_note',
+    sql: `
+      ALTER TABLE accounts ADD COLUMN admin_note TEXT NOT NULL DEFAULT '';
+    `,
+  },
 ];
 
 /** 建表只经本 runner：幂等、每条迁移独立事务、记录进 schema_migrations。 */
