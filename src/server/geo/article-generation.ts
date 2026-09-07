@@ -11,6 +11,7 @@ import {
   buildDirectTitleMessages,
   buildRankingDimensionMessages,
   combineArticleReview,
+  contentPromptVersionAtLeast,
   dealNarrativeSeeds,
   deterministicArticleReview,
   parseArticleReflection,
@@ -690,13 +691,14 @@ export class ArticleGenerationService {
           imageQuota,
         );
       const blockingIssuesOf = (candidate: string) =>
-        deterministicArticleReview(
-          candidate,
-          context.article.plannedFacts,
-          context.article.contentType,
-          context.brandName,
-          rankingDimensions ?? context.article.rankingDimensions ?? undefined,
-        ).filter((issue) => issue.severity === "blocking");
+        deterministicArticleReview({
+          body: candidate,
+          facts: context.article.plannedFacts,
+          contentType: context.article.contentType,
+          workspaceBrandName: context.brandName,
+          expectedRankingDimensions:
+            rankingDimensions ?? context.article.rankingDimensions ?? undefined,
+        }).filter((issue) => issue.severity === "blocking");
       let body = deterministicallyRepaired(parsed);
       let blocking = blockingIssuesOf(body);
       let repairUsed = false;
@@ -917,19 +919,23 @@ export class ArticleGenerationService {
   }): Promise<ArticleProjection> {
     this.assertIdentity(input);
     const { context, body } = await this.persistence.claimReview(input);
-    const deterministic = deterministicArticleReview(
-      body.body,
-      context.article.plannedFacts,
-      context.article.contentType,
-      context.brandName,
+    const deterministic = deterministicArticleReview({
+      body: body.body,
+      facts: context.article.plannedFacts,
+      contentType: context.article.contentType,
+      workspaceBrandName: context.brandName,
       // 注入清单随文落库（ADR-0009 Decision 2）：批准门对照清单复检；
       // 存量稿无清单时门内回退与第一家集合比对。
-      context.article.rankingDimensions ?? undefined,
-      // 指称序豁免（用户裁决 2026-09-03）：品牌指称序规则（首次全称、
-      // 其后简称）不追诉 v8 及更早生成的存量稿；新生成稿已在生成期
-      // 管线（含一次有界修复 pass）执行过本检查。
-      { brandNameOrderEnforced: false },
-    );
+      expectedRankingDimensions:
+        context.article.rankingDimensions ?? undefined,
+      // 指称序豁免（用户裁决 2026-09-03）：只豁免 v8 及更早的存量稿，不
+      // 追诉旧稿形态；v9 起（指称序落地版本）照常复检——人工编辑路径
+      // 不走生成期管线，批准门是指称序在人工路径上的唯一防线。
+      brandNameOrderEnforced: contentPromptVersionAtLeast(
+        context.article.currentVersion?.review?.policyVersion,
+        9,
+      ),
+    });
     // 用户裁定（2026-08-18）：审核先只做格式确定性检查，反思 LLM 审核暂停
     // （省一次 LLM 调用与等待；恢复时改回 REFLECTION_REVIEW_ENABLED=true）。
     if (!REFLECTION_REVIEW_ENABLED) {

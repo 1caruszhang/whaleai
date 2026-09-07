@@ -240,13 +240,13 @@ describe("ranking roster projection（自 articleGeneration.test.ts 原样搬移
       ].flatMap((name, index) => section(`## ${index + 1}. ${name}`)),
     ].join("\n");
     expect(
-      deterministicArticleReview(
-        shortHeadingBody,
-        rankingFacts,
-        "ranking",
-        "工作区名称",
-        dimensions,
-      ).filter((issue) => issue.severity === "blocking"),
+      deterministicArticleReview({
+        body: shortHeadingBody,
+        facts: rankingFacts,
+        contentType: "ranking",
+        workspaceBrandName: "工作区名称",
+        expectedRankingDimensions: dimensions
+      }).filter((issue) => issue.severity === "blocking"),
     ).toEqual([]);
   });
 

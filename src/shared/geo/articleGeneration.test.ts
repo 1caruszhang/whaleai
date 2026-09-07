@@ -16,6 +16,7 @@ import {
   buildArticleRepairMessages,
   buildRankingDimensionMessages,
   combineArticleReview,
+  contentPromptVersionAtLeast,
   dealNarrativeSeeds,
   deterministicArticleReview,
   parseArticleReflection,
@@ -42,6 +43,25 @@ describe("article generation contract pin（ADR-0012 三方裁判）", () => {
     );
     expect(articleGenerationContract.maxBodyBytes.bytes).toBe(
       ARTICLE_BODY_MAX_BYTES,
+    );
+  });
+
+  it("contentPromptVersionAtLeast 按尾部数字判序，解不出按存量稿", () => {
+    // 人工路径豁免的判定基础：v9 起指称序追诉，v8 及更早/异名串豁免。
+    expect(contentPromptVersionAtLeast("xiaojing-content-prompt-v9", 9)).toBe(
+      true,
+    );
+    expect(contentPromptVersionAtLeast("xiaojing-content-prompt-v10", 9)).toBe(
+      true,
+    );
+    expect(contentPromptVersionAtLeast("xiaojing-content-prompt-v8", 9)).toBe(
+      false,
+    );
+    expect(contentPromptVersionAtLeast("js-ai-dev-article-v2", 9)).toBe(false);
+    expect(contentPromptVersionAtLeast(null, 9)).toBe(false);
+    expect(contentPromptVersionAtLeast(undefined, 9)).toBe(false);
+    expect(contentPromptVersionAtLeast("xiaojing-content-prompt", 9)).toBe(
+      false,
     );
   });
 });
@@ -353,12 +373,12 @@ describe("material-image placeholder cross-process contract (ADR-0008 T4)", () =
         parseGeneratedArticleBody(contractCase.body, requestedTitle),
       ).toThrow(contractCase.expectedParseError);
     }
-    const placeholderBlocking = deterministicArticleReview(
-      contractCase.body,
-      [],
-      "guide",
-      "",
-    ).filter(
+    const placeholderBlocking = deterministicArticleReview({
+      body: contractCase.body,
+      facts: [],
+      contentType: "guide",
+      workspaceBrandName: ""
+    }).filter(
       (issue) =>
         issue.severity === "blocking" &&
         /material-image|配图|未解析占位符/.test(issue.message),
@@ -512,7 +532,7 @@ describe("brand mention auto-bolding (ADR-0009)", () => {
       brandFacts,
     );
     expect(
-      deterministicArticleReview(body, brandFacts, "guide").filter(
+      deterministicArticleReview({ body, facts: brandFacts, contentType: "guide" }).filter(
         (issue) => issue.category === "output-contract",
       ),
     ).toEqual([]);
@@ -531,7 +551,7 @@ describe("brand mention auto-bolding (ADR-0009)", () => {
       "- 图片说明见上",
     ].join("\n");
     expect(
-      deterministicArticleReview(body, brandFacts, "guide").filter(
+      deterministicArticleReview({ body, facts: brandFacts, contentType: "guide" }).filter(
         (issue) => issue.category === "output-contract",
       ),
     ).toEqual([]);
@@ -568,6 +588,23 @@ describe("list-item label auto-bolding（用户裁决 2026-09-04）", () => {
   it("skips stop-word-led narrative items in space form", () => {
     const body = ["- 我们 先看预算再看工艺。", "- 首先 明确需求。"].join("\n");
     expect(autoBoldListLabels(body)).toBe(body);
+  });
+
+  it("skips space-form tokens that merely start with a stop word", () => {
+    // 叙述句开头语义：停用词是起笔不是标签本体——「我们家」「首先来说」
+    // 整个 token 都是叙述的一部分，不因长度/成分合格而被误加粗。
+    const body = [
+      "- 我们家 附近就有门店，售后很方便。",
+      "- 首先来说 预算这件事。",
+    ].join("\n");
+    expect(autoBoldListLabels(body)).toBe(body);
+  });
+
+  it("still bolds colon-form labels that start with a stop word", () => {
+    // 冒号型不经停用词闸（冒号本身已是高置信标签信号）。
+    expect(autoBoldListLabels("- 建议：优先看质保年限。")).toBe(
+      "- **建议**：优先看质保年限。",
+    );
   });
 
   it("skips pure-number labels and sentence-like long labels", () => {
@@ -786,13 +823,13 @@ describe("ranking dimension skeleton (ADR-0009 Decision 2)", () => {
       ),
     ].join("\n");
     expect(
-      deterministicArticleReview(
-        orderDriftBody,
-        rankingFacts,
-        "ranking",
-        "目标品牌",
-        DIMENSIONS,
-      ).filter((issue) => issue.severity === "blocking"),
+      deterministicArticleReview({
+        body: orderDriftBody,
+        facts: rankingFacts,
+        contentType: "ranking",
+        workspaceBrandName: "目标品牌",
+        expectedRankingDimensions: DIMENSIONS
+      }).filter((issue) => issue.severity === "blocking"),
     ).toEqual([]);
 
     // 一家把「选择要点」换成了清单外维度：集合不等，拦截。
@@ -809,13 +846,13 @@ describe("ranking dimension skeleton (ADR-0009 Decision 2)", () => {
       ),
     ].join("\n");
     expect(
-      deterministicArticleReview(
-        swappedBody,
-        rankingFacts,
-        "ranking",
-        "目标品牌",
-        DIMENSIONS,
-      ),
+      deterministicArticleReview({
+        body: swappedBody,
+        facts: rankingFacts,
+        contentType: "ranking",
+        workspaceBrandName: "目标品牌",
+        expectedRankingDimensions: DIMENSIONS
+      }),
     ).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
@@ -842,13 +879,13 @@ describe("ranking dimension skeleton (ADR-0009 Decision 2)", () => {
       ),
     ].join("\n");
     expect(
-      deterministicArticleReview(
-        offSkeletonBody,
-        rankingFacts,
-        "ranking",
-        "目标品牌",
-        DIMENSIONS,
-      ),
+      deterministicArticleReview({
+        body: offSkeletonBody,
+        facts: rankingFacts,
+        contentType: "ranking",
+        workspaceBrandName: "目标品牌",
+        expectedRankingDimensions: DIMENSIONS
+      }),
     ).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
@@ -859,12 +896,12 @@ describe("ranking dimension skeleton (ADR-0009 Decision 2)", () => {
     );
     // 同一偏离清单的存量稿无注入清单时回退与第一家比对：六家一致即过。
     expect(
-      deterministicArticleReview(
-        offSkeletonBody,
-        rankingFacts,
-        "ranking",
-        "目标品牌",
-      ).filter((issue) => issue.severity === "blocking"),
+      deterministicArticleReview({
+        body: offSkeletonBody,
+        facts: rankingFacts,
+        contentType: "ranking",
+        workspaceBrandName: "目标品牌"
+      }).filter((issue) => issue.severity === "blocking"),
     ).toEqual([]);
   });
 });
@@ -886,10 +923,10 @@ describe("article review gate", () => {
 
   it("blocks unsupported hard claims, advertising risks and weak citability", () => {
     expect(
-      deterministicArticleReview(
-        "# 标题\n正文宣称服务100家客户，是行业第一。",
-        facts,
-      ).map((issue) => issue.category),
+      deterministicArticleReview({
+        body: "# 标题\n正文宣称服务100家客户，是行业第一。",
+        facts
+      }).map((issue) => issue.category),
     ).toEqual(
       expect.arrayContaining([
         "fact-consistency",
@@ -897,7 +934,7 @@ describe("article review gate", () => {
         "geo-citability",
       ]),
     );
-    expect(deterministicArticleReview(structuredBody, facts)).toEqual([]);
+    expect(deterministicArticleReview({ body: structuredBody, facts })).toEqual([]);
   });
 
   it("grounds labelled prose claims on fact values instead of the whole phrase", () => {
@@ -910,7 +947,7 @@ describe("article review gate", () => {
       "## 口碑",
       "- 客户认可。",
     ].join("\n");
-    expect(deterministicArticleReview(prose, facts)).toEqual([]);
+    expect(deterministicArticleReview({ body: prose, facts })).toEqual([]);
   });
 
   it("still blocks fabricated achievements the fact base cannot support", () => {
@@ -920,7 +957,7 @@ describe("article review gate", () => {
       "- 荣获国家级科技进步奖认证。",
       "- 服务500家客户。",
     ].join("\n");
-    const messages = deterministicArticleReview(prose, facts).map(
+    const messages = deterministicArticleReview({ body: prose, facts }).map(
       (issue) => issue.message,
     );
     expect(messages).toEqual(
@@ -946,13 +983,13 @@ describe("article review gate", () => {
       "覆盖多类团餐场景。",
     ].join("\n");
     expect(
-      deterministicArticleReview(checkmarkBody, facts, "showcase").filter(
+      deterministicArticleReview({ body: checkmarkBody, facts, contentType: "showcase" }).filter(
         (issue) => issue.severity === "blocking",
       ),
     ).toEqual([]);
 
     const proseOnlyBody = checkmarkBody.replace(/✅ /g, "");
-    expect(deterministicArticleReview(proseOnlyBody, facts, "showcase")).toEqual(
+    expect(deterministicArticleReview({ body: proseOnlyBody, facts, contentType: "showcase" })).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
           severity: "blocking",
@@ -963,7 +1000,7 @@ describe("article review gate", () => {
   });
 
   it("enforces the js_ai six-entry parallel ranking structure deterministically", () => {
-    expect(deterministicArticleReview(structuredBody, facts, "ranking")).toEqual(
+    expect(deterministicArticleReview({ body: structuredBody, facts, contentType: "ranking" })).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
           category: "geo-citability",
@@ -1009,12 +1046,12 @@ describe("article review gate", () => {
       "竞品丁",
     ]);
     expect(
-      deterministicArticleReview(
-        valid,
-        rankingFacts,
-        "ranking",
-        "目标品牌",
-      ).filter((issue) => issue.severity === "blocking"),
+      deterministicArticleReview({
+        body: valid,
+        facts: rankingFacts,
+        contentType: "ranking",
+        workspaceBrandName: "目标品牌"
+      }).filter((issue) => issue.severity === "blocking"),
     ).toEqual([]);
 
     // 回归（2026-08-31 契约切换）：旧契约（• **维度名**）落库的存量
@@ -1025,12 +1062,12 @@ describe("article review gate", () => {
       .map((line) => line.replace(/^- /, "• "))
       .join("\n");
     expect(
-      deterministicArticleReview(
-        legacyBullets,
-        rankingFacts,
-        "ranking",
-        "目标品牌",
-      ).filter((issue) => issue.severity === "blocking"),
+      deterministicArticleReview({
+        body: legacyBullets,
+        facts: rankingFacts,
+        contentType: "ranking",
+        workspaceBrandName: "目标品牌"
+      }).filter((issue) => issue.severity === "blocking"),
     ).toEqual([]);
 
     const invalid = body([
@@ -1042,7 +1079,7 @@ describe("article review gate", () => {
       "目标品牌产品",
     ]);
     expect(
-      deterministicArticleReview(invalid, rankingFacts, "ranking", "目标品牌"),
+      deterministicArticleReview({ body: invalid, facts: rankingFacts, contentType: "ranking", workspaceBrandName: "目标品牌" }),
     ).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
@@ -1062,12 +1099,12 @@ describe("article review gate", () => {
       "竞品戊",
     ]);
     expect(
-      deterministicArticleReview(
-        targetNotFirst,
-        rankingFacts,
-        "ranking",
-        "目标品牌",
-      ),
+      deterministicArticleReview({
+        body: targetNotFirst,
+        facts: rankingFacts,
+        contentType: "ranking",
+        workspaceBrandName: "目标品牌"
+      }),
     ).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
@@ -1249,7 +1286,7 @@ describe("deterministic format-contract additions", () => {
   ].join("\n");
 
   it("accepts a guide body that satisfies the format contract", () => {
-    const issues = deterministicArticleReview(cleanGuide, identityFacts, "guide");
+    const issues = deterministicArticleReview({ body: cleanGuide, facts: identityFacts, contentType: "guide" });
     expect(issues.filter((issue) => issue.severity === "blocking")).toEqual([]);
   });
 
@@ -1258,7 +1295,7 @@ describe("deterministic format-contract additions", () => {
       "**锦江区鲸鱼汽车音响经营部**师傅经验扎实。",
       "锦江区鲸鱼汽车音响经营部的师傅经验扎实。",
     );
-    const issues = deterministicArticleReview(body, identityFacts, "guide");
+    const issues = deterministicArticleReview({ body, facts: identityFacts, contentType: "guide" });
     expect(
       issues.some((issue) => issue.message.includes("必须逐字使用并加粗")),
     ).toBe(true);
@@ -1269,13 +1306,13 @@ describe("deterministic format-contract additions", () => {
       "开篇段落。一句话。",
       "第一句。第二句。第三句。第四句。",
     );
-    const issues = deterministicArticleReview(body, identityFacts, "guide");
+    const issues = deterministicArticleReview({ body, facts: identityFacts, contentType: "guide" });
     expect(issues.some((issue) => issue.severity === "blocking")).toBe(false);
   });
 
   it("enforces the per-type minimum H2 count", () => {
     const twoH2 = cleanGuide.replace("## 售后与保障", "售后说明");
-    const issues = deterministicArticleReview(twoH2, identityFacts, "guide");
+    const issues = deterministicArticleReview({ body: twoH2, facts: identityFacts, contentType: "guide" });
     expect(
       issues.some((issue) =>
         issue.message.includes("guide 类型至少需要 3 个 H2"),
@@ -1316,7 +1353,7 @@ describe("brand name mention order（用户裁决 2026-09-03：首次全称、�
     facts: readonly (typeof orderFacts)[number][] = orderFacts,
     options?: { brandNameOrderEnforced?: boolean },
   ) =>
-    deterministicArticleReview(body, facts, "guide", "", undefined, options)
+    deterministicArticleReview({ body, facts, contentType: "guide", workspaceBrandName: "", ...options })
       .filter((issue) => issue.message.includes("品牌指称序违约"));
 
   it("blocks when a short name appears before the full name", () => {

@@ -9,6 +9,9 @@ use std::io::Write;
 /// 内容策略版本戳（裁判：`src/shared/geo/articleGenerationContract.json`，
 /// ADR-0012 双侧 pin）：只钉当前值等值，落库的旧版本串是数据不是契约。
 const POLICY_VERSION: &str = "xiaojing-content-prompt-v10";
+/// 单批文章数与单篇正文字节上限（同一裁判 JSON）。MAX_BODY_BYTES 在
+/// publish_scheduler.rs 另有一份，两处常量都各自 pin 该裁判——改值需
+/// JSON、TS 与 Rust 两处共四处齐动。
 const MAX_ARTICLES: usize = 20;
 const MAX_BODY_BYTES: usize = 256 * 1024;
 

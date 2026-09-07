@@ -321,24 +321,6 @@ export function resolveBrandName(
   );
 }
 
-/**
- * ranking 陈列位 1 指称裁决（用户裁决 2026-09-03）：简称优先——陈列位 1
- * 的小节标题与篇内指称用已确认简称（展示位省字数，与标题简称优先同哲学；
- * 全称留在首段全称/简称关系句，若该约定启用）。无已确认简称回退全称，
- * 身份事实都没有才回退 workspace 名。正文注入的「品牌：」行仍用
- * resolveBrandName（全称优先），两者分工不同，勿混用。
- */
-export function resolveRankingTargetBrand(
-  profile: BrandProfile,
-  workspaceName: string,
-): string {
-  return (
-    firstProfileValue(profile, "shortNames") ??
-    firstProfileValue(profile, "fullName") ??
-    workspaceName
-  );
-}
-
 /** 挖词阶段的业务画像块：只喂业务信号，不给品牌名（ADR-0028 禁品牌名不变量）。 */
 export function renderMiningProfileBlock(profile: BrandProfile): string {
   const lines: string[] = [];

@@ -29,6 +29,19 @@ import {
  * pin）：只钉当前值等值，落库的旧版本串是数据不是契约。 */
 export const ARTICLE_GENERATION_POLICY_VERSION =
   "xiaojing-content-prompt-v10";
+
+/**
+ * 内容策略版本序比较（命名形如 xiaojing-content-prompt-vN，只解尾部
+ * 数字）：人工路径按落库的 policyVersion 判断新规则是否追诉——解不出
+ * （更早的异名版本串或缺失）按存量稿处理，不追诉。
+ */
+export function contentPromptVersionAtLeast(
+  version: string | null | undefined,
+  minimum: number,
+): boolean {
+  const match = /-v(\d+)$/.exec(version ?? "");
+  return match !== null && Number(match[1]) >= minimum;
+}
 export const ARTICLE_GENERATION_CONCURRENCY =
   GEO_PORT_CONTRACT.concurrency.perArticleLifecycle.limit;
 /** 单批文章数与单篇正文字节上限（裁判：articleGenerationContract.json）。 */
@@ -180,6 +193,14 @@ const CONTENT_TYPE_LABELS: Record<GeoContentType, string> = {
 };
 
 /**
+ * 五类统一收束纪律（用户裁决 2026-09-03 泛化）：全文以最后一个独立
+ * 小节收束、单独设「总结」小标题。guide/showcase/news_light 共用的字面
+ * 规则（ranking 有选型建议专属版、news 融进 5W1H 条目，各自内联）。
+ */
+const CLOSING_SECTION_RULE =
+  "全文以最后一个独立小节收束：单独设「总结」小标题，回扣主题、提示读者如何根据本文信息做下一步判断。";
+
+/**
  * 五类写作规范三段式（ADR-0006 §3「事实从紧、表达从宽」）：
  * 格式契约=确定性可校验的结构硬约束；表达参考=写作工艺（骨架非填空）；
  * 事实衔接=与事实纪律的边界。纯数据形态，便于未来抽为 md/yaml 资产。
@@ -197,7 +218,7 @@ const CONTENT_TYPE_CONTRACTS: Record<
       "以问题—答案、步骤或清单组织内容，正文至少 3 个 H2 小标题。",
       "小标题口语化、直击读者疑问，不使用书面腔。",
       "关键词与核心结论适度加粗（每屏至多 1–2 处）。",
-      "全文以最后一个独立小节收束：单独设「总结」小标题，回扣主题、提示读者如何根据本文信息做下一步判断。",
+      CLOSING_SECTION_RULE,
     ],
     expression: [
       "约 70% 干货（痛点科普、选型方法、可执行清单）+ 约 30% 品牌信息，品牌以「内行人」身份出现。",
@@ -213,7 +234,7 @@ const CONTENT_TYPE_CONTRACTS: Record<
     format: [
       "以品牌详情页方式组织：核心卖点、服务范围、服务流程、门店/适用场景等栏目，正文至少 3 个 H2。",
       "卖点用 ✅ 或列表逐条呈现，颗粒度一致。",
-      "全文以最后一个独立小节收束：单独设「总结」小标题，回扣主题、提示读者如何根据本文信息做下一步判断。",
+      CLOSING_SECTION_RULE,
     ],
     expression: [
       "结构化展示品牌全貌，语言具体可感——把每条卖点写成一个可验证的细节，而不是口号。",
@@ -270,7 +291,7 @@ const CONTENT_TYPE_CONTRACTS: Record<
       "倒金字塔 + 移动端短段落（每段不超过 3 句）。",
       "导语完整包含 5W1H 要素，详细细节后置。",
       "正文至少 2 个 H2 或清晰分节。",
-      "全文以最后一个独立小节收束：单独设「总结」小标题，回扣主题、提示读者如何根据本文信息做下一步判断。",
+      CLOSING_SECTION_RULE,
     ],
     expression: [
       "便民、服务升级或知识普及的轻新闻口吻，贴近日常表达。",
@@ -805,23 +826,32 @@ const BOLD_SPAN_RE = /\*\*[^*\n]+\*\*/g;
 const IMAGE_SYNTAX_RE = /!\[[^\]\n]*\]\([^)\n]*\)/g;
 const LINK_SYNTAX_RE = /\[[^\]\n]*\]\([^)\n]*\)/g;
 
-function lineBrandMentionBlindSpots(line: string): Array<[number, number]> {
+/**
+ * 图片语法与链接 URL 括号段的行内盲区（加粗门与指称序门共用同一套）：
+ * 图片 alt 不是正文指称；链接文本仍是指称面，只护 URL 括号段——
+ * match[0] 的最后一个 "(" 必是 URL 起始（URL 段不含 ")"，链接文本里的
+ * "(" 都在它之前）。
+ */
+function lineImageLinkBlindSpots(line: string): Array<[number, number]> {
   const spots: Array<[number, number]> = [];
-  for (const match of line.matchAll(BOLD_SPAN_RE)) {
-    const start = match.index ?? 0;
-    spots.push([start, start + match[0].length]);
-  }
   for (const match of line.matchAll(IMAGE_SYNTAX_RE)) {
     const start = match.index ?? 0;
     spots.push([start, start + match[0].length]);
   }
   for (const match of line.matchAll(LINK_SYNTAX_RE)) {
     const start = match.index ?? 0;
-    // 只护 URL 括号段：match[0] 的最后一个 "(" 必是 URL 起始（URL 段
-    // 不含 ")"，链接文本里的 "(" 都在它之前）。
     spots.push([start + match[0].lastIndexOf("("), start + match[0].length]);
   }
   return spots;
+}
+
+function lineBrandMentionBlindSpots(line: string): Array<[number, number]> {
+  const spots: Array<[number, number]> = [];
+  for (const match of line.matchAll(BOLD_SPAN_RE)) {
+    const start = match.index ?? 0;
+    spots.push([start, start + match[0].length]);
+  }
+  return [...spots, ...lineImageLinkBlindSpots(line)];
 }
 
 /**
@@ -845,34 +875,26 @@ function classifyBodyLines(
   });
 }
 
-/**
- * 指称序扫描的盲区间（用户裁决 2026-09-03）：与加粗门同一行分类、同一
- * 套图片/链接 URL 盲区，但不屏蔽加粗块——加粗是指称的合法排版，序判定
- * 必须能看到加粗块内的名字（加粗门反查「未加粗」时才把加粗块抹除）。
- */
-function lineMentionTextBlindSpots(line: string): Array<[number, number]> {
-  const spots: Array<[number, number]> = [];
-  for (const match of line.matchAll(IMAGE_SYNTAX_RE)) {
-    const start = match.index ?? 0;
-    spots.push([start, start + match[0].length]);
-  }
-  for (const match of line.matchAll(LINK_SYNTAX_RE)) {
-    const start = match.index ?? 0;
-    // 只护 URL 括号段（与 lineBrandMentionBlindSpots 同口径）：链接文本
-    // 仍是指称面，链接内品牌名参与序判定。
-    spots.push([start + match[0].lastIndexOf("("), start + match[0].length]);
-  }
-  return spots;
-}
-
 /** 可检正文的指称文本（序判定用）：标题行/围栏块剔除，图片与链接 URL 抹除。 */
 function reviewableBrandMentionText(body: string): string {
   return classifyBodyLines(body)
     .filter((entry) => entry.checkable)
     .map((entry) =>
-      removeSpans(entry.line, lineMentionTextBlindSpots(entry.line)),
+      removeSpans(entry.line, lineImageLinkBlindSpots(entry.line)),
     )
     .join("\n");
+}
+
+/**
+ * 长名优先的去重名单（自动加粗与指称序命中共用同一形状）：简称是全称
+ * 子串时全称整体命中，内部不再重复计简称。
+ */
+function uniqueNamesLongestFirst(names: readonly string[]): string[] {
+  return [
+    ...new Set(
+      names.map((name) => name.trim()).filter((name) => name.length >= 2),
+    ),
+  ].sort((left, right) => right.length - left.length);
 }
 
 /**
@@ -884,11 +906,7 @@ function orderedBrandNameOccurrences(
   text: string,
   names: readonly string[],
 ): Array<{ name: string; index: number }> {
-  const ordered = [
-    ...new Set(
-      names.map((name) => name.trim()).filter((name) => name.length >= 2),
-    ),
-  ].sort((left, right) => right.length - left.length);
+  const ordered = uniqueNamesLongestFirst(names);
   const occurrences: Array<{ name: string; index: number }> = [];
   let cursor = 0;
   while (cursor < text.length) {
@@ -935,11 +953,11 @@ export function autoBoldBrandMentions(
   facts: readonly TopicPlanKnowledgeFact[],
 ): string {
   const profile = projectBrandProfile(facts);
-  const names = [...(profile.fullName ?? []), ...(profile.shortNames ?? [])]
-    .map((name) => name.trim())
-    .filter((name) => name.length >= 2);
-  if (names.length === 0) return body;
-  const ordered = [...new Set(names)].sort((a, b) => b.length - a.length);
+  const ordered = uniqueNamesLongestFirst([
+    ...(profile.fullName ?? []),
+    ...(profile.shortNames ?? []),
+  ]);
+  if (ordered.length === 0) return body;
   let result = body;
   for (const name of ordered) {
     result = boldNameOutsideBlindSpots(result, name);
@@ -1040,24 +1058,46 @@ function isBoldableListLabel(label: string, spaceForm: boolean): boolean {
   if (LIST_LABEL_FORBIDDEN_CHAR_RE.test(label)) return false;
   if (/^[\d\s]+$/.test(label) || /^[A-Za-z]+$/.test(label)) return false;
   if (/https?/i.test(label)) return false;
-  if (spaceForm && LIST_LABEL_STOP_WORDS.has(label)) return false;
+  // 叙述句开头语义（用户裁决 2026-09-04）：以停用词开头的 token（我们家/
+  // 首先来说类）是叙述起笔不是标签，整 token 不加粗；冒号型不经本闸。
+  if (
+    spaceForm &&
+    [...LIST_LABEL_STOP_WORDS].some((word) => label.startsWith(word))
+  ) {
+    return false;
+  }
   return true;
 }
 
-export function deterministicArticleReview(
-  body: string,
-  facts: readonly TopicPlanKnowledgeFact[],
-  contentType: GeoContentType = "guide",
-  workspaceBrandName = "",
-  expectedRankingDimensions?: readonly string[],
+/** 确定性审核输入（收敛为单一对象：参数不再随规则项增生）。 */
+export interface DeterministicArticleReviewInput {
+  body: string;
+  facts: readonly TopicPlanKnowledgeFact[];
+  contentType?: GeoContentType;
+  workspaceBrandName?: string;
+  /** 注入清单随文落库（ADR-0009 Decision 2）：有清单对照清单，存量稿
+   * 无清单时门内回退与第一家集合比对。 */
+  expectedRankingDimensions?: readonly string[];
   /**
    * 品牌指称序检查开关（用户裁决 2026-09-03）：缺省强制执行（fail-closed）。
-   * 人工批准路径对存量稿传 `brandNameOrderEnforced: false` 豁免——v8 及更早
-   * 生成的稿子形态不受新规则追诉；新生成稿已在生成期管线（含一次有界
-   * 修复 pass）执行过本检查。
+   * 人工批准路径只对 v8 及更早的存量稿传 `false` 豁免——新规则不追诉旧稿
+   * 形态；v9 起的稿子照常复检（人工编辑不走生成期管线，本门是指称序在
+   * 人工路径上的唯一防线）。
    */
-  options: { brandNameOrderEnforced?: boolean } = {},
+  brandNameOrderEnforced?: boolean;
+}
+
+export function deterministicArticleReview(
+  input: DeterministicArticleReviewInput,
 ): ArticleReviewIssue[] {
+  const {
+    body,
+    facts,
+    contentType = "guide",
+    workspaceBrandName = "",
+    expectedRankingDimensions,
+    brandNameOrderEnforced,
+  } = input;
   const issues: ArticleReviewIssue[] = [];
   const reviewBody = stripLeadingH1(body);
   const factCorpus = facts.map((fact) =>
@@ -1143,7 +1183,7 @@ export function deterministicArticleReview(
   // 品牌指称序裁决（用户裁决 2026-09-03）：首次全称、其后钉第一个已确认
   // 简称，全文仅一次也用全称。门只校验两个机械点——首个指称不是全称、
   // 全称在首次之后复现；白名单内其他简称形态不拦（提示词纪律管得比门宽）。
-  if (options.brandNameOrderEnforced !== false) {
+  if (brandNameOrderEnforced !== false) {
     const fullName = firstProfileValue(profile, "fullName");
     const preferredShort = firstProfileValue(profile, "shortNames");
     if (fullName && preferredShort && fullName !== preferredShort) {
