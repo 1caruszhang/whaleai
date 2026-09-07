@@ -8,6 +8,7 @@ import { GEO_NEXT_STEP_GUIDES, quoteGeoNextStep } from './operation-progress';
 import {
   assessStageToolOrder,
   GEO_STAGE_ORDER_GATED_TOOLS,
+  GEO_STAGE_ORDER_UNGATED_TOOLS,
   type GeoStageOrderRejection,
 } from './stage-order-gate';
 
@@ -80,9 +81,10 @@ function outOfOrder(
 }
 
 describe('GEO_STAGE_ORDER_GATED_TOOLS scope', () => {
-  it('pins the gate to exactly the five consequential stage tools', () => {
-    // 只读查询（inspect_*）与材料类工具（request/import/retry_brand_material）
-    // 不在列：闸不拦「先重读操作状态」与计划外补材料。
+  it('derives the gate from the guides value domain minus the explicit two-tool ungated whitelist', () => {
+    // 派生钉（票 01，spec 2026-09-03）：被闸集 := GEO_NEXT_STEP_GUIDES 值域
+    // 工具集 − 显式白名单。此后 Guides 增工具（自动入闸）或白名单扩充
+    // （有意豁免）都会让本钉变红——闸覆盖面的变化永远是一次有意识的提交。
     expect([...GEO_STAGE_ORDER_GATED_TOOLS]).toEqual([
       'run_question_pool',
       'plan_topics',
@@ -90,6 +92,30 @@ describe('GEO_STAGE_ORDER_GATED_TOOLS scope', () => {
       'plan_distribution',
       'prepare_publish',
     ]);
+    expect([...GEO_STAGE_ORDER_UNGATED_TOOLS]).toEqual([
+      'request_brand_material',
+      'choose_next_round_knowledge',
+    ]);
+    // 派生完备性：Guides 值域的每个工具要么被闸、要么在白名单（没有
+    // 第三态），且两侧不相交——「被闸集∪白名单==Guides 值域」正是派生
+    // 关系本身，防止表被手改回双源而钉子仍绿。
+    const guidesTools = new Set(
+      Object.values(GEO_NEXT_STEP_GUIDES).map((guide) => guide.tool),
+    );
+    const ungated = GEO_STAGE_ORDER_UNGATED_TOOLS as readonly string[];
+    for (const tool of guidesTools) {
+      expect(
+        GEO_STAGE_ORDER_GATED_TOOLS.includes(tool) || ungated.includes(tool),
+      ).toBe(true);
+    }
+    expect(guidesTools.size).toBe(
+      GEO_STAGE_ORDER_GATED_TOOLS.length + GEO_STAGE_ORDER_UNGATED_TOOLS.length,
+    );
+    // 只读查询（inspect_*）与材料导入工具（import/retry_brand_material）
+    // 不在 Guides 值域、天然不闸：闸不拦「先重读操作状态」与计划外补材料。
+    for (const unguided of ['inspect_geo_operations', 'import_pasted_material', 'retry_brand_material']) {
+      expect(GEO_STAGE_ORDER_GATED_TOOLS.includes(unguided)).toBe(false);
+    }
   });
 });
 

@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 
+import distributionPlanContract from "./distributionPlanContract.json";
 import { GEO_PORT_CONTRACT } from "./portContract";
 import { buildUnambiguousDomains } from "./channelRecall";
 import {
+  DISTRIBUTION_PLAN_POLICY_VERSION,
   applyDistributionPlanEdit,
   assignDistributionChannels,
   buildDistributionCandidates,
@@ -1877,5 +1879,17 @@ describe("fallback recall sampling (2026-08-28 三轮用户裁决：召回层随
     expect(names.indexOf("垂媒甲")).toBe(10);
     expect(names.indexOf("垂媒乙")).toBe(11);
     expect(names.indexOf("GEO站0")).toBe(12);
+  });
+});
+
+// 分发计划版本戳契约（票 #41，ADR-0012）：与裁判 JSON 严格相等；
+// Rust 侧 distribution_plans.rs 的同文件测试 include_str! 同一裁判。
+// 这是全仓唯一兼任兼容闸的版本戳——Rust prepare 拒绝 policyVersion
+// 不符的 provider 快照，两侧漂移直接在 pin 测试红。
+describe("distributionPlan 契约（票 #41，ADR-0012）", () => {
+  it("DISTRIBUTION_PLAN_POLICY_VERSION 与 distributionPlanContract.json 裁判严格相等", () => {
+    expect(distributionPlanContract.policyVersion).toBe(
+      DISTRIBUTION_PLAN_POLICY_VERSION,
+    );
   });
 });

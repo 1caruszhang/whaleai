@@ -1,7 +1,7 @@
 /**
  * 合规文案注册表（票 11）：三份公示文件以 `docs/compliance/` 下的 markdown
- * 为唯一权威源，经 Vite `?raw` 在构建期内联为字符串——客户端展示与仓内
- * 文件天然同源，不存在第二份可漂移的文本。价目数字与
+ * 为唯一权威源，经 Vite `?raw` 在构建期内联为字符串——客户端展示即仓内
+ * 文件本身，不存在第二份可漂移的文本。价目数字与
  * `backend/src/domain/pricing.ts` 权威值的一致性由
  * `backend/tests/compliance-docs.test.ts` 对表校验兜底。
  */

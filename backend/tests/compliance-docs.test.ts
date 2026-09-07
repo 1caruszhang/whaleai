@@ -12,7 +12,10 @@ import { OPERATION_PRICES } from "../src/domain/pricing";
  *  - 《计费标准》docs/compliance/计费标准.md 的固定价目表必须与
  *    src/domain/pricing.ts 的权威 OPERATION_PRICES 逐项一致（基础费 + 单价），
  *    且操作集合不缺不多，防止公示文件与服务端价目两处漂移；
- *  - 发布订单折算示例必须与 publishOrderPoints 的实现一致；
+ *  - 发布订单公示口径为「一口价 + 确认门逐单公示」：折算实现钉在代码侧
+ *    （publishOrderPoints 行为断言）；公示文件全文禁「媒介费」，第三节
+ *    另禁加成比例/折算公式与示例/取整规则（充值锚点在手，任何成本侧数字
+ *    都会被反推出毛利；百分比等易误伤词只扫发布订单节，防全文误伤）；
  *  - 《隐私政策》必须覆盖决策票 13 的全部要点（存储位置/本地数据/注销删除）；
  *  - 《用户协议（2026 年正式版）》必须入仓且为定稿（法务复核后正式版，
  *    不再携带修订记录；修订工作单的溯源见 git 历史）。
@@ -46,6 +49,14 @@ function parsePublishedPrices(
   return rows;
 }
 
+/** 截取《计费标准》某节正文：自 `## <titlePrefix>` 标题起，至下一节标题前。 */
+function docSection(doc: string, titlePrefix: string): string {
+  const start = doc.indexOf(`## ${titlePrefix}`);
+  if (start < 0) throw new Error(`公示文件缺少章节「${titlePrefix}」`);
+  const next = doc.indexOf("\n## ", start);
+  return doc.slice(start, next < 0 ? doc.length : next);
+}
+
 describe("《计费标准》与网关服务端价目对表（票 11 验收项 2）", () => {
   it("固定价目表逐项与 OPERATION_PRICES 一致（基础费与单价）", () => {
     const published = parsePublishedPrices(pricingDoc);
@@ -74,13 +85,24 @@ describe("《计费标准》与网关服务端价目对表（票 11 验收项 2�
     // 调整时需同步公示文件（pricing.ts 头注释的调价纪律同样适用）。
   });
 
-  it("发布订单折算示例与 publishOrderPoints 实现一致（含 60% 服务费、向上取整）", () => {
+  it("发布订单公示口径为「一口价 + 确认门逐单公示」，不泄露成本侧定价", () => {
+    // 服务端折算实现的行为钉（内部代码口径，不上公示文件）：
     expect(publishOrderPoints(88_00)).toBe(1408);
     expect(publishOrderPoints(12_34)).toBe(198);
-    expect(pricingDoc).toContain("¥88.00 → 1408 点");
-    expect(pricingDoc).toContain("¥12.34 → 198 点");
-    expect(pricingDoc).toContain("60% 服务费");
-    expect(pricingDoc).toContain("向上取整");
+    // 公示只承诺一口价与逐单公示价，与《用户协议》5.3 同口径。
+    expect(pricingDoc).toContain("一口价");
+    expect(pricingDoc).toContain("发布确认门");
+    expect(pricingDoc).toContain("甲方不再另行收取");
+    // 防回归（全文）：媒介费是纯成本侧概念，出现在公示文件任何位置都是泄露。
+    expect(pricingDoc).not.toContain("媒介费");
+    // 防回归（限第三节）：百分比/公式/示例/取整只禁发布订单节——其它节日后
+    // 出现合法的百分比或金额（如命中率、退款示例）不应被全文扫描误伤。
+    const publishSection = docSection(pricingDoc, "三、");
+    expect(publishSection).not.toMatch(/60\s*%/);
+    expect(publishSection).not.toMatch(/1\.6/);
+    expect(publishSection).not.toContain("1408");
+    expect(publishSection).not.toContain("向上取整");
+    expect(publishSection).not.toContain("折算");
   });
 });
 

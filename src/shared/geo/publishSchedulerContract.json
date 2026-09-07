@@ -1,0 +1,46 @@
+{
+  "policyVersion": "js-ai-dev-deterministic-publish-v1",
+  "retryBackoffMs": {
+    "_comment": "自动重试 2 次、间隔 3 秒（产品语义 2026-09-01）：瞬时故障快速自愈，耗尽即落终态 failed-nonretryable 跳过，队列不再长时间等待退避；深度恢复交由用户驱动的「重新发布」按钮。重试语义变更不升 policyVersion（ADR-0012 Decision 2：版本只冻结「发布什么＋不可逆影响」）。",
+    "values": [3000, 3000]
+  },
+  "maxSafeRetries": 2,
+  "egressProviders": {
+    "_comment": "发布 egress 的 provider/endpointFamily 身份（票 08 网关 port 闭环）：objectStorage＝OSS 上传（经运营网关重签），distribution＝渠道下单（经网关 order API）。变更 provider 意味着对外承诺的链路变化，属用户可感知语义。",
+    "objectStorage": {
+      "provider": "aliyun-oss",
+      "endpointFamily": "gateway-oss-put"
+    },
+    "distribution": {
+      "provider": "超级媒介",
+      "endpointFamily": "gateway-order-api"
+    }
+  },
+  "executionStatuses": [
+    "awaiting-confirmation",
+    "confirmed",
+    "running",
+    "scheduled",
+    "partially-succeeded",
+    "succeeded",
+    "failed",
+    "reconciliation-required",
+    "superseded",
+    "cancelled"
+  ],
+  "itemStatuses": [
+    "pending",
+    "uploading",
+    "uploaded",
+    "submitting",
+    "submitted",
+    "failed-retryable",
+    "failed-nonretryable",
+    "reconciliation-required",
+    "cancelled"
+  ],
+  "publishOrderRefundStatuses": {
+    "_comment": "原路退点的上游订单状态（票 09 状态机）：已拒稿(2)、已取消(5)、已退款(7)——进入即订单点数退回余额。TS 谓词 publishOrderRefundsPoints（src/shared/geo/publishScheduler.ts）与网关 backend REFUND_STATUSES（backend/src/domain/publish-orders.ts）两处独立手写值的双源裁判（ADR-0012）：双侧 pin 断言严格相等，含顺序（升序）。",
+    "values": [2, 5, 7]
+  }
+}

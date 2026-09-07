@@ -1,50 +1,68 @@
-/** 预览载荷哈希公式的输入（Rust 侧同名 POLICY_VERSION 逐字同步）：钉的是
- * 「发布什么 + 不可逆影响」的冻结身份，不含执行循环的重试表——重试语义
- * 变更（如 2026-09-01 的 3s×2 停车）不升版本，否则存量执行的对账哈希
- * 全部失配。 */
+/** 预览载荷哈希公式的输入（裁判：publishSchedulerContract.json，ADR-0012
+ * 双侧 pin）：钉的是「发布什么 + 不可逆影响」的冻结身份，不含执行循环的
+ * 重试表——重试语义变更（如 2026-09-01 的 3s×2 停车）不升版本，否则存量
+ * 执行的对账哈希全部失配。 */
 export const PUBLISH_SCHEDULER_POLICY_VERSION =
   "js-ai-dev-deterministic-publish-v1";
 
-/** 自动重试 2 次、间隔 3 秒（与 Rust 侧 RETRY_BACKOFF_MS 同源契约）：
- * 耗尽即落终态 failed-nonretryable 跳过，深度恢复交由「重新发布」按钮。 */
+/** 自动重试 2 次、间隔 3 秒（产品语义与「不升版」红线记于契约 JSON 的
+ * `_comment`，见 publishSchedulerContract.json / ADR-0012）：耗尽即落终态
+ * failed-nonretryable 跳过，深度恢复交由「重新发布」按钮。 */
 export const PUBLISH_RETRY_BACKOFF_MS = [3_000, 3_000] as const;
 export const PUBLISH_MAX_SAFE_RETRIES = PUBLISH_RETRY_BACKOFF_MS.length;
 
-export type PublishExecutionStatus =
-  | "awaiting-confirmation"
-  | "confirmed"
-  | "running"
-  | "scheduled"
-  | "partially-succeeded"
-  | "succeeded"
-  | "failed"
-  | "superseded"
-  | "reconciliation-required"
-  | "cancelled";
+/** 发布执行状态全集（裁判：publishSchedulerContract.json，ADR-0012 双侧
+ * pin）；union type 由本表派生以保字面量收窄。 */
+export const PUBLISH_EXECUTION_STATUSES = [
+  "awaiting-confirmation",
+  "confirmed",
+  "running",
+  "scheduled",
+  "partially-succeeded",
+  "succeeded",
+  "failed",
+  "reconciliation-required",
+  "superseded",
+  "cancelled",
+] as const;
 
-export type PublishItemStatus =
-  | "pending"
-  | "uploading"
-  | "uploaded"
-  | "submitting"
-  | "submitted"
-  | "failed-retryable"
-  | "failed-nonretryable"
-  | "reconciliation-required"
-  | "cancelled";
+export type PublishExecutionStatus =
+  (typeof PUBLISH_EXECUTION_STATUSES)[number];
+
+/** 发布条目状态全集（裁判：publishSchedulerContract.json，ADR-0012 双侧
+ * pin）；union type 由本表派生以保字面量收窄。 */
+export const PUBLISH_ITEM_STATUSES = [
+  "pending",
+  "uploading",
+  "uploaded",
+  "submitting",
+  "submitted",
+  "failed-retryable",
+  "failed-nonretryable",
+  "reconciliation-required",
+  "cancelled",
+] as const;
+
+export type PublishItemStatus = (typeof PUBLISH_ITEM_STATUSES)[number];
+
+/** 发布 egress 身份（裁判：publishSchedulerContract.json egressProviders，ADR-0012 双侧 pin）。 */
+export const PUBLISH_EGRESS_OBJECT_STORAGE_PROVIDER = "aliyun-oss";
+export const PUBLISH_EGRESS_OBJECT_STORAGE_ENDPOINT_FAMILY = "gateway-oss-put";
+export const PUBLISH_EGRESS_DISTRIBUTION_PROVIDER = "超级媒介";
+export const PUBLISH_EGRESS_DISTRIBUTION_ENDPOINT_FAMILY = "gateway-order-api";
 
 export interface PublishProviderSnapshot {
   objectStorage: {
-    provider: "aliyun-oss";
+    provider: typeof PUBLISH_EGRESS_OBJECT_STORAGE_PROVIDER;
     /** 票 08 起：发布 egress 经运营网关（服务器侧重签），不再直连 OSS。 */
-    endpointFamily: "gateway-oss-put";
+    endpointFamily: typeof PUBLISH_EGRESS_OBJECT_STORAGE_ENDPOINT_FAMILY;
     configured: boolean;
     configurationFingerprint: string | null;
   };
   distribution: {
-    provider: "超级媒介";
+    provider: typeof PUBLISH_EGRESS_DISTRIBUTION_PROVIDER;
     /** 票 08 起：下单经网关 port（服务器定价 + 预扣冻结 + sn 幂等）。 */
-    endpointFamily: "gateway-order-api";
+    endpointFamily: typeof PUBLISH_EGRESS_DISTRIBUTION_ENDPOINT_FAMILY;
     configured: boolean;
     configurationFingerprint: string | null;
   };
@@ -210,7 +228,7 @@ export function publishExecutionCanStart(
 // ---------------------------------------------------------------------------
 
 /**
- * 上游渠道订单状态码（超级媒介契约，与后端 `publish-orders` 状态机同源）：
+ * 上游渠道订单状态码（超级媒介契约；后端 `publish-orders` 状态机消费同一份码表）：
  * 1 待处理、2 已拒稿、3 发布中、4 已发布、5 已取消、6 退款中、7 已退款、
  * 8 退款被拒、9 已关闭、10 补发中、11 已补发、12 已收录。
  */
@@ -248,7 +266,9 @@ export const PUBLISH_ORDER_STATUS_LABEL: Record<
 };
 
 /**
- * 是否为原路退点状态（后端 REFUND_STATUSES 同源）：已拒稿(2)、已取消(5)、
+ * 是否为原路退点状态（裁判：publishSchedulerContract.json 的
+ * publishOrderRefundStatuses，ADR-0012 双侧 pin；网关 backend 的
+ * REFUND_STATUSES 对同一裁判在 backend/tests 断言）：已拒稿(2)、已取消(5)、
  * 已退款(7)。进入这些状态时订单点数退回余额，UI 需联动余额刷新展示。
  * 未知状态码（上游契约外的漂移）不判定退点，按需人工核对。
  */

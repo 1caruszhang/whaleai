@@ -1,0 +1,21 @@
+{
+  "_comment": "媒介价（分）→ 点数公式的三侧裁判（票 #39，ADR-0012 Decision 2）。三处实现结构异构——shared points.ts 与网关 publishOrderPoints 用 Math.ceil，Rust publish_channel_price_points 用整数 (cents*4+24)/25——参数等值测不出算式结构漂移，cases 由三侧 pin 测试各自实跑兜底。cases 覆盖：0、最小非整除（1 分→1 点）、除法下界（6 分＝24/25 不进位）、整除边界（25 的倍数族：整数实现里 (a+24)/25 改 (a+25)/25 的变异只在此族上可测出）、非整除进位、三处文档共例（¥12.34 / ¥88.00 / ¥88.01 分位边界）、大额整除（¥1000）与大额上界（¥1000 万→1.6 亿点，恰为分发限额上界 maxDistributionSpendLimitPoints）。",
+  "formula": {
+    "_comment": "ceil(分 × multiplier / divisor)＝ceil(分 × 4 / 25)：媒介费 ×1.6（含 60% 服务费）× 10（1 元 = 10 点锚点），以分为基向上取整。",
+    "multiplier": 4,
+    "divisor": 25,
+    "rounding": "ceil"
+  },
+  "cases": [
+    { "inputCents": 0, "expectedPoints": 0 },
+    { "inputCents": 1, "expectedPoints": 1 },
+    { "inputCents": 6, "expectedPoints": 1 },
+    { "inputCents": 25, "expectedPoints": 4 },
+    { "inputCents": 40, "expectedPoints": 7 },
+    { "inputCents": 1234, "expectedPoints": 198 },
+    { "inputCents": 8800, "expectedPoints": 1408 },
+    { "inputCents": 8801, "expectedPoints": 1409 },
+    { "inputCents": 100000, "expectedPoints": 16000 },
+    { "inputCents": 1000000000, "expectedPoints": 160000000 }
+  ]
+}

@@ -71,6 +71,30 @@ function openPermitCount(db: SqlClient, accountId: string): number {
   return row?.count ?? 0;
 }
 
+/**
+ * 悬挂 permit 回收（第二档·按活跃度）：客户端崩溃/断网/被杀后 permit
+ * 永远停在 open——既占并发名额又冻结点数，账号会被自己的残骸砖死
+ * （2026-09-04 实测：无人使用的账号持续 429 concurrency_limit）。在下一
+ * 次申请前把「最后活跃」超过 TTL 仍 open 的 permit 按失败结清（未回报
+ * 单位全部回补，口径与 closePermit 一致）。活跃判据是 last_activity_at：
+ * apply 置为创建时刻，此后每次成功回报（含幂等重放）续活——长批量
+ * （文章逐篇回报）跑多久都不会被误回收，真死掉的从最后一次活跃起算。
+ * 惰性回收不需要定时器；TTL 须大于「无回报间隔」的上界（单份材料抽取
+ * 硬超时 10 分钟远小于 90 分钟缺省）。
+ */
+function reclaimStaleOpenPermits(
+  db: SqlClient,
+  accountId: string,
+  nowIso: string,
+  ttlMs: number,
+): void {
+  const cutoffIso = new Date(Date.parse(nowIso) - ttlMs).toISOString();
+  db.run(
+    "UPDATE billing_permits SET status = 'settled', settled_at = ?, frozen_remaining = 0 WHERE account_id = ? AND status = 'open' AND last_activity_at < ?",
+    [nowIso, accountId, cutoffIso],
+  );
+}
+
 function reportCounts(db: SqlClient, permitId: string): { succeeded: number; failed: number } {
   const rows = db.all<{ outcome: UnitOutcome; count: number }>(
     'SELECT outcome, COUNT(*) AS count FROM permit_unit_reports WHERE permit_id = ? GROUP BY outcome',
@@ -168,6 +192,11 @@ export function applyForPermit(
       );
     }
 
+    // 先回收悬挂 permit 再数并发：回收本身会释放并发名额并回补冻结点数，
+    // 本次申请直接受益（顺序反了会把刚回收的槽位也计满）。
+    const nowIso = new Date(deps.now()).toISOString();
+    reclaimStaleOpenPermits(deps.db, accountId, nowIso, deps.config.staleOpenPermitTtlMs);
+
     const active = openPermitCount(deps.db, accountId);
     const limit = deps.config.maxConcurrentPermitsPerAccount;
     if (active >= limit) {
@@ -192,11 +221,10 @@ export function applyForPermit(
       );
     }
 
-    const nowIso = new Date(deps.now()).toISOString();
     deps.db.run(
-      `INSERT INTO billing_permits (id, account_id, operation, units, unit_price, base_price, frozen_remaining, status, created_at, settled_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, 'open', ?, NULL)`,
-      [input.permitId, accountId, input.operation, input.units, input.unitPrice, input.basePrice, required, nowIso],
+      `INSERT INTO billing_permits (id, account_id, operation, units, unit_price, base_price, frozen_remaining, status, created_at, settled_at, last_activity_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 'open', ?, NULL, ?)`,
+      [input.permitId, accountId, input.operation, input.units, input.unitPrice, input.basePrice, required, nowIso, nowIso],
     );
     const created = loadPermit(deps.db, input.permitId);
     if (!created) throw new AppError('internal_error', 'permit 创建后读取失败。', 500);
@@ -225,12 +253,19 @@ export function reportPermitUnit(
 
     // 幂等优先于状态检查：最后一单位回报落库后 permit 即自动结清，
     // 若响应在网络中丢失，客户端重放同一回报必须成功而不是撞 409。
+    // 重放同样续活——会重放说明客户端活着（恢复重跑）。
     const prior = deps.db.get<{ outcome: UnitOutcome }>(
       'SELECT outcome FROM permit_unit_reports WHERE permit_id = ? AND unit_index = ?',
       [permitId, unit],
     );
     if (prior) {
-      if (prior.outcome === outcome) return permitProjection(deps.db, permit);
+      if (prior.outcome === outcome) {
+        deps.db.run('UPDATE billing_permits SET last_activity_at = ? WHERE id = ? AND status = \'open\'', [
+          nowIso,
+          permitId,
+        ]);
+        return permitProjection(deps.db, permit);
+      }
       throw new AppError(
         'unit_outcome_conflict',
         `单位 ${unit} 已回报为 ${prior.outcome}，不能改报 ${outcome}。`,
@@ -241,6 +276,12 @@ export function reportPermitUnit(
       throw new AppError('permit_settled', 'permit 已结清，不能再回报单位结果。', 409);
     }
 
+    // 每次成功回报续活（第二档·按活跃度回收）：批量操作逐单位回报的
+    // 间隔即「存活心跳」，长批量跑多久都不会被 TTL 误回收。
+    deps.db.run('UPDATE billing_permits SET last_activity_at = ? WHERE id = ?', [
+      nowIso,
+      permitId,
+    ]);
     if (outcome === 'success') {
       const { succeeded } = reportCounts(deps.db, permitId);
       const charge = permit.unit_price + (succeeded === 0 ? permit.base_price : 0);

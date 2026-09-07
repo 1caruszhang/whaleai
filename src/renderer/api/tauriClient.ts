@@ -136,23 +136,35 @@ export async function releaseTabSession(sessionId: string, tabId: string): Promi
   return invoke<boolean>('cmd_release_tab_session', { sessionId, tabId });
 }
 
-export type SessionDeleteFailureReason =
-  | 'in-use'
-  | 'busy-replying'
-  | 'monitor-active'
-  | 'not-found'
-  | 'protected-session'
-  | 'invalid-session-id'
-  | 'authority-unavailable'
-  | 'transition-in-progress'
-  | 'activity-unavailable'
-  | 'unexpected';
+// 会话删除失败原因词表（ADR-0012 双侧 pin）：值的裁判是
+// src/shared/geo/geoOperationContract.json 的 sessionDeletionFailureReasons
+// （10 值全表）与 sessionPersistentOwnerReasons（4 值持久 owner 子集）；
+// Rust 判定路径只产出其中 6 值（sidecar/manager.rs 常量组）。类型联合由
+// 常量表派生，pin 测试 tauriClient.deletionReasons.test.ts 断言两侧逐项
+// 相等——改词表四处改齐：裁判 JSON、本常量组、Rust 常量组、i18n 文案。
+export const SESSION_DELETE_FAILURE_REASONS = [
+  'in-use',
+  'busy-replying',
+  'monitor-active',
+  'not-found',
+  'protected-session',
+  'invalid-session-id',
+  'authority-unavailable',
+  'transition-in-progress',
+  'activity-unavailable',
+  'unexpected',
+] as const;
 
-export type SessionPersistentOwnerReason =
-  | 'in-use'
-  | 'busy-replying'
-  | 'monitor-active'
-  | 'activity-unavailable';
+export type SessionDeleteFailureReason = (typeof SESSION_DELETE_FAILURE_REASONS)[number];
+
+export const SESSION_PERSISTENT_OWNER_REASONS = [
+  'in-use',
+  'busy-replying',
+  'monitor-active',
+  'activity-unavailable',
+] as const;
+
+export type SessionPersistentOwnerReason = (typeof SESSION_PERSISTENT_OWNER_REASONS)[number];
 
 export interface SessionPersistentOwnersResult {
   hasPersistentOwners: boolean;

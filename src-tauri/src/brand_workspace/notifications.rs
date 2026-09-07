@@ -1,7 +1,7 @@
 use rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
-use super::{open_database, BrandWorkspace, BrandWorkspaceStore};
+use super::{BrandWorkspace, BrandWorkspaceStore};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "kebab-case")]
@@ -172,7 +172,7 @@ impl BrandWorkspaceStore {
                 ));
             }
         };
-        let connection = open_database(&workspace)?;
+        let connection = BrandWorkspaceStore::open(&workspace)?;
         let operation_session: Option<Option<String>> = connection
             .query_row(
                 "SELECT session_id FROM geo_operations WHERE id=?1",
@@ -370,7 +370,7 @@ mod tests {
                 },
             )
             .unwrap();
-        let connection = open_database(&workspace).unwrap();
+        let connection = BrandWorkspaceStore::open(&workspace).unwrap();
         connection
             .execute(
                 "INSERT INTO geo_operations

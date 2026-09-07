@@ -8,7 +8,7 @@ import type {
   BrandHistoryProjection,
   BrandKnowledgeHistoryFact,
 } from "../../../shared/geo/brandHistory";
-import { formatCompetitorFactValue } from '../../../shared/geo/competitorDetails';
+import { formatCompetitorFactValue } from '../../../shared/geo/competitorRoster';
 import {
   canonicalEnterpriseProfileField,
   PROFILE_PREDICATE_PREFIX,

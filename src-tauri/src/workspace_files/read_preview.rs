@@ -128,7 +128,8 @@ fn read_preview_resolved(
 /// Cross-review caught the original allowlist as a real UX regression — sidecar
 /// `isPreviewableText` falls through to this same blocklist via `isPreviewable`,
 /// so the renderer's "show preview" gate and the Rust port's "allow read" gate
-/// must agree. Set must stay in sync with `src/shared/fileTypes.ts` BINARY_EXTENSIONS.
+/// must agree (shared adjudicator: `src/shared/binaryExtensionsContract.json`,
+/// ADR-0012 dual-side pin).
 fn is_previewable(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
     // No dot, or a trailing dot with no real extension → extensionless file
@@ -144,7 +145,8 @@ fn is_previewable(name: &str) -> bool {
     !BINARY_EXTENSIONS.contains(&ext)
 }
 
-/// Keep in sync with `src/shared/fileTypes.ts::BINARY_EXTENSIONS`.
+/// 不可文本预览的二进制扩展名黑名单（裁判：src/shared/binaryExtensionsContract.json，
+/// ADR-0012 双侧 pin——与 TS 侧 fileTypes.test.ts 的 import pin 同一裁判文件）。
 const BINARY_EXTENSIONS: &[&str] = &[
     // Images (superset of IMAGE_EXTENSIONS — includes raw/vector formats)
     "png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "ico", "tiff", "tif", "psd", "ai", "eps",
@@ -330,5 +332,27 @@ mod tests {
             assert!(res.is_err(), "{} should be rejected as binary", name);
         }
         let _ = fs::remove_dir_all(&ws);
+    }
+
+    // ── binaryExtensions 契约（票 #41，ADR-0012）：共享裁判 JSON 的 Rust pin
+    //（与 TS 侧 fileTypes.test.ts 的 import pin 同一裁判文件）。
+
+    #[derive(Debug, serde::Deserialize)]
+    struct BinaryExtensionsContract {
+        extensions: Vec<String>,
+    }
+
+    #[test]
+    fn binary_extensions_contract_pins_constants() {
+        let contract: BinaryExtensionsContract = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../src/shared/binaryExtensionsContract.json"
+        )))
+        .expect("shared binary extensions contract json");
+        assert_eq!(
+            contract.extensions,
+            BINARY_EXTENSIONS.to_vec(),
+            "二进制扩展名黑名单严格相等（含顺序）；黑名单策略说明记于 JSON 的 _comment"
+        );
     }
 }

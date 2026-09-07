@@ -398,7 +398,7 @@ function mergeArraySupplement(
 }
 
 /**
- * 候选审计摘录的长度闸门（propose 与 MCP 工具 schema 同源）。ADR-0007 后
+ * 候选审计摘录的长度闸门（propose 与 MCP 工具 schema 共用同一上限）。ADR-0007 后
  * 竞品摘录是纯证据文本（无元数据头），仍在预算内自截。
  */
 export const KNOWLEDGE_EXCERPT_MAX_LENGTH = 4_000;

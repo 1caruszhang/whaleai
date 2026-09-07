@@ -80,7 +80,7 @@ describe("首登勾选处的合规文件链接（票 11）", () => {
     expect(viewer).not.toHaveTextContent("本条为修订");
   });
 
-  it("点击《计费标准》打开全文，价目表首末行均在（与公示文件同源）", async () => {
+  it("点击《计费标准》打开全文，价目表首末行均在（公示文件内联渲染）", async () => {
     renderLogin();
     fireEvent.click(screen.getByRole("button", { name: "《计费标准》" }));
     const viewer = await screen.findByRole("dialog", { name: "计费标准" });

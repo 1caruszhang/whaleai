@@ -1,11 +1,13 @@
+use super::persistence::{gates, with_immediate_tx};
 use super::*;
-use rusqlite::TransactionBehavior;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::OpenOptions;
 use std::io::Write;
 
+/// 内容策略版本戳（裁判：`src/shared/geo/articleGenerationContract.json`，
+/// ADR-0012 双侧 pin）：只钉当前值等值，落库的旧版本串是数据不是契约。
 const POLICY_VERSION: &str = "xiaojing-content-prompt-v10";
 const MAX_ARTICLES: usize = 20;
 const MAX_BODY_BYTES: usize = 256 * 1024;
@@ -458,8 +460,8 @@ impl BrandWorkspaceStore {
         _request: ArticleLatestRequest,
     ) -> Result<Option<ArticleOperationProjection>, String> {
         let workspace = self.workspace(workspace_id)?;
-        let connection = open_database(&workspace)?;
-        require_article_session(&connection, session_id)?;
+        let connection = BrandWorkspaceStore::open(&workspace)?;
+        gates::ARTICLE_SESSION.enforce(&connection, session_id)?;
         let id = connection
             .query_row(
                 &format!(
@@ -483,8 +485,8 @@ impl BrandWorkspaceStore {
         request: ArticleOperationGetRequest,
     ) -> Result<ArticleOperationProjection, String> {
         let workspace = self.workspace(workspace_id)?;
-        let connection = open_database(&workspace)?;
-        require_article_session(&connection, session_id)?;
+        let connection = BrandWorkspaceStore::open(&workspace)?;
+        gates::ARTICLE_SESSION.enforce(&connection, session_id)?;
         let is_owner = require_article_operation_visibility(
             &connection,
             &request.operation_id,
@@ -506,8 +508,8 @@ impl BrandWorkspaceStore {
         request: ArticleGetRequest,
     ) -> Result<ArticleProjection, String> {
         let workspace = self.workspace(workspace_id)?;
-        let connection = open_database(&workspace)?;
-        require_article_session(&connection, session_id)?;
+        let connection = BrandWorkspaceStore::open(&workspace)?;
+        gates::ARTICLE_SESSION.enforce(&connection, session_id)?;
         let article = read_article(&connection, workspace_id, &request.article_id)?;
         if article.operation_id != request.operation_id {
             return Err("article_generation_operation_mismatch".to_string());
@@ -527,102 +529,103 @@ impl BrandWorkspaceStore {
         request: ArticleOperationStartRequest,
     ) -> Result<ArticleOperationProjection, String> {
         let workspace = self.workspace(workspace_id)?;
-        let mut connection = open_database(&workspace)?;
-        require_article_session(&connection, session_id)?;
-        let transaction = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|error| format!("start article operation transaction: {error}"))?;
-        let (
-            knowledge_version,
-            product_line,
-            target_region,
-            topic_plan_id,
-            topic_plan_revision,
-            spec,
-            seeds,
-        ) = match request.source_kind.as_str() {
-            "confirmed-topic-plan" => prepare_plan_article_seeds(
-                &transaction,
-                &workspace,
-                request.topic_plan_id.as_deref(),
-                request.item_ids.as_deref(),
-            )?,
-            "direct" => prepare_direct_article_seeds(
-                &transaction,
-                &workspace,
-                request.direct_spec.as_ref(),
-            )?,
-            _ => return Err("article_generation_source_invalid".to_string()),
-        };
-        if seeds.is_empty() || seeds.len() > MAX_ARTICLES {
-            return Err("article_generation_article_count_invalid".to_string());
-        }
-        let operation_id = Uuid::new_v4().to_string();
-        let now = Utc::now().to_rfc3339();
-        transaction
-            .execute(
-                "INSERT INTO geo_operations (id, session_id, state, created_at)
-                 VALUES (?1, ?2, 'article-generation-running', ?3)",
-                params![operation_id, session_id, now],
-            )
-            .map_err(|error| format!("create article operation: {error}"))?;
-        transaction
-            .execute(
-                "INSERT INTO geo_article_operations
+        let mut connection = BrandWorkspaceStore::open(&workspace)?;
+        gates::ARTICLE_SESSION.enforce(&connection, session_id)?;
+        let operation_id = with_immediate_tx(
+            &mut connection,
+            "start article operation transaction",
+            "commit article operation",
+            |transaction| {
+                let (
+                    knowledge_version,
+                    product_line,
+                    target_region,
+                    topic_plan_id,
+                    topic_plan_revision,
+                    spec,
+                    seeds,
+                ) = match request.source_kind.as_str() {
+                    "confirmed-topic-plan" => prepare_plan_article_seeds(
+                        transaction,
+                        &workspace,
+                        request.topic_plan_id.as_deref(),
+                        request.item_ids.as_deref(),
+                    )?,
+                    "direct" => prepare_direct_article_seeds(
+                        transaction,
+                        &workspace,
+                        request.direct_spec.as_ref(),
+                    )?,
+                    _ => return Err("article_generation_source_invalid".to_string()),
+                };
+                if seeds.is_empty() || seeds.len() > MAX_ARTICLES {
+                    return Err("article_generation_article_count_invalid".to_string());
+                }
+                let operation_id = Uuid::new_v4().to_string();
+                let now = Utc::now().to_rfc3339();
+                open_lineage(
+                    transaction,
+                    &operation_id,
+                    session_id,
+                    "article-generation-running",
+                )?;
+                transaction
+                    .execute(
+                        "INSERT INTO geo_article_operations
                     (operation_id, created_by_session_id, source_kind, topic_plan_id,
                      topic_plan_revision, knowledge_version, product_line, target_region,
                      policy_version, operation_spec_json, status, created_at, updated_at)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'running', ?11, ?11)",
-                params![
-                    operation_id,
-                    session_id,
-                    request.source_kind,
-                    topic_plan_id,
-                    topic_plan_revision,
-                    knowledge_version,
-                    product_line,
-                    target_region,
-                    POLICY_VERSION,
-                    canonical_article_json(&spec)?,
-                    now
-                ],
-            )
-            .map_err(|error| format!("persist article operation: {error}"))?;
-        for seed in seeds {
-            let article_id = Uuid::new_v4().to_string();
-            transaction
-                .execute(
-                    "INSERT INTO geo_articles
+                        params![
+                            operation_id,
+                            session_id,
+                            request.source_kind,
+                            topic_plan_id,
+                            topic_plan_revision,
+                            knowledge_version,
+                            product_line,
+                            target_region,
+                            POLICY_VERSION,
+                            canonical_article_json(&spec)?,
+                            now
+                        ],
+                    )
+                    .map_err(|error| format!("persist article operation: {error}"))?;
+                for seed in seeds {
+                    let article_id = Uuid::new_v4().to_string();
+                    transaction
+                        .execute(
+                            "INSERT INTO geo_articles
                         (id, operation_id, source_plan_item_id, knowledge_version,
                          content_type, topic, requested_title, constraints,
                          planned_facts_json, status, revision, created_at, updated_at)
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'planned', 0, ?10, ?10)",
-                    params![
-                        article_id,
-                        operation_id,
-                        seed.source_plan_item_id,
-                        knowledge_version,
-                        seed.content_type,
-                        seed.topic,
-                        seed.requested_title,
-                        seed.constraints,
-                        canonical_article_json(&seed.planned_facts)?,
-                        now
-                    ],
-                )
-                .map_err(|error| format!("persist planned article: {error}"))?;
-            transaction
-                .execute(
-                    "INSERT INTO geo_artifacts
+                            params![
+                                article_id,
+                                operation_id,
+                                seed.source_plan_item_id,
+                                knowledge_version,
+                                seed.content_type,
+                                seed.topic,
+                                seed.requested_title,
+                                seed.constraints,
+                                canonical_article_json(&seed.planned_facts)?,
+                                now
+                            ],
+                        )
+                        .map_err(|error| format!("persist planned article: {error}"))?;
+                    transaction
+                        .execute(
+                            "INSERT INTO geo_artifacts
                         (id, operation_id, session_id, kind, knowledge_version, created_at)
                      VALUES (?1, ?2, ?3, 'article-draft', ?4, ?5)",
-                    params![article_id, operation_id, session_id, knowledge_version, now],
-                )
-                .map_err(|error| format!("persist article artifact: {error}"))?;
-        }
-        transaction
-            .commit()
-            .map_err(|error| format!("commit article operation: {error}"))?;
+                            params![article_id, operation_id, session_id, knowledge_version, now],
+                        )
+                        .map_err(|error| format!("persist article artifact: {error}"))?;
+                }
+                Ok(operation_id)
+            },
+        )?;
         read_article_operation(&connection, workspace_id, &operation_id)
     }
 
@@ -636,79 +639,87 @@ impl BrandWorkspaceStore {
             return Err("article_generation_mode_invalid".to_string());
         }
         let workspace = self.workspace(workspace_id)?;
-        let mut connection = open_database(&workspace)?;
-        require_article_session(&connection, session_id)?;
-        let transaction = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|error| format!("start article generation claim: {error}"))?;
-        let (operation_id, status, revision, attempt): (String, String, i64, i64) = transaction
-            .query_row(
-                "SELECT operation_id, status, revision, generation_attempt FROM geo_articles WHERE id=?1",
-                [&request.article_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-            )
-            .optional()
-            .map_err(|error| format!("read article generation claim: {error}"))?
-            .ok_or_else(|| "article_generation_article_not_found".to_string())?;
-        if operation_id != request.operation_id {
-            return Err("article_generation_operation_mismatch".to_string());
-        }
-        require_article_operation_visibility(&transaction, &operation_id, session_id, false)?;
-        if revision != request.expected_revision {
-            return Err("article_generation_revision_conflict".to_string());
-        }
-        let allowed = if request.mode == "initial" {
-            status == "planned"
-        } else {
-            matches!(
-                status.as_str(),
-                "generation_failed" | "draft_ready" | "rejected" | "approved"
-            )
-        };
-        if !allowed {
-            return Err("article_generation_status_invalid".to_string());
-        }
-        let claim_token = Uuid::new_v4().to_string();
-        let attempt_id = Uuid::new_v4().to_string();
-        let next_attempt = attempt + 1;
-        let now = Utc::now().to_rfc3339();
-        let changed = transaction
-            .execute(
-                "UPDATE geo_articles SET status='drafting', generation_attempt=?2,
+        let mut connection = BrandWorkspaceStore::open(&workspace)?;
+        gates::ARTICLE_SESSION.enforce(&connection, session_id)?;
+        let claim_token = with_immediate_tx(
+            &mut connection,
+            "start article generation claim",
+            "commit article generation claim",
+            |transaction| {
+                let (operation_id, status, revision, attempt): (String, String, i64, i64) =
+                    transaction
+                        .query_row(
+                            "SELECT operation_id, status, revision, generation_attempt FROM geo_articles WHERE id=?1",
+                            [&request.article_id],
+                            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                        )
+                        .optional()
+                        .map_err(|error| format!("read article generation claim: {error}"))?
+                        .ok_or_else(|| "article_generation_article_not_found".to_string())?;
+                if operation_id != request.operation_id {
+                    return Err("article_generation_operation_mismatch".to_string());
+                }
+                require_article_operation_visibility(
+                    transaction,
+                    &operation_id,
+                    session_id,
+                    false,
+                )?;
+                if revision != request.expected_revision {
+                    return Err("article_generation_revision_conflict".to_string());
+                }
+                let allowed = if request.mode == "initial" {
+                    status == "planned"
+                } else {
+                    matches!(
+                        status.as_str(),
+                        "generation_failed" | "draft_ready" | "rejected" | "approved"
+                    )
+                };
+                if !allowed {
+                    return Err("article_generation_status_invalid".to_string());
+                }
+                let claim_token = Uuid::new_v4().to_string();
+                let attempt_id = Uuid::new_v4().to_string();
+                let next_attempt = attempt + 1;
+                let now = Utc::now().to_rfc3339();
+                let changed = transaction
+                    .execute(
+                        "UPDATE geo_articles SET status='drafting', generation_attempt=?2,
                      generation_claim_token=?3, review_claim_token=NULL,
                      failure_reason=NULL, updated_at=?4
                  WHERE id=?1 AND revision=?5 AND status=?6",
-                params![
-                    request.article_id,
-                    next_attempt,
-                    claim_token,
-                    now,
-                    revision,
-                    status
-                ],
-            )
-            .map_err(|error| format!("claim article generation: {error}"))?;
-        if changed != 1 {
-            return Err("article_generation_revision_conflict".to_string());
-        }
-        transaction
-            .execute(
-                "INSERT INTO geo_article_generation_attempts
+                        params![
+                            request.article_id,
+                            next_attempt,
+                            claim_token,
+                            now,
+                            revision,
+                            status
+                        ],
+                    )
+                    .map_err(|error| format!("claim article generation: {error}"))?;
+                if changed != 1 {
+                    return Err("article_generation_revision_conflict".to_string());
+                }
+                transaction
+                    .execute(
+                        "INSERT INTO geo_article_generation_attempts
                     (id, article_id, attempt, base_revision, mode, outcome, created_at)
                  VALUES (?1, ?2, ?3, ?4, ?5, 'running', ?6)",
-                params![
-                    attempt_id,
-                    request.article_id,
-                    next_attempt,
-                    revision,
-                    request.mode,
-                    now
-                ],
-            )
-            .map_err(|error| format!("audit article generation claim: {error}"))?;
-        transaction
-            .commit()
-            .map_err(|error| format!("commit article generation claim: {error}"))?;
+                        params![
+                            attempt_id,
+                            request.article_id,
+                            next_attempt,
+                            revision,
+                            request.mode,
+                            now
+                        ],
+                    )
+                    .map_err(|error| format!("audit article generation claim: {error}"))?;
+                Ok(claim_token)
+            },
+        )?;
         let article = read_article(&connection, workspace_id, &request.article_id)?;
         let (brand_name, product_line, target_region): (String, String, String) = connection
             .query_row(
@@ -752,115 +763,122 @@ impl BrandWorkspaceStore {
             }
         }
         let workspace = self.workspace(workspace_id)?;
-        let mut connection = open_database(&workspace)?;
-        require_article_session(&connection, session_id)?;
-        let transaction = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|error| format!("start article generation finish: {error}"))?;
-        let (operation_id, revision, attempt, status, claim): (
-            String,
-            i64,
-            i64,
-            String,
-            Option<String>,
-        ) = transaction
-            .query_row(
-                "SELECT operation_id, revision, generation_attempt, status, generation_claim_token
+        let mut connection = BrandWorkspaceStore::open(&workspace)?;
+        gates::ARTICLE_SESSION.enforce(&connection, session_id)?;
+        with_immediate_tx(
+            &mut connection,
+            "start article generation finish",
+            "commit article generation",
+            |transaction| {
+                let (operation_id, revision, attempt, status, claim): (
+                    String,
+                    i64,
+                    i64,
+                    String,
+                    Option<String>,
+                ) = transaction
+                    .query_row(
+                        "SELECT operation_id, revision, generation_attempt, status, generation_claim_token
                      FROM geo_articles WHERE id=?1",
-                [&request.article_id],
-                |row| {
-                    Ok((
-                        row.get(0)?,
-                        row.get(1)?,
-                        row.get(2)?,
-                        row.get(3)?,
-                        row.get(4)?,
-                    ))
-                },
-            )
-            .optional()
-            .map_err(|error| format!("read article generation finish: {error}"))?
-            .ok_or_else(|| "article_generation_article_not_found".to_string())?;
-        if revision != request.expected_revision
-            || operation_id != request.operation_id
-            || status != "drafting"
-            || claim.as_deref() != Some(request.claim_token.as_str())
-        {
-            return Err("article_generation_claim_conflict".to_string());
-        }
-        require_article_operation_visibility(&transaction, &operation_id, session_id, false)?;
-        let next_revision = revision + 1;
-        let relative_path = format!(
-            "operations/{operation_id}/articles/{}/v{next_revision}.md",
-            request.article_id
-        );
-        let body_path = workspace.root_path.join(&relative_path);
-        atomic_write_immutable(&body_path, request.body.as_bytes())?;
-        let body_sha256 = format!("{:x}", Sha256::digest(request.body.as_bytes()));
-        let now = Utc::now().to_rfc3339();
-        transaction
-            .execute(
-                "INSERT INTO geo_article_versions
+                        [&request.article_id],
+                        |row| {
+                            Ok((
+                                row.get(0)?,
+                                row.get(1)?,
+                                row.get(2)?,
+                                row.get(3)?,
+                                row.get(4)?,
+                            ))
+                        },
+                    )
+                    .optional()
+                    .map_err(|error| format!("read article generation finish: {error}"))?
+                    .ok_or_else(|| "article_generation_article_not_found".to_string())?;
+                if revision != request.expected_revision
+                    || operation_id != request.operation_id
+                    || status != "drafting"
+                    || claim.as_deref() != Some(request.claim_token.as_str())
+                {
+                    return Err("article_generation_claim_conflict".to_string());
+                }
+                require_article_operation_visibility(
+                    transaction,
+                    &operation_id,
+                    session_id,
+                    false,
+                )?;
+                let next_revision = revision + 1;
+                let relative_path = format!(
+                    "operations/{operation_id}/articles/{}/v{next_revision}.md",
+                    request.article_id
+                );
+                let body_path = workspace.root_path.join(&relative_path);
+                atomic_write_immutable(&body_path, request.body.as_bytes())?;
+                let body_sha256 = format!("{:x}", Sha256::digest(request.body.as_bytes()));
+                let now = Utc::now().to_rfc3339();
+                transaction
+                    .execute(
+                        "INSERT INTO geo_article_versions
                     (article_id, revision, title, body_path, body_sha256, origin,
                      based_on_revision, model_audit_json, created_by_session_id, created_at)
                  VALUES (?1, ?2, ?3, ?4, ?5, 'generated', ?6, ?7, ?8, ?9)",
-                params![
-                    request.article_id,
-                    next_revision,
-                    request.title.trim(),
-                    relative_path,
-                    body_sha256,
-                    if revision == 0 { None } else { Some(revision) },
-                    canonical_article_json(&request.model_audit)?,
-                    session_id,
-                    now
-                ],
-            )
-            .map_err(|error| format!("persist article version: {error}"))?;
-        let changed = transaction
-            .execute(
-                "UPDATE geo_articles SET status='draft_ready', revision=?2,
+                        params![
+                            request.article_id,
+                            next_revision,
+                            request.title.trim(),
+                            relative_path,
+                            body_sha256,
+                            if revision == 0 { None } else { Some(revision) },
+                            canonical_article_json(&request.model_audit)?,
+                            session_id,
+                            now
+                        ],
+                    )
+                    .map_err(|error| format!("persist article version: {error}"))?;
+                let changed = transaction
+                    .execute(
+                        "UPDATE geo_articles SET status='draft_ready', revision=?2,
                      generation_claim_token=NULL, review_claim_token=NULL,
                      failure_reason=NULL, updated_at=?3
                  WHERE id=?1 AND revision=?4 AND generation_claim_token=?5",
-                params![
-                    request.article_id,
-                    next_revision,
-                    now,
-                    revision,
-                    request.claim_token
-                ],
-            )
-            .map_err(|error| format!("finish article generation: {error}"))?;
-        if changed != 1 {
-            return Err("article_generation_claim_conflict".to_string());
-        }
-        if let Some(dimensions) = request.ranking_dimensions.as_ref() {
-            transaction
-                .execute(
-                    "UPDATE geo_articles SET ranking_dimensions_json=?2, updated_at=?3
+                        params![
+                            request.article_id,
+                            next_revision,
+                            now,
+                            revision,
+                            request.claim_token
+                        ],
+                    )
+                    .map_err(|error| format!("finish article generation: {error}"))?;
+                if changed != 1 {
+                    return Err("article_generation_claim_conflict".to_string());
+                }
+                if let Some(dimensions) = request.ranking_dimensions.as_ref() {
+                    transaction
+                        .execute(
+                            "UPDATE geo_articles SET ranking_dimensions_json=?2, updated_at=?3
                      WHERE id=?1",
-                    params![request.article_id, canonical_article_json(dimensions)?, now],
-                )
-                .map_err(|error| format!("persist article ranking dimensions: {error}"))?;
-        }
-        transaction
-            .execute(
-                "UPDATE geo_article_generation_attempts
+                            params![request.article_id, canonical_article_json(dimensions)?, now],
+                        )
+                        .map_err(|error| format!("persist article ranking dimensions: {error}"))?;
+                }
+                transaction
+                    .execute(
+                        "UPDATE geo_article_generation_attempts
                  SET outcome='success', model_audit_json=?3, finished_at=?4
                  WHERE article_id=?1 AND attempt=?2 AND outcome='running'",
-                params![
-                    request.article_id,
-                    attempt,
-                    canonical_article_json(&request.model_audit)?,
-                    now
-                ],
-            )
-            .map_err(|error| format!("finish article generation audit: {error}"))?;
-        refresh_article_operation_status(&transaction, &operation_id, &now)?;
-        transaction
-            .commit()
-            .map_err(|error| format!("commit article generation: {error}"))?;
+                        params![
+                            request.article_id,
+                            attempt,
+                            canonical_article_json(&request.model_audit)?,
+                            now
+                        ],
+                    )
+                    .map_err(|error| format!("finish article generation audit: {error}"))?;
+                refresh_article_operation_status(transaction, &operation_id, &now)?;
+                Ok(())
+            },
+        )?;
         read_article(&connection, workspace_id, &request.article_id)
     }
 
@@ -875,70 +893,77 @@ impl BrandWorkspaceStore {
             return Err("article_generation_failure_reason_invalid".to_string());
         }
         let workspace = self.workspace(workspace_id)?;
-        let mut connection = open_database(&workspace)?;
-        require_article_session(&connection, session_id)?;
-        let transaction = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|error| format!("start article generation failure: {error}"))?;
-        let (operation_id, revision, attempt, status, claim): (
-            String,
-            i64,
-            i64,
-            String,
-            Option<String>,
-        ) = transaction
-            .query_row(
-                "SELECT operation_id, revision, generation_attempt, status, generation_claim_token
+        let mut connection = BrandWorkspaceStore::open(&workspace)?;
+        gates::ARTICLE_SESSION.enforce(&connection, session_id)?;
+        with_immediate_tx(
+            &mut connection,
+            "start article generation failure",
+            "commit article generation failure",
+            |transaction| {
+                let (operation_id, revision, attempt, status, claim): (
+                    String,
+                    i64,
+                    i64,
+                    String,
+                    Option<String>,
+                ) = transaction
+                    .query_row(
+                        "SELECT operation_id, revision, generation_attempt, status, generation_claim_token
                      FROM geo_articles WHERE id=?1",
-                [&request.article_id],
-                |row| {
-                    Ok((
-                        row.get(0)?,
-                        row.get(1)?,
-                        row.get(2)?,
-                        row.get(3)?,
-                        row.get(4)?,
-                    ))
-                },
-            )
-            .optional()
-            .map_err(|error| format!("read article generation failure: {error}"))?
-            .ok_or_else(|| "article_generation_article_not_found".to_string())?;
-        if revision != request.expected_revision
-            || operation_id != request.operation_id
-            || status != "drafting"
-            || claim.as_deref() != Some(request.claim_token.as_str())
-        {
-            return Err("article_generation_claim_conflict".to_string());
-        }
-        require_article_operation_visibility(&transaction, &operation_id, session_id, false)?;
-        let now = Utc::now().to_rfc3339();
-        transaction
-            .execute(
-                "UPDATE geo_articles SET status='generation_failed', failure_reason=?2,
+                        [&request.article_id],
+                        |row| {
+                            Ok((
+                                row.get(0)?,
+                                row.get(1)?,
+                                row.get(2)?,
+                                row.get(3)?,
+                                row.get(4)?,
+                            ))
+                        },
+                    )
+                    .optional()
+                    .map_err(|error| format!("read article generation failure: {error}"))?
+                    .ok_or_else(|| "article_generation_article_not_found".to_string())?;
+                if revision != request.expected_revision
+                    || operation_id != request.operation_id
+                    || status != "drafting"
+                    || claim.as_deref() != Some(request.claim_token.as_str())
+                {
+                    return Err("article_generation_claim_conflict".to_string());
+                }
+                require_article_operation_visibility(
+                    transaction,
+                    &operation_id,
+                    session_id,
+                    false,
+                )?;
+                let now = Utc::now().to_rfc3339();
+                transaction
+                    .execute(
+                        "UPDATE geo_articles SET status='generation_failed', failure_reason=?2,
                      generation_claim_token=NULL, updated_at=?3
                  WHERE id=?1 AND revision=?4 AND generation_claim_token=?5",
-                params![
-                    request.article_id,
-                    reason,
-                    now,
-                    revision,
-                    request.claim_token
-                ],
-            )
-            .map_err(|error| format!("fail article generation: {error}"))?;
-        transaction
-            .execute(
-                "UPDATE geo_article_generation_attempts
+                        params![
+                            request.article_id,
+                            reason,
+                            now,
+                            revision,
+                            request.claim_token
+                        ],
+                    )
+                    .map_err(|error| format!("fail article generation: {error}"))?;
+                transaction
+                    .execute(
+                        "UPDATE geo_article_generation_attempts
                  SET outcome='failed', failure_reason=?3, finished_at=?4
                  WHERE article_id=?1 AND attempt=?2 AND outcome='running'",
-                params![request.article_id, attempt, reason, now],
-            )
-            .map_err(|error| format!("fail article generation audit: {error}"))?;
-        refresh_article_operation_status(&transaction, &operation_id, &now)?;
-        transaction
-            .commit()
-            .map_err(|error| format!("commit article generation failure: {error}"))?;
+                        params![request.article_id, attempt, reason, now],
+                    )
+                    .map_err(|error| format!("fail article generation audit: {error}"))?;
+                refresh_article_operation_status(transaction, &operation_id, &now)?;
+                Ok(())
+            },
+        )?;
         read_article(&connection, workspace_id, &request.article_id)
     }
 
@@ -950,82 +975,91 @@ impl BrandWorkspaceStore {
     ) -> Result<ArticleProjection, String> {
         validate_article_title_body(&request.title, &request.body)?;
         let workspace = self.workspace(workspace_id)?;
-        let mut connection = open_database(&workspace)?;
-        require_article_session(&connection, session_id)?;
-        let transaction = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|error| format!("start article edit: {error}"))?;
-        let (operation_id, revision, status): (String, i64, String) = transaction
-            .query_row(
-                "SELECT operation_id, revision, status FROM geo_articles WHERE id=?1",
-                [&request.article_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
-            .optional()
-            .map_err(|error| format!("read article edit: {error}"))?
-            .ok_or_else(|| "article_generation_article_not_found".to_string())?;
-        if revision != request.expected_revision {
-            return Err("article_generation_revision_conflict".to_string());
-        }
-        if operation_id != request.operation_id {
-            return Err("article_generation_operation_mismatch".to_string());
-        }
-        require_article_operation_visibility(&transaction, &operation_id, session_id, false)?;
-        // discarded 是终态：弃用稿不再可编辑（票 #34）。
-        if matches!(status.as_str(), "drafting" | "reviewing" | "discarded") || revision == 0 {
-            return Err("article_edit_status_invalid".to_string());
-        }
-        let next_revision = revision + 1;
-        let relative_path = format!(
-            "operations/{operation_id}/articles/{}/v{next_revision}.md",
-            request.article_id
-        );
-        atomic_write_immutable(
-            &workspace.root_path.join(&relative_path),
-            request.body.as_bytes(),
-        )?;
-        let hash = format!("{:x}", Sha256::digest(request.body.as_bytes()));
-        let now = Utc::now().to_rfc3339();
-        // 聊天修订把用户指令原文留在版本行审计里；普通面板/接口编辑保持 '{}'。
-        let model_audit_json = request
-            .reason
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(|value| serde_json::json!({ "revisionReason": value }).to_string())
-            .unwrap_or_else(|| "{}".to_string());
-        transaction
-            .execute(
-                "INSERT INTO geo_article_versions
+        let mut connection = BrandWorkspaceStore::open(&workspace)?;
+        gates::ARTICLE_SESSION.enforce(&connection, session_id)?;
+        with_immediate_tx(
+            &mut connection,
+            "start article edit",
+            "commit article edit",
+            |transaction| {
+                let (operation_id, revision, status): (String, i64, String) = transaction
+                    .query_row(
+                        "SELECT operation_id, revision, status FROM geo_articles WHERE id=?1",
+                        [&request.article_id],
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                    )
+                    .optional()
+                    .map_err(|error| format!("read article edit: {error}"))?
+                    .ok_or_else(|| "article_generation_article_not_found".to_string())?;
+                if revision != request.expected_revision {
+                    return Err("article_generation_revision_conflict".to_string());
+                }
+                if operation_id != request.operation_id {
+                    return Err("article_generation_operation_mismatch".to_string());
+                }
+                require_article_operation_visibility(
+                    transaction,
+                    &operation_id,
+                    session_id,
+                    false,
+                )?;
+                // discarded 是终态：弃用稿不再可编辑（票 #34）。
+                if matches!(status.as_str(), "drafting" | "reviewing" | "discarded")
+                    || revision == 0
+                {
+                    return Err("article_edit_status_invalid".to_string());
+                }
+                let next_revision = revision + 1;
+                let relative_path = format!(
+                    "operations/{operation_id}/articles/{}/v{next_revision}.md",
+                    request.article_id
+                );
+                atomic_write_immutable(
+                    &workspace.root_path.join(&relative_path),
+                    request.body.as_bytes(),
+                )?;
+                let hash = format!("{:x}", Sha256::digest(request.body.as_bytes()));
+                let now = Utc::now().to_rfc3339();
+                // 聊天修订把用户指令原文留在版本行审计里；普通面板/接口编辑保持 '{}'。
+                let model_audit_json = request
+                    .reason
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(|value| serde_json::json!({ "revisionReason": value }).to_string())
+                    .unwrap_or_else(|| "{}".to_string());
+                transaction
+                    .execute(
+                        "INSERT INTO geo_article_versions
                     (article_id, revision, title, body_path, body_sha256, origin,
                      based_on_revision, model_audit_json, created_by_session_id, created_at)
                  VALUES (?1, ?2, ?3, ?4, ?5, 'user-edited', ?6, ?7, ?8, ?9)",
-                params![
-                    request.article_id,
-                    next_revision,
-                    request.title.trim(),
-                    relative_path,
-                    hash,
-                    revision,
-                    model_audit_json,
-                    session_id,
-                    now
-                ],
-            )
-            .map_err(|error| format!("persist article edit version: {error}"))?;
-        transaction
-            .execute(
-                "UPDATE geo_articles SET status='draft_ready', revision=?2,
+                        params![
+                            request.article_id,
+                            next_revision,
+                            request.title.trim(),
+                            relative_path,
+                            hash,
+                            revision,
+                            model_audit_json,
+                            session_id,
+                            now
+                        ],
+                    )
+                    .map_err(|error| format!("persist article edit version: {error}"))?;
+                transaction
+                    .execute(
+                        "UPDATE geo_articles SET status='draft_ready', revision=?2,
                      failure_reason=NULL, generation_claim_token=NULL,
                      review_claim_token=NULL, updated_at=?3
                  WHERE id=?1 AND revision=?4 AND status=?5",
-                params![request.article_id, next_revision, now, revision, status],
-            )
-            .map_err(|error| format!("finish article edit: {error}"))?;
-        refresh_article_operation_status(&transaction, &operation_id, &now)?;
-        transaction
-            .commit()
-            .map_err(|error| format!("commit article edit: {error}"))?;
+                        params![request.article_id, next_revision, now, revision, status],
+                    )
+                    .map_err(|error| format!("finish article edit: {error}"))?;
+                refresh_article_operation_status(transaction, &operation_id, &now)?;
+                Ok(())
+            },
+        )?;
         read_article(&connection, workspace_id, &request.article_id)
     }
 
@@ -1039,50 +1073,57 @@ impl BrandWorkspaceStore {
         request: ArticleDiscardRequest,
     ) -> Result<ArticleProjection, String> {
         let workspace = self.workspace(workspace_id)?;
-        let mut connection = open_database(&workspace)?;
-        require_article_session(&connection, session_id)?;
-        let transaction = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|error| format!("start article discard: {error}"))?;
-        let (operation_id, revision, status): (String, i64, String) = transaction
-            .query_row(
-                "SELECT operation_id, revision, status FROM geo_articles WHERE id=?1",
-                [&request.article_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
-            .optional()
-            .map_err(|error| format!("read article discard: {error}"))?
-            .ok_or_else(|| "article_generation_article_not_found".to_string())?;
-        if revision != request.expected_revision {
-            return Err("article_generation_revision_conflict".to_string());
-        }
-        if operation_id != request.operation_id {
-            return Err("article_generation_operation_mismatch".to_string());
-        }
-        require_article_operation_visibility(&transaction, &operation_id, session_id, false)?;
-        if !matches!(
-            status.as_str(),
-            "draft_ready" | "generation_failed" | "rejected"
-        ) {
-            return Err("article_discard_status_invalid".to_string());
-        }
-        let now = Utc::now().to_rfc3339();
-        let changed = transaction
-            .execute(
-                "UPDATE geo_articles SET status='discarded',
+        let mut connection = BrandWorkspaceStore::open(&workspace)?;
+        gates::ARTICLE_SESSION.enforce(&connection, session_id)?;
+        with_immediate_tx(
+            &mut connection,
+            "start article discard",
+            "commit article discard",
+            |transaction| {
+                let (operation_id, revision, status): (String, i64, String) = transaction
+                    .query_row(
+                        "SELECT operation_id, revision, status FROM geo_articles WHERE id=?1",
+                        [&request.article_id],
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                    )
+                    .optional()
+                    .map_err(|error| format!("read article discard: {error}"))?
+                    .ok_or_else(|| "article_generation_article_not_found".to_string())?;
+                if revision != request.expected_revision {
+                    return Err("article_generation_revision_conflict".to_string());
+                }
+                if operation_id != request.operation_id {
+                    return Err("article_generation_operation_mismatch".to_string());
+                }
+                require_article_operation_visibility(
+                    transaction,
+                    &operation_id,
+                    session_id,
+                    false,
+                )?;
+                if !matches!(
+                    status.as_str(),
+                    "draft_ready" | "generation_failed" | "rejected"
+                ) {
+                    return Err("article_discard_status_invalid".to_string());
+                }
+                let now = Utc::now().to_rfc3339();
+                let changed = transaction
+                    .execute(
+                        "UPDATE geo_articles SET status='discarded',
                      failure_reason=NULL, generation_claim_token=NULL,
                      review_claim_token=NULL, updated_at=?2
                  WHERE id=?1 AND revision=?3 AND status=?4",
-                params![request.article_id, now, revision, status],
-            )
-            .map_err(|error| format!("discard article: {error}"))?;
-        if changed != 1 {
-            return Err("article_generation_revision_conflict".to_string());
-        }
-        refresh_article_operation_status(&transaction, &operation_id, &now)?;
-        transaction
-            .commit()
-            .map_err(|error| format!("commit article discard: {error}"))?;
+                        params![request.article_id, now, revision, status],
+                    )
+                    .map_err(|error| format!("discard article: {error}"))?;
+                if changed != 1 {
+                    return Err("article_generation_revision_conflict".to_string());
+                }
+                refresh_article_operation_status(transaction, &operation_id, &now)?;
+                Ok(())
+            },
+        )?;
         read_article(&connection, workspace_id, &request.article_id)
     }
 
@@ -1093,8 +1134,8 @@ impl BrandWorkspaceStore {
         request: ArticleBodyRequest,
     ) -> Result<ArticleBodyProjection, String> {
         let workspace = self.workspace(workspace_id)?;
-        let connection = open_database(&workspace)?;
-        require_article_session(&connection, session_id)?;
+        let connection = BrandWorkspaceStore::open(&workspace)?;
+        gates::ARTICLE_SESSION.enforce(&connection, session_id)?;
         let (operation_id, current_revision, approved_revision): (String, i64, Option<i64>) =
             connection
                 .query_row(
@@ -1150,54 +1191,61 @@ impl BrandWorkspaceStore {
         request: ArticleReviewClaimRequest,
     ) -> Result<(ArticleGenerationContext, ArticleBodyProjection), String> {
         let workspace = self.workspace(workspace_id)?;
-        let mut connection = open_database(&workspace)?;
-        require_article_session(&connection, session_id)?;
-        let transaction = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|error| format!("start article review claim: {error}"))?;
-        let (operation_id, revision, status): (String, i64, String) = transaction
-            .query_row(
-                "SELECT operation_id, revision, status FROM geo_articles WHERE id=?1",
-                [&request.article_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
-            .optional()
-            .map_err(|error| format!("read article review claim: {error}"))?
-            .ok_or_else(|| "article_generation_article_not_found".to_string())?;
-        if operation_id != request.operation_id {
-            return Err("article_generation_operation_mismatch".to_string());
-        }
-        require_article_operation_visibility(&transaction, &operation_id, session_id, false)?;
-        if revision != request.expected_revision {
-            return Err("article_generation_revision_conflict".to_string());
-        }
-        if status != "draft_ready" || revision == 0 {
-            return Err("article_review_status_invalid".to_string());
-        }
-        let claim_token = Uuid::new_v4().to_string();
-        let attempt_id = Uuid::new_v4().to_string();
-        let now = Utc::now().to_rfc3339();
-        let changed = transaction
-            .execute(
-                "UPDATE geo_articles SET status='reviewing', review_claim_token=?2,
+        let mut connection = BrandWorkspaceStore::open(&workspace)?;
+        gates::ARTICLE_SESSION.enforce(&connection, session_id)?;
+        let (claim_token, revision) = with_immediate_tx(
+            &mut connection,
+            "start article review claim",
+            "commit article review claim",
+            |transaction| {
+                let (operation_id, revision, status): (String, i64, String) = transaction
+                    .query_row(
+                        "SELECT operation_id, revision, status FROM geo_articles WHERE id=?1",
+                        [&request.article_id],
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                    )
+                    .optional()
+                    .map_err(|error| format!("read article review claim: {error}"))?
+                    .ok_or_else(|| "article_generation_article_not_found".to_string())?;
+                if operation_id != request.operation_id {
+                    return Err("article_generation_operation_mismatch".to_string());
+                }
+                require_article_operation_visibility(
+                    transaction,
+                    &operation_id,
+                    session_id,
+                    false,
+                )?;
+                if revision != request.expected_revision {
+                    return Err("article_generation_revision_conflict".to_string());
+                }
+                if status != "draft_ready" || revision == 0 {
+                    return Err("article_review_status_invalid".to_string());
+                }
+                let claim_token = Uuid::new_v4().to_string();
+                let attempt_id = Uuid::new_v4().to_string();
+                let now = Utc::now().to_rfc3339();
+                let changed = transaction
+                    .execute(
+                        "UPDATE geo_articles SET status='reviewing', review_claim_token=?2,
                      updated_at=?3 WHERE id=?1 AND revision=?4 AND status=?5",
-                params![request.article_id, claim_token, now, revision, status],
-            )
-            .map_err(|error| format!("claim article review: {error}"))?;
-        if changed != 1 {
-            return Err("article_generation_revision_conflict".to_string());
-        }
-        transaction
-            .execute(
-                "INSERT INTO geo_article_review_attempts
+                        params![request.article_id, claim_token, now, revision, status],
+                    )
+                    .map_err(|error| format!("claim article review: {error}"))?;
+                if changed != 1 {
+                    return Err("article_generation_revision_conflict".to_string());
+                }
+                transaction
+                    .execute(
+                        "INSERT INTO geo_article_review_attempts
                     (id, article_id, revision, outcome, created_at)
                  VALUES (?1, ?2, ?3, 'running', ?4)",
-                params![attempt_id, request.article_id, revision, now],
-            )
-            .map_err(|error| format!("audit article review claim: {error}"))?;
-        transaction
-            .commit()
-            .map_err(|error| format!("commit article review claim: {error}"))?;
+                        params![attempt_id, request.article_id, revision, now],
+                    )
+                    .map_err(|error| format!("audit article review claim: {error}"))?;
+                Ok((claim_token, revision))
+            },
+        )?;
         let article = read_article(&connection, workspace_id, &request.article_id)?;
         let (brand_name, product_line, target_region): (String, String, String) = connection
             .query_row(
@@ -1248,113 +1296,126 @@ impl BrandWorkspaceStore {
             return Err("article_review_result_invalid".to_string());
         }
         let workspace = self.workspace(workspace_id)?;
-        let mut connection = open_database(&workspace)?;
-        require_article_session(&connection, session_id)?;
-        let transaction = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|error| format!("start article review finish: {error}"))?;
-        let (operation_id, revision, status, claim): (String, i64, String, Option<String>) =
-            transaction
-                .query_row(
-                    "SELECT operation_id, revision, status, review_claim_token
+        let mut connection = BrandWorkspaceStore::open(&workspace)?;
+        gates::ARTICLE_SESSION.enforce(&connection, session_id)?;
+        with_immediate_tx(
+            &mut connection,
+            "start article review finish",
+            "commit article review",
+            |transaction| {
+                let (operation_id, revision, status, claim): (String, i64, String, Option<String>) =
+                    transaction
+                        .query_row(
+                            "SELECT operation_id, revision, status, review_claim_token
                      FROM geo_articles WHERE id=?1",
-                    [&request.article_id],
-                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-                )
-                .optional()
-                .map_err(|error| format!("read article review finish: {error}"))?
-                .ok_or_else(|| "article_generation_article_not_found".to_string())?;
-        if revision != request.expected_revision
-            || operation_id != request.operation_id
-            || status != "reviewing"
-            || claim.as_deref() != Some(request.claim_token.as_str())
-        {
-            return Err("article_review_claim_conflict".to_string());
-        }
-        require_article_operation_visibility(&transaction, &operation_id, session_id, false)?;
-        let now = Utc::now().to_rfc3339();
-        let review_json = canonical_article_json(&request.review)?;
-        if request.passed {
-            let (body_path, hash): (String, String) = transaction
-                .query_row(
-                    "SELECT body_path, body_sha256 FROM geo_article_versions
+                            [&request.article_id],
+                            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                        )
+                        .optional()
+                        .map_err(|error| format!("read article review finish: {error}"))?
+                        .ok_or_else(|| "article_generation_article_not_found".to_string())?;
+                if revision != request.expected_revision
+                    || operation_id != request.operation_id
+                    || status != "reviewing"
+                    || claim.as_deref() != Some(request.claim_token.as_str())
+                {
+                    return Err("article_review_claim_conflict".to_string());
+                }
+                require_article_operation_visibility(
+                    transaction,
+                    &operation_id,
+                    session_id,
+                    false,
+                )?;
+                let now = Utc::now().to_rfc3339();
+                let review_json = canonical_article_json(&request.review)?;
+                if request.passed {
+                    let (body_path, hash): (String, String) = transaction
+                        .query_row(
+                            "SELECT body_path, body_sha256 FROM geo_article_versions
                      WHERE article_id=?1 AND revision=?2 AND approved_at IS NULL",
-                    params![request.article_id, revision],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
-                )
-                .optional()
-                .map_err(|error| format!("read article approval source: {error}"))?
-                .ok_or_else(|| "article_version_not_approvable".to_string())?;
-            let source_body = read_bounded_body(&workspace.root_path.join(body_path))?;
-            let approved_relative =
-                format!("articles/approved/{}/v{revision}.md", request.article_id);
-            let approved_path = workspace.root_path.join(&approved_relative);
-            atomic_write_immutable(&approved_path, source_body.as_bytes())?;
-            let approved_hash = format!("{:x}", Sha256::digest(source_body.as_bytes()));
-            if approved_hash != hash {
-                return Err("article_approval_digest_mismatch".to_string());
-            }
-            transaction
-                .execute(
-                    "UPDATE geo_article_versions SET review_json=?3, approved_body_path=?4,
+                            params![request.article_id, revision],
+                            |row| Ok((row.get(0)?, row.get(1)?)),
+                        )
+                        .optional()
+                        .map_err(|error| format!("read article approval source: {error}"))?
+                        .ok_or_else(|| "article_version_not_approvable".to_string())?;
+                    let source_body = read_bounded_body(&workspace.root_path.join(body_path))?;
+                    let approved_relative =
+                        format!("articles/approved/{}/v{revision}.md", request.article_id);
+                    let approved_path = workspace.root_path.join(&approved_relative);
+                    atomic_write_immutable(&approved_path, source_body.as_bytes())?;
+                    let approved_hash = format!("{:x}", Sha256::digest(source_body.as_bytes()));
+                    if approved_hash != hash {
+                        return Err("article_approval_digest_mismatch".to_string());
+                    }
+                    transaction
+                        .execute(
+                            "UPDATE geo_article_versions SET review_json=?3, approved_body_path=?4,
                          approved_at=?5 WHERE article_id=?1 AND revision=?2 AND approved_at IS NULL",
-                    params![request.article_id, revision, review_json, approved_relative, now],
-                )
-                .map_err(|error| format!("approve article version: {error}"))?;
-            transaction
-                .execute(
-                    "UPDATE geo_articles SET status='approved', approved_revision=?2,
+                            params![
+                                request.article_id,
+                                revision,
+                                review_json,
+                                approved_relative,
+                                now
+                            ],
+                        )
+                        .map_err(|error| format!("approve article version: {error}"))?;
+                    transaction
+                        .execute(
+                            "UPDATE geo_articles SET status='approved', approved_revision=?2,
                          review_claim_token=NULL, failure_reason=NULL, updated_at=?3
                      WHERE id=?1 AND revision=?2 AND review_claim_token=?4",
-                    params![request.article_id, revision, now, request.claim_token],
-                )
-                .map_err(|error| format!("mark article approved: {error}"))?;
-            let artifact_id = format!("article-{}-v{revision}", request.article_id);
-            transaction
-                .execute(
-                    "INSERT INTO geo_artifacts
+                            params![request.article_id, revision, now, request.claim_token],
+                        )
+                        .map_err(|error| format!("mark article approved: {error}"))?;
+                    let artifact_id = format!("article-{}-v{revision}", request.article_id);
+                    transaction
+                        .execute(
+                            "INSERT INTO geo_artifacts
                         (id, operation_id, session_id, kind, knowledge_version, created_at)
                      SELECT ?1, operation_id, ?2, 'approved-article', knowledge_version, ?3
                      FROM geo_articles WHERE id=?4",
-                    params![artifact_id, session_id, now, request.article_id],
-                )
-                .map_err(|error| format!("persist approved article artifact: {error}"))?;
-        } else {
-            transaction
-                .execute(
-                    "UPDATE geo_article_versions SET review_json=?3
+                            params![artifact_id, session_id, now, request.article_id],
+                        )
+                        .map_err(|error| format!("persist approved article artifact: {error}"))?;
+                } else {
+                    transaction
+                        .execute(
+                            "UPDATE geo_article_versions SET review_json=?3
                      WHERE article_id=?1 AND revision=?2 AND approved_at IS NULL",
-                    params![request.article_id, revision, review_json],
-                )
-                .map_err(|error| format!("persist failed article review: {error}"))?;
-            transaction
-                .execute(
-                    "UPDATE geo_articles SET status='rejected', review_claim_token=NULL,
+                            params![request.article_id, revision, review_json],
+                        )
+                        .map_err(|error| format!("persist failed article review: {error}"))?;
+                    transaction
+                        .execute(
+                            "UPDATE geo_articles SET status='rejected', review_claim_token=NULL,
                          failure_reason='article_review_blocked', updated_at=?3
                      WHERE id=?1 AND revision=?2 AND review_claim_token=?4",
-                    params![request.article_id, revision, now, request.claim_token],
-                )
-                .map_err(|error| format!("park failed article review: {error}"))?;
-        }
-        transaction
-            .execute(
-                "UPDATE geo_article_review_attempts SET outcome=?3, review_json=?4, finished_at=?5
+                            params![request.article_id, revision, now, request.claim_token],
+                        )
+                        .map_err(|error| format!("park failed article review: {error}"))?;
+                }
+                transaction
+                    .execute(
+                        "UPDATE geo_article_review_attempts SET outcome=?3, review_json=?4, finished_at=?5
                  WHERE id=(SELECT id FROM geo_article_review_attempts
                            WHERE article_id=?1 AND revision=?2 AND outcome='running'
                            ORDER BY created_at DESC LIMIT 1)",
-                params![
-                    request.article_id,
-                    revision,
-                    if request.passed { "passed" } else { "failed" },
-                    review_json,
-                    now
-                ],
-            )
-            .map_err(|error| format!("finish article review audit: {error}"))?;
-        refresh_article_operation_status(&transaction, &operation_id, &now)?;
-        transaction
-            .commit()
-            .map_err(|error| format!("commit article review: {error}"))?;
+                        params![
+                            request.article_id,
+                            revision,
+                            if request.passed { "passed" } else { "failed" },
+                            review_json,
+                            now
+                        ],
+                    )
+                    .map_err(|error| format!("finish article review audit: {error}"))?;
+                refresh_article_operation_status(transaction, &operation_id, &now)?;
+                Ok(())
+            },
+        )?;
         read_article(&connection, workspace_id, &request.article_id)
     }
 
@@ -1368,8 +1429,8 @@ impl BrandWorkspaceStore {
         _request: ArticleReviewStatsRequest,
     ) -> Result<Value, String> {
         let workspace = self.workspace(workspace_id)?;
-        let connection = open_database(&workspace)?;
-        require_article_session(&connection, session_id)?;
+        let connection = BrandWorkspaceStore::open(&workspace)?;
+        gates::ARTICLE_SESSION.enforce(&connection, session_id)?;
         let mut statement = connection
             .prepare(
                 "SELECT a.content_type, r.outcome, r.review_json
@@ -2187,12 +2248,13 @@ fn refresh_article_operation_status(
             params![operation_id, status, now],
         )
         .map_err(|error| format!("update article operation status: {error}"))?;
-    connection
-        .execute(
-            "UPDATE geo_operations SET state=?2 WHERE id=?1",
-            params![operation_id, format!("article-generation-{status}")],
-        )
-        .map_err(|error| format!("update article operation state: {error}"))?;
+    // 血缘行迁移经唯一 owner（票 06）：聚合目标态与旧 UPDATE 逐字相同，
+    // 缺失行 no-op 语义由 set_lineage_state 保持。
+    set_lineage_state(
+        connection,
+        operation_id,
+        &format!("article-generation-{status}"),
+    )?;
     Ok(())
 }
 
@@ -2233,22 +2295,6 @@ fn required_article_string<'a>(value: &'a Value, key: &str, max: usize) -> Resul
         .and_then(Value::as_str)
         .filter(|value| !value.trim().is_empty() && value.chars().count() <= max)
         .ok_or_else(|| "article_generation_plan_item_invalid".to_string())
-}
-
-fn require_article_session(connection: &Connection, session_id: &str) -> Result<(), String> {
-    validate_session_id(session_id)?;
-    let exists: i64 = connection
-        .query_row(
-            "SELECT COUNT(*) FROM brand_sessions WHERE id=?1",
-            [session_id],
-            |row| row.get(0),
-        )
-        .map_err(|error| format!("validate article session: {error}"))?;
-    if exists == 1 {
-        Ok(())
-    } else {
-        Err("article_generation_session_not_committed".to_string())
-    }
 }
 
 fn canonical_article_json<T: ?Sized + Serialize>(value: &T) -> Result<String, String> {
@@ -2354,7 +2400,7 @@ mod tests {
                 },
             )
             .expect("session");
-        let connection = open_database(&workspace).expect("db");
+        let connection = BrandWorkspaceStore::open(&workspace).expect("db");
         connection
             .execute_batch(
                 r#"INSERT INTO knowledge_raw_inputs
@@ -2439,11 +2485,19 @@ mod tests {
 
     #[test]
     fn ranking_competitor_contract_excludes_workspace_identity_and_related_brands() {
-        let cases: Vec<Value> = serde_json::from_str(include_str!(concat!(
+        let contract: Value = serde_json::from_str(include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../src/shared/geo/rankingCompetitorContractCases.json"
         )))
         .expect("shared ranking competitor contract cases");
+        // 票 #43 契约扩容：顶层从用例数组改为 { mergeCases, keyNormalizationCases }
+        // 两段——本测试跑合并用例（集合比对），排序断言与键向量见下方新增
+        // pin 测试；镜像实现（valid_ranking_competitors）原位不动。
+        let cases: Vec<Value> = contract
+            .get("mergeCases")
+            .and_then(Value::as_array)
+            .cloned()
+            .expect("mergeCases section");
         for contract_case in cases {
             let values = |key: &str| {
                 contract_case
@@ -2497,9 +2551,122 @@ mod tests {
             } else {
                 assert_eq!(
                     validation.unwrap_err(),
-                    format!("article_generation_ranking_competitors_insufficient:{expected_count}")
+                    format!("{}:{expected_count}", ranking_insufficient_code())
                 );
             }
+        }
+    }
+
+    /// 排行竞品不足五家错误码前缀（票 #43 review 补充 pin）：自
+    /// rankingCompetitorContract.json 裁判进口，测试内期望串一律经它拼装，
+    /// 不留第二份手写字面量。
+    fn ranking_insufficient_code() -> String {
+        let contract: Value = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../src/shared/geo/rankingCompetitorContract.json"
+        )))
+        .expect("shared ranking competitor contract");
+        contract
+            .get("rankingCompetitorsInsufficientCode")
+            .and_then(Value::as_str)
+            .expect("rankingCompetitorsInsufficientCode")
+            .to_string()
+    }
+
+    /// 行为等值 pin：生产侧 `validate_ranking_competitors` 的错误串前缀
+    /// （手写 format! 字面量）必须产出裁判值——改动任一侧即红。TS 侧对
+    /// 内核常量 RANKING_COMPETITORS_INSUFFICIENT_CODE 做 import pin
+    /// （competitorRoster.test.ts）。
+    #[test]
+    fn ranking_competitor_insufficient_code_matches_shared_contract() {
+        let error = validate_ranking_competitors(&Value::Array(Vec::new()), "工作区品牌")
+            .expect_err("empty facts must fail closed");
+        assert_eq!(error, format!("{}:0", ranking_insufficient_code()));
+    }
+
+    /// 票 #43 契约扩容：排序用例（镜像现行返回无序 HashSet，形态不动——与
+    /// expected 做集合比对；「直接层在前、补位在后」的序列断言在 TS 侧）＋
+    /// 排行键归一输入向量（双侧算法一致子集：中文、全角折叠、空白折叠、
+    /// ASCII 大小写；markdown 剥离与 Unicode lowercase 的分歧挂起漂移台账，
+    /// 不入向量）。
+    #[test]
+    fn ranking_competitor_contract_pins_merged_order_and_key_normalization() {
+        let contract: Value = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../src/shared/geo/rankingCompetitorContractCases.json"
+        )))
+        .expect("shared ranking competitor contract cases");
+
+        let ordering_case = contract
+            .get("mergeCases")
+            .and_then(Value::as_array)
+            .expect("mergeCases section")
+            .iter()
+            .find(|case| {
+                case.get("name").and_then(Value::as_str)
+                    == Some("merged sequence keeps direct tier before potential backfill")
+            })
+            .expect("ordering contract case")
+            .clone();
+        let values = |key: &str| {
+            ordering_case
+                .get(key)
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default()
+        };
+        let mut fact_list = vec![
+            json!({
+                "predicate": "enterprise-profile.fullName",
+                "normalizedValueJson": serde_json::to_string(&values("fullNames")).unwrap()
+            }),
+            json!({
+                "predicate": "enterprise-profile.shortNames",
+                "normalizedValueJson": serde_json::to_string(&values("shortNames")).unwrap()
+            }),
+            json!({
+                "predicate": "enterprise-profile.relatedBrands",
+                "normalizedValueJson": serde_json::to_string(&values("relatedBrands")).unwrap()
+            }),
+            json!({
+                "predicate": "enterprise-profile.competitors",
+                "normalizedValueJson": serde_json::to_string(&values("competitors")).unwrap()
+            }),
+        ];
+        let potential = values("potentialCompetitors");
+        if !potential.is_empty() {
+            fact_list.push(json!({
+                "predicate": "enterprise-profile.potentialCompetitors",
+                "normalizedValueJson": serde_json::to_string(&potential).unwrap()
+            }));
+        }
+        let facts = Value::Array(fact_list);
+        let workspace_name = ordering_case
+            .get("workspaceBrandName")
+            .and_then(Value::as_str)
+            .unwrap();
+        let actual = valid_ranking_competitors(&facts, workspace_name);
+        let expected: HashSet<String> = values("expected")
+            .into_iter()
+            .filter_map(|value| value.as_str().map(normalize_ranking_entity_name))
+            .collect();
+        // 集合比对：镜像不保序（TS 侧同用例断言精确序列），集合相等即两侧
+        // 同一幸存名集。
+        assert_eq!(actual, expected, "ordering case set comparison");
+
+        for key_case in contract
+            .get("keyNormalizationCases")
+            .and_then(Value::as_array)
+            .expect("keyNormalizationCases section")
+        {
+            let input = key_case.get("input").and_then(Value::as_str).unwrap();
+            let expected = key_case.get("expected").and_then(Value::as_str).unwrap();
+            assert_eq!(
+                normalize_ranking_entity_name(input),
+                expected,
+                "key case: {}",
+                key_case.get("name").and_then(Value::as_str).unwrap_or("?")
+            );
         }
     }
 
@@ -2523,12 +2690,9 @@ mod tests {
                 },
             )
             .expect_err("ranking without competitors must fail before persistence");
-        assert_eq!(
-            error,
-            "article_generation_ranking_competitors_insufficient:0"
-        );
+        assert_eq!(error, format!("{}:0", ranking_insufficient_code()));
 
-        let connection = open_database(&workspace).expect("db");
+        let connection = BrandWorkspaceStore::open(&workspace).expect("db");
         append_competitor_snapshot(
             &connection,
             &["竞品甲", "竞品乙", "竞品丙", "竞品丁", "竞品戊"],
@@ -2557,7 +2721,7 @@ mod tests {
     #[test]
     fn confirmed_ranking_plan_overlays_a_later_natural_language_competitor_snapshot() {
         let (_root, store, workspace) = seeded_store();
-        let connection = open_database(&workspace).expect("db");
+        let connection = BrandWorkspaceStore::open(&workspace).expect("db");
         let topics = json!([{
             "id": "topic-ranking",
             "name": "本地服务对比",
@@ -2652,7 +2816,7 @@ mod tests {
             .articles
             .iter()
             .all(|article| article.knowledge_version == 1));
-        let connection = open_database(&workspace).expect("db");
+        let connection = BrandWorkspaceStore::open(&workspace).expect("db");
         let operation_spec: String = connection
             .query_row(
                 "SELECT operation_spec_json FROM geo_article_operations WHERE operation_id=?1",
@@ -2841,7 +3005,7 @@ mod tests {
             .expect("approved body after regeneration");
         assert_eq!(approved_body_before.body, approved_body_after.body);
         assert_eq!(approved_body_after.revision, 1);
-        let connection = open_database(&workspace).expect("db");
+        let connection = BrandWorkspaceStore::open(&workspace).expect("db");
         let approved_artifact_count: i64 = connection
             .query_row(
                 "SELECT COUNT(*) FROM geo_artifacts WHERE operation_id=?1 AND kind='approved-article'",
@@ -3073,7 +3237,7 @@ mod tests {
     #[test]
     fn confirmed_plan_uses_only_selected_approved_items_and_fixed_revision() {
         let (_root, store, workspace) = seeded_store();
-        let connection = open_database(&workspace).expect("db");
+        let connection = BrandWorkspaceStore::open(&workspace).expect("db");
         let topics = json!([{
             "id": "topic-1",
             "name": "知识库选型",
@@ -3156,7 +3320,7 @@ mod tests {
             1
         );
 
-        let connection = open_database(&workspace).expect("db");
+        let connection = BrandWorkspaceStore::open(&workspace).expect("db");
         let spec: String = connection
             .query_row(
                 "SELECT operation_spec_json FROM geo_article_operations WHERE operation_id=?1",
@@ -3393,7 +3557,7 @@ mod tests {
 
     /// 票 #34 夹具：三项全 approved 的 confirmed plan，selectedItemIds 全选。
     fn seed_confirmed_plan_with_three_items(workspace: &BrandWorkspace, plan_id: &str) {
-        let connection = open_database(workspace).expect("db");
+        let connection = BrandWorkspaceStore::open(workspace).expect("db");
         let topics = json!([{
             "id": "topic-1",
             "name": "知识库选型",
@@ -3478,7 +3642,7 @@ mod tests {
                 .collect::<HashSet<_>>()
         );
 
-        let connection = open_database(&workspace).expect("db");
+        let connection = BrandWorkspaceStore::open(&workspace).expect("db");
         let spec: String = connection
             .query_row(
                 "SELECT operation_spec_json FROM geo_article_operations WHERE operation_id=?1",
@@ -3547,6 +3711,215 @@ mod tests {
         assert_eq!(
             start(Some(vec![])).unwrap_err(),
             "article_generation_plan_selection_invalid"
+        );
+    }
+
+    // 票 06：聚合源状态 → 血缘态映射的端到端钉。refresh 的 from 规则面
+    // （owner 矩阵测试）之外，这条经真实 mutation 逐跳断言 geo_operations
+    // 落值：混合未收束→running 自持；批准＋失败→completed-with-failures；
+    // 失败重试收束→running（cwf→running 真实路径）；全批准→completed；
+    // 全批准后编辑→running（completed→running 真实路径）。
+    #[test]
+    fn refresh_maps_article_statuses_onto_lineage_states_end_to_end() {
+        let (_root, store, workspace) = seeded_store();
+        let operation = store
+            .start_article_operation(
+                &workspace.id,
+                "session-article",
+                ArticleOperationStartRequest {
+                    source_kind: "direct".to_string(),
+                    topic_plan_id: None,
+                    item_ids: None,
+                    direct_spec: Some(ArticleDirectSpec {
+                        count: 2,
+                        themes: vec!["知识库指南".to_string()],
+                        content_type: "guide".to_string(),
+                        constraints: "面向企业".to_string(),
+                    }),
+                },
+            )
+            .expect("operation");
+        let lineage = |label: &str| -> String {
+            let connection = BrandWorkspaceStore::open(&workspace).expect("db");
+            connection
+                .query_row(
+                    "SELECT state FROM geo_operations WHERE id=?1",
+                    [&operation.id],
+                    |row| row.get(0),
+                )
+                .unwrap_or_else(|_| panic!("lineage row missing at {label}"))
+        };
+        assert_eq!(lineage("open"), "article-generation-running");
+
+        let first = &operation.articles[0];
+        let second = &operation.articles[1];
+        let claim = store
+            .claim_article_generation(
+                &workspace.id,
+                "session-article",
+                ArticleGenerationClaimRequest {
+                    operation_id: operation.id.clone(),
+                    article_id: first.id.clone(),
+                    expected_revision: 0,
+                    mode: "initial".to_string(),
+                },
+            )
+            .expect("claim");
+        store
+            .finish_article_generation(
+                &workspace.id,
+                "session-article",
+                ArticleGenerationFinishRequest {
+                    operation_id: operation.id.clone(),
+                    article_id: first.id.clone(),
+                    expected_revision: 0,
+                    claim_token: claim.claim_token,
+                    title: "知识库指南".to_string(),
+                    body: body("知识库指南"),
+                    ranking_dimensions: None,
+                    model_audit: json!({"model":"mock-generation"}),
+                },
+            )
+            .expect("draft");
+        // {draft_ready, planned} 混合未收束：血缘留在 running。
+        assert_eq!(lineage("mixed"), "article-generation-running");
+
+        let failed_claim = store
+            .claim_article_generation(
+                &workspace.id,
+                "session-article",
+                ArticleGenerationClaimRequest {
+                    operation_id: operation.id.clone(),
+                    article_id: second.id.clone(),
+                    expected_revision: 0,
+                    mode: "initial".to_string(),
+                },
+            )
+            .expect("claim");
+        store
+            .fail_article_generation(
+                &workspace.id,
+                "session-article",
+                ArticleGenerationFailRequest {
+                    operation_id: operation.id.clone(),
+                    article_id: second.id.clone(),
+                    expected_revision: 0,
+                    claim_token: failed_claim.claim_token,
+                    failure_reason: "mock-failure".to_string(),
+                },
+            )
+            .expect("fail");
+        // 仍混合（draft_ready 非收束态）：血缘继续 running。
+        assert_eq!(lineage("still mixed"), "article-generation-running");
+
+        let review = store
+            .claim_article_review(
+                &workspace.id,
+                "session-article",
+                ArticleReviewClaimRequest {
+                    operation_id: operation.id.clone(),
+                    article_id: first.id.clone(),
+                    expected_revision: 1,
+                },
+            )
+            .expect("review claim");
+        store
+            .finish_article_review(
+                &workspace.id,
+                "session-article",
+                ArticleReviewFinishRequest {
+                    operation_id: operation.id.clone(),
+                    article_id: first.id.clone(),
+                    expected_revision: 1,
+                    claim_token: review.0.claim_token,
+                    review: json!({"passed":true,"issues":[]}),
+                    passed: true,
+                },
+            )
+            .expect("approve");
+        // {approved, generation_failed}：收束但非全批准。
+        assert_eq!(
+            lineage("approved with failure"),
+            "article-generation-completed-with-failures"
+        );
+
+        let retry = store
+            .claim_article_generation(
+                &workspace.id,
+                "session-article",
+                ArticleGenerationClaimRequest {
+                    operation_id: operation.id.clone(),
+                    article_id: second.id.clone(),
+                    expected_revision: 0,
+                    mode: "regenerate".to_string(),
+                },
+            )
+            .expect("retry claim");
+        let retried = store
+            .finish_article_generation(
+                &workspace.id,
+                "session-article",
+                ArticleGenerationFinishRequest {
+                    operation_id: operation.id.clone(),
+                    article_id: second.id.clone(),
+                    expected_revision: 0,
+                    claim_token: retry.claim_token,
+                    title: "知识库指南二".to_string(),
+                    body: body("知识库指南二"),
+                    ranking_dimensions: None,
+                    model_audit: json!({"model":"mock-generation"}),
+                },
+            )
+            .expect("retried draft");
+        // 失败重试收束回 draft_ready：血缘自 completed-with-failures 回 running。
+        assert_eq!(lineage("retry in flight"), "article-generation-running");
+
+        let retry_review = store
+            .claim_article_review(
+                &workspace.id,
+                "session-article",
+                ArticleReviewClaimRequest {
+                    operation_id: operation.id.clone(),
+                    article_id: second.id.clone(),
+                    expected_revision: 1,
+                },
+            )
+            .expect("retry review claim");
+        store
+            .finish_article_review(
+                &workspace.id,
+                "session-article",
+                ArticleReviewFinishRequest {
+                    operation_id: operation.id.clone(),
+                    article_id: second.id.clone(),
+                    expected_revision: 1,
+                    claim_token: retry_review.0.claim_token,
+                    review: json!({"passed":true,"issues":[]}),
+                    passed: true,
+                },
+            )
+            .expect("approve retry");
+        // 全批准：血缘落 completed。
+        assert_eq!(lineage("all approved"), "article-generation-completed");
+
+        store
+            .edit_article(
+                &workspace.id,
+                "session-article",
+                ArticleEditRequest {
+                    operation_id: operation.id.clone(),
+                    article_id: second.id.clone(),
+                    expected_revision: retried.revision,
+                    title: "知识库指南二（修订）".to_string(),
+                    body: body("知识库指南二修订"),
+                    reason: None,
+                },
+            )
+            .expect("edit");
+        // 全批准后编辑打破收束：血缘自 completed 回 running。
+        assert_eq!(
+            lineage("edited after completion"),
+            "article-generation-running"
         );
     }
 
@@ -3866,9 +4239,9 @@ mod tests {
     #[test]
     fn legacy_status_check_is_rebuilt_to_accept_discarded() {
         // 存量库迁移（票 #34）：把 geo_articles 降级成迁移前的旧版 CHECK
-        // 形态（先例 materials/post_publish_monitoring 的同款测法），下一次
-        // store 调用经 open_database 重走 ensure_schema 触发重建；迁移后
-        // 'discarded' 既出现在 DDL 里，也能真实落库。
+        // 形态（先例 materials/post_publish_monitoring 的同款测法），再触发
+        // ensure_schema 重建；迁移后 'discarded' 既出现在 DDL 里，也能真实
+        // 落库。
         let (_root, store, workspace) = seeded_store();
         {
             let connection =
@@ -3910,8 +4283,14 @@ mod tests {
                 .expect("restore");
         }
 
-        // start 内部先经 open_database → ensure_schema 完成重建，INSERT 落
-        // 在新表上；随后弃用一个失败稿，旧 CHECK 会拒绝的 UPDATE 现在成立。
+        // 内核 open() 的迁移登记表按进程去重：fixture 的 store 调用已登记
+        // 本路径，这里先用测试钩子忘掉登记（「新进程首开」的进程内等价
+        // 路径）再经 open() 重走全套探测触发重建。
+        super::super::persistence::forget_migration(&workspace);
+        drop(BrandWorkspaceStore::open(&workspace).expect("reprobe"));
+
+        // ensure_schema 已完成重建，INSERT 落在新表上；随后弃用一个失败
+        // 稿，旧 CHECK 会拒绝的 UPDATE 现在成立。
         let operation = store
             .start_article_operation(
                 &workspace.id,
@@ -3968,7 +4347,7 @@ mod tests {
             .expect("discard after migration");
         assert_eq!(discarded.status, "discarded");
 
-        let connection = open_database(&workspace).expect("db");
+        let connection = BrandWorkspaceStore::open(&workspace).expect("db");
         let ddl: String = connection
             .query_row(
                 "SELECT sql FROM sqlite_master WHERE type='table' AND name='geo_articles'",
@@ -4086,6 +4465,37 @@ mod tests {
                 )
                 .unwrap_err(),
             "article_discard_status_invalid"
+        );
+    }
+
+    // ── articleGeneration 契约（票 #38，ADR-0012）：共享裁判 JSON 的 Rust pin
+    //（与 TS 侧 articleGeneration.test.ts 的 import pin 同一裁判文件）。
+
+    #[derive(Debug, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct ArticleGenerationContract {
+        policy_version: String,
+        max_articles: usize,
+        max_body_bytes: ArticleGenerationContractBodyBytes,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct ArticleGenerationContractBodyBytes {
+        bytes: usize,
+    }
+
+    #[test]
+    fn article_generation_contract_pins_constants() {
+        let contract: ArticleGenerationContract = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../src/shared/geo/articleGenerationContract.json"
+        )))
+        .expect("shared article generation contract json");
+        assert_eq!(contract.policy_version, POLICY_VERSION);
+        assert_eq!(contract.max_articles, MAX_ARTICLES);
+        assert_eq!(
+            contract.max_body_bytes.bytes, MAX_BODY_BYTES,
+            "单篇正文字节上限；Rust 侧双份常量的事实记于 JSON 的 _comment"
         );
     }
 }

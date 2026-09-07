@@ -18,7 +18,6 @@ import {
   parseGeneratedArticleBody,
   parseRankingDimensions,
   normalizeTitleIdentity,
-  resolveRankingRoster,
   validateDirectArticleSource,
   type ArticleBodyProjection,
   type ArticleGenerationContext,
@@ -29,6 +28,7 @@ import {
   type ArticleProjection,
   type ArticleReviewResult,
 } from "../../shared/geo/articleGeneration";
+import { resolveRankingRoster } from "../../shared/geo/competitorRoster";
 import { trimMaterialImagePlaceholders } from "../../shared/geo/materialImagePlaceholder";
 import {
   deriveServiceScope,
@@ -40,29 +40,10 @@ import {
 } from "../../shared/geo/profileInjection";
 import { validateTitleCandidates } from "../../shared/geo/topicPlan";
 import { XIAOJING_GEO_PROVIDER_DEFAULTS } from "../../shared/geo/providerCapabilities";
-import { writeFileSync } from "fs";
-import { join } from "path";
-import { ensureLogsDir, LOGS_DIR } from "../logUtils";
 
 /** 反思 LLM 审核开关：用户裁定（2026-08-18）先只审格式，暂停语义反思。 */
 const REFLECTION_REVIEW_ENABLED = false;
 
-/**
- * 临时诊断（2026-09-04 品牌指称序排查，定位后移除）：blocking 判失败时把
- * 初稿/修复稿全文与上下文 dump 到 logs/article-gen-debug-*.json。草稿属
- * 正文内容，按 unified_logging 数据边界不能进统一日志，故单独落文件，
- * 统一日志只留一行有界指针。
- */
-function dumpArticleGenerationDebug(payload: Record<string, unknown>): void {
-  try {
-    ensureLogsDir();
-    const file = join(LOGS_DIR, `article-gen-debug-${Date.now()}.json`);
-    writeFileSync(file, JSON.stringify(payload, null, 2));
-    console.log(`[article-gen-debug] failure draft dump: ${file}`);
-  } catch {
-    // 诊断写盘失败不影响失败判定主链。
-  }
-}
 import { managementApi } from "../utils/management-api-client";
 import { warnCompoundAnchorValues } from "./anchor-patrol";
 import type { GeoBillingPermitPort } from "./billing-permit";
@@ -719,9 +700,6 @@ export class ArticleGenerationService {
       let body = deterministicallyRepaired(parsed);
       let blocking = blockingIssuesOf(body);
       let repairUsed = false;
-      // 临时诊断（2026-09-04 指称序排查，定位后移除）：留存修复稿与修复异常。
-      let debugRepairedBody: string | undefined;
-      let debugRepairError: string | undefined;
       if (blocking.length > 0) {
         // 有界修复（Decision 3）：条件触发、一次为限；修复输出同样过
         // parse 门与确定性修复，修不好才判失败。修复是精确改写不是创作：
@@ -765,14 +743,11 @@ export class ArticleGenerationService {
           const repaired = deterministicallyRepaired(
             parseGeneratedArticleBody(repairedRaw, requestedTitle),
           );
-          debugRepairedBody = repaired;
           blocking = blockingIssuesOf(repaired);
           if (blocking.length === 0) body = repaired;
-        } catch (error) {
+        } catch {
           // 修复调用失败（provider/parse 抛错）不掩盖原始违规：仍按
           // blocking 判失败，让 failReason 直指真实问题。
-          debugRepairError =
-            error instanceof Error ? error.message : String(error);
         }
       }
       if (blocking.length > 0) {
@@ -780,21 +755,6 @@ export class ArticleGenerationService {
           context.article.contentType === "ranking"
             ? "article_generation_ranking_output_invalid"
             : "article_generation_output_invalid";
-        // 临时诊断（2026-09-04 指称序排查，定位后移除）。
-        dumpArticleGenerationDebug({
-          operationId: context.article.operationId,
-          articleId: context.article.id,
-          contentType: context.article.contentType,
-          generationAttempt: context.article.generationAttempt,
-          requestedTitle,
-          brandFullNames: articleProfile.fullName ?? [],
-          brandShortNames: articleProfile.shortNames ?? [],
-          blocking: blocking.map((issue) => issue.message),
-          repairUsed,
-          repairError: debugRepairError ?? null,
-          initialBody: body,
-          repairedBody: debugRepairedBody ?? null,
-        });
         throw new Error(
           `${code}:${blocking.map((issue) => issue.message).join("；")}`,
         );

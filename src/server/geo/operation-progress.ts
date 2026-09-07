@@ -149,7 +149,7 @@ export interface GeoOperationProgressService {
 
 /** 终态操作集（导出供顺序闸等消费方同口径判定「非终态」）；口径下沉
  * shared policy（票 07），此处按既有名字转发，消费方零改动。「已走完」
- * 步骤状态集与 currentGeoOperationStep 同源 shared policy，上方以
+ * 步骤状态集取自 currentGeoOperationStep 的同一 shared policy，上方以
  * STEP_PAST_STATUSES 别名引入，正文复用。 */
 export const TERMINAL_OPERATION = TERMINAL_GEO_OPERATION_STATUSES;
 
@@ -172,7 +172,7 @@ export interface GeoNextStepGuide {
 export const GEO_NEXT_STEP_GUIDES: Readonly<Record<string, GeoNextStepGuide>> = {
   "collect-materials": {
     tool: "request_brand_material",
-    // 材料收集契约（票 03）：话术与工具描述、系统提示词材料段逐字同源
+    // 材料收集契约（票 03）：话术与工具描述、系统提示词材料段逐字相同
     //（MATERIAL_COLLECTION_CONTRACT）——引述里就说清按计划调用即安全，
     // 不在调用现场重新权衡品牌知识是否够用。
     guidance: `Request brand material on the chat material-request card and wait there — ${MATERIAL_COLLECTION_CONTRACT}; pasted text goes through import_pasted_material.`,
@@ -184,14 +184,14 @@ export const GEO_NEXT_STEP_GUIDES: Readonly<Record<string, GeoNextStepGuide>> = 
   },
   "generate-question-pool": {
     tool: "run_question_pool",
-    // 复用契约（ADR-0011 Decision 3）：话术与工具描述、结果信封逐字同源
+    // 复用契约（ADR-0011 Decision 3）：话术与工具描述、结果信封逐字相同
     //（QUESTION_POOL_REUSE_CONTRACT）——引述里就说清按计划调用即安全。
     guidance: `Call run_question_pool for the confirmed product line and target region without judging whether to skip — ${QUESTION_POOL_REUSE_CONTRACT}; when the service generates a fresh pool instead, the selection card parks at the question gate.`,
   },
   "select-next-question-pool": {
     tool: "run_question_pool",
     // 复用契约（ADR-0011 Decision 3，2026-09-01 修订）：与
-    // generate-question-pool 条目同源话术——按计划调用即安全；复用命中
+    // generate-question-pool 条目话术一致——按计划调用即安全；复用命中
     // 停卡重选（预勾上次选择），只有用户的卡片确认才放行问题门。
     guidance: `Call run_question_pool as planned without judging whether to skip — ${QUESTION_POOL_REUSE_CONTRACT}.`,
   },

@@ -27,7 +27,7 @@ Renderer structured operation / xiaojing product tool
 LLM 抽取可能远超转发控制面请求的 120s 代理超时，因此导入与重试拆成两段：
 
 1. **请求内只做有界存储**（文件复制 / 文本落盘 / 官网抓取，无 LLM），按输入顺序返回 `{entries: [{ok:true, material} | {ok:false, errorCode}]}`。
-2. **抽取在 Sidecar 内按 Session 串行的后台队列执行**；逐材料落 `awaiting-confirmation` / `failed` 终态并尽力推进 GeoOperation 里程碑。队列只活在 Sidecar 进程内，材料与 attempt 状态由 Rust 持久化。
+2. **抽取在 Sidecar 内按 Session 串行的后台队列执行**；逐材料落 `awaiting-confirmation` / `failed` 终态并尽力推进 GeoOperation 里程碑。队列只活在 Sidecar 进程内，材料与 attempt 状态由 Rust 持久化。后台任务的 MaterialImportService 经组合根 `geoServices(identity, { accountToken })` 构造（不缓存）：「入队时捕获请求级 token」的时机留在调用方、传值进组合根（2026-09-03 spec：geo-service-composition）。
 
 Renderer 对处理中行每 3s 轮询 `/api/xiaojing/materials/status`（带 `materialIds`）；缺省 `materialIds` 的同一路由返回本 Session 最近材料（Rust `/api/brand-materials/list`，按 `updated_at` 倒序、上限 10），用于材料请求卡重挂载（transcript 重放）后恢复在途行与确认卡。非处理中材料在响应中携带批量确认卡投影——确认卡数据以权威候选为源重建，不依赖一次性响应存活。挂载恢复接管的在途行允许直接单材料重试：其原后台队列可能已随 Sidecar 进程消失。
 
@@ -39,7 +39,7 @@ Renderer 对处理中行每 3s 轮询 `/api/xiaojing/materials/status`（带 `ma
 
 配图管线落地前导入的 docx/pptx 旧材料（内嵌图片曾被丢弃、原始字节留存）可经材料请求卡卡头的「重扫存量图片」手动触发一次图片提取（最小 UI 挂点；材料入口不出现在工作台的纪律不变）。链路：Renderer `POST /api/xiaojing/materials/rescan-images`（Session 身份闸）→ Sidecar 经 management `/api/brand-materials/documents/list` 枚举本 workspace 全部 docx/pptx 材料（跨导入 Session，processing 中的除外，最旧优先、limit ≤100）→ 逐份从 `/content` 读回原始字节，复用 T3 同一条内嵌提取腿（`extractEmbeddedMaterialImages` → 打标管线 → `images/save`），不复制管线代码。
 
-重扫只做图片腿：不 begin/finish attempt、不产出知识候选，材料终态与画像事实原样保留。幂等由 `brand_material_images` 的 sha256 全局唯一键保证——重复触发先按池预扫（`images/list`，上限 200，预扫漏网由唯一键兜底）跳过已入池图片的打标，存储层再把漏网的重复写合一；重复触发不产生重复候选。同步一次通过受双时间预算约束（每份材料 25s、启动新材料前的总预算 60s，落在转发控制面 120s 代理上限内）；预算截断是幂等的，再次触发只花在余量上。单份失败（字节读不回等）以固定错误码计入逐份摘要，不拖垮其余文档。
+重扫只做图片腿：不 begin/finish attempt、不产出知识候选，材料终态与画像事实原样保留。幂等由 `brand_material_images` 的 sha256 全局唯一键保证——重复触发先按池预扫（`images/list`，上限 200，预扫漏网由唯一键兜底）跳过已入池图片的打标，存储层再把漏网的重复写合一；重复触发不产生重复候选。同步一次通过受双时间预算约束（每份材料 25s、启动新材料前的总预算 60s，落在转发控制面 120s 代理上限内）；预算截断是幂等的，再次触发只花在余量上。单份失败（字节读不回等）以固定错误码计入逐份摘要，不拖垮其余文档。重扫的 MaterialImportService 同样经组合根构造：请求头 token 作 `accountToken`、每份材料预算经 `rescanBudgetMs` 透传，且不接计费通道（收敛前口径，重扫从不计费）。
 
 ## 产品入口与 Session 归属
 

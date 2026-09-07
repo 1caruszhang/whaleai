@@ -107,40 +107,52 @@ export interface GeoOperationReference {
   revision?: number;
 }
 
-export type GeoOperationRetryUnit =
-  | "operation"
-  | "article"
-  | "probe"
-  | "publish-item"
-  | "monitor-item";
+export const GEO_OPERATION_RETRY_UNITS = [
+  "operation",
+  "article",
+  "probe",
+  "publish-item",
+  "monitor-item",
+] as const;
+
+export type GeoOperationRetryUnit = (typeof GEO_OPERATION_RETRY_UNITS)[number];
 
 export type GeoOperationStepCondition =
   | "if-evidence-insufficient"
   | "if-knowledge-refresh-requested";
 
+export const GEO_OPERATION_CONFIRMATION_KINDS = [
+  "plan-ack",
+  "knowledge-change",
+  "next-round-knowledge",
+  "question-selection",
+  "baseline-probe",
+  "topic-plan",
+  "article-approval",
+  "distribution-plan",
+  "paid-publish",
+  "external-publish",
+  "monitoring-activation",
+] as const;
+
 export type GeoOperationConfirmationKind =
-  | "plan-ack"
-  | "knowledge-change"
-  | "next-round-knowledge"
-  | "question-selection"
-  | "baseline-probe"
-  | "topic-plan"
-  | "article-approval"
-  | "distribution-plan"
-  | "paid-publish"
-  | "external-publish"
-  | "monitoring-activation";
+  (typeof GEO_OPERATION_CONFIRMATION_KINDS)[number];
+
+export const GEO_OPERATION_CONFIRMATION_AUTHORITIES = [
+  "geo-operation",
+  "knowledge-authority",
+  "brand-workspace",
+  "publish-scheduler",
+  "post-publish-monitor",
+] as const;
 
 export type GeoOperationConfirmationAuthority =
-  | "geo-operation"
-  | "knowledge-authority"
-  | "brand-workspace"
-  | "publish-scheduler"
-  | "post-publish-monitor";
+  (typeof GEO_OPERATION_CONFIRMATION_AUTHORITIES)[number];
 
 /** 裁决面在产品界面（Rust UI）而非聊天卡片的确认 authority：付费/外部
- * 发布与监测激活。通用确认入口（recordConfirmedStep）拒绝它们，顺序闸的
- * heldStep 指引按同一对区分裁决面——两处同源，防漂移。 */
+ * 发布与监测激活。通用确认入口（recordConfirmedStep）与顺序闸的
+ * heldStep 指引都从这一个集合读取裁决面；authority 全表与 Rust 的
+ * 对照由 geoOperationContract.json 双侧 pin 裁决（ADR-0012，票 #37）。 */
 export const RUST_UI_CONFIRMATION_AUTHORITIES: ReadonlySet<GeoOperationConfirmationAuthority> =
   new Set<GeoOperationConfirmationAuthority>([
     "publish-scheduler",

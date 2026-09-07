@@ -1,3 +1,5 @@
+/** 基线证据策略版本戳（裁判：baselineContract.json，ADR-0012 双侧 pin）：
+ * 只钉当前值等值，落库的 v1 旧版本串是数据不是契约。 */
 export const GEO_BASELINE_POLICY_VERSION = "xiaojing-geo-baseline-v2";
 export const GEO_BASELINE_ENGINE_IDS = ["doubao"] as const;
 

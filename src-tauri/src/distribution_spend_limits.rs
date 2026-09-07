@@ -105,6 +105,39 @@ pub async fn cmd_set_distribution_spend_limits(
 mod tests {
     use super::*;
 
+    // ── 分发限额契约（票 #39，ADR-0012）：共享裁判 JSON 的 Rust pin
+    //（与 TS 侧 distributionSpendLimits.test.ts 的 import pin 同一裁判文件）。
+
+    #[derive(Debug, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct DistributionSpendLimitsContract {
+        default_per_article_max_points: i64,
+        default_per_execution_max_points: i64,
+        max_distribution_spend_limit_points: i64,
+    }
+
+    #[test]
+    fn distribution_spend_limits_contract_pins_constants() {
+        let contract: DistributionSpendLimitsContract =
+            serde_json::from_str(include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../src/shared/geo/distributionSpendLimitsContract.json"
+            )))
+            .expect("shared distribution spend limits contract json");
+        assert_eq!(
+            contract.default_per_article_max_points,
+            DEFAULT_PER_ARTICLE_MAX_POINTS
+        );
+        assert_eq!(
+            contract.default_per_execution_max_points,
+            DEFAULT_PER_EXECUTION_MAX_POINTS
+        );
+        assert_eq!(
+            contract.max_distribution_spend_limit_points,
+            MAX_DISTRIBUTION_SPEND_LIMIT_POINTS
+        );
+    }
+
     fn config_path(tag: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!(
             "xiaojing-distribution-limits-{tag}-{}-{}",

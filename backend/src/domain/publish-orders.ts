@@ -31,8 +31,11 @@ import type {
 
 /** 进入结转的上游状态：发布中(3)、已发布(4)、退款被拒(8，费用成立)、补发/收录(10/11/12)。 */
 const SETTLE_STATUSES = new Set([3, 4, 8, 10, 11, 12]);
-/** 原路退点的上游状态：已拒稿(2)、已取消(5)、已退款(7)。 */
-const REFUND_STATUSES = new Set([2, 5, 7]);
+/** 原路退点的上游状态：已拒稿(2)、已取消(5)、已退款(7)。裁判与双侧 pin：
+ * src/shared/geo/publishSchedulerContract.json 的 publishOrderRefundStatuses
+ *（TS 侧 publishScheduler.test.ts、本侧 backend/tests/
+ * publish-scheduler-contract-pin.test.ts，ADR-0012）。导出仅供 pin 测试消费。 */
+export const REFUND_STATUSES = new Set([2, 5, 7]);
 
 export interface PublishOrderProjection {
   sn: string;
@@ -120,7 +123,10 @@ export function publishOrderProjection(row: PublishOrderRow): PublishOrderProjec
 /**
  * 订单点数：媒介费 × 1.6（含 60% 服务费）× 10（1 元 = 10 点锚点）→ 向上
  * 取整。以分为基的整数运算：ceil(分 × 1.6 × 10 / 100) = ceil(分 × 4 / 25)。
- * 例：¥88.00 → 1408 点；¥12.34 → 198 点。
+ * 例：¥88.00 → 1408 点；¥12.34 → 198 点。公式契约（参数＋用例向量）的
+ * 裁判文件是 src/shared/geo/pointsContract.json，pin 测试在
+ * backend/tests/points-contract-pin.test.ts（测试侧 import，运行时零耦合；
+ * 票 #39，ADR-0012）。
  */
 export function publishOrderPoints(mediaPriceCents: number): number {
   return Math.ceil((mediaPriceCents * 4) / 25);

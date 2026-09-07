@@ -1,7 +1,17 @@
 import { describe, expect, it } from "vitest";
 
+import publishSchedulerContract from "./publishSchedulerContract.json";
 import {
+  PUBLISH_EGRESS_DISTRIBUTION_ENDPOINT_FAMILY,
+  PUBLISH_EGRESS_DISTRIBUTION_PROVIDER,
+  PUBLISH_EGRESS_OBJECT_STORAGE_ENDPOINT_FAMILY,
+  PUBLISH_EGRESS_OBJECT_STORAGE_PROVIDER,
+  PUBLISH_EXECUTION_STATUSES,
+  PUBLISH_ITEM_STATUSES,
+  PUBLISH_MAX_SAFE_RETRIES,
   PUBLISH_ORDER_STATUS_LABEL,
+  PUBLISH_RETRY_BACKOFF_MS,
+  PUBLISH_SCHEDULER_POLICY_VERSION,
   isPublishExecutionImmutable,
   publishExecutionCanStart,
   publishOrderRefundsPoints,
@@ -10,6 +20,54 @@ import {
   type PublishExecutionProjection,
   type PublishOrderUpstreamStatus,
 } from "./publishScheduler";
+
+describe("publish scheduler contract pin（ADR-0012 三方裁判）", () => {
+  it("五键与 publishSchedulerContract.json 严格相等（含顺序）", () => {
+    expect(publishSchedulerContract.policyVersion).toBe(
+      PUBLISH_SCHEDULER_POLICY_VERSION,
+    );
+    expect(publishSchedulerContract.retryBackoffMs.values).toEqual([
+      ...PUBLISH_RETRY_BACKOFF_MS,
+    ]);
+    expect(publishSchedulerContract.maxSafeRetries).toBe(
+      PUBLISH_MAX_SAFE_RETRIES,
+    );
+    expect(publishSchedulerContract.executionStatuses).toEqual([
+      ...PUBLISH_EXECUTION_STATUSES,
+    ]);
+    expect(publishSchedulerContract.itemStatuses).toEqual([
+      ...PUBLISH_ITEM_STATUSES,
+    ]);
+  });
+
+  it("退点状态谓词语义与 publishSchedulerContract.json 严格相等（含顺序）", () => {
+    // 1..12 全域推导：谓词的退点结果集恰为裁判数组（含顺序）。
+    const refunding = Array.from({ length: 12 }, (_, index) => index + 1)
+      .filter((status) => publishOrderRefundsPoints(status));
+    expect(refunding).toEqual(
+      publishSchedulerContract.publishOrderRefundStatuses.values,
+    );
+    // 12 值状态域外（含 null）一律不判退点：未知码不触发余额联动。
+    for (const outside of [null, 0, -2, 13, 99]) {
+      expect(publishOrderRefundsPoints(outside)).toBe(false);
+    }
+  });
+
+  it("egress provider 身份四值与 publishSchedulerContract.json 相等", () => {
+    expect(publishSchedulerContract.egressProviders.objectStorage.provider).toBe(
+      PUBLISH_EGRESS_OBJECT_STORAGE_PROVIDER,
+    );
+    expect(
+      publishSchedulerContract.egressProviders.objectStorage.endpointFamily,
+    ).toBe(PUBLISH_EGRESS_OBJECT_STORAGE_ENDPOINT_FAMILY);
+    expect(publishSchedulerContract.egressProviders.distribution.provider).toBe(
+      PUBLISH_EGRESS_DISTRIBUTION_PROVIDER,
+    );
+    expect(
+      publishSchedulerContract.egressProviders.distribution.endpointFamily,
+    ).toBe(PUBLISH_EGRESS_DISTRIBUTION_ENDPOINT_FAMILY);
+  });
+});
 
 describe("publish scheduler policy", () => {
   it("keeps the 2026-09 retry contract at two 3-second retries", () => {

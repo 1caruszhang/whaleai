@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 
+import postPublishMonitoringContract from "./postPublishMonitoringContract.json";
 import {
+  POST_PUBLISH_MONITOR_POLICY_VERSION,
   aggregatePostPublishMonitorUnits,
   classifyGeoMetricTrend,
   mapSupermediaStatus,
@@ -189,5 +191,15 @@ describe("classifyGeoMetricTrend（两轮确认噪声纪律）", () => {
     expect(classifyGeoMetricTrend([50, 50])).toBe("flat");
     expect(classifyGeoMetricTrend([50, 60, 60])).toBe("flat");
     expect(classifyGeoMetricTrend([null, 40, null, 50, 60])).toBe("up");
+  });
+});
+
+// 发布后监测版本戳契约（票 #41，ADR-0012）：与裁判 JSON 严格相等；
+// Rust 侧 post_publish_monitoring.rs 的同文件测试 include_str! 同一裁判。
+describe("postPublishMonitoring 契约（票 #41，ADR-0012）", () => {
+  it("POST_PUBLISH_MONITOR_POLICY_VERSION 与 postPublishMonitoringContract.json 裁判严格相等", () => {
+    expect(postPublishMonitoringContract.policyVersion).toBe(
+      POST_PUBLISH_MONITOR_POLICY_VERSION,
+    );
   });
 });

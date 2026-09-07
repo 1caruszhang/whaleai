@@ -6,7 +6,7 @@ import { signSupermediaQuery, signSupermediaQueryWithLists } from './provider-si
 
 /**
  * 超级媒介上游客户端（票 08）：下单/查单/订单操作/资源查询的统一重签出口。
- * 签名规则与票 05 资源读取完全同源（展平 HMAC-SHA256 + timestamp 现取），
+ * 签名规则与票 05 资源读取完全一致（展平 HMAC-SHA256 + timestamp 现取），
  * 上游密钥只经 config 进入、只出现在对上游的 query 签名里。
  *
  * 参数 wire 取舍：上游文档未指定 POST body 编码，签名的权威形态是「参数

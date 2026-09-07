@@ -29,7 +29,14 @@ import {
 } from '../../shared/geo/materialImages';
 import { toKnowledgeCardCandidate } from '../../shared/geo/knowledgeCard';
 import { registeredDomain } from '../../shared/geo/channelRecall';
-import type { CompetitorDisplayDetail } from '../../shared/geo/competitorDetails';
+import {
+  competitorIdentityKey,
+  dropSelfReferences,
+  isSimilarSelfName,
+  sameBrandIdentity,
+  toSimplifiedChinese,
+  type CompetitorDisplayDetail,
+} from '../../shared/geo/competitorRoster';
 import {
   deriveCompetitorScope,
   resolveBrandName,
@@ -108,7 +115,7 @@ const COMPETITOR_CONTINUATION_ROUNDS = 3;
 
 /**
  * 续搜轮换词的目标语料池轮换（票 #23「换词多轮」）：各轮分别逼向品类
- * 盘点、口碑探店、行业榜单三个中立观察者语料池，避免同词重搜同源。
+ * 盘点、口碑探店、行业榜单三个中立观察者语料池，避免同词重搜回捞重复语料。
  * 形态全部无行业词、无招商词；招商词过滤由 parseRetryQuery 兜底。
  */
 const COMPETITOR_ROUND_QUERY_FORMS = [
@@ -715,7 +722,7 @@ function extractionPrompt(
     '- 第 1 条以【目标客户】的口吻写需求问句——客户带着具体问题搜：目标客户是',
     '  经营者/采购方（加盟商、企业采购）→「地域 + 品类/项目 + 加盟/合作/供应商',
     '  哪家好/怎么选」；终端消费者 →「地域 + 品类 + 排行榜/哪家好/口碑」。客户',
-    '  是谁由材料决定（targetCustomers 字段的判定同源），不套固定模板。这条',
+    '  是谁由材料决定（与 targetCustomers 字段的判定一致），不套固定模板。这条',
     '  命中的是招商/比价类内容池。',
     '- 第 2 条以中立的行业观察者口吻写品类盘点——「地域 + 品类 + 品牌 有哪些/',
     '  盘点/名单」，不得出现加盟、招商、合作、供应商这类客户口吻词，且品类',
@@ -935,37 +942,6 @@ function normalizeEvidenceText(value: string): string {
   return toSimplifiedChinese(value).toLocaleLowerCase('zh-CN').replace(/\s+/g, ' ').trim();
 }
 
-/** 竞品名的唯一键口径：富化解析、已知/排除名单与 process() 合并去重共用。
- * 注意：本口径含繁→简映射（存在闸/关系闸两侧同映射）；competitorDetails
- * 存量元数据读侧的按名匹配仍是纯 toLocaleLowerCase——繁体存量名走该读侧
- * 时不做归一，属接受的存量兼容差异。 */
-function normalizeCompetitorKey(value: string): string {
-  // 括号段（（广州）/【旗舰】等）是注册名里的地域/系列中缀，不是品牌身份：
-  // 剥离后再比对，否则「张仔纪（广州）餐饮管理有限公司」与「张仔纪餐饮
-  // 管理有限公司」互不为子串，同名双份上卡（2026-08-31 第三写实跑）。
-  return toSimplifiedChinese(value)
-    .replace(/[（(【[［][^（(【[］）)】\]]*[）)】\]]/g, '')
-    .trim()
-    .toLocaleLowerCase('zh-CN');
-}
-
-/** 高频繁→简映射（品牌/餐饮语境）：语料源页常为繁体（「榕邊干蒸鮮排骨」），
- * 名字归一与存在闸比对两侧同时映射即可对齐；证据摘录保留原文引述。 */
-const TRADITIONAL_TO_SIMPLIFIED: Record<string, string> = {
-  邊: '边', 鮮: '鲜', 記: '记', 順: '顺', 廣: '广', 東: '东', 燒: '烧',
-  雞: '鸡', 魚: '鱼', 豬: '猪', 鹵: '卤', 檔: '档', 館: '馆', 廳: '厅',
-  個: '个', 陳: '陈', 黃: '黄', 葉: '叶', 萬: '万', 興: '兴', 豐: '丰',
-  寧: '宁', 龍: '龙', 鳳: '凤', 麵: '面', 飯: '饭', 雲: '云', 灣: '湾',
-  門: '门', 車: '车', 場: '场', 樂: '乐', 緣: '缘', 長: '长', 陽: '阳',
-  銘: '铭', 鋒: '锋', 華: '华', 聯: '联', 燈: '灯', 爐: '炉', 鍋: '锅',
-  鹽: '盐', 醬: '酱', 臘: '腊', 鴨: '鸭', 鵝: '鹅', 錦: '锦', 蘭: '兰',
-  應: '应', 際: '际', 級: '级', 統: '统', 銷: '销', 廠: '厂', 業: '业',
-};
-
-function toSimplifiedChinese(value: string): string {
-  return value.replace(/[\u3400-\u9fff]/g, (ch) => TRADITIONAL_TO_SIMPLIFIED[ch] ?? ch);
-}
-
 /**
  * 竞品名公共闸（两条富化路径共用）：排除名单（品牌自身/别名/关联主体）
  * 按双向子串匹配——目标品牌「九味牛」要连「成都九味牛食品」一起拦下
@@ -979,7 +955,7 @@ function passesCompetitorNameGates(
     excludedNames: ReadonlySet<string>;
   },
 ): boolean {
-  const normalized = normalizeCompetitorKey(name);
+  const normalized = competitorIdentityKey(name);
   if (!normalized) return false;
   if ([...limits.excludedNames].some(
     (excluded) => excluded === normalized || excluded.includes(normalized) || normalized.includes(excluded)
@@ -1115,7 +1091,7 @@ function parseCompetitorSuggestions(
     // 关系轻门：摘录里名字附近出现供应/合作/前东家等关系词的整条剔除，
     // 拦下模型把上下游改写成竞品的常见错误。
     if (namedRelation(sourceExcerpt, name, NON_COMPETITOR_RELATION)) continue;
-    const normalized = normalizeCompetitorKey(name);
+    const normalized = competitorIdentityKey(name);
     if (!passesCompetitorNameGates(name, limits)) continue;
     if (seen.some(
       (existing) => existing === normalized || existing.includes(normalized) || normalized.includes(existing),
@@ -1335,7 +1311,7 @@ export function parseRetryQuery(raw: string, existingQueries: readonly string[])
 /**
  * 检索语料域名封顶的分组键：复用共享层 registeredDomain（可注册域近似值，
  * 子域/前缀不参与分组，com.cn 等两段公共后缀取倒数三段——后缀清单只此一
- * 份，渠道召回侧同源）。解析失败/非 URL 原样返回，退化为每条独立成组
+ * 份，渠道召回侧共用同一份）。解析失败/非 URL 原样返回，退化为每条独立成组
  * （不影响封顶正确性，只少合并）。纯函数。
  */
 export function sourceDomainKey(url: string): string {
@@ -1357,50 +1333,7 @@ export function dedupeSourcesByUrl<T extends { url: string }>(sources: readonly 
 }
 
 /**
- * 同品牌身份判定（层内/跨层互斥用）：两个名字指向同一品牌时 true。两条
- * 通道：①归一键（简体+小写+剥括号中缀）相等或互为子串——注册名变体
- * （张仔纪（广州）餐饮管理有限公司/张仔纪餐饮管理有限公司）；②「·」分段
- * 交叉包含——中文命名「品牌·系列」与「地域·品牌」两种形态并存（张仔纪·
- * 老顺德干蒸菜/顺德·渔文乐），任一段（≥2 字）被对方包含即同品牌。地域段
- * （regionHints：双方 region + 服务区锚）剔除后再比分段，否则「顺德·渔文乐」
- * 会因共享地名段误并「顺德杨廷记」。只判身份、不改存储名——截断会把地域
- * 削成品牌（第四写实跑「顺德·渔文乐」→「顺德」事故）。纯函数。
- */
-export function sameBrandIdentity(a: string, b: string, regionHints: readonly string[] = []): boolean {
-  // 公司形态后缀（仅比对用，不改存储名）：注册名的法人形态词不是品牌
-  // 身份——「张仔纪（广州）餐饮管理有限公司/张仔纪老顺德干蒸菜」因后缀
-  // 与马甲词序差异互不为子串漏并（第六写实跑，用户指认三马甲同一家）。
-  // 剥离后短于 3 字保留全键，防「广东××公司」剥成地域词误并。
-  const COMPANY_FORM_SUFFIX = /(?:餐饮管理|餐饮服务|企业管理|食品|供应链|科技|信息技术)?(?:集团)?(?:股份)?有限(?:责任)?公司$/;
-  const keyOf = (value: string) => {
-    const key = normalizeCompetitorKey(value);
-    const stripped = key.replace(COMPANY_FORM_SUFFIX, '');
-    return stripped.length >= 3 ? stripped : key;
-  };
-  const ka = keyOf(a);
-  const kb = keyOf(b);
-  if (!ka || !kb) return false;
-  if (ka === kb || ka.includes(kb) || kb.includes(ka)) return true;
-  const regionVariants = new Set<string>();
-  for (const hint of regionHints) {
-    const key = keyOf(hint);
-    if (key) regionVariants.add(key);
-    const stripped = key?.replace(/[省市区县]$/, '');
-    if (stripped) regionVariants.add(stripped);
-  }
-  const isRegionSegment = (segment: string) =>
-    [...regionVariants].some((variant) => segment.includes(variant) || variant.includes(segment));
-  const segmentsOf = (value: string) => value
-    .split(/[·・‧•]/)
-    .map((segment) => keyOf(segment))
-    .filter((segment) => segment.length >= 2 && !isRegionSegment(segment));
-  const aSegments = segmentsOf(a);
-  const bSegments = segmentsOf(b);
-  return aSegments.some((segment) => kb.includes(segment))
-    || bSegments.some((segment) => ka.includes(segment));
-}
-
-/** 同一可注册域最多保留 cap 条（保检索序，先到先得）。cap 非正数时原样
+ * 同一可注册域最多保留 cap 条（保检索序，先到先得）。cap 非正数时原样
  * 返回全量副本。纯函数，配合 dedupeSourcesByUrl 使用。 */
 export function capSourcesPerDomain<T extends { url: string }>(sources: readonly T[], cap: number): T[] {
   if (!Number.isFinite(cap) || cap <= 0) return [...sources];
@@ -1417,78 +1350,9 @@ export function capSourcesPerDomain<T extends { url: string }>(sources: readonly
 }
 
 /**
- * 短名形近变体护栏：材料错别字会把品牌短名的形近变体漏进竞品/关联品牌
- * （品牌「炊班长」被材料写成「炊事班」——与短名逐位比对差两个位置，按
- * 字符多重集只差一个字）。规则：去空白后等长、长度 2–4、含 CJK 的两个
- * 名字，忽略字序的字符差异（多重集对称差）≤1 判为自引用——覆盖同音/形
- * 近换字与字序调换；长度 1 豁免（单字重名率太高），长度 ≥5 或不等长仍
- * 只走相等/双向子串旧规则，避免误伤真实竞品。纯函数，dropSelfReferences
- * 与 parseCompetitorSuggestions 共用同一判定。
+ * relatedBrands/competitors 落库前的自名过滤已迁入名单语义内核
+ * （competitorRoster.dropSelfReferences）；本文件作为消费方自内核进口。
  */
-const CJK_CHAR = /[㐀-鿿豈-﫿]/;
-
-export function isSimilarSelfName(candidate: string, self: string): boolean {
-  const left = candidate.replace(/\s+/g, '');
-  const right = self.replace(/\s+/g, '');
-  if (left.length !== right.length) return false;
-  if (left.length < 2 || left.length > 4) return false;
-  if (!CJK_CHAR.test(left) || !CJK_CHAR.test(right)) return false;
-  return multisetDifference(left, right) <= 1;
-}
-
-/** 忽略字序的字符差异：right 中在 left 字符多重集里找不到配对的字符数。 */
-function multisetDifference(left: string, right: string): number {
-  const counts = new Map<string, number>();
-  for (const char of left) counts.set(char, (counts.get(char) ?? 0) + 1);
-  let unmatched = 0;
-  for (const char of right) {
-    const count = counts.get(char) ?? 0;
-    if (count > 0) counts.set(char, count - 1);
-    else unmatched += 1;
-  }
-  return unmatched;
-}
-
-/**
- * relatedBrands/competitors 落库前的确定性自名过滤：剔除品牌名、同批抽出的
- * 全称与别名（大小写不敏感、双向子串 + 短名形近变体）。提示词只能降频，这层
- * 把「本品牌进入自己的关联/竞品列表」变成结构不可能（js_ai dedupeAndFilterCompetitors 契约）。
- */
-function dropSelfReferences(
-  context: BrandMaterialContext,
-  facts: ExtractedProfileFact[],
-): ExtractedProfileFact[] {
-  const selfNames = new Set<string>();
-  const remember = (value: string) => {
-    const normalized = value.trim().toLowerCase();
-    if (normalized.length >= 2) selfNames.add(normalized);
-  };
-  remember(context.brandName);
-  for (const fact of facts) {
-    if (fact.field !== 'fullName' && fact.field !== 'shortNames') continue;
-    for (const value of Array.isArray(fact.value) ? fact.value : [fact.value]) remember(value);
-  }
-  const isSelf = (value: string) => {
-    const normalized = value.trim().toLowerCase();
-    if (normalized.length < 2) return false;
-    return [...selfNames].some(
-      (self) => self === normalized || self.includes(normalized) || normalized.includes(self)
-        || isSimilarSelfName(normalized, self),
-    );
-  };
-  return facts.flatMap((fact) => {
-    // 两层竞品（ADR-0007）同受自名/形近剔除——品牌自身进哪层都不是竞品。
-    if (
-      fact.field !== 'relatedBrands'
-      && fact.field !== 'competitors'
-      && fact.field !== 'potentialCompetitors'
-    ) return [fact];
-    const values = Array.isArray(fact.value) ? fact.value : [fact.value];
-    const kept = values.filter((value) => !isSelf(value));
-    // 全部被剔除时整条丢弃，不产出空数组候选。
-    return kept.length === values.length ? [fact] : kept.length > 0 ? [{ ...fact, value: kept }] : [];
-  });
-}
 
 /**
  * 材料腿竞品不能只凭「模型把某个品牌放进 competitors 数组」落候选：逐名
@@ -1533,8 +1397,15 @@ function dropUnsupportedMaterialCompetitors(
 function errorCode(error: unknown): MaterialErrorCode {
   // GatewayBillingError 是类型化错误，message 是自由中文文本，子串机制会把
   // insufficient_balance / billing_transport_failed 等真实原因掩蔽成泛化
-  // 兜底——先按类型归到登记码 material_billing_failed。
-  if (error instanceof GatewayBillingError) return 'material_billing_failed';
+  // 兜底——先按类型归到登记码 material_billing_failed。concurrency_limit
+  // （429）单列 material_billing_busy：并发名额被占不是扣费故障，界面
+  // 提示与用户的等待/重试动作都不同（2026-09-04 实测：悬挂 permit 让
+  // 空闲账号持续报 material_billing_failed，误导为计费异常）。
+  if (error instanceof GatewayBillingError) {
+    return error.code === 'concurrency_limit'
+      ? 'material_billing_busy'
+      : 'material_billing_failed';
+  }
   const message = error instanceof Error ? error.message : String(error);
   return MATERIAL_ERROR_CODES.find((candidate) => message.includes(candidate))
     ?? 'material_processing_failed';
@@ -1840,7 +1711,7 @@ export class MaterialImportService {
       logOutcome({ status: 'skipped', errorCode: 'keyword_search_unavailable' });
       return [];
     }
-    const normalize = normalizeCompetitorKey;
+    const normalize = competitorIdentityKey;
     const brandCompetitors = new Set<string>();
     const knownCompetitors = new Set<string>();
     const excludedNames = new Set<string>([normalize(context.brandName)]);
@@ -2089,7 +1960,7 @@ export class MaterialImportService {
       : [];
     // 语料多样性两步裁剪：先按 URL 去重（两条查询召回同一篇只算一份），再按
     // 可注册域封顶——防单一品牌的 GEO 投放霸屏软文站挤出列表页/品类文（张仔纪
-    // 事故：19/20 同四站）。裁剪后的列表同源供给模型快照与存在闸语料。
+    // 事故：19/20 同四站）。裁剪后的同一份列表供给模型快照与存在闸语料。
     const sources = capSourcesPerDomain(
       dedupeSourcesByUrl(sourceGroups.flat()),
       COMPETITOR_SOURCE_DOMAIN_CAP,
@@ -2296,7 +2167,7 @@ export class MaterialImportService {
             response: rewrite.slice(0, 1_000),
           });
           // parseRetryQuery 拒空/过短/与已试词重复/仍带招商词——换不出合规
-          // 新词时续搜收束，不拿同词重搜同源浪费预算。
+          // 新词时续搜收束，不拿同词重搜重复语料浪费预算。
           retryQuery = parseRetryQuery(rewrite, roundQueries);
         } catch {
           // 重写调用失败（provider 异常）：保既有结果，续搜终止。
@@ -2433,7 +2304,7 @@ export class MaterialImportService {
         if (suggestions.length >= deficit) break;
         if (scope.granularity === 'city'
           && !regionInServiceScope(suggestion.region, scope.allowed)) continue;
-        const normalized = normalizeCompetitorKey(suggestion.name);
+        const normalized = competitorIdentityKey(suggestion.name);
         if (seen.has(normalized)) continue;
         seen.add(normalized);
         suggestions.push({
@@ -2511,7 +2382,7 @@ export class MaterialImportService {
       }
       try {
         facts = parseProfileFacts(response, context, text);
-        // 竞品检索词与 facts 同源同响应：抽取模型已读完材料，顺手产出
+        // 竞品检索词与 facts 同一响应产出：抽取模型已读完材料，顺手产出
         // 目标客户视角的查询词（管线瞬时值）。
         competitorSearchQueries = parseCompetitorSearchQueries(response);
         break;
@@ -2904,7 +2775,7 @@ export class MaterialImportService {
             ...enriched,
             value: [...new Map(
               [...baseNames, ...enriched.value as string[]]
-                .map((name) => [normalizeCompetitorKey(name), name.trim()]),
+                .map((name) => [competitorIdentityKey(name), name.trim()]),
             ).values()],
           };
         } else {

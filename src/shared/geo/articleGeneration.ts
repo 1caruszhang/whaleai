@@ -9,8 +9,15 @@ import {
   firstProfileValue,
   profileValues,
   projectBrandProfile,
-  resolveRankingTargetBrand,
 } from "./profileInjection";
+// 名单语义（resolveRankingRoster 及竞品过滤/合并）随票 #43 迁入名单内核；
+// 本模块不再直接做品牌名裁决，只消费内核投影。
+import {
+  foldFullWidthAndLowercase,
+  RANKING_COMPETITORS_INSUFFICIENT_CODE,
+  resolveRankingRoster,
+  rosterIdentityKey,
+} from "./competitorRoster";
 import {
   rankingBrandBanRule,
   TITLE_STYLE_DEFINITIONS,
@@ -18,10 +25,13 @@ import {
   type TopicPlanKnowledgeFact,
 } from "./topicPlan";
 
+/** 内容策略版本戳（裁判：articleGenerationContract.json，ADR-0012 双侧
+ * pin）：只钉当前值等值，落库的旧版本串是数据不是契约。 */
 export const ARTICLE_GENERATION_POLICY_VERSION =
   "xiaojing-content-prompt-v10";
 export const ARTICLE_GENERATION_CONCURRENCY =
   GEO_PORT_CONTRACT.concurrency.perArticleLifecycle.limit;
+/** 单批文章数与单篇正文字节上限（裁判：articleGenerationContract.json）。 */
 export const ARTICLE_GENERATION_MAX_ARTICLES = 20;
 export const ARTICLE_BODY_MAX_BYTES = 256 * 1024;
 /**
@@ -432,119 +442,6 @@ function factLines(facts: readonly TopicPlanKnowledgeFact[]): string[] {
   );
 }
 
-export interface RankingRoster {
-  targetBrand: string;
-  competitors: string[];
-}
-
-export interface RankingCompetitorIdentity {
-  workspaceBrandName: string;
-  fullNames: readonly string[];
-  shortNames: readonly string[];
-  relatedBrands: readonly string[];
-}
-
-function normalizeEntityName(value: string): string {
-  return normalizeArticleClaim(value.replace(/[*`_~]/g, ""));
-}
-
-function sameOrNestedEntityName(left: string, right: string): boolean {
-  return left === right || left.includes(right) || right.includes(left);
-}
-
-/**
- * 所有 Node 排行榜入口共用的有效竞品规则。跨 Rust 边界仍由同一组契约
- * 用例约束：去空、去重，并排除 workspace 名、身份别名和关联主体。
- */
-export function filterValidRankingCompetitors(
-  names: readonly string[],
-  identity: RankingCompetitorIdentity,
-): string[] {
-  const excluded = [
-    identity.workspaceBrandName,
-    ...identity.fullNames,
-    ...identity.shortNames,
-    ...identity.relatedBrands,
-  ]
-    .map(normalizeEntityName)
-    .filter(Boolean);
-  const seen = new Set<string>();
-  return names.filter((name) => {
-    const normalized = normalizeEntityName(name);
-    if (
-      !normalized ||
-      seen.has(normalized) ||
-      excluded.some((blocked) => sameOrNestedEntityName(normalized, blocked))
-    ) {
-      return false;
-    }
-    seen.add(normalized);
-    return true;
-  });
-}
-
-/**
- * 两层竞品合并（ADR-0007，与 Rust `valid_ranking_competitors` 同构、由
- * rankingCompetitorContractCases.json 共同约束）：直接层在前，潜在层
- * 补位；跨层按归一名嵌套互斥（张仔纪/张纪仔类变体不留双份），身份/关联
- * 主体排除两层共用。
- */
-export function mergeRankingCompetitorTiers(
-  directNames: readonly string[],
-  potentialNames: readonly string[],
-  identity: RankingCompetitorIdentity,
-): string[] {
-  const direct = filterValidRankingCompetitors(directNames, identity);
-  const directNormalized = direct.map(normalizeEntityName);
-  return [
-    ...direct,
-    ...filterValidRankingCompetitors(potentialNames, identity).filter(
-      (name) => {
-        const normalized = normalizeEntityName(name);
-        return !directNormalized.some((kept) =>
-          sameOrNestedEntityName(normalized, kept),
-        );
-      },
-    ),
-  ];
-}
-
-/**
- * ranking 的唯一名单投影：目标品牌用 resolveRankingTargetBrand（简称优先，
- * 无已确认简称回退全称、都无才回退 workspace 名——陈列位 1 是篇内展示位，
- * 用户裁决 2026-09-03），竞品来自 immutable plannedFacts 中已确认的
- * competitors（直接层），不足 5 家时用 potentialCompetitors（潜在层，相近
- * 场景/替代品类）按序补足——两层都只含真实检索来源的名称（ADR-0007 两层
- * 名单，用户裁决 2026-08-30）。选五家时保持「直接层在前、补位在后」的顺序；
- * 正文可自由调整这五家在陈列位 2–6 的顺序。
- */
-export function resolveRankingRoster(
-  facts: readonly TopicPlanKnowledgeFact[],
-  workspaceBrandName: string,
-): RankingRoster {
-  const profile = projectBrandProfile(facts);
-  const targetBrand = resolveRankingTargetBrand(
-    profile,
-    workspaceBrandName,
-  ).trim();
-  const competitors = mergeRankingCompetitorTiers(
-    profile.competitors ?? [],
-    profile.potentialCompetitors ?? [],
-    {
-      workspaceBrandName,
-      fullNames: profile.fullName ?? [],
-      shortNames: profile.shortNames ?? [],
-      relatedBrands: profile.relatedBrands ?? [],
-    },
-  );
-  if (competitors.length < 5) {
-    throw new Error(
-      `article_generation_ranking_competitors_insufficient:${competitors.length}`,
-    );
-  }
-  return { targetBrand, competitors: competitors.slice(0, 5) };
-}
-
 export function buildArticleGenerationMessages(input: {
   brandName: string;
   productLine: string;
@@ -745,7 +642,7 @@ export function parseRankingDimensions(raw: string): string[] {
         name.length > 10 ||
         /[*【】`#]/.test(name),
     ) ||
-    new Set(dimensions.map(normalizeArticleClaim)).size !== RANKING_DIMENSION_COUNT
+    new Set(dimensions.map(foldFullWidthAndLowercase)).size !== RANKING_DIMENSION_COUNT
   ) {
     throw new Error("article_generation_ranking_dimensions_invalid_value");
   }
@@ -777,7 +674,7 @@ export function buildArticleRepairMessages(input: {
     "你是文章格式修复器。你会收到一篇已生成的文章草稿与一份「无法通过确定性审核的具体问题清单」。你的唯一任务是把清单里的问题全部修掉；其余内容逐字保留——不改写段落措辞、不增删事实或卖点、不调整配图、不润色。",
     "输出要求：",
     "- 直接输出修复后的完整文章（plain Markdown）：不要 JSON、不要代码围栏、不要任何解释、前言或后缀。",
-    `- 首行必须是指定标题的 H1，逐字一致。`,
+    `- 首行必须是指定标题的 H1，一字不差。`,
     "- 不得引入【】占位符；配图语法 ![alt](material-image://图片ID) 一律原样保留，不得增删。",
     "- 列表用标准 Markdown 语法（行首 `- ` 或 `1. `），禁止用 •、●、· 等圆点字符起行。",
     `本篇类型：${CONTENT_TYPE_LABELS[input.contentType]} / ${input.contentType}`,
@@ -837,19 +734,9 @@ export function parseGeneratedArticleBody(
   return body;
 }
 
-export function normalizeArticleClaim(value: string): string {
-  let normalized = "";
-  for (const character of value) {
-    const code = character.codePointAt(0) ?? 0;
-    normalized +=
-      code >= 0xff01 && code <= 0xff5e
-        ? String.fromCharCode(code - 0xfee0)
-        : code === 0x3000
-          ? " "
-          : character;
-  }
-  return normalized.toLowerCase().replace(/\s+/g, "");
-}
+// 事实主张比对的归一衬底已单源化于名单内核（票 #43 review）：原私有
+// normalizeArticleClaim 与内核 foldFullWidthAndLowercase 函数体逐字节相同，
+// 删除本侧副本改为进口，防单边改动静默漂移。
 
 const NUMBER_CLAIM_RE =
   /(?:增长|超过?|达到|突破|累计|领先|覆盖|服务过?|完成|获得|荣获|认证|授权|排名)?\s*(\d+(?:\.\d+)?)\s*(?:%|％|万|亿|岁|年|个月|人|家|店|款|项|倍|分|秒|小时|天|周)/g;
@@ -867,9 +754,9 @@ const CLAIM_TRIGGER_RE =
  * (predicate + JSON value) and would block every generated draft.
  */
 function claimEssence(raw: string, numberCore?: string): string {
-  if (numberCore) return normalizeArticleClaim(numberCore);
+  if (numberCore) return foldFullWidthAndLowercase(numberCore);
   const afterLabel = raw.split(/[:：]/).pop() ?? raw;
-  return normalizeArticleClaim(
+  return foldFullWidthAndLowercase(
     afterLabel.replace(CLAIM_TRIGGER_RE, "").replace(/[*"'\s]/g, ""),
   );
 }
@@ -1090,8 +977,8 @@ function boldNameOutsideBlindSpots(body: string, name: string): string {
  *   四个字符，不改写原文结构。
  * 候选标签约束 2–12 字、无句读标点、不含 `*[]()`` 或 http（已加粗/链接/
  * 代码不碰）、不纯数字/纯拉丁；空格型额外过停用词闸（叙述句开头的
- * 「我们/首先/注意…」不是标签）。盲区与品牌加粗同源：标题行/围栏代码块
- * 整行跳过。行首允许 ✅ 等前置符号段，符号不进加粗块。
+ * 「我们/首先/注意…」不是标签）。盲区与品牌加粗同一套行分类：标题行/
+ * 围栏代码块整行跳过。行首允许 ✅ 等前置符号段，符号不进加粗块。
  */
 const LIST_ITEM_LINE_RE = /^(\s*(?:[-*+]|\d{1,2}[.)])\s+)(.*)$/;
 const LIST_LABEL_SYMBOL_PREFIX_RE = /^[✅✔✓★☆▪◆◇●○•·\s]+/;
@@ -1174,7 +1061,7 @@ export function deterministicArticleReview(
   const issues: ArticleReviewIssue[] = [];
   const reviewBody = stripLeadingH1(body);
   const factCorpus = facts.map((fact) =>
-    normalizeArticleClaim(`${fact.factKey}${fact.predicate}${fact.normalizedValueJson}`),
+    foldFullWidthAndLowercase(`${fact.factKey}${fact.predicate}${fact.normalizedValueJson}`),
   );
   const factTokens = factValueTokens(facts);
   const claims = new Map<string, string>();
@@ -1307,7 +1194,7 @@ export function deterministicArticleReview(
         ...reviewBody
           .slice(start, end)
           .matchAll(/^[-•]\s+\*\*([^*]+)\*\*[：:]\s*\S/gm),
-      ].map((match) => normalizeArticleClaim(match[1]));
+      ].map((match) => foldFullWidthAndLowercase(match[1]));
     });
     const firstDimensions = dimensionSets[0] ?? [];
     // 集合相等门（ADR-0009 Decision 2，用户裁定「等长非严格等长，相似即
@@ -1315,7 +1202,7 @@ export function deterministicArticleReview(
     // 清单（更强，服务端持有的权威骨架）；存量稿无清单时回退与第一家
     // 集合比对。
     const referenceSet = expectedRankingDimensions
-      ? new Set(expectedRankingDimensions.map(normalizeArticleClaim))
+      ? new Set(expectedRankingDimensions.map(foldFullWidthAndLowercase))
       : new Set(firstDimensions);
     const parallelDimensionSets =
       headings.length === 6 &&
@@ -1342,7 +1229,7 @@ export function deterministicArticleReview(
     try {
       const roster = resolveRankingRoster(facts, workspaceBrandName);
       const headingNames = headings.map((heading) =>
-        normalizeEntityName(heading[0].replace(/^##\s+\d+[.、]\s+/, "")),
+        rosterIdentityKey(heading[0].replace(/^##\s+\d+[.、]\s+/, "")),
       );
       const targetNames = new Set(
         [
@@ -1350,12 +1237,12 @@ export function deterministicArticleReview(
           ...(profile.fullName ?? []),
           ...(profile.shortNames ?? []),
         ]
-          .map(normalizeEntityName)
+          .map(rosterIdentityKey)
           .filter(Boolean),
       );
       const actualCompetitors = headingNames.slice(1);
       const expectedCompetitors = new Set(
-        roster.competitors.map(normalizeEntityName),
+        roster.competitors.map(rosterIdentityKey),
       );
       const actualSet = new Set(actualCompetitors);
       const validEntitySet =
@@ -1381,9 +1268,7 @@ export function deterministicArticleReview(
         severity: "blocking",
         message:
           error instanceof Error &&
-          error.message.startsWith(
-            "article_generation_ranking_competitors_insufficient",
-          )
+          error.message.startsWith(RANKING_COMPETITORS_INSUFFICIENT_CODE)
             ? "ranking 生成需要至少五家已确认竞品。"
             : "ranking 名单无法从已批准事实中解析。",
       });

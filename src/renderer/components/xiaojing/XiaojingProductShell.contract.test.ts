@@ -268,12 +268,14 @@ describe("Xiaojing product shell contract", () => {
       "src/renderer/components/xiaojing/XiaojingSidebar.tsx",
     );
     const store = source("src-tauri/src/brand_workspace.rs");
+    // 持久化内核（ADR-0014）后开库路径居内核文件；WAL 与库名权威钉随之改向。
+    const persistence = source("src-tauri/src/brand_workspace/persistence.rs");
     expect(app).toContain("useBrandWorkspaces()");
     expect(sidebar).toContain("createWorkspace");
     expect(sidebar).toContain("switchWorkspace");
     expect(sidebar).toContain("xiaojingSidebar.deleteFailed.");
-    expect(store).toContain('"project.sqlite"');
-    expect(store).toContain("PRAGMA journal_mode = WAL");
+    expect(persistence).toContain('"project.sqlite"');
+    expect(persistence).toContain("PRAGMA journal_mode = WAL");
     expect(store).toContain("session_deletion_intents");
     expect(sidebar).not.toContain("useConfig");
   });

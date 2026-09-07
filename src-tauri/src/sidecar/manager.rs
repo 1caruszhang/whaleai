@@ -188,6 +188,23 @@ pub struct SidecarManager {
     pub(super) terminal_events: tokio::sync::broadcast::Sender<(String, u64)>,
 }
 
+// ── 会话删除拒绝原因词表（ADR-0012 双侧 pin）────────────────────────────
+//
+// 值的裁判是 src/shared/geo/geoOperationContract.json 的
+// sessionDeletionFailureReasons（10 值全表）与 sessionPersistentOwnerReasons
+// （4 值持久 owner 子集）；TS 侧 tauriClient.ts 以常量联合 pin 同一裁判，
+// Rust pin 测试在 session_lifecycle.rs。删除/持久 owner 判定只从这里取值
+// ——改词表需四处改齐：裁判 JSON、TS 常量、本常量组、i18n 文案。
+// Rust 判定路径只产出下列 6 值；TS 专属兜底（protected-session /
+// authority-unavailable / transition-in-progress / unexpected）只在渲染层
+// 出现，不进本组。
+pub(crate) const SESSION_DELETE_REASON_IN_USE: &str = "in-use";
+pub(crate) const SESSION_DELETE_REASON_BUSY_REPLYING: &str = "busy-replying";
+pub(crate) const SESSION_DELETE_REASON_MONITOR_ACTIVE: &str = "monitor-active";
+pub(crate) const SESSION_DELETE_REASON_NOT_FOUND: &str = "not-found";
+pub(crate) const SESSION_DELETE_REASON_INVALID_SESSION_ID: &str = "invalid-session-id";
+pub(crate) const SESSION_DELETE_REASON_ACTIVITY_UNAVAILABLE: &str = "activity-unavailable";
+
 impl SidecarManager {
     pub fn new() -> Self {
         // Drop the initial receiver immediately — subscribers grab their own via
@@ -1468,8 +1485,8 @@ impl SidecarManager {
     pub fn session_persistent_owner_reason(&self, session_id: &str) -> Option<&'static str> {
         self.session_owners(session_id)
             .find_map(|owner| match owner {
-                SidecarOwner::BackgroundCompletion(_) => Some("busy-replying"),
-                SidecarOwner::GeoMonitor(_) => Some("monitor-active"),
+                SidecarOwner::BackgroundCompletion(_) => Some(SESSION_DELETE_REASON_BUSY_REPLYING),
+                SidecarOwner::GeoMonitor(_) => Some(SESSION_DELETE_REASON_MONITOR_ACTIVE),
                 _ => None,
             })
     }
@@ -1528,9 +1545,9 @@ impl SidecarManager {
                 _ => true,
             })
             .map(|owner| match owner {
-                SidecarOwner::BackgroundCompletion(_) => "busy-replying",
-                SidecarOwner::GeoMonitor(_) => "monitor-active",
-                _ => "in-use",
+                SidecarOwner::BackgroundCompletion(_) => SESSION_DELETE_REASON_BUSY_REPLYING,
+                SidecarOwner::GeoMonitor(_) => SESSION_DELETE_REASON_MONITOR_ACTIVE,
+                _ => SESSION_DELETE_REASON_IN_USE,
             })
             .next()
     }

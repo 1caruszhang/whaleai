@@ -78,6 +78,14 @@ export interface GatewayBillingChannelDependencies {
   fetch?: typeof fetch;
   /** 瞬时网络失败的有界重试次数（缺省 2 次，指数退避）。 */
   transportRetries?: number;
+  /** apply 收到 concurrency_limit(429) 或网关 5xx 时的有界重试次数
+   * （缺省 2 次，1s 起指数退避）。并发名额被其他操作短暂占用时等待
+   * 重试，而不是立刻以失败终态落库。 */
+  concurrencyRetries?: number;
+  /** report/close 收到网关 5xx 时的有界重试次数（缺省 2 次；两端点
+   * 幂等，重放安全）。结算最终失败会打一条脱敏 [billing] 日志——
+   * 悬挂 permit 要在日志里可见，不能静默吞掉。 */
+  settleRetries?: number;
   sleep?: (ms: number) => Promise<void>;
 }
 
@@ -116,9 +124,38 @@ export function createGatewayBillingPermitChannel(
   const token = input.accessToken.trim();
   const fetchImpl = deps.fetch ?? fetch;
   const maxRetries = deps.transportRetries ?? 2;
+  const maxConcurrencyRetries = deps.concurrencyRetries ?? 2;
+  const maxSettleRetries = deps.settleRetries ?? 2;
   const sleep =
     deps.sleep ??
     ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+
+  /** apply 的可重试拒绝：并发额度被占（429）或网关 5xx。permitId 是幂等
+   * 键，重放 apply 不二次预扣，重试安全。 */
+  const retryableApplyRejection = (error: unknown): boolean =>
+    error instanceof GatewayBillingError &&
+    (error.code === "concurrency_limit" || error.status >= 500);
+
+  /** 结算（report/close）的可重试失败：仅网关 5xx。两端点幂等（同结果
+   * 重放/已结清重放 close 都返回 200），重试安全。 */
+  const retryableSettleFailure = (error: unknown): boolean =>
+    error instanceof GatewayBillingError && error.status >= 500;
+
+  /** 结算最终失败的脱敏留痕：真实原因只进日志（与材料域 failureDiagnostic
+   * 同口径——类名 + 类型化错误的 code/status，自由文本 message 不进日志），
+   * 悬挂 permit 不再静默泄漏。 */
+  const logSettleFailure = (op: "report" | "close", permitId: string, error: unknown): void => {
+    const diagnostic: Record<string, unknown> = {
+      op,
+      permitId,
+      errorName: error instanceof Error ? error.name : typeof error,
+    };
+    if (error instanceof GatewayBillingError) {
+      diagnostic.billingCode = error.code;
+      diagnostic.billingStatus = error.status;
+    }
+    console.log(`[billing] settle failed ${JSON.stringify(diagnostic)}`);
+  };
 
   const request = async (
     method: "GET" | "POST",
@@ -187,38 +224,71 @@ export function createGatewayBillingPermitChannel(
 
   return {
     async apply({ permitId, operation, units }) {
-      return call<GeoBillingPermitProjection>(
-        "POST",
-        "/billing/permits",
-        { permitId, operation, units },
-        (payload) => projectionOf(payload.permit),
-      );
+      let attempt = 0;
+      for (;;) {
+        try {
+          return await call<GeoBillingPermitProjection>(
+            "POST",
+            "/billing/permits",
+            { permitId, operation, units },
+            (payload) => projectionOf(payload.permit),
+          );
+        } catch (error) {
+          if (attempt >= maxConcurrencyRetries || !retryableApplyRejection(error)) {
+            throw error;
+          }
+          await sleep(1000 * 2 ** attempt);
+          attempt += 1;
+        }
+      }
     },
     async reportUnit(permitId, unit, outcome) {
-      try {
-        await call("POST", `/billing/permits/${encodeURIComponent(permitId)}/report`, {
-          unit,
-          outcome,
-        });
-      } catch (error) {
-        // 同单位已按更早结果回报（恢复重跑中结果漂移）：首个结果为准，
-        // 不重复扣也不阻断业务收尾。
-        if (
-          error instanceof GatewayBillingError &&
-          error.code === "unit_outcome_conflict"
-        ) {
+      let attempt = 0;
+      for (;;) {
+        try {
+          await call("POST", `/billing/permits/${encodeURIComponent(permitId)}/report`, {
+            unit,
+            outcome,
+          });
           return;
+        } catch (error) {
+          // 同单位已按更早结果回报（恢复重跑中结果漂移）：首个结果为准，
+          // 不重复扣也不阻断业务收尾。
+          if (
+            error instanceof GatewayBillingError &&
+            error.code === "unit_outcome_conflict"
+          ) {
+            return;
+          }
+          if (attempt >= maxSettleRetries || !retryableSettleFailure(error)) {
+            logSettleFailure("report", permitId, error);
+            throw error;
+          }
+          await sleep(500 * 2 ** attempt);
+          attempt += 1;
         }
-        throw error;
       }
     },
     async close(permitId) {
-      // 结清幂等（服务端对已结清 permit 重放 close 返回 200）。
-      await call(
-        "POST",
-        `/billing/permits/${encodeURIComponent(permitId)}/close`,
-        {},
-      );
+      let attempt = 0;
+      for (;;) {
+        try {
+          // 结清幂等（服务端对已结清 permit 重放 close 返回 200）。
+          await call(
+            "POST",
+            `/billing/permits/${encodeURIComponent(permitId)}/close`,
+            {},
+          );
+          return;
+        } catch (error) {
+          if (attempt >= maxSettleRetries || !retryableSettleFailure(error)) {
+            logSettleFailure("close", permitId, error);
+            throw error;
+          }
+          await sleep(500 * 2 ** attempt);
+          attempt += 1;
+        }
+      }
     },
     async balance() {
       return call<GeoBillingBalanceSnapshot>(

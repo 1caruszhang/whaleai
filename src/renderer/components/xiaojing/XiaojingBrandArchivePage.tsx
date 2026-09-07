@@ -26,7 +26,7 @@ import { canonicalEnterpriseProfileField, PROFILE_PREDICATE_PREFIX } from "../..
 import {
   decodeCompetitorEvidence,
   formatCompetitorFactValue,
-} from '../../../shared/geo/competitorDetails';
+} from '../../../shared/geo/competitorRoster';
 
 interface Props {
   workspace: BrandWorkspace | null;
@@ -708,7 +708,7 @@ function BrandArchiveBody({ workspace }: { workspace: BrandWorkspace }) {
     void refresh();
   }, [refresh]);
 
-  /** 字段名走 knowledgeCard.fields 中文词表（与知识确认卡同源），
+  /** 字段名走 knowledgeCard.fields 中文词表（与知识确认卡共用词表），
    *  非档案字段的 factKey 回退原文。 */
   const labelOf = useCallback(
     (factKey: string) => {

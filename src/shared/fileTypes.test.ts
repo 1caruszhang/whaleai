@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
+import binaryExtensionsContract from './binaryExtensionsContract.json';
 import {
   BINARY_EXTENSIONS,
   getFileExtension,
@@ -95,5 +96,13 @@ describe('fileTypes — rich-document routing', () => {
       expect(BINARY_EXTENSIONS.has(ext), `${ext} must be in BINARY_EXTENSIONS`).toBe(true);
       expect(isPreviewable(`file.${ext}`), `${ext} must NOT be text-previewable`).toBe(false);
     }
+  });
+});
+
+// 二进制扩展名黑名单契约（票 #41，ADR-0012）：与裁判 JSON 严格相等含顺序；
+// Rust 侧 read_preview.rs 的同文件测试 include_str! 同一裁判。
+describe('binaryExtensions 契约（票 #41，ADR-0012）', () => {
+  it('BINARY_EXTENSIONS 与 binaryExtensionsContract.json 裁判严格相等（含顺序）', () => {
+    expect([...BINARY_EXTENSIONS]).toEqual(binaryExtensionsContract.extensions);
   });
 });

@@ -1,3 +1,4 @@
+use super::persistence::{canonical_json, gates, with_immediate_tx};
 use super::*;
 use rusqlite::TransactionBehavior;
 use serde_json::Value;
@@ -345,8 +346,8 @@ impl BrandWorkspaceStore {
         request: QuestionPoolLatestRequest,
     ) -> Result<Option<QuestionPoolProjection>, String> {
         let workspace = self.workspace(workspace_id)?;
-        let connection = open_database(&workspace)?;
-        require_question_pool_session(&connection, session_id)?;
+        let connection = BrandWorkspaceStore::open(&workspace)?;
+        gates::QUESTION_POOL_SESSION.enforce(&connection, session_id)?;
         let knowledge_version: i64 = connection
             .query_row(
                 "SELECT COALESCE(MAX(version), 0) FROM knowledge_versions",
@@ -414,15 +415,15 @@ impl BrandWorkspaceStore {
     ) -> Result<QuestionPoolPreparation, String> {
         validate_question_pool_prepare(&request)?;
         let workspace = self.workspace(&request.workspace_id)?;
-        let mut connection = open_database(&workspace)?;
-        require_question_pool_session(&connection, &request.session_id)?;
+        let mut connection = BrandWorkspaceStore::open(&workspace)?;
+        gates::QUESTION_POOL_SESSION.enforce(&connection, &request.session_id)?;
         let context = read_question_pool_context(
             &connection,
             &workspace,
             &request.product_line,
             &request.target_region,
         )?;
-        let parameters_json = canonical_json(&request.generation_parameters)?;
+        let parameters_json = canonical_json(&request.generation_parameters, "question pool JSON")?;
 
         if let Some(attempt) = read_attempt_by_key(&connection, &request.idempotency_key)? {
             let attempt_session: String = connection
@@ -439,7 +440,8 @@ impl BrandWorkspaceStore {
             if pool.knowledge_version != context.knowledge_version
                 || pool.product_line != request.product_line.trim()
                 || pool.target_region != request.target_region.trim()
-                || canonical_json(&pool.generation_parameters)? != parameters_json
+                || canonical_json(&pool.generation_parameters, "question pool JSON")?
+                    != parameters_json
             {
                 return Err("question_pool_idempotency_conflict".to_string());
             }
@@ -499,56 +501,57 @@ impl BrandWorkspaceStore {
             }
         }
 
-        let transaction = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|error| format!("start question pool transaction: {error}"))?;
-        let operation_id = Uuid::new_v4().to_string();
-        let pool_id = Uuid::new_v4().to_string();
-        let attempt_id = Uuid::new_v4().to_string();
-        let now = Utc::now().to_rfc3339();
-        transaction
-            .execute(
-                "INSERT INTO geo_operations (id, session_id, state, created_at)
-                 VALUES (?1, ?2, 'question-pool-generating', ?3)",
-                params![operation_id, request.session_id, now],
-            )
-            .map_err(|error| format!("create question pool operation: {error}"))?;
-        transaction
-            .execute(
-                "INSERT INTO geo_artifacts (id, operation_id, session_id, kind, knowledge_version, created_at)
-                 VALUES (?1, ?2, ?3, 'question-pool', ?4, ?5)",
-                params![pool_id, operation_id, request.session_id, context.knowledge_version, now],
-            )
-            .map_err(|error| format!("create question pool artifact: {error}"))?;
-        transaction
-            .execute(
-                "INSERT INTO geo_question_pools
-                    (id, operation_id, created_by_session_id, knowledge_version, product_line,
-                     target_region, generation_parameters_json, status, revision, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'generating', 0, ?8, ?8)",
-                params![
-                    pool_id,
-                    operation_id,
-                    request.session_id,
-                    context.knowledge_version,
-                    request.product_line.trim(),
-                    request.target_region.trim(),
-                    parameters_json,
-                    now
-                ],
-            )
-            .map_err(|error| format!("create question pool: {error}"))?;
-        transaction
-            .execute(
-                "INSERT INTO geo_question_pool_attempts
-                    (id, pool_id, session_id, idempotency_key, state, current_stage, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, 'running', NULL, ?5, ?5)",
-                params![attempt_id, pool_id, request.session_id, request.idempotency_key, now],
-            )
-            .map_err(|error| format!("create question pool attempt: {error}"))?;
-        transaction
-            .commit()
-            .map_err(|error| format!("commit question pool preparation: {error}"))?;
+        let pool_id = with_immediate_tx(
+            &mut connection,
+            "start question pool transaction",
+            "commit question pool preparation",
+            |transaction| {
+                let operation_id = Uuid::new_v4().to_string();
+                let pool_id = Uuid::new_v4().to_string();
+                let attempt_id = Uuid::new_v4().to_string();
+                let now = Utc::now().to_rfc3339();
+                open_lineage(
+                    transaction,
+                    &operation_id,
+                    &request.session_id,
+                    "question-pool-generating",
+                )?;
+                transaction
+                    .execute(
+                        "INSERT INTO geo_artifacts (id, operation_id, session_id, kind, knowledge_version, created_at)
+                         VALUES (?1, ?2, ?3, 'question-pool', ?4, ?5)",
+                        params![pool_id, operation_id, request.session_id, context.knowledge_version, now],
+                    )
+                    .map_err(|error| format!("create question pool artifact: {error}"))?;
+                transaction
+                    .execute(
+                        "INSERT INTO geo_question_pools
+                            (id, operation_id, created_by_session_id, knowledge_version, product_line,
+                             target_region, generation_parameters_json, status, revision, created_at, updated_at)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'generating', 0, ?8, ?8)",
+                        params![
+                            pool_id,
+                            operation_id,
+                            request.session_id,
+                            context.knowledge_version,
+                            request.product_line.trim(),
+                            request.target_region.trim(),
+                            parameters_json,
+                            now
+                        ],
+                    )
+                    .map_err(|error| format!("create question pool: {error}"))?;
+                transaction
+                    .execute(
+                        "INSERT INTO geo_question_pool_attempts
+                            (id, pool_id, session_id, idempotency_key, state, current_stage, created_at, updated_at)
+                         VALUES (?1, ?2, ?3, ?4, 'running', NULL, ?5, ?5)",
+                        params![attempt_id, pool_id, request.session_id, request.idempotency_key, now],
+                    )
+                    .map_err(|error| format!("create question pool attempt: {error}"))?;
+                Ok(pool_id)
+            },
+        )?;
         let attempt = read_attempt_by_key(&connection, &request.idempotency_key)?
             .ok_or_else(|| "question_pool_attempt_not_found".to_string())?;
         let pool = read_question_pool(&connection, &workspace.id, &pool_id, false)?;
@@ -569,8 +572,8 @@ impl BrandWorkspaceStore {
         validate_stage(&request.stage)?;
         validate_hash(&request.input_hash)?;
         let workspace = self.workspace(workspace_id)?;
-        let mut connection = open_database(&workspace)?;
-        require_question_pool_session(&connection, session_id)?;
+        let mut connection = BrandWorkspaceStore::open(&workspace)?;
+        gates::QUESTION_POOL_SESSION.enforce(&connection, session_id)?;
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|error| format!("start question pool step claim: {error}"))?;
@@ -731,54 +734,60 @@ impl BrandWorkspaceStore {
             return Err("question_pool_step_status_invalid".to_string());
         }
         let workspace = self.workspace(workspace_id)?;
-        let mut connection = open_database(&workspace)?;
-        require_question_pool_session(&connection, session_id)?;
-        let transaction = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|error| format!("start question pool step finish: {error}"))?;
-        let attempt_session: String = transaction
-            .query_row(
-                "SELECT session_id FROM geo_question_pool_attempts WHERE id=?1",
-                [&request.attempt_id],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(|error| format!("read question pool attempt: {error}"))?
-            .ok_or_else(|| "question_pool_attempt_not_found".to_string())?;
-        if attempt_session != session_id {
-            return Err("question_pool_identity_mismatch".to_string());
-        }
-        let output_json = request.output.as_ref().map(canonical_json).transpose()?;
-        let changed = transaction
-            .execute(
-                "UPDATE geo_question_pool_checkpoints
-                 SET status=?4, output_json=?5, error_code=?6, finished_at=?7, claim_token=NULL
-                 WHERE attempt_id=?1 AND stage=?2 AND claim_token=?3 AND status='running'",
-                params![
-                    request.attempt_id,
-                    request.stage,
-                    request.claim_token,
-                    request.status,
-                    output_json,
-                    request.error_code,
-                    Utc::now().to_rfc3339()
-                ],
-            )
-            .map_err(|error| format!("finish question pool checkpoint: {error}"))?;
-        if changed != 1 {
-            return Err("question_pool_checkpoint_cas_conflict".to_string());
-        }
-        if request.status != "completed" {
-            transaction
-                .execute(
-                    "UPDATE geo_question_pool_attempts SET state=?2, updated_at=?3 WHERE id=?1",
-                    params![request.attempt_id, request.status, Utc::now().to_rfc3339()],
-                )
-                .map_err(|error| format!("mark question pool attempt terminal: {error}"))?;
-        }
-        transaction
-            .commit()
-            .map_err(|error| format!("commit question pool checkpoint: {error}"))?;
+        let mut connection = BrandWorkspaceStore::open(&workspace)?;
+        gates::QUESTION_POOL_SESSION.enforce(&connection, session_id)?;
+        with_immediate_tx(
+            &mut connection,
+            "start question pool step finish",
+            "commit question pool checkpoint",
+            |transaction| {
+                let attempt_session: String = transaction
+                    .query_row(
+                        "SELECT session_id FROM geo_question_pool_attempts WHERE id=?1",
+                        [&request.attempt_id],
+                        |row| row.get(0),
+                    )
+                    .optional()
+                    .map_err(|error| format!("read question pool attempt: {error}"))?
+                    .ok_or_else(|| "question_pool_attempt_not_found".to_string())?;
+                if attempt_session != session_id {
+                    return Err("question_pool_identity_mismatch".to_string());
+                }
+                let output_json = request
+                    .output
+                    .as_ref()
+                    .map(|value| canonical_json(value, "question pool JSON"))
+                    .transpose()?;
+                let changed = transaction
+                    .execute(
+                        "UPDATE geo_question_pool_checkpoints
+                         SET status=?4, output_json=?5, error_code=?6, finished_at=?7, claim_token=NULL
+                         WHERE attempt_id=?1 AND stage=?2 AND claim_token=?3 AND status='running'",
+                        params![
+                            request.attempt_id,
+                            request.stage,
+                            request.claim_token,
+                            request.status,
+                            output_json,
+                            request.error_code,
+                            Utc::now().to_rfc3339()
+                        ],
+                    )
+                    .map_err(|error| format!("finish question pool checkpoint: {error}"))?;
+                if changed != 1 {
+                    return Err("question_pool_checkpoint_cas_conflict".to_string());
+                }
+                if request.status != "completed" {
+                    transaction
+                        .execute(
+                            "UPDATE geo_question_pool_attempts SET state=?2, updated_at=?3 WHERE id=?1",
+                            params![request.attempt_id, request.status, Utc::now().to_rfc3339()],
+                        )
+                        .map_err(|error| format!("mark question pool attempt terminal: {error}"))?;
+                }
+                Ok(())
+            },
+        )?;
         read_checkpoint(&connection, &request.attempt_id, &request.stage)
     }
 
@@ -789,73 +798,86 @@ impl BrandWorkspaceStore {
         request: QuestionPoolPersistRequest,
     ) -> Result<QuestionPoolProjection, String> {
         let workspace = self.workspace(workspace_id)?;
-        let mut connection = open_database(&workspace)?;
-        require_question_pool_session(&connection, session_id)?;
-        let transaction = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|error| format!("start question pool persist: {error}"))?;
-        let (pool_id, attempt_session): (String, String) = transaction
-            .query_row(
-                "SELECT pool_id, session_id FROM geo_question_pool_attempts WHERE id=?1",
-                [&request.attempt_id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .optional()
-            .map_err(|error| format!("read question pool attempt: {error}"))?
-            .ok_or_else(|| "question_pool_attempt_not_found".to_string())?;
-        if attempt_session != session_id {
-            return Err("question_pool_identity_mismatch".to_string());
-        }
-        let has_decision: i64 = transaction
-            .query_row(
-                "SELECT COUNT(*) FROM geo_question_pool_decisions WHERE pool_id=?1",
-                [&pool_id],
-                |row| row.get(0),
-            )
-            .map_err(|error| format!("inspect question pool decisions: {error}"))?;
-        if has_decision > 0 {
-            return Err("question_pool_confirmed_immutable".to_string());
-        }
-        let embedding_complete: Option<String> = transaction
-            .query_row(
-                "SELECT status FROM geo_question_pool_checkpoints WHERE attempt_id=?1 AND stage='embedding'",
-                [&request.attempt_id],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(|error| format!("read embedding checkpoint: {error}"))?;
-        if embedding_complete.as_deref() != Some("completed") {
-            return Err("question_pool_embedding_incomplete".to_string());
-        }
-        let now = Utc::now().to_rfc3339();
-        let keywords = canonical_json(&request.keywords)?;
-        let questions = canonical_json(&request.questions)?;
-        let source_evidence = canonical_json(&request.source_evidence)?;
-        transaction
-            .execute(
-                "UPDATE geo_question_pools
-                 SET keywords_json=?2, questions_json=?3, source_evidence_json=?4,
-                     status='awaiting-selection', updated_at=?5 WHERE id=?1",
-                params![pool_id, keywords, questions, source_evidence, now],
-            )
-            .map_err(|error| format!("persist question pool artifact: {error}"))?;
-        transaction
-            .execute(
-                "UPDATE geo_question_pool_attempts
-                 SET state='awaiting-selection', current_stage='persist', updated_at=?2 WHERE id=?1",
-                params![request.attempt_id, now],
-            )
-            .map_err(|error| format!("finish question pool attempt: {error}"))?;
-        transaction
-            .execute(
-                "UPDATE geo_operations SET state='question-pool-awaiting-selection'
-                 WHERE id=(SELECT operation_id FROM geo_question_pools WHERE id=?1)",
-                [&pool_id],
-            )
-            .map_err(|error| format!("advance question pool operation: {error}"))?;
-        transaction
-            .commit()
-            .map_err(|error| format!("commit question pool artifact: {error}"))?;
+        let mut connection = BrandWorkspaceStore::open(&workspace)?;
+        gates::QUESTION_POOL_SESSION.enforce(&connection, session_id)?;
+        let pool_id = with_immediate_tx(
+            &mut connection,
+            "start question pool persist",
+            "commit question pool artifact",
+            |transaction| {
+                let (pool_id, attempt_session): (String, String) = transaction
+                    .query_row(
+                        "SELECT pool_id, session_id FROM geo_question_pool_attempts WHERE id=?1",
+                        [&request.attempt_id],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .optional()
+                    .map_err(|error| format!("read question pool attempt: {error}"))?
+                    .ok_or_else(|| "question_pool_attempt_not_found".to_string())?;
+                if attempt_session != session_id {
+                    return Err("question_pool_identity_mismatch".to_string());
+                }
+                let has_decision: i64 = transaction
+                    .query_row(
+                        "SELECT COUNT(*) FROM geo_question_pool_decisions WHERE pool_id=?1",
+                        [&pool_id],
+                        |row| row.get(0),
+                    )
+                    .map_err(|error| format!("inspect question pool decisions: {error}"))?;
+                if has_decision > 0 {
+                    return Err("question_pool_confirmed_immutable".to_string());
+                }
+                let embedding_complete: Option<String> = transaction
+                    .query_row(
+                        "SELECT status FROM geo_question_pool_checkpoints WHERE attempt_id=?1 AND stage='embedding'",
+                        [&request.attempt_id],
+                        |row| row.get(0),
+                    )
+                    .optional()
+                    .map_err(|error| format!("read embedding checkpoint: {error}"))?;
+                if embedding_complete.as_deref() != Some("completed") {
+                    return Err("question_pool_embedding_incomplete".to_string());
+                }
+                let now = Utc::now().to_rfc3339();
+                let keywords = canonical_json(&request.keywords, "question pool JSON")?;
+                let questions = canonical_json(&request.questions, "question pool JSON")?;
+                let source_evidence =
+                    canonical_json(&request.source_evidence, "question pool JSON")?;
+                transaction
+                    .execute(
+                        "UPDATE geo_question_pools
+                         SET keywords_json=?2, questions_json=?3, source_evidence_json=?4,
+                             status='awaiting-selection', updated_at=?5 WHERE id=?1",
+                        params![pool_id, keywords, questions, source_evidence, now],
+                    )
+                    .map_err(|error| format!("persist question pool artifact: {error}"))?;
+                transaction
+                    .execute(
+                        "UPDATE geo_question_pool_attempts
+                         SET state='awaiting-selection', current_stage='persist', updated_at=?2 WHERE id=?1",
+                        params![request.attempt_id, now],
+                    )
+                    .map_err(|error| format!("finish question pool attempt: {error}"))?;
+                // 血缘行迁移经唯一 owner（票 03）；旧子查询 UPDATE 在池行缺失时影响
+                // 0 行被忽略——optional 读取保持同一 no-op。
+                let operation_id: Option<String> = transaction
+                    .query_row(
+                        "SELECT operation_id FROM geo_question_pools WHERE id=?1",
+                        [&pool_id],
+                        |row| row.get(0),
+                    )
+                    .optional()
+                    .map_err(|error| format!("read question pool operation: {error}"))?;
+                if let Some(operation_id) = operation_id {
+                    set_lineage_state(
+                        transaction,
+                        &operation_id,
+                        "question-pool-awaiting-selection",
+                    )?;
+                }
+                Ok(pool_id)
+            },
+        )?;
         read_question_pool(&connection, &workspace.id, &pool_id, false)
     }
 
@@ -866,57 +888,59 @@ impl BrandWorkspaceStore {
         request: QuestionPoolCancelRequest,
     ) -> Result<QuestionPoolProjection, String> {
         let workspace = self.workspace(workspace_id)?;
-        let mut connection = open_database(&workspace)?;
-        require_question_pool_session(&connection, session_id)?;
-        let transaction = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|error| format!("start question pool cancellation: {error}"))?;
-        let (pool_id, attempt_session): (String, String) = transaction
-            .query_row(
-                "SELECT pool_id, session_id FROM geo_question_pool_attempts WHERE id=?1",
-                [&request.attempt_id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .optional()
-            .map_err(|error| format!("read question pool attempt: {error}"))?
-            .ok_or_else(|| "question_pool_attempt_not_found".to_string())?;
-        if attempt_session != session_id {
-            return Err("question_pool_identity_mismatch".to_string());
-        }
-        let has_decision: i64 = transaction
-            .query_row(
-                "SELECT COUNT(*) FROM geo_question_pool_decisions WHERE pool_id=?1",
-                [&pool_id],
-                |row| row.get(0),
-            )
-            .map_err(|error| format!("inspect question pool decisions: {error}"))?;
-        if has_decision > 0 {
-            return Err("question_pool_confirmed_immutable".to_string());
-        }
-        let now = Utc::now().to_rfc3339();
-        transaction
-            .execute(
-                "UPDATE geo_question_pool_attempts SET state='cancelled', updated_at=?2 WHERE id=?1",
-                params![request.attempt_id, now],
-            )
-            .map_err(|error| format!("cancel question pool attempt: {error}"))?;
-        transaction
-            .execute(
-                "UPDATE geo_question_pool_checkpoints
-                 SET status='cancelled', error_code='question_pool_cancelled', finished_at=?2, claim_token=NULL
-                 WHERE attempt_id=?1 AND status='running'",
-                params![request.attempt_id, now],
-            )
-            .map_err(|error| format!("cancel question pool checkpoint: {error}"))?;
-        transaction
-            .execute(
-                "UPDATE geo_question_pools SET status='cancelled', updated_at=?2 WHERE id=?1",
-                params![pool_id, now],
-            )
-            .map_err(|error| format!("cancel question pool artifact: {error}"))?;
-        transaction
-            .commit()
-            .map_err(|error| format!("commit question pool cancellation: {error}"))?;
+        let mut connection = BrandWorkspaceStore::open(&workspace)?;
+        gates::QUESTION_POOL_SESSION.enforce(&connection, session_id)?;
+        let pool_id = with_immediate_tx(
+            &mut connection,
+            "start question pool cancellation",
+            "commit question pool cancellation",
+            |transaction| {
+                let (pool_id, attempt_session): (String, String) = transaction
+                    .query_row(
+                        "SELECT pool_id, session_id FROM geo_question_pool_attempts WHERE id=?1",
+                        [&request.attempt_id],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .optional()
+                    .map_err(|error| format!("read question pool attempt: {error}"))?
+                    .ok_or_else(|| "question_pool_attempt_not_found".to_string())?;
+                if attempt_session != session_id {
+                    return Err("question_pool_identity_mismatch".to_string());
+                }
+                let has_decision: i64 = transaction
+                    .query_row(
+                        "SELECT COUNT(*) FROM geo_question_pool_decisions WHERE pool_id=?1",
+                        [&pool_id],
+                        |row| row.get(0),
+                    )
+                    .map_err(|error| format!("inspect question pool decisions: {error}"))?;
+                if has_decision > 0 {
+                    return Err("question_pool_confirmed_immutable".to_string());
+                }
+                let now = Utc::now().to_rfc3339();
+                transaction
+                    .execute(
+                        "UPDATE geo_question_pool_attempts SET state='cancelled', updated_at=?2 WHERE id=?1",
+                        params![request.attempt_id, now],
+                    )
+                    .map_err(|error| format!("cancel question pool attempt: {error}"))?;
+                transaction
+                    .execute(
+                        "UPDATE geo_question_pool_checkpoints
+                         SET status='cancelled', error_code='question_pool_cancelled', finished_at=?2, claim_token=NULL
+                         WHERE attempt_id=?1 AND status='running'",
+                        params![request.attempt_id, now],
+                    )
+                    .map_err(|error| format!("cancel question pool checkpoint: {error}"))?;
+                transaction
+                    .execute(
+                        "UPDATE geo_question_pools SET status='cancelled', updated_at=?2 WHERE id=?1",
+                        params![pool_id, now],
+                    )
+                    .map_err(|error| format!("cancel question pool artifact: {error}"))?;
+                Ok(pool_id)
+            },
+        )?;
         read_question_pool(&connection, &workspace.id, &pool_id, false)
     }
 
@@ -930,106 +954,104 @@ impl BrandWorkspaceStore {
         }
         validate_decision_payload(&request.questions, &request.selected_question_ids)?;
         let workspace = self.workspace(&request.workspace_id)?;
-        let mut connection = open_database(&workspace)?;
-        require_question_pool_session(&connection, &request.session_id)?;
-        let transaction = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|error| format!("start question pool decision: {error}"))?;
-        let (revision, status, operation_id, knowledge_version, owner_session_id, keywords_json): (
-            i64,
-            String,
-            String,
-            i64,
-            String,
-            String,
-        ) = transaction
-            .query_row(
-                &format!(
-                    "SELECT revision, status, operation_id, knowledge_version,
-                            {QUESTION_POOL_OWNER_KEY}, keywords_json
-                     FROM geo_question_pools WHERE id=?1"
-                ),
-                [&request.pool_id],
-                |row| {
-                    Ok((
-                        row.get(0)?,
-                        row.get(1)?,
-                        row.get(2)?,
-                        row.get(3)?,
-                        row.get(4)?,
-                        row.get(5)?,
-                    ))
-                },
-            )
-            .optional()
-            .map_err(|error| format!("read question pool: {error}"))?
-            .ok_or_else(|| "question_pool_not_found".to_string())?;
-        // 跨会话重选（复用停卡重选，2026-09-01）：confirmed 池是工作区级
-        // 事实——新一轮 Session 对复用池的重选裁决放行（快照与 revision CAS
-        // 仍是护栏）；owner 闸只约束 awaiting-selection 待决池（防两个
-        // Session 并发裁决同一草稿）。
-        if owner_session_id != request.session_id && status != "confirmed" {
-            return Err("question_pool_identity_mismatch".to_string());
-        }
-        if !matches!(status.as_str(), "awaiting-selection" | "confirmed") {
-            return Err("question_pool_not_selectable".to_string());
-        }
-        if revision != request.expected_revision {
-            return Err("question_pool_revision_conflict".to_string());
-        }
-        let decision_id = Uuid::new_v4().to_string();
-        let next_revision = revision + 1;
-        let now = Utc::now().to_rfc3339();
-        let questions_json = canonical_json(&request.questions)?;
-        let selected_json = canonical_json(&request.selected_question_ids)?;
-        transaction
-            .execute(
-                "INSERT INTO geo_question_pool_decisions
-                    (id, pool_id, session_id, decision, expected_revision, revision,
-                     questions_json, selected_question_ids_json, actor_id, decided_at)
-                 VALUES (?1, ?2, ?3, 'confirm-selection', ?4, ?5, ?6, ?7, ?8, ?9)",
-                params![
-                    decision_id,
-                    request.pool_id,
-                    request.session_id,
+        let mut connection = BrandWorkspaceStore::open(&workspace)?;
+        gates::QUESTION_POOL_SESSION.enforce(&connection, &request.session_id)?;
+        let (decision_id, revision, next_revision, knowledge_version, now) = with_immediate_tx(
+            &mut connection,
+            "start question pool decision",
+            "commit question pool decision",
+            |transaction| {
+                let (
                     revision,
-                    next_revision,
-                    questions_json,
-                    selected_json,
-                    request.actor_id,
-                    now
-                ],
-            )
-            .map_err(|error| format!("store question pool decision: {error}"))?;
-        transaction
-            .execute(
-                "UPDATE geo_question_pools SET status='confirmed', revision=?2, updated_at=?3
-                 WHERE id=?1 AND revision=?4",
-                params![request.pool_id, next_revision, now, revision],
-            )
-            .map_err(|error| format!("confirm question pool: {error}"))?;
-        transaction
-            .execute(
-                "UPDATE geo_question_pool_attempts SET state='confirmed', updated_at=?2 WHERE pool_id=?1",
-                params![request.pool_id, now],
-            )
-            .map_err(|error| format!("confirm question pool attempt: {error}"))?;
-        transaction
-            .execute(
-                "UPDATE geo_operations SET state='question-pool-confirmed' WHERE id=?1",
-                [operation_id],
-            )
-            .map_err(|error| format!("confirm question pool operation: {error}"))?;
-        persist_keywords_to_library(
-            &transaction,
-            &workspace.id,
-            &request.pool_id,
-            &keywords_json,
-            &now,
+                    status,
+                    operation_id,
+                    knowledge_version,
+                    owner_session_id,
+                    keywords_json,
+                ): (i64, String, String, i64, String, String) = transaction
+                    .query_row(
+                        &format!(
+                            "SELECT revision, status, operation_id, knowledge_version,
+                                    {QUESTION_POOL_OWNER_KEY}, keywords_json
+                             FROM geo_question_pools WHERE id=?1"
+                        ),
+                        [&request.pool_id],
+                        |row| {
+                            Ok((
+                                row.get(0)?,
+                                row.get(1)?,
+                                row.get(2)?,
+                                row.get(3)?,
+                                row.get(4)?,
+                                row.get(5)?,
+                            ))
+                        },
+                    )
+                    .optional()
+                    .map_err(|error| format!("read question pool: {error}"))?
+                    .ok_or_else(|| "question_pool_not_found".to_string())?;
+                // 跨会话重选（复用停卡重选，2026-09-01）：confirmed 池是工作区级
+                // 事实——新一轮 Session 对复用池的重选裁决放行（快照与 revision CAS
+                // 仍是护栏）；owner 闸只约束 awaiting-selection 待决池（防两个
+                // Session 并发裁决同一草稿）。
+                if owner_session_id != request.session_id && status != "confirmed" {
+                    return Err("question_pool_identity_mismatch".to_string());
+                }
+                if !matches!(status.as_str(), "awaiting-selection" | "confirmed") {
+                    return Err("question_pool_not_selectable".to_string());
+                }
+                if revision != request.expected_revision {
+                    return Err("question_pool_revision_conflict".to_string());
+                }
+                let decision_id = Uuid::new_v4().to_string();
+                let next_revision = revision + 1;
+                let now = Utc::now().to_rfc3339();
+                let questions_json = canonical_json(&request.questions, "question pool JSON")?;
+                let selected_json =
+                    canonical_json(&request.selected_question_ids, "question pool JSON")?;
+                transaction
+                    .execute(
+                        "INSERT INTO geo_question_pool_decisions
+                            (id, pool_id, session_id, decision, expected_revision, revision,
+                             questions_json, selected_question_ids_json, actor_id, decided_at)
+                         VALUES (?1, ?2, ?3, 'confirm-selection', ?4, ?5, ?6, ?7, ?8, ?9)",
+                        params![
+                            decision_id,
+                            request.pool_id,
+                            request.session_id,
+                            revision,
+                            next_revision,
+                            questions_json,
+                            selected_json,
+                            request.actor_id,
+                            now
+                        ],
+                    )
+                    .map_err(|error| format!("store question pool decision: {error}"))?;
+                transaction
+                    .execute(
+                        "UPDATE geo_question_pools SET status='confirmed', revision=?2, updated_at=?3
+                         WHERE id=?1 AND revision=?4",
+                        params![request.pool_id, next_revision, now, revision],
+                    )
+                    .map_err(|error| format!("confirm question pool: {error}"))?;
+                transaction
+                    .execute(
+                        "UPDATE geo_question_pool_attempts SET state='confirmed', updated_at=?2 WHERE pool_id=?1",
+                        params![request.pool_id, now],
+                    )
+                    .map_err(|error| format!("confirm question pool attempt: {error}"))?;
+                set_lineage_state(transaction, &operation_id, "question-pool-confirmed")?;
+                persist_keywords_to_library(
+                    transaction,
+                    &workspace.id,
+                    &request.pool_id,
+                    &keywords_json,
+                    &now,
+                )?;
+                Ok((decision_id, revision, next_revision, knowledge_version, now))
+            },
         )?;
-        transaction
-            .commit()
-            .map_err(|error| format!("commit question pool decision: {error}"))?;
         Ok(QuestionPoolDecisionResult {
             pool_id: request.pool_id,
             decision_id,
@@ -1078,113 +1100,115 @@ impl BrandWorkspaceStore {
         }
         validate_revision_payload(&request.keywords, &request.questions)?;
         let workspace = self.workspace(&request.workspace_id)?;
-        let mut connection = open_database(&workspace)?;
-        require_question_pool_session(&connection, &request.session_id)?;
-        let transaction = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|error| format!("start question pool revision: {error}"))?;
-        let (revision, status, keywords_json, questions_json, owner_session_id): (
-            i64,
-            String,
-            String,
-            String,
-            String,
-        ) = transaction
-            .query_row(
-                &format!(
-                    "SELECT revision, status, keywords_json, questions_json,
-                            {QUESTION_POOL_OWNER_KEY}
-                     FROM geo_question_pools WHERE id=?1"
-                ),
-                [&request.pool_id],
-                |row| {
-                    Ok((
-                        row.get(0)?,
-                        row.get(1)?,
-                        row.get(2)?,
-                        row.get(3)?,
-                        row.get(4)?,
-                    ))
-                },
-            )
-            .optional()
-            .map_err(|error| format!("read question pool for revision: {error}"))?
-            .ok_or_else(|| "question_pool_not_found".to_string())?;
-        if owner_session_id != request.session_id {
-            return Err("question_pool_identity_mismatch".to_string());
-        }
-        let has_decision: i64 = transaction
-            .query_row(
-                "SELECT COUNT(*) FROM geo_question_pool_decisions WHERE pool_id=?1",
-                [&request.pool_id],
-                |row| row.get(0),
-            )
-            .map_err(|error| format!("inspect question pool decisions: {error}"))?;
-        if has_decision > 0 || status == "confirmed" {
-            return Err("question_pool_confirmed_immutable".to_string());
-        }
-        if status != "awaiting-selection" {
-            return Err("question_pool_not_selectable".to_string());
-        }
-        if revision != request.expected_revision {
-            return Err("question_pool_revision_conflict".to_string());
-        }
-        let next_revision = revision + 1;
-        let now = Utc::now().to_rfc3339();
-        let next_keywords_json = canonical_json(&request.keywords)?;
-        let next_questions_json = canonical_json(&request.questions)?;
-        transaction
-            .execute(
-                "INSERT INTO geo_question_pool_revisions
-                    (id, pool_id, session_id, action, target_kind, target_id,
-                     before_json, after_json, actor_id, reason, revised_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-                params![
-                    Uuid::new_v4().to_string(),
-                    request.pool_id,
-                    request.session_id,
-                    request.action,
-                    request.target_kind,
-                    request.target_id,
-                    serde_json::json!({
-                        "keywords": serde_json::from_str::<Value>(&keywords_json)
-                            .unwrap_or(Value::Null),
-                        "questions": serde_json::from_str::<Value>(&questions_json)
-                            .unwrap_or(Value::Null),
-                    })
-                    .to_string(),
-                    serde_json::json!({
-                        "keywords": request.keywords,
-                        "questions": request.questions,
-                    })
-                    .to_string(),
-                    request.actor_id,
-                    request.reason,
-                    now
-                ],
-            )
-            .map_err(|error| format!("audit question pool revision: {error}"))?;
-        let changed = transaction
-            .execute(
-                "UPDATE geo_question_pools
-                 SET keywords_json=?2, questions_json=?3, revision=?4, updated_at=?5
-                 WHERE id=?1 AND revision=?6 AND status='awaiting-selection'",
-                params![
-                    request.pool_id,
-                    next_keywords_json,
-                    next_questions_json,
-                    next_revision,
-                    now,
-                    revision
-                ],
-            )
-            .map_err(|error| format!("apply question pool revision: {error}"))?;
-        if changed != 1 {
-            return Err("question_pool_revision_conflict".to_string());
-        }
-        transaction
-            .commit()
-            .map_err(|error| format!("commit question pool revision: {error}"))?;
+        let mut connection = BrandWorkspaceStore::open(&workspace)?;
+        gates::QUESTION_POOL_SESSION.enforce(&connection, &request.session_id)?;
+        with_immediate_tx(
+            &mut connection,
+            "start question pool revision",
+            "commit question pool revision",
+            |transaction| {
+                let (revision, status, keywords_json, questions_json, owner_session_id): (
+                    i64,
+                    String,
+                    String,
+                    String,
+                    String,
+                ) = transaction
+                    .query_row(
+                        &format!(
+                            "SELECT revision, status, keywords_json, questions_json,
+                                    {QUESTION_POOL_OWNER_KEY}
+                             FROM geo_question_pools WHERE id=?1"
+                        ),
+                        [&request.pool_id],
+                        |row| {
+                            Ok((
+                                row.get(0)?,
+                                row.get(1)?,
+                                row.get(2)?,
+                                row.get(3)?,
+                                row.get(4)?,
+                            ))
+                        },
+                    )
+                    .optional()
+                    .map_err(|error| format!("read question pool for revision: {error}"))?
+                    .ok_or_else(|| "question_pool_not_found".to_string())?;
+                if owner_session_id != request.session_id {
+                    return Err("question_pool_identity_mismatch".to_string());
+                }
+                let has_decision: i64 = transaction
+                    .query_row(
+                        "SELECT COUNT(*) FROM geo_question_pool_decisions WHERE pool_id=?1",
+                        [&request.pool_id],
+                        |row| row.get(0),
+                    )
+                    .map_err(|error| format!("inspect question pool decisions: {error}"))?;
+                if has_decision > 0 || status == "confirmed" {
+                    return Err("question_pool_confirmed_immutable".to_string());
+                }
+                if status != "awaiting-selection" {
+                    return Err("question_pool_not_selectable".to_string());
+                }
+                if revision != request.expected_revision {
+                    return Err("question_pool_revision_conflict".to_string());
+                }
+                let next_revision = revision + 1;
+                let now = Utc::now().to_rfc3339();
+                let next_keywords_json = canonical_json(&request.keywords, "question pool JSON")?;
+                let next_questions_json = canonical_json(&request.questions, "question pool JSON")?;
+                transaction
+                    .execute(
+                        "INSERT INTO geo_question_pool_revisions
+                            (id, pool_id, session_id, action, target_kind, target_id,
+                             before_json, after_json, actor_id, reason, revised_at)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                        params![
+                            Uuid::new_v4().to_string(),
+                            request.pool_id,
+                            request.session_id,
+                            request.action,
+                            request.target_kind,
+                            request.target_id,
+                            serde_json::json!({
+                                "keywords": serde_json::from_str::<Value>(&keywords_json)
+                                    .unwrap_or(Value::Null),
+                                "questions": serde_json::from_str::<Value>(&questions_json)
+                                    .unwrap_or(Value::Null),
+                            })
+                            .to_string(),
+                            serde_json::json!({
+                                "keywords": request.keywords,
+                                "questions": request.questions,
+                            })
+                            .to_string(),
+                            request.actor_id,
+                            request.reason,
+                            now
+                        ],
+                    )
+                    .map_err(|error| format!("audit question pool revision: {error}"))?;
+                let changed = transaction
+                    .execute(
+                        "UPDATE geo_question_pools
+                         SET keywords_json=?2, questions_json=?3, revision=?4, updated_at=?5
+                         WHERE id=?1 AND revision=?6 AND status='awaiting-selection'",
+                        params![
+                            request.pool_id,
+                            next_keywords_json,
+                            next_questions_json,
+                            next_revision,
+                            now,
+                            revision
+                        ],
+                    )
+                    .map_err(|error| format!("apply question pool revision: {error}"))?;
+                if changed != 1 {
+                    return Err("question_pool_revision_conflict".to_string());
+                }
+                Ok(())
+            },
+        )?;
         read_question_pool(&connection, &workspace.id, &request.pool_id, false)
     }
 }
@@ -1219,26 +1243,6 @@ fn validate_hash(value: &str) -> Result<(), String> {
         Ok(())
     } else {
         Err("question_pool_input_hash_invalid".to_string())
-    }
-}
-
-fn canonical_json<T: ?Sized + Serialize>(value: &T) -> Result<String, String> {
-    serde_json::to_string(value).map_err(|error| format!("serialize question pool JSON: {error}"))
-}
-
-fn require_question_pool_session(connection: &Connection, session_id: &str) -> Result<(), String> {
-    validate_session_id(session_id)?;
-    let exists: i64 = connection
-        .query_row(
-            "SELECT COUNT(*) FROM brand_sessions WHERE id=?1",
-            [session_id],
-            |row| row.get(0),
-        )
-        .map_err(|error| format!("validate question pool session: {error}"))?;
-    if exists == 1 {
-        Ok(())
-    } else {
-        Err("question_pool_session_not_committed".to_string())
     }
 }
 
@@ -1660,7 +1664,7 @@ mod tests {
     }
 
     fn seed_knowledge(workspace: &BrandWorkspace, version: i64, value: &str) {
-        let connection = open_database(workspace).unwrap();
+        let connection = BrandWorkspaceStore::open(workspace).unwrap();
         let now = Utc::now().to_rfc3339();
         let raw_input_id = format!("raw-{version}");
         let candidate_id = format!("candidate-{version}");
@@ -1865,7 +1869,7 @@ mod tests {
         assert_eq!(revised.questions.as_array().unwrap().len(), 2);
 
         // 逐条审计携带用户指令原文。
-        let connection = open_database(&workspace).unwrap();
+        let connection = BrandWorkspaceStore::open(&workspace).unwrap();
         let (audit_count, audit_reason, audit_action): (i64, String, String) = connection
             .query_row(
                 "SELECT COUNT(*), MAX(reason), MAX(action) FROM geo_question_pool_revisions
@@ -2123,7 +2127,7 @@ mod tests {
         // 同 Session 再有一个 awaiting 池（如跨产品线并行挖掘）时，普通
         // latest 会被排在前面的 confirmed 池遮蔽，pending_only 必须解析到
         // 本 Session 的待决池。
-        let connection = open_database(&workspace).unwrap();
+        let connection = BrandWorkspaceStore::open(&workspace).unwrap();
         connection
             .execute(
                 "INSERT INTO geo_operations (id, session_id, state, created_at)
