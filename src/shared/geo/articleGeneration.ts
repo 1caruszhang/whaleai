@@ -54,11 +54,20 @@ export function contentPromptVersionAtLeast(
  */
 export const BRAND_NAME_ORDER_MIN_POLICY_VERSION = 9;
 
+/**
+ * 版本行审计（model_audit_json）内策略戳的键名（裁判：
+ * articleGenerationContract.json 的 modelAudit.policyVersionKey，ADR-0012
+ * 双侧 pin）：TS sidecar 生成期写入（finishGeneration 的 modelAudit）、
+ * Rust edit_article 继承基准版戳时同键读写。键名漂移任一侧会静默读
+ * null——稿子被误判为存量而豁免指称序复检，故钉进契约。
+ */
+export const MODEL_AUDIT_POLICY_VERSION_KEY = "policyVersion";
+
 /** 版本行审计里的 policyVersion（生成期写入；编辑版由 Rust 继承基准版）。 */
 export function modelAuditPolicyVersion(
   audit: Record<string, unknown> | null | undefined,
 ): string | null {
-  const value = audit?.policyVersion;
+  const value = audit?.[MODEL_AUDIT_POLICY_VERSION_KEY];
   return typeof value === "string" ? value : null;
 }
 
@@ -1106,8 +1115,14 @@ function isBoldableListLabel(label: string, spaceForm: boolean): boolean {
 export interface DeterministicArticleReviewInput {
   body: string;
   facts: readonly TopicPlanKnowledgeFact[];
-  contentType?: GeoContentType;
-  workspaceBrandName?: string;
+  /**
+   * 审核按类型格式契约裁决（H2 下限、showcase 列表、ranking 名单/维度、
+   * 配图配额）——必填：调用方必须声明审的是哪类稿，不设静默类型回退
+   * （票 #44 评审修复：原缺省回退 guide 会把忘传类型的调用悄悄审错）。
+   */
+  contentType: GeoContentType;
+  /** ranking 名单解析的 workspace 名兜底；非 ranking 类型传空串。 */
+  workspaceBrandName: string;
   /** 注入清单随文落库（ADR-0009 Decision 2）：有清单对照清单，存量稿
    * 无清单时门内回退与第一家集合比对。 */
   expectedRankingDimensions?: readonly string[];
@@ -1120,14 +1135,25 @@ export interface DeterministicArticleReviewInput {
   brandNameOrderEnforced?: boolean;
 }
 
+/** 确定性 output-contract blocking 问题的唯一拼装点（票 #44 评审修复：
+ * 同形字面量在门内多处重复，收口单一出处防两侧增改漂移）。 */
+function outputContractBlocking(message: string): ArticleReviewIssue {
+  return {
+    source: "deterministic",
+    category: "output-contract",
+    severity: "blocking",
+    message,
+  };
+}
+
 export function deterministicArticleReview(
   input: DeterministicArticleReviewInput,
 ): ArticleReviewIssue[] {
   const {
     body,
     facts,
-    contentType = "guide",
-    workspaceBrandName = "",
+    contentType,
+    workspaceBrandName,
     expectedRankingDimensions,
     brandNameOrderEnforced,
   } = input;
@@ -1206,16 +1232,16 @@ export function deterministicArticleReview(
   ];
   const unbolded = unboldedBrandMentions(reviewBody, brandNames);
   if (unbolded.length > 0) {
-    issues.push({
-      source: "deterministic",
-      category: "output-contract",
-      severity: "blocking",
-      message: `品牌名出现时必须逐字使用并加粗（未加粗或被转述）：${unbolded.join("、")}`,
-    });
+    issues.push(
+      outputContractBlocking(
+        `品牌名出现时必须逐字使用并加粗（未加粗或被转述）：${unbolded.join("、")}`,
+      ),
+    );
   }
   // 品牌指称序裁决（用户裁决 2026-09-03）：首次全称、其后钉第一个已确认
-  // 简称，全文仅一次也用全称。门只校验两个机械点——首个指称不是全称、
-  // 全称在首次之后复现；白名单内其他简称形态不拦（提示词纪律管得比门宽）。
+  // 简称，全文仅一次也用全称。门校验三个机械点——首个指称不是全称、全称
+  // 在首次之后复现、首次全称后混用非第一个已确认简称（票 #44 评审修复
+  // 补齐第三点：原「白名单内其他简称不拦」使钉住只剩提示词层保证）。
   if (brandNameOrderEnforced !== false) {
     const fullName = firstProfileValue(profile, "fullName");
     const preferredShort = firstProfileValue(profile, "shortNames");
@@ -1226,26 +1252,38 @@ export function deterministicArticleReview(
         ...profileValues(profile, "shortNames"),
       ]);
       if (occurrences.length > 0 && occurrences[0].name !== fullName) {
-        issues.push({
-          source: "deterministic",
-          category: "output-contract",
-          severity: "blocking",
-          message: `品牌指称序违约：正文首次出现品牌指称必须使用全称「${fullName}」（当前第一次出现的是「${occurrences[0].name}」）。`,
-        });
+        issues.push(
+          outputContractBlocking(
+            `品牌指称序违约：正文首次出现品牌指称必须使用全称「${fullName}」（当前第一次出现的是「${occurrences[0].name}」）。`,
+          ),
+        );
       }
       const firstFullIndex = occurrences.findIndex(
         (hit) => hit.name === fullName,
       );
-      if (
-        firstFullIndex >= 0 &&
-        occurrences.slice(firstFullIndex + 1).some((hit) => hit.name === fullName)
-      ) {
-        issues.push({
-          source: "deterministic",
-          category: "output-contract",
-          severity: "blocking",
-          message: `品牌指称序违约：首次全称「${fullName}」之后应统一使用已确认简称「${preferredShort}」，请勿在后文再次使用全称。`,
-        });
+      if (firstFullIndex >= 0) {
+        const afterFirstFull = occurrences.slice(firstFullIndex + 1);
+        if (afterFirstFull.some((hit) => hit.name === fullName)) {
+          issues.push(
+            outputContractBlocking(
+              `品牌指称序违约：首次全称「${fullName}」之后应统一使用已确认简称「${preferredShort}」，请勿在后文再次使用全称。`,
+            ),
+          );
+        }
+        const strayShorts = [
+          ...new Set(
+            afterFirstFull
+              .map((hit) => hit.name)
+              .filter((name) => name !== fullName && name !== preferredShort),
+          ),
+        ];
+        if (strayShorts.length > 0) {
+          issues.push(
+            outputContractBlocking(
+              `品牌指称序违约：首次全称「${fullName}」之后应统一使用第一个已确认简称「${preferredShort}」，请勿混用其他简称（发现「${strayShorts.join("、")}」）。`,
+            ),
+          );
+        }
       }
     }
   }
@@ -1322,54 +1360,43 @@ export function deterministicArticleReview(
         actualSet.size === expectedCompetitors.size &&
         [...actualSet].every((name) => expectedCompetitors.has(name));
       if (!validEntitySet) {
-        issues.push({
-          source: "deterministic",
-          category: "output-contract",
-          severity: "blocking",
-          message:
+        issues.push(
+          outputContractBlocking(
             "ranking 第 1 家必须是目标品牌，第 2–6 家必须完整使用五家已确认竞品（竞品内部顺序不限）。",
-        });
+          ),
+        );
       }
     } catch (error) {
-      issues.push({
-        source: "deterministic",
-        category: "output-contract",
-        severity: "blocking",
-        message:
+      issues.push(
+        outputContractBlocking(
           error instanceof Error &&
-          error.message.startsWith(RANKING_COMPETITORS_INSUFFICIENT_CODE)
+            error.message.startsWith(RANKING_COMPETITORS_INSUFFICIENT_CODE)
             ? "ranking 生成需要至少五家已确认竞品。"
             : "ranking 名单无法从已批准事实中解析。",
-      });
+        ),
+      );
     }
   }
   if (body.includes("【") || body.includes("】")) {
-    issues.push({
-      source: "deterministic",
-      category: "output-contract",
-      severity: "blocking",
-      message: "正文仍包含未解析占位符。",
-    });
+    issues.push(outputContractBlocking("正文仍包含未解析占位符。"));
   }
   // 配图纪律的确定性面（ADR-0008 T4）：批准门复检覆盖人工编辑——
   // scheme 逃逸用法与超过密度上限都阻断（人工编辑路径不走
   // parseGeneratedArticleBody，这里是唯一防线）。
   const imageScan = scanMaterialImagePlaceholders(body);
   if (imageScan.violations.length > 0) {
-    issues.push({
-      source: "deterministic",
-      category: "output-contract",
-      severity: "blocking",
-      message: `正文包含不合契约的 material-image 占位符：${imageScan.violations[0]}`,
-    });
+    issues.push(
+      outputContractBlocking(
+        `正文包含不合契约的 material-image 占位符：${imageScan.violations[0]}`,
+      ),
+    );
   }
   if (imageScan.placeholders.length > ARTICLE_IMAGE_QUOTA_BY_TYPE[contentType]) {
-    issues.push({
-      source: "deterministic",
-      category: "output-contract",
-      severity: "blocking",
-      message: `配图纪律不满足：${contentType} 类型配图上限 ${ARTICLE_IMAGE_QUOTA_BY_TYPE[contentType]} 张（当前 ${imageScan.placeholders.length} 张）。`,
-    });
+    issues.push(
+      outputContractBlocking(
+        `配图纪律不满足：${contentType} 类型配图上限 ${ARTICLE_IMAGE_QUOTA_BY_TYPE[contentType]} 张（当前 ${imageScan.placeholders.length} 张）。`,
+      ),
+    );
   }
   return issues;
 }

@@ -25,7 +25,7 @@
  */
 
 import {
-  firstProfileValue,
+  firstConfirmedProfileValue,
   projectBrandProfile,
   type BrandProfile,
   type BrandProfileFact,
@@ -197,16 +197,16 @@ export function mergeRankingCompetitorTiers(
  * 自内核规则自画像模块迁入）：简称优先——陈列位 1 的小节标题与篇内指称
  * 用已确认简称（展示位省字数，与标题简称优先同哲学；全称留在首段全称/
  * 简称关系句，若该约定启用）。无已确认简称回退全称，身份事实都没有才
- * 回退 workspace 名。正文注入的「品牌：」行仍用 profileInjection 的
- * resolveBrandName（全称优先），两者分工不同，勿混用。
+ * 回退 workspace 名。优先级链与 profileInjection 的 resolveBrandName
+ * 共用同一形状（firstConfirmedProfileValue，只差字段顺序），但正文注入
+ * 的「品牌：」行仍用全称优先的 resolveBrandName——两者分工不同，勿混用。
  */
 export function resolveRankingTargetBrand(
   profile: BrandProfile,
   workspaceName: string,
 ): string {
   return (
-    firstProfileValue(profile, "shortNames") ??
-    firstProfileValue(profile, "fullName") ??
+    firstConfirmedProfileValue(profile, ["shortNames", "fullName"]) ??
     workspaceName
   );
 }
