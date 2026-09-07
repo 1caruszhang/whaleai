@@ -442,7 +442,7 @@ function articlePersistence(count: number) {
     topicPlanId: null,
     topicPlanRevision: null,
     knowledgeVersion: 1,
-    policyVersion: "xiaojing-content-prompt-v9",
+    policyVersion: "xiaojing-content-prompt-v10",
     status: "running" as const,
     articles,
     createdAt: "2026-08-15T00:00:00Z",

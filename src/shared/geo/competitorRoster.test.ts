@@ -174,6 +174,14 @@ describe("ranking roster projection（自 articleGeneration.test.ts 原样搬移
     ];
     const roster = resolveRankingRoster(rankingFacts, "工作区名称");
     expect(roster.targetBrand).toBe("炊班主干蒸菜");
+    const dimensions = [
+      "服务范围",
+      "核心项目",
+      "适用人群",
+      "服务方式",
+      "区域覆盖",
+      "选择要点",
+    ];
     const messages = buildArticleGenerationMessages({
       brandName: "广州造卤先生有限公司",
       productLine: "本地服务",
@@ -183,14 +191,7 @@ describe("ranking roster projection（自 articleGeneration.test.ts 原样搬移
       requestedTitle: "本地服务六家对比",
       constraints: "",
       plannedFacts: rankingFacts,
-      rankingDimensions: [
-        "服务范围",
-        "核心项目",
-        "适用人群",
-        "服务方式",
-        "区域覆盖",
-        "选择要点",
-      ],
+      rankingDimensions: dimensions,
     });
     expect(messages.user).toContain("目标品牌固定为陈列位 1：炊班主干蒸菜");
     // 无已确认简称：回退全称，行为与现状一致。
@@ -215,14 +216,6 @@ describe("ranking roster projection（自 articleGeneration.test.ts 原样搬移
       ).targetBrand,
     ).toBe("工作区名称");
     // 陈列位 1 小节标题用简称：门的实体校验是全称∪简称超集，照常过门。
-    const dimensions = [
-      "服务范围",
-      "核心项目",
-      "适用人群",
-      "服务方式",
-      "区域覆盖",
-      "选择要点",
-    ];
     const section = (name: string) => [
       name,
       ...dimensions.map((dimension) => `- **${dimension}**：信息`),

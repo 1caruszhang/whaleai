@@ -888,6 +888,141 @@ describe("ArticleGenerationService", () => {
     );
   });
 
+  // 指称序豁免接线钉子（票 #44 复审）：review_json 首审前恒为 null，版本
+  // 戳只能来自版本行 model_audit——v10 稿（含人工编辑版）批准时照常复检，
+  // v8 及更早存量稿豁免。
+  const orderFacts = [
+    {
+      factKey: "brand-name",
+      predicate: "brand.fullName",
+      normalizedValueJson: '"成都鲸鱼家居有限公司"',
+    },
+    {
+      factKey: "brand-short",
+      predicate: "brand.shortNames",
+      normalizedValueJson: '["鲸鱼家居"]',
+    },
+  ];
+  // 首次指称是简称（违序），其余门全过：3 个 H2、品牌全加粗、无违禁词。
+  const orderViolatingBody = [
+    "# 标题",
+    "",
+    "**鲸鱼家居**深耕成都家居市场。",
+    "",
+    "## 服务范围",
+    "**成都鲸鱼家居有限公司**提供整装服务。",
+    "",
+    "## 服务流程",
+    "**鲸鱼家居**支持上门测量。",
+    "",
+    "## 总结",
+    "**鲸鱼家居**持续服务客户。",
+  ].join("\n");
+
+  function approveOrderPort(policyVersion: string) {
+    const draft = {
+      ...article("a-order"),
+      plannedFacts: orderFacts,
+      status: "draft_ready" as const,
+      revision: 1,
+      currentVersion: {
+        revision: 1,
+        title: "标题",
+        bodyPath: "operations/operation-1/articles/a-order/v1.md",
+        bodySha256: "hash",
+        origin: "generated" as const,
+        basedOnRevision: null,
+        review: null,
+        modelAudit: { policyVersion },
+        createdAt: "2026-01-01T00:00:00Z",
+        approvedAt: null,
+      },
+    };
+    const finishReview = vi.fn(async ({ passed }: { passed: boolean }) => ({
+      ...draft,
+      status: passed ? ("approved" as const) : ("rejected" as const),
+    }));
+    const port = {
+      claimReview: vi.fn(async () => ({
+        context: {
+          article: draft,
+          brandName: "测试品牌",
+          productLine: "家居服务",
+          targetRegion: "成都",
+          claimToken: "review-claim",
+        },
+        body: {
+          articleId: draft.id,
+          revision: 1,
+          title: draft.requestedTitle,
+          body: orderViolatingBody,
+          approved: false,
+        },
+      })),
+      finishReview,
+    } as unknown as ArticlePersistencePort;
+    return { port, finishReview };
+  }
+
+  it("re-checks brand-name ordering at approve when the version stamp is v9+", async () => {
+    const { port, finishReview } = approveOrderPort("xiaojing-content-prompt-v10");
+    const service = new ArticleGenerationService(
+      { workspaceId: "workspace-1", sessionId: "session-1" },
+      port,
+      { slot: "generation", complete: vi.fn() } satisfies GeoTextCapability,
+      { slot: "reflection", complete: vi.fn() } satisfies GeoTextCapability,
+    );
+    const result = await service.approve({
+      workspaceId: "workspace-1",
+      sessionId: "session-1",
+      operationId: "operation-1",
+      articleId: "a-order",
+      expectedRevision: 1,
+    });
+    expect(result.status).toBe("rejected");
+    expect(finishReview).toHaveBeenCalledWith(
+      expect.objectContaining({
+        passed: false,
+        review: expect.objectContaining({
+          issues: expect.arrayContaining([
+            expect.objectContaining({
+              severity: "blocking",
+              message: expect.stringContaining("品牌指称序违约"),
+            }),
+          ]),
+        }),
+      }),
+    );
+  });
+
+  it("exempts legacy v8 drafts from the ordering gate at approve", async () => {
+    const { port, finishReview } = approveOrderPort("xiaojing-content-prompt-v8");
+    const service = new ArticleGenerationService(
+      { workspaceId: "workspace-1", sessionId: "session-1" },
+      port,
+      { slot: "generation", complete: vi.fn() } satisfies GeoTextCapability,
+      { slot: "reflection", complete: vi.fn() } satisfies GeoTextCapability,
+    );
+    const result = await service.approve({
+      workspaceId: "workspace-1",
+      sessionId: "session-1",
+      operationId: "operation-1",
+      articleId: "a-order",
+      expectedRevision: 1,
+    });
+    expect(result.status).toBe("approved");
+    expect(finishReview).toHaveBeenCalledWith(
+      expect.objectContaining({
+        passed: true,
+        review: expect.objectContaining({
+          issues: expect.not.arrayContaining([
+            expect.objectContaining({ message: expect.stringContaining("品牌指称序违约") }),
+          ]),
+        }),
+      }),
+    );
+  });
+
   it("fails review closed when the reflection provider response is invalid", async () => {
     const draft = {
       ...article("a-reflection"),

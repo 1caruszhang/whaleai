@@ -600,6 +600,11 @@ describe("list-item label auto-bolding（用户裁决 2026-09-04）", () => {
     expect(autoBoldListLabels(body)).toBe(body);
   });
 
+  it("leaves inline-code labels untouched (D22 code-not-touched)", () => {
+    const body = "- `code` 标签：行内代码形态不自动加粗。";
+    expect(autoBoldListLabels(body)).toBe(body);
+  });
+
   it("still bolds colon-form labels that start with a stop word", () => {
     // 冒号型不经停用词闸（冒号本身已是高置信标签信号）。
     expect(autoBoldListLabels("- 建议：优先看质保年限。")).toBe(

@@ -42,6 +42,18 @@ export function contentPromptVersionAtLeast(
   const match = /-v(\d+)$/.exec(version ?? "");
   return match !== null && Number(match[1]) >= minimum;
 }
+
+/** 品牌指称序门（D21）开始追诉的最低内容策略版本：v8→v9 落地。 */
+export const BRAND_NAME_ORDER_MIN_POLICY_VERSION = 9;
+
+/** 版本行审计里的 policyVersion（生成期写入；编辑版由 Rust 继承基准版）。 */
+export function modelAuditPolicyVersion(
+  audit: Record<string, unknown> | null | undefined,
+): string | null {
+  const value = audit?.policyVersion;
+  return typeof value === "string" ? value : null;
+}
+
 export const ARTICLE_GENERATION_CONCURRENCY =
   GEO_PORT_CONTRACT.concurrency.perArticleLifecycle.limit;
 /** 单批文章数与单篇正文字节上限（裁判：articleGenerationContract.json）。 */
@@ -122,6 +134,12 @@ export interface ArticleVersionProjection {
   origin: "generated" | "user-edited";
   basedOnRevision: number | null;
   review: ArticleReviewResult | null;
+  /**
+   * 版本行审计（Rust model_audit_json）：生成版带 policyVersion（本版生成
+   * 时的内容策略戳），编辑版由 Rust 继承基准版戳。审批路径读它判定新规则
+   * 是否复检——review_json 在首审前恒为 null，版本戳只能从这里取。
+   */
+  modelAudit?: Record<string, unknown> | null;
   createdAt: string;
   approvedAt: string | null;
 }

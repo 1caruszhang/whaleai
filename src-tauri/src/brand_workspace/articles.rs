@@ -169,6 +169,10 @@ pub struct ArticleVersionProjection {
     pub origin: String,
     pub based_on_revision: Option<i64>,
     pub review: Option<Value>,
+    /// 版本行审计（model_audit_json）：生成版带 policyVersion（本版生成时的
+    /// 内容策略戳），编辑版继承基准版戳。审批路径读它判定新规则是否复检
+    /// （票 #44 指称序：v8 及更早存量稿豁免，v9 起照常检查）。
+    pub model_audit: Option<Value>,
     pub created_at: String,
     pub approved_at: Option<String>,
 }
@@ -1023,14 +1027,43 @@ impl BrandWorkspaceStore {
                 )?;
                 let hash = format!("{:x}", Sha256::digest(request.body.as_bytes()));
                 let now = Utc::now().to_rfc3339();
-                // 聊天修订把用户指令原文留在版本行审计里；普通面板/接口编辑保持 '{}'。
-                let model_audit_json = request
+                // 聊天修订把用户指令原文留在版本行审计里；普通面板/接口编辑只有
+                // 策略戳。策略戳继承基准版（票 #44 指称序豁免按版本戳判定）：
+                // v8 及更早的存量稿不因编辑被追诉，v9 起的稿子（含编辑版）
+                // 批准时照常复检新规则。
+                let base_model_audit_json: Option<String> = transaction
+                    .query_row(
+                        "SELECT model_audit_json FROM geo_article_versions
+                         WHERE article_id=?1 AND revision=?2",
+                        params![request.article_id, revision],
+                        |row| row.get(0),
+                    )
+                    .optional()
+                    .map_err(|error| format!("read base article version audit: {error}"))?;
+                let base_policy_version = base_model_audit_json
+                    .and_then(|value| serde_json::from_str::<Value>(&value).ok())
+                    .and_then(|audit| {
+                        audit
+                            .get("policyVersion")
+                            .and_then(Value::as_str)
+                            .map(str::to_string)
+                    });
+                let mut model_audit = serde_json::Map::new();
+                if let Some(reason) = request
                     .reason
                     .as_deref()
                     .map(str::trim)
                     .filter(|value| !value.is_empty())
-                    .map(|value| serde_json::json!({ "revisionReason": value }).to_string())
-                    .unwrap_or_else(|| "{}".to_string());
+                {
+                    model_audit.insert("revisionReason".to_string(), serde_json::json!(reason));
+                }
+                if let Some(policy_version) = base_policy_version {
+                    model_audit.insert(
+                        "policyVersion".to_string(),
+                        serde_json::json!(policy_version),
+                    );
+                }
+                let model_audit_json = Value::Object(model_audit).to_string();
                 transaction
                     .execute(
                         "INSERT INTO geo_article_versions
@@ -2192,11 +2225,13 @@ fn read_article_version(
         .query_row(
             "SELECT revision, title,
                     CASE WHEN ?3 THEN COALESCE(approved_body_path, body_path) ELSE body_path END,
-                    body_sha256, origin, based_on_revision, review_json, created_at, approved_at
+                    body_sha256, origin, based_on_revision, review_json, model_audit_json,
+                    created_at, approved_at
              FROM geo_article_versions WHERE article_id=?1 AND revision=?2",
             params![article_id, revision, approved_path],
             |row| {
                 let review: Option<String> = row.get(6)?;
+                let model_audit: Option<String> = row.get(7)?;
                 Ok(ArticleVersionProjection {
                     revision: row.get(0)?,
                     title: row.get(1)?,
@@ -2205,8 +2240,9 @@ fn read_article_version(
                     origin: row.get(4)?,
                     based_on_revision: row.get(5)?,
                     review: review.and_then(|value| serde_json::from_str(&value).ok()),
-                    created_at: row.get(7)?,
-                    approved_at: row.get(8)?,
+                    model_audit: model_audit.and_then(|value| serde_json::from_str(&value).ok()),
+                    created_at: row.get(8)?,
+                    approved_at: row.get(9)?,
                 })
             },
         )
@@ -3870,7 +3906,7 @@ mod tests {
                     title: "知识库指南二".to_string(),
                     body: body("知识库指南二"),
                     ranking_dimensions: None,
-                    model_audit: json!({"model":"mock-generation"}),
+                    model_audit: json!({"policyVersion": POLICY_VERSION, "model":"mock-generation"}),
                 },
             )
             .expect("retried draft");
@@ -3905,7 +3941,7 @@ mod tests {
         // 全批准：血缘落 completed。
         assert_eq!(lineage("all approved"), "article-generation-completed");
 
-        store
+        let edited = store
             .edit_article(
                 &workspace.id,
                 "session-article",
@@ -3919,6 +3955,14 @@ mod tests {
                 },
             )
             .expect("edit");
+        // 票 #44：编辑版策略戳继承基准版——审批路径按它判定指称序是否
+        // 追诉（v8 及更早存量稿不因编辑被追诉）。
+        let edited_audit = edited
+            .current_version
+            .expect("edited current version")
+            .model_audit
+            .expect("edited model audit");
+        assert_eq!(edited_audit["policyVersion"], json!(POLICY_VERSION));
         // 全批准后编辑打破收束：血缘自 completed 回 running。
         assert_eq!(
             lineage("edited after completion"),
