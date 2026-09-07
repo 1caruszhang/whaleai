@@ -4,5 +4,9 @@
   "maxBodyBytes": {
     "_comment": "单篇正文字节上限。Rust 侧常量有两份（brand_workspace/articles.rs 与 brand_workspace/publish_scheduler.rs），两处各自 pin 本裁判；TS 侧 ARTICLE_BODY_MAX_BYTES（ADR-0012 双侧 pin）。",
     "bytes": 262144
+  },
+  "modelAudit": {
+    "_comment": "版本行审计（model_audit_json）内策略戳的键名：TS sidecar 生成期写入，TS 审批豁免判定（modelAuditPolicyVersion）与 Rust edit_article 基准版戳继承两侧读取。键名漂移任一侧会静默读 null——稿子被误判为存量而豁免指称序复检（ADR-0012 双侧 pin）。",
+    "policyVersionKey": "policyVersion"
   }
 }

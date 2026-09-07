@@ -304,6 +304,23 @@ export function firstProfileValue(
 }
 
 /**
+ * 按字段优先序取首个已确认画像值（票 #44 评审修复）：身份类裁决共用的
+ * 优先级链形状单源化——resolveBrandName（全称优先）与名单内核的
+ * resolveRankingTargetBrand（简称优先，票 #43）只差字段顺序，顺序本身
+ * 是各自裁决的一部分，链的写法只留这一份。
+ */
+export function firstConfirmedProfileValue(
+  profile: BrandProfile,
+  fields: readonly EnterpriseProfileField[],
+): string | undefined {
+  for (const field of fields) {
+    const value = firstProfileValue(profile, field);
+    if (value !== undefined) return value;
+  }
+  return undefined;
+}
+
+/**
  * 品牌名裁决（用户拍板 2026-08-19）：品牌名只用知识库已确认的身份事实，
  * 优先级 fullName[0] → shortNames[0]；知识库没有任何身份事实时才用
  * workspace 名兜底。workspace 名是创建品牌工作区时用户随手填的展示名，
@@ -315,8 +332,7 @@ export function resolveBrandName(
   workspaceName: string,
 ): string {
   return (
-    firstProfileValue(profile, "fullName") ??
-    firstProfileValue(profile, "shortNames") ??
+    firstConfirmedProfileValue(profile, ["fullName", "shortNames"]) ??
     workspaceName
   );
 }

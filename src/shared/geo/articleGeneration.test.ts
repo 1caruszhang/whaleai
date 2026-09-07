@@ -19,6 +19,9 @@ import {
   contentPromptVersionAtLeast,
   dealNarrativeSeeds,
   deterministicArticleReview,
+  MODEL_AUDIT_POLICY_VERSION_KEY,
+  type ArticleReviewIssue,
+  type DeterministicArticleReviewInput,
   parseArticleReflection,
   parseGeneratedArticleBody,
   parseRankingDimensions,
@@ -33,6 +36,18 @@ import {
   trimMaterialImagePlaceholders,
 } from "./materialImagePlaceholder";
 
+/**
+ * 审核门测试调用的空 workspace 名收口：非 ranking 类型按
+ * DeterministicArticleReviewInput 的约定传空串（ranking 用例名单事实
+ * 自足时同样不依赖兜底）。contentType 仍由调用方显式声明——必填化是
+ * 票 #44 的修复，不在测试侧回设静默回退。
+ */
+function reviewWithoutWorkspaceName(
+  input: Omit<DeterministicArticleReviewInput, "workspaceBrandName">,
+): ArticleReviewIssue[] {
+  return deterministicArticleReview({ ...input, workspaceBrandName: "" });
+}
+
 describe("article generation contract pin（ADR-0012 三方裁判）", () => {
   it("三键与 articleGenerationContract.json 严格相等", () => {
     expect(articleGenerationContract.policyVersion).toBe(
@@ -43,6 +58,14 @@ describe("article generation contract pin（ADR-0012 三方裁判）", () => {
     );
     expect(articleGenerationContract.maxBodyBytes.bytes).toBe(
       ARTICLE_BODY_MAX_BYTES,
+    );
+  });
+
+  it("版本行审计的 policyVersion 键名与裁判严格相等（票 #44 评审修复）", () => {
+    // 键名由 sidecar 写入、审批豁免判定与 Rust edit_article 继承两侧读取：
+    // 漂移任一侧会静默读 null——稿子被误判为存量而豁免指称序复检。
+    expect(articleGenerationContract.modelAudit.policyVersionKey).toBe(
+      MODEL_AUDIT_POLICY_VERSION_KEY,
     );
   });
 
@@ -373,11 +396,10 @@ describe("material-image placeholder cross-process contract (ADR-0008 T4)", () =
         parseGeneratedArticleBody(contractCase.body, requestedTitle),
       ).toThrow(contractCase.expectedParseError);
     }
-    const placeholderBlocking = deterministicArticleReview({
+    const placeholderBlocking = reviewWithoutWorkspaceName({
       body: contractCase.body,
       facts: [],
-      contentType: "guide",
-      workspaceBrandName: ""
+      contentType: "guide"
     }).filter(
       (issue) =>
         issue.severity === "blocking" &&
@@ -532,7 +554,7 @@ describe("brand mention auto-bolding (ADR-0009)", () => {
       brandFacts,
     );
     expect(
-      deterministicArticleReview({ body, facts: brandFacts, contentType: "guide" }).filter(
+      reviewWithoutWorkspaceName({ body, facts: brandFacts, contentType: "guide" }).filter(
         (issue) => issue.category === "output-contract",
       ),
     ).toEqual([]);
@@ -551,7 +573,7 @@ describe("brand mention auto-bolding (ADR-0009)", () => {
       "- 图片说明见上",
     ].join("\n");
     expect(
-      deterministicArticleReview({ body, facts: brandFacts, contentType: "guide" }).filter(
+      reviewWithoutWorkspaceName({ body, facts: brandFacts, contentType: "guide" }).filter(
         (issue) => issue.category === "output-contract",
       ),
     ).toEqual([]);
@@ -935,9 +957,10 @@ describe("article review gate", () => {
 
   it("blocks unsupported hard claims, advertising risks and weak citability", () => {
     expect(
-      deterministicArticleReview({
+      reviewWithoutWorkspaceName({
         body: "# 标题\n正文宣称服务100家客户，是行业第一。",
-        facts
+        facts,
+        contentType: "guide"
       }).map((issue) => issue.category),
     ).toEqual(
       expect.arrayContaining([
@@ -946,7 +969,7 @@ describe("article review gate", () => {
         "geo-citability",
       ]),
     );
-    expect(deterministicArticleReview({ body: structuredBody, facts })).toEqual([]);
+    expect(reviewWithoutWorkspaceName({ body: structuredBody, facts, contentType: "guide" })).toEqual([]);
   });
 
   it("grounds labelled prose claims on fact values instead of the whole phrase", () => {
@@ -959,7 +982,7 @@ describe("article review gate", () => {
       "## 口碑",
       "- 客户认可。",
     ].join("\n");
-    expect(deterministicArticleReview({ body: prose, facts })).toEqual([]);
+    expect(reviewWithoutWorkspaceName({ body: prose, facts, contentType: "guide" })).toEqual([]);
   });
 
   it("still blocks fabricated achievements the fact base cannot support", () => {
@@ -969,7 +992,7 @@ describe("article review gate", () => {
       "- 荣获国家级科技进步奖认证。",
       "- 服务500家客户。",
     ].join("\n");
-    const messages = deterministicArticleReview({ body: prose, facts }).map(
+    const messages = reviewWithoutWorkspaceName({ body: prose, facts, contentType: "guide" }).map(
       (issue) => issue.message,
     );
     expect(messages).toEqual(
@@ -995,13 +1018,13 @@ describe("article review gate", () => {
       "覆盖多类团餐场景。",
     ].join("\n");
     expect(
-      deterministicArticleReview({ body: checkmarkBody, facts, contentType: "showcase" }).filter(
+      reviewWithoutWorkspaceName({ body: checkmarkBody, facts, contentType: "showcase" }).filter(
         (issue) => issue.severity === "blocking",
       ),
     ).toEqual([]);
 
     const proseOnlyBody = checkmarkBody.replace(/✅ /g, "");
-    expect(deterministicArticleReview({ body: proseOnlyBody, facts, contentType: "showcase" })).toEqual(
+    expect(reviewWithoutWorkspaceName({ body: proseOnlyBody, facts, contentType: "showcase" })).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
           severity: "blocking",
@@ -1012,7 +1035,7 @@ describe("article review gate", () => {
   });
 
   it("enforces the js_ai six-entry parallel ranking structure deterministically", () => {
-    expect(deterministicArticleReview({ body: structuredBody, facts, contentType: "ranking" })).toEqual(
+    expect(reviewWithoutWorkspaceName({ body: structuredBody, facts, contentType: "ranking" })).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
           category: "geo-citability",
@@ -1298,7 +1321,7 @@ describe("deterministic format-contract additions", () => {
   ].join("\n");
 
   it("accepts a guide body that satisfies the format contract", () => {
-    const issues = deterministicArticleReview({ body: cleanGuide, facts: identityFacts, contentType: "guide" });
+    const issues = reviewWithoutWorkspaceName({ body: cleanGuide, facts: identityFacts, contentType: "guide" });
     expect(issues.filter((issue) => issue.severity === "blocking")).toEqual([]);
   });
 
@@ -1307,7 +1330,7 @@ describe("deterministic format-contract additions", () => {
       "**锦江区鲸鱼汽车音响经营部**师傅经验扎实。",
       "锦江区鲸鱼汽车音响经营部的师傅经验扎实。",
     );
-    const issues = deterministicArticleReview({ body, facts: identityFacts, contentType: "guide" });
+    const issues = reviewWithoutWorkspaceName({ body, facts: identityFacts, contentType: "guide" });
     expect(
       issues.some((issue) => issue.message.includes("必须逐字使用并加粗")),
     ).toBe(true);
@@ -1318,13 +1341,13 @@ describe("deterministic format-contract additions", () => {
       "开篇段落。一句话。",
       "第一句。第二句。第三句。第四句。",
     );
-    const issues = deterministicArticleReview({ body, facts: identityFacts, contentType: "guide" });
+    const issues = reviewWithoutWorkspaceName({ body, facts: identityFacts, contentType: "guide" });
     expect(issues.some((issue) => issue.severity === "blocking")).toBe(false);
   });
 
   it("enforces the per-type minimum H2 count", () => {
     const twoH2 = cleanGuide.replace("## 售后与保障", "售后说明");
-    const issues = deterministicArticleReview({ body: twoH2, facts: identityFacts, contentType: "guide" });
+    const issues = reviewWithoutWorkspaceName({ body: twoH2, facts: identityFacts, contentType: "guide" });
     expect(
       issues.some((issue) =>
         issue.message.includes("guide 类型至少需要 3 个 H2"),
@@ -1360,12 +1383,26 @@ describe("brand name mention order（用户裁决 2026-09-03：首次全称、�
       normalizedValueJson: '["鲸鱼家居"]',
     },
   ];
+  // 票 #44 评审修复：非首个已确认简称在首次全称后出现即违约——「其后钉
+  // 第一个已确认简称」从提示词层保证升为门的第三个机械点。
+  const dualShortFacts = [
+    {
+      factKey: "f1",
+      predicate: "brand.fullName",
+      normalizedValueJson: '"锦江区鲸鱼汽车音响经营部"',
+    },
+    {
+      factKey: "f2",
+      predicate: "brand.shortNames",
+      normalizedValueJson: '["鲸鱼音响", "鲸鱼汽响"]',
+    },
+  ];
   const orderIssues = (
     body: string,
     facts: readonly (typeof orderFacts)[number][] = orderFacts,
     options?: { brandNameOrderEnforced?: boolean },
   ) =>
-    deterministicArticleReview({ body, facts, contentType: "guide", workspaceBrandName: "", ...options })
+    reviewWithoutWorkspaceName({ body, facts, contentType: "guide", ...options })
       .filter((issue) => issue.message.includes("品牌指称序违约"));
 
   it("blocks when a short name appears before the full name", () => {
@@ -1411,6 +1448,51 @@ describe("brand name mention order（用户裁决 2026-09-03：首次全称、�
     expect(issues).toHaveLength(1);
     expect(issues[0].message).toContain("之后应统一使用已确认简称");
     expect(issues[0].message).toContain("鲸鱼音响");
+  });
+
+  it("blocks when a non-first confirmed short name appears after the first full name", () => {
+    const body = [
+      "# 标题",
+      "",
+      "## 一段",
+      "",
+      "**锦江区鲸鱼汽车音响经营部**是本地老店。",
+      "",
+      "## 二段",
+      "",
+      "**鲸鱼汽响**报价透明。",
+      "",
+      "## 三段",
+      "",
+      "**鲸鱼音响**收尾。",
+    ].join("\n");
+    const issues = orderIssues(body, dualShortFacts);
+    expect(issues).toHaveLength(1);
+    expect(issues[0].severity).toBe("blocking");
+    expect(issues[0].message).toContain("第一个已确认简称");
+    expect(issues[0].message).toContain("鲸鱼音响");
+    expect(issues[0].message).toContain("鲸鱼汽响");
+  });
+
+  it("reports a pre-full-name stray short via the first-mention check only", () => {
+    const body = [
+      "# 标题",
+      "",
+      "## 一段",
+      "",
+      "**鲸鱼汽响**口碑不错。",
+      "",
+      "## 二段",
+      "",
+      "**锦江区鲸鱼汽车音响经营部**是本地老店。",
+      "",
+      "## 三段",
+      "",
+      "**鲸鱼音响**收尾。",
+    ].join("\n");
+    const issues = orderIssues(body, dualShortFacts);
+    expect(issues).toHaveLength(1);
+    expect(issues[0].message).toContain("首次出现品牌指称必须使用全称");
   });
 
   it("accepts full name first and the confirmed short name afterwards", () => {

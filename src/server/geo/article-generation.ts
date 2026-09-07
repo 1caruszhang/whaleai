@@ -12,6 +12,7 @@ import {
   buildRankingDimensionMessages,
   combineArticleReview,
   contentPromptVersionAtLeast,
+  MODEL_AUDIT_POLICY_VERSION_KEY,
   BRAND_NAME_ORDER_MIN_POLICY_VERSION,
   modelAuditPolicyVersion,
   dealNarrativeSeeds,
@@ -772,7 +773,7 @@ export class ArticleGenerationService {
         body,
         ...(rankingDimensions ? { rankingDimensions } : {}),
         modelAudit: {
-          policyVersion: ARTICLE_GENERATION_POLICY_VERSION,
+          [MODEL_AUDIT_POLICY_VERSION_KEY]: ARTICLE_GENERATION_POLICY_VERSION,
           provider: "volcengine",
           capabilitySlot: "generation",
           model: XIAOJING_GEO_PROVIDER_DEFAULTS.generationModel,

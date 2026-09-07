@@ -14,6 +14,11 @@ const POLICY_VERSION: &str = "xiaojing-content-prompt-v10";
 /// JSON、TS 与 Rust 两处共四处齐动。
 const MAX_ARTICLES: usize = 20;
 const MAX_BODY_BYTES: usize = 256 * 1024;
+/// 版本行审计（model_audit_json）内策略戳的键名（同一裁判 JSON 的
+/// modelAudit.policyVersionKey）：TS sidecar 生成期写入、本侧 edit_article
+/// 继承基准版戳时读写。漂移会使编辑版策略戳静默丢失——稿子被误判为
+/// 存量而豁免指称序复检。
+const MODEL_AUDIT_POLICY_VERSION_KEY: &str = "policyVersion";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -1044,7 +1049,7 @@ impl BrandWorkspaceStore {
                     .and_then(|value| serde_json::from_str::<Value>(&value).ok())
                     .and_then(|audit| {
                         audit
-                            .get("policyVersion")
+                            .get(MODEL_AUDIT_POLICY_VERSION_KEY)
                             .and_then(Value::as_str)
                             .map(str::to_string)
                     });
@@ -1059,7 +1064,7 @@ impl BrandWorkspaceStore {
                 }
                 if let Some(policy_version) = base_policy_version {
                     model_audit.insert(
-                        "policyVersion".to_string(),
+                        MODEL_AUDIT_POLICY_VERSION_KEY.to_string(),
                         serde_json::json!(policy_version),
                     );
                 }
@@ -4524,11 +4529,18 @@ mod tests {
         policy_version: String,
         max_articles: usize,
         max_body_bytes: ArticleGenerationContractBodyBytes,
+        model_audit: ArticleGenerationContractModelAudit,
     }
 
     #[derive(Debug, Deserialize)]
     struct ArticleGenerationContractBodyBytes {
         bytes: usize,
+    }
+
+    #[derive(Debug, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct ArticleGenerationContractModelAudit {
+        policy_version_key: String,
     }
 
     #[test]
@@ -4543,6 +4555,11 @@ mod tests {
         assert_eq!(
             contract.max_body_bytes.bytes, MAX_BODY_BYTES,
             "单篇正文字节上限；Rust 侧双份常量的事实记于 JSON 的 _comment"
+        );
+        assert_eq!(
+            contract.model_audit.policy_version_key, MODEL_AUDIT_POLICY_VERSION_KEY,
+            "版本行审计策略戳键名：edit_article 继承基准版戳的读写键，TS 侧\
+             MODEL_AUDIT_POLICY_VERSION_KEY 同钉（票 #44 评审修复）"
         );
     }
 }
