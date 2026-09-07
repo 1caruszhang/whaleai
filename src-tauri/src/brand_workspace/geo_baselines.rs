@@ -1,3 +1,4 @@
+use super::persistence::{canonical_json, gates, with_immediate_tx};
 use super::*;
 use rusqlite::TransactionBehavior;
 use serde_json::{json, Value};
@@ -222,8 +223,8 @@ impl BrandWorkspaceStore {
         _request: GeoBaselineLatestRequest,
     ) -> Result<Option<GeoBaselineProjection>, String> {
         let workspace = self.workspace(workspace_id)?;
-        let connection = open_database(&workspace)?;
-        require_baseline_session(&connection, session_id)?;
+        let connection = BrandWorkspaceStore::open(&workspace)?;
+        gates::GEO_BASELINE_SESSION.enforce(&connection, session_id)?;
         let baseline_id: Option<String> = connection
             .query_row(
                 "SELECT id FROM geo_baselines ORDER BY updated_at DESC, id DESC LIMIT 1",
@@ -244,8 +245,8 @@ impl BrandWorkspaceStore {
         request: GeoBaselineGetRequest,
     ) -> Result<Option<GeoBaselineProjection>, String> {
         let workspace = self.workspace(workspace_id)?;
-        let connection = open_database(&workspace)?;
-        require_baseline_session(&connection, session_id)?;
+        let connection = BrandWorkspaceStore::open(&workspace)?;
+        gates::GEO_BASELINE_SESSION.enforce(&connection, session_id)?;
         if request.baseline_id.trim().is_empty() {
             return Err("geo_baseline_id_invalid".to_string());
         }
@@ -270,7 +271,7 @@ impl BrandWorkspaceStore {
         workspace_id: &str,
     ) -> Result<Option<GeoBaselineProjection>, String> {
         let workspace = self.workspace(workspace_id)?;
-        let connection = open_database(&workspace)?;
+        let connection = BrandWorkspaceStore::open(&workspace)?;
         let baseline_id: Option<String> = connection
             .query_row(
                 "SELECT id FROM geo_baselines ORDER BY updated_at DESC, id DESC LIMIT 1",
@@ -293,7 +294,7 @@ impl BrandWorkspaceStore {
             return Err("geo_baseline_id_invalid".to_string());
         }
         let workspace = self.workspace(workspace_id)?;
-        let connection = open_database(&workspace)?;
+        let connection = BrandWorkspaceStore::open(&workspace)?;
         let exists: i64 = connection
             .query_row(
                 "SELECT COUNT(*) FROM geo_baselines WHERE id=?1",
@@ -313,8 +314,8 @@ impl BrandWorkspaceStore {
     ) -> Result<GeoBaselinePreparation, String> {
         validate_prepare(&request)?;
         let workspace = self.workspace(&request.workspace_id)?;
-        let mut connection = open_database(&workspace)?;
-        require_baseline_session(&connection, &request.session_id)?;
+        let mut connection = BrandWorkspaceStore::open(&workspace)?;
+        gates::GEO_BASELINE_SESSION.enforce(&connection, &request.session_id)?;
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|error| format!("start GEO baseline preparation: {error}"))?;
@@ -421,7 +422,7 @@ impl BrandWorkspaceStore {
                     knowledge_version,
                     serde_json::to_string(&brand_names).map_err(|error| error.to_string())?,
                     serde_json::to_string(&competitor_names).map_err(|error| error.to_string())?,
-                    canonical_json(&request.provider_snapshots)?,
+                    canonical_json(&request.provider_snapshots, "GEO baseline JSON")?,
                     request.policy_version,
                     request.idempotency_key,
                     now
@@ -442,7 +443,7 @@ impl BrandWorkspaceStore {
                             question_id,
                             question,
                             engine_id,
-                            canonical_json(&snapshot)?
+                            canonical_json(&snapshot, "GEO baseline JSON")?
                         ],
                     )
                     .map_err(|error| format!("create GEO baseline evidence unit: {error}"))?;
@@ -466,8 +467,8 @@ impl BrandWorkspaceStore {
         request: GeoBaselineUnitClaimRequest,
     ) -> Result<GeoBaselineUnitClaim, String> {
         let workspace = self.workspace(workspace_id)?;
-        let mut connection = open_database(&workspace)?;
-        require_baseline_session(&connection, session_id)?;
+        let mut connection = BrandWorkspaceStore::open(&workspace)?;
+        gates::GEO_BASELINE_SESSION.enforce(&connection, session_id)?;
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|error| format!("start baseline unit claim: {error}"))?;
@@ -544,125 +545,134 @@ impl BrandWorkspaceStore {
     ) -> Result<GeoBaselineEvidenceUnit, String> {
         validate_finish(&request)?;
         let workspace = self.workspace(workspace_id)?;
-        let mut connection = open_database(&workspace)?;
-        require_baseline_session(&connection, session_id)?;
-        let transaction = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|error| format!("start baseline unit finish: {error}"))?;
-        let (baseline_id, status, attempt_number, claim_token): (
-            String,
-            String,
-            i64,
-            Option<String>,
-        ) = transaction
-            .query_row(
-                "SELECT baseline_id, status, attempt_number, current_claim_token
-                 FROM geo_baseline_units WHERE id=?1",
-                [&request.unit_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-            )
-            .optional()
-            .map_err(|error| format!("read claimed baseline unit: {error}"))?
-            .ok_or_else(|| "geo_baseline_unit_not_found".to_string())?;
-        if baseline_id != request.baseline_id {
-            return Err("geo_baseline_unit_identity_mismatch".to_string());
-        }
-        if status != "running" || claim_token.as_deref() != Some(&request.claim_token) {
-            return Err("geo_baseline_unit_claim_stale".to_string());
-        }
-        let now = Utc::now().to_rfc3339();
-        let citations = canonical_json(request.citations.as_ref().unwrap_or(&json!([])))?;
-        let raw_evidence = request
-            .raw_evidence
-            .as_ref()
-            .map(canonical_json)
-            .transpose()?;
-        let analysis = request.analysis.as_ref().map(canonical_json).transpose()?;
-        transaction
-            .execute(
-                "UPDATE geo_baseline_units SET status=?2, current_claim_token=NULL,
-                     raw_answer=?3, raw_evidence_json=?4, citations_json=?5,
-                     analysis_json=?6, finished_at=?7, duration_ms=?8,
-                     error_code=?9, error_message=?10 WHERE id=?1",
-                params![
-                    request.unit_id,
-                    request.status,
-                    request.raw_answer,
-                    raw_evidence,
-                    citations,
-                    analysis,
-                    now,
-                    request.duration_ms,
-                    request.error_code,
-                    request.error_message
-                ],
-            )
-            .map_err(|error| format!("finish baseline evidence unit: {error}"))?;
-        transaction
-            .execute(
-                "UPDATE geo_baseline_attempts SET status=?3, finished_at=?4,
-                     duration_ms=?5, error_code=?6, error_message=?7
-                 WHERE unit_id=?1 AND attempt_number=?2 AND claim_token=?8 AND status='running'",
-                params![
-                    request.unit_id,
-                    attempt_number,
-                    request.status,
-                    now,
-                    request.duration_ms,
-                    request.error_code,
-                    request.error_message,
-                    request.claim_token
-                ],
-            )
-            .map_err(|error| format!("finish baseline evidence attempt: {error}"))?;
+        let mut connection = BrandWorkspaceStore::open(&workspace)?;
+        gates::GEO_BASELINE_SESSION.enforce(&connection, session_id)?;
+        with_immediate_tx(
+            &mut connection,
+            "start baseline unit finish",
+            "commit baseline unit finish",
+            |transaction| {
+                let (baseline_id, status, attempt_number, claim_token): (
+                    String,
+                    String,
+                    i64,
+                    Option<String>,
+                ) = transaction
+                    .query_row(
+                        "SELECT baseline_id, status, attempt_number, current_claim_token
+                         FROM geo_baseline_units WHERE id=?1",
+                        [&request.unit_id],
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                    )
+                    .optional()
+                    .map_err(|error| format!("read claimed baseline unit: {error}"))?
+                    .ok_or_else(|| "geo_baseline_unit_not_found".to_string())?;
+                if baseline_id != request.baseline_id {
+                    return Err("geo_baseline_unit_identity_mismatch".to_string());
+                }
+                if status != "running" || claim_token.as_deref() != Some(&request.claim_token) {
+                    return Err("geo_baseline_unit_claim_stale".to_string());
+                }
+                let now = Utc::now().to_rfc3339();
+                let citations = canonical_json(
+                    request.citations.as_ref().unwrap_or(&json!([])),
+                    "GEO baseline JSON",
+                )?;
+                let raw_evidence = request
+                    .raw_evidence
+                    .as_ref()
+                    .map(|value| canonical_json(value, "GEO baseline JSON"))
+                    .transpose()?;
+                let analysis = request
+                    .analysis
+                    .as_ref()
+                    .map(|value| canonical_json(value, "GEO baseline JSON"))
+                    .transpose()?;
+                transaction
+                    .execute(
+                        "UPDATE geo_baseline_units SET status=?2, current_claim_token=NULL,
+                             raw_answer=?3, raw_evidence_json=?4, citations_json=?5,
+                             analysis_json=?6, finished_at=?7, duration_ms=?8,
+                             error_code=?9, error_message=?10 WHERE id=?1",
+                        params![
+                            request.unit_id,
+                            request.status,
+                            request.raw_answer,
+                            raw_evidence,
+                            citations,
+                            analysis,
+                            now,
+                            request.duration_ms,
+                            request.error_code,
+                            request.error_message
+                        ],
+                    )
+                    .map_err(|error| format!("finish baseline evidence unit: {error}"))?;
+                transaction
+                    .execute(
+                        "UPDATE geo_baseline_attempts SET status=?3, finished_at=?4,
+                             duration_ms=?5, error_code=?6, error_message=?7
+                         WHERE unit_id=?1 AND attempt_number=?2 AND claim_token=?8 AND status='running'",
+                        params![
+                            request.unit_id,
+                            attempt_number,
+                            request.status,
+                            now,
+                            request.duration_ms,
+                            request.error_code,
+                            request.error_message,
+                            request.claim_token
+                        ],
+                    )
+                    .map_err(|error| format!("finish baseline evidence attempt: {error}"))?;
 
-        if request.status == "succeeded" {
-            let evidence = json!({
-                "baselineId": request.baseline_id,
-                "unitId": request.unit_id,
-                "attemptNumber": attempt_number,
-                "rawAnswer": request.raw_answer,
-                "rawEvidence": request.raw_evidence,
-                "citations": request.citations,
-                "analysis": request.analysis,
-            });
-            transaction
-                .execute(
-                    "INSERT INTO observations (id, operation_id, observed_at, evidence_json)
-                     SELECT ?1, operation_id, ?2, ?3 FROM geo_baselines WHERE id=?4",
-                    params![
-                        format!("{}-attempt-{}", request.unit_id, attempt_number),
-                        now,
-                        canonical_json(&evidence)?,
-                        request.baseline_id
-                    ],
-                )
-                .map_err(|error| format!("store baseline observation evidence: {error}"))?;
-        }
-        let (baseline_status, operation_state) =
-            baseline_status(&transaction, &request.baseline_id)?;
-        transaction
-            .execute(
-                "UPDATE geo_baselines SET status=?2, updated_at=?3 WHERE id=?1",
-                params![request.baseline_id, baseline_status, now],
-            )
-            .map_err(|error| format!("update baseline aggregate state: {error}"))?;
-        // 血缘行迁移经唯一 owner（票 02）；旧子查询 UPDATE 在 baseline 行
-        // 缺失时影响 0 行被忽略——optional 读取保持同一 no-op。
-        let operation_id: Option<String> = transaction
-            .query_row(
-                "SELECT operation_id FROM geo_baselines WHERE id=?1",
-                [&request.baseline_id],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(|error| format!("read baseline operation: {error}"))?;
-        if let Some(operation_id) = operation_id {
-            set_lineage_state(&transaction, &operation_id, &operation_state)?;
-        }
-        transaction
-            .commit()
-            .map_err(|error| format!("commit baseline unit finish: {error}"))?;
+                if request.status == "succeeded" {
+                    let evidence = json!({
+                        "baselineId": request.baseline_id,
+                        "unitId": request.unit_id,
+                        "attemptNumber": attempt_number,
+                        "rawAnswer": request.raw_answer,
+                        "rawEvidence": request.raw_evidence,
+                        "citations": request.citations,
+                        "analysis": request.analysis,
+                    });
+                    transaction
+                        .execute(
+                            "INSERT INTO observations (id, operation_id, observed_at, evidence_json)
+                             SELECT ?1, operation_id, ?2, ?3 FROM geo_baselines WHERE id=?4",
+                            params![
+                                format!("{}-attempt-{}", request.unit_id, attempt_number),
+                                now,
+                                canonical_json(&evidence, "GEO baseline JSON")?,
+                                request.baseline_id
+                            ],
+                        )
+                        .map_err(|error| format!("store baseline observation evidence: {error}"))?;
+                }
+                let (baseline_status, operation_state) =
+                    baseline_status(transaction, &request.baseline_id)?;
+                transaction
+                    .execute(
+                        "UPDATE geo_baselines SET status=?2, updated_at=?3 WHERE id=?1",
+                        params![request.baseline_id, baseline_status, now],
+                    )
+                    .map_err(|error| format!("update baseline aggregate state: {error}"))?;
+                // 血缘行迁移经唯一 owner（票 02）；旧子查询 UPDATE 在 baseline 行
+                // 缺失时影响 0 行被忽略——optional 读取保持同一 no-op。
+                let operation_id: Option<String> = transaction
+                    .query_row(
+                        "SELECT operation_id FROM geo_baselines WHERE id=?1",
+                        [&request.baseline_id],
+                        |row| row.get(0),
+                    )
+                    .optional()
+                    .map_err(|error| format!("read baseline operation: {error}"))?;
+                if let Some(operation_id) = operation_id {
+                    set_lineage_state(transaction, &operation_id, &operation_state)?;
+                }
+                Ok(())
+            },
+        )?;
         read_geo_baseline_unit(&connection, &request.unit_id)
     }
 }
@@ -682,10 +692,6 @@ fn validate_prepare(request: &GeoBaselinePrepareRequest) -> Result<(), String> {
         return Err("geo_baseline_engine_required".to_string());
     }
     Ok(())
-}
-
-fn canonical_json<T: ?Sized + Serialize>(value: &T) -> Result<String, String> {
-    serde_json::to_string(value).map_err(|error| format!("serialize GEO baseline JSON: {error}"))
 }
 
 fn validate_finish(request: &GeoBaselineUnitFinishRequest) -> Result<(), String> {
@@ -727,22 +733,6 @@ fn validate_finish(request: &GeoBaselineUnitFinishRequest) -> Result<(), String>
         return Err("geo_baseline_failure_diagnostic_required".to_string());
     }
     Ok(())
-}
-
-fn require_baseline_session(connection: &Connection, session_id: &str) -> Result<(), String> {
-    validate_session_id(session_id)?;
-    let exists: i64 = connection
-        .query_row(
-            "SELECT COUNT(*) FROM brand_sessions WHERE id=?1",
-            [session_id],
-            |row| row.get(0),
-        )
-        .map_err(|error| format!("verify GEO baseline session: {error}"))?;
-    if exists == 1 {
-        Ok(())
-    } else {
-        Err("geo_baseline_session_not_committed".to_string())
-    }
 }
 
 fn selected_questions(
@@ -1461,7 +1451,7 @@ mod tests {
             )
             .unwrap();
         seed_confirmed_pool(&brand);
-        let connection = open_database(&brand).unwrap();
+        let connection = BrandWorkspaceStore::open(&brand).unwrap();
         // 竞品事实只需要 current + version snapshot 两行（读取侧 join 面），
         // 关闭 FK 以免为测试补齐整条 candidate/decision 血缘。
         connection
@@ -1554,7 +1544,7 @@ mod tests {
             )
             .unwrap();
         seed_confirmed_pool(&brand);
-        let connection = open_database(&brand).unwrap();
+        let connection = BrandWorkspaceStore::open(&brand).unwrap();
         // 手工落一行 v1 基线（不带 competitors_json 列值，走列缺省）。
         connection
             .execute(
@@ -1645,7 +1635,7 @@ mod tests {
     }
 
     fn seed_confirmed_pool(brand: &BrandWorkspace) {
-        let connection = open_database(brand).unwrap();
+        let connection = BrandWorkspaceStore::open(brand).unwrap();
         // Seed only the immutable snapshot rows needed by this owner; foreign
         // keys require a real candidate/raw-input/decision lineage.
         connection.execute(
@@ -1721,7 +1711,7 @@ mod tests {
                  selected_question_ids_json, actor_id, decided_at)
              VALUES ('decision-08', 'pool-08', 'session-09', 'confirm-selection', 0, 1, ?1,
                      '[\"q-1\",\"q-2\"]', 'desktop-user', 'now')",
-                [canonical_json(&questions).unwrap()],
+                [canonical_json(&questions, "GEO baseline JSON").unwrap()],
             )
             .unwrap();
     }

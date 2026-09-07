@@ -4,14 +4,14 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
-use chrono::{DateTime, SecondsFormat, Utc};
+use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 use tauri::Manager;
 
-use super::{open_database, open_lineage, set_lineage_state, BrandWorkspace, BrandWorkspaceStore};
+use super::persistence::{gates, now_iso, sha256_hex, with_immediate_tx};
+use super::{open_lineage, set_lineage_state, BrandWorkspace, BrandWorkspaceStore};
 
 /// 发布后监测策略版本戳（裁判：src/shared/geo/postPublishMonitoringContract.json，
 /// ADR-0012 双侧 pin）：只钉当前值等值。WAKE_SCHEMA 是 Rust 单源常量，不入契约。
@@ -387,11 +387,12 @@ fn monitor_publish_execution_id(
     workspace: &BrandWorkspace,
     plan_id: &str,
 ) -> Result<String, MonitorProviderFailure> {
-    let connection = open_database(workspace).map_err(|error| MonitorProviderFailure {
-        code: "monitor-evidence-store-unavailable".to_string(),
-        message: bounded_error(error),
-        retryable: true,
-    })?;
+    let connection =
+        BrandWorkspaceStore::open(workspace).map_err(|error| MonitorProviderFailure {
+            code: "monitor-evidence-store-unavailable".to_string(),
+            message: bounded_error(error),
+            retryable: true,
+        })?;
     connection
         .query_row(
             "SELECT publish_execution_id FROM geo_post_publish_monitor_plans WHERE id=?1",
@@ -522,11 +523,12 @@ fn published_articles_for_run(
     workspace: &BrandWorkspace,
     run_id: &str,
 ) -> Result<Vec<Value>, MonitorProviderFailure> {
-    let connection = open_database(workspace).map_err(|error| MonitorProviderFailure {
-        code: "monitor-evidence-store-unavailable".to_string(),
-        message: bounded_error(error),
-        retryable: true,
-    })?;
+    let connection =
+        BrandWorkspaceStore::open(workspace).map_err(|error| MonitorProviderFailure {
+            code: "monitor-evidence-store-unavailable".to_string(),
+            message: bounded_error(error),
+            retryable: true,
+        })?;
     let mut statement = connection
         .prepare(
             "SELECT item.article_id,unit.evidence_json
@@ -933,18 +935,8 @@ fn widen_monitor_plan_status_check(connection: &Connection) -> Result<(), String
     }
 }
 
-fn digest(value: impl AsRef<[u8]>) -> String {
-    format!("{:x}", Sha256::digest(value.as_ref()))
-}
-
 fn stable_id(prefix: &str, value: &str) -> String {
-    format!("{prefix}-{}", &digest(value)[..32])
-}
-
-fn now_iso(now_ms: i64) -> String {
-    DateTime::<Utc>::from_timestamp_millis(now_ms)
-        .unwrap_or_else(Utc::now)
-        .to_rfc3339_opts(SecondsFormat::Millis, true)
+    format!("{prefix}-{}", &sha256_hex(value)[..32])
 }
 
 fn iso_from_ms(value: Option<i64>) -> Option<String> {
@@ -992,19 +984,6 @@ fn validate_prepare(request: &PostPublishMonitorPrepareRequest, now_ms: i64) -> 
     Ok(())
 }
 
-fn require_monitor_session(connection: &Connection, session_id: &str) -> Result<(), String> {
-    let exists: bool = connection
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM brand_sessions WHERE id=?1)",
-            [session_id],
-            |row| row.get(0),
-        )
-        .map_err(|error| format!("verify monitoring session: {error}"))?;
-    exists
-        .then_some(())
-        .ok_or_else(|| "post_publish_monitor_session_not_found".to_string())
-}
-
 /// 血缘行迁移经唯一 owner（票 07）：旧五处按计划行派生 operation_id 的
 /// 子查询直写，其 0 行 no-op 语义（计划行缺失 → 子查询 NULL → 无行可更）
 /// 经 optional 读取逐位保持（沿票 02 惯例）；monitor 族 from 规则已在
@@ -1039,264 +1018,269 @@ impl BrandWorkspaceStore {
     ) -> Result<PostPublishMonitorPlanProjection, String> {
         validate_prepare(&request, now_ms)?;
         let workspace = self.workspace(workspace_id)?;
-        let mut connection = open_database(&workspace)?;
-        require_monitor_session(&connection, session_id)?;
-        let transaction = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|error| format!("prepare monitoring plan transaction: {error}"))?;
+        let mut connection = BrandWorkspaceStore::open(&workspace)?;
+        gates::MONITOR_SESSION.enforce(&connection, session_id)?;
+        let (plan_id, revision) = with_immediate_tx(
+            &mut connection,
+            "prepare monitoring plan transaction",
+            "commit monitoring plan",
+            |transaction| {
+                if let Some(plan_id) = request.plan_id.as_deref() {
+                    let (revision, status): (i64, String) = transaction
+                    .query_row(
+                        "SELECT revision,status FROM geo_post_publish_monitor_plans WHERE id=?1",
+                        [plan_id],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .optional()
+                    .map_err(|error| format!("read editable monitoring plan: {error}"))?
+                    .ok_or_else(|| "post_publish_monitor_plan_not_found".to_string())?;
+                    if status != "draft" {
+                        return Err("post_publish_monitor_active_plan_immutable".to_string());
+                    }
+                    if request.expected_revision != Some(revision) {
+                        return Err("post_publish_monitor_revision_conflict".to_string());
+                    }
+                    transaction
+                        .execute(
+                            "DELETE FROM geo_post_publish_monitor_items WHERE plan_id=?1",
+                            [plan_id],
+                        )
+                        .map_err(|error| format!("replace monitoring item snapshot: {error}"))?;
+                    transaction
+                        .execute(
+                            "DELETE FROM geo_post_publish_monitor_questions WHERE plan_id=?1",
+                            [plan_id],
+                        )
+                        .map_err(|error| {
+                            format!("replace monitoring question snapshot: {error}")
+                        })?;
+                }
 
-        if let Some(plan_id) = request.plan_id.as_deref() {
-            let (revision, status): (i64, String) = transaction
+                let source_operation_id: String = transaction
                 .query_row(
-                    "SELECT revision,status FROM geo_post_publish_monitor_plans WHERE id=?1",
-                    [plan_id],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
+                    "SELECT operation_id,created_by_session_id FROM geo_publish_executions WHERE id=?1",
+                    [&request.publish_execution_id],
+                    |row| row.get(0),
                 )
                 .optional()
-                .map_err(|error| format!("read editable monitoring plan: {error}"))?
-                .ok_or_else(|| "post_publish_monitor_plan_not_found".to_string())?;
-            if status != "draft" {
-                return Err("post_publish_monitor_active_plan_immutable".to_string());
-            }
-            if request.expected_revision != Some(revision) {
-                return Err("post_publish_monitor_revision_conflict".to_string());
-            }
-            transaction
-                .execute(
-                    "DELETE FROM geo_post_publish_monitor_items WHERE plan_id=?1",
-                    [plan_id],
+                .map_err(|error| format!("read monitoring publish execution: {error}"))?
+                .ok_or_else(|| "post_publish_monitor_publish_execution_not_found".to_string())?;
+                let mut item_statement = transaction
+                .prepare(
+                    "SELECT item.id,item.article_id,json_extract(item.channel_json,'$.kind'),
+                            item.external_request_sn,item.external_order_id,item.external_content_id,
+                            item.idempotency_key,COALESCE(item.object_url,json_extract(item.request_summary_json,'$.plannedObjectUrl')),
+                            item.article_json,item.channel_json
+                     FROM geo_publish_items item
+                     WHERE item.execution_id=?1 AND item.status='submitted'
+                       AND item.external_order_id IS NOT NULL
+                     ORDER BY item.sequence,item.id",
                 )
-                .map_err(|error| format!("replace monitoring item snapshot: {error}"))?;
-            transaction
-                .execute(
-                    "DELETE FROM geo_post_publish_monitor_questions WHERE plan_id=?1",
-                    [plan_id],
-                )
-                .map_err(|error| format!("replace monitoring question snapshot: {error}"))?;
-        }
+                .map_err(|error| format!("prepare submitted publish items: {error}"))?;
+                let publish_items = item_statement
+                    .query_map([&request.publish_execution_id], |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, String>(3)?,
+                            row.get::<_, String>(4)?,
+                            row.get::<_, Option<String>>(5)?,
+                            row.get::<_, String>(6)?,
+                            row.get::<_, String>(7)?,
+                            row.get::<_, String>(8)?,
+                            row.get::<_, String>(9)?,
+                        ))
+                    })
+                    .map_err(|error| format!("read submitted publish items: {error}"))?
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|error| format!("collect submitted publish items: {error}"))?;
+                drop(item_statement);
+                if publish_items.is_empty() {
+                    return Err("post_publish_monitor_submitted_item_required".to_string());
+                }
+                if publish_items.iter().any(|item| {
+                    url::Url::parse(&item.7)
+                        .ok()
+                        .is_none_or(|url| url.scheme() != "https")
+                }) {
+                    return Err("post_publish_monitor_object_url_invalid".to_string());
+                }
 
-        let source_operation_id: String = transaction
-            .query_row(
-                "SELECT operation_id,created_by_session_id FROM geo_publish_executions WHERE id=?1",
-                [&request.publish_execution_id],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(|error| format!("read monitoring publish execution: {error}"))?
-            .ok_or_else(|| "post_publish_monitor_publish_execution_not_found".to_string())?;
-        let mut item_statement = transaction
-            .prepare(
-                "SELECT item.id,item.article_id,json_extract(item.channel_json,'$.kind'),
-                        item.external_request_sn,item.external_order_id,item.external_content_id,
-                        item.idempotency_key,COALESCE(item.object_url,json_extract(item.request_summary_json,'$.plannedObjectUrl')),
-                        item.article_json,item.channel_json
-                 FROM geo_publish_items item
-                 WHERE item.execution_id=?1 AND item.status='submitted'
-                   AND item.external_order_id IS NOT NULL
-                 ORDER BY item.sequence,item.id",
-            )
-            .map_err(|error| format!("prepare submitted publish items: {error}"))?;
-        let publish_items = item_statement
-            .query_map([&request.publish_execution_id], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, String>(4)?,
-                    row.get::<_, Option<String>>(5)?,
-                    row.get::<_, String>(6)?,
-                    row.get::<_, String>(7)?,
-                    row.get::<_, String>(8)?,
-                    row.get::<_, String>(9)?,
-                ))
-            })
-            .map_err(|error| format!("read submitted publish items: {error}"))?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|error| format!("collect submitted publish items: {error}"))?;
-        drop(item_statement);
-        if publish_items.is_empty() {
-            return Err("post_publish_monitor_submitted_item_required".to_string());
-        }
-        if publish_items.iter().any(|item| {
-            url::Url::parse(&item.7)
-                .ok()
-                .is_none_or(|url| url.scheme() != "https")
-        }) {
-            return Err("post_publish_monitor_object_url_invalid".to_string());
-        }
+                let (baseline_policy, question_pool_id, question_pool_revision, brand_names_json, competitors_json): (
+                String,
+                String,
+                i64,
+                String,
+                String,
+            ) = transaction
+                .query_row(
+                    "SELECT policy_version,question_pool_id,question_pool_revision,brand_names_json,competitors_json
+                     FROM geo_baselines WHERE id=?1",
+                    [&request.baseline_id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+                )
+                .optional()
+                .map_err(|error| format!("read monitoring baseline: {error}"))?
+                .ok_or_else(|| "post_publish_monitor_baseline_not_found".to_string())?;
+                let selected_engines = request
+                    .engine_ids
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<HashSet<_>>();
+                let mut question_statement = transaction
+                    .prepare(
+                        "SELECT id,question_id,question_text,engine_id,provider_snapshot_json
+                     FROM geo_baseline_units
+                     WHERE baseline_id=?1 AND status='succeeded'
+                     ORDER BY question_id,engine_id,id",
+                    )
+                    .map_err(|error| format!("prepare monitoring baseline questions: {error}"))?;
+                let questions = question_statement
+                    .query_map([&request.baseline_id], |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, String>(3)?,
+                            row.get::<_, String>(4)?,
+                        ))
+                    })
+                    .map_err(|error| format!("read monitoring baseline questions: {error}"))?
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|error| format!("collect monitoring baseline questions: {error}"))?
+                    .into_iter()
+                    .filter(|question| selected_engines.contains(question.3.as_str()))
+                    .collect::<Vec<_>>();
+                drop(question_statement);
+                if questions.is_empty() {
+                    return Err(
+                        "post_publish_monitor_successful_baseline_unit_required".to_string()
+                    );
+                }
 
-        let (baseline_policy, question_pool_id, question_pool_revision, brand_names_json, competitors_json): (
-            String,
-            String,
-            i64,
-            String,
-            String,
-        ) = transaction
-            .query_row(
-                "SELECT policy_version,question_pool_id,question_pool_revision,brand_names_json,competitors_json
-                 FROM geo_baselines WHERE id=?1",
-                [&request.baseline_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
-            )
-            .optional()
-            .map_err(|error| format!("read monitoring baseline: {error}"))?
-            .ok_or_else(|| "post_publish_monitor_baseline_not_found".to_string())?;
-        let selected_engines = request
-            .engine_ids
-            .iter()
-            .map(String::as_str)
-            .collect::<HashSet<_>>();
-        let mut question_statement = transaction
-            .prepare(
-                "SELECT id,question_id,question_text,engine_id,provider_snapshot_json
-                 FROM geo_baseline_units
-                 WHERE baseline_id=?1 AND status='succeeded'
-                 ORDER BY question_id,engine_id,id",
-            )
-            .map_err(|error| format!("prepare monitoring baseline questions: {error}"))?;
-        let questions = question_statement
-            .query_map([&request.baseline_id], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, String>(4)?,
-                ))
-            })
-            .map_err(|error| format!("read monitoring baseline questions: {error}"))?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|error| format!("collect monitoring baseline questions: {error}"))?
-            .into_iter()
-            .filter(|question| selected_engines.contains(question.3.as_str()))
-            .collect::<Vec<_>>();
-        drop(question_statement);
-        if questions.is_empty() {
-            return Err("post_publish_monitor_successful_baseline_unit_required".to_string());
-        }
+                let existing_plan_id = request.plan_id.clone();
+                let sequence: i64 = transaction
+                    .query_row(
+                        "SELECT COUNT(*)+1 FROM geo_post_publish_monitor_plans",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .map_err(|error| format!("allocate monitoring plan sequence: {error}"))?;
+                let plan_id = existing_plan_id.unwrap_or_else(|| {
+                    stable_id(
+                        "monitor-plan",
+                        &format!(
+                            "{workspace_id}|{}|{}|{sequence}",
+                            request.publish_execution_id, request.baseline_id
+                        ),
+                    )
+                });
+                let operation_id = stable_id("geo-operation-monitor", &plan_id);
+                let now = now_iso(now_ms);
+                let next_run_at_ms = now_ms.saturating_add(request.interval_minutes * 60_000);
+                let end_conditions_json = serde_json::to_string(&request.end_conditions)
+                    .map_err(|error| format!("serialize monitoring end conditions: {error}"))?;
+                let engine_ids_json = serde_json::to_string(&request.engine_ids)
+                    .map_err(|error| format!("serialize monitoring engines: {error}"))?;
+                let revision = if request.plan_id.is_some() {
+                    transaction
+                        .execute(
+                            "UPDATE geo_post_publish_monitor_plans
+                         SET source_operation_id=?2,publish_execution_id=?3,baseline_id=?4,
+                             baseline_policy_version=?5,baseline_question_pool_id=?6,
+                             baseline_question_pool_revision=?7,engine_ids_json=?8,
+                             interval_minutes=?9,end_conditions_json=?10,revision=revision+1,
+                             next_run_at_ms=?11,updated_at=?12
+                         WHERE id=?1 AND status='draft'",
+                            params![
+                                plan_id,
+                                source_operation_id,
+                                request.publish_execution_id,
+                                request.baseline_id,
+                                baseline_policy,
+                                question_pool_id,
+                                question_pool_revision,
+                                engine_ids_json,
+                                request.interval_minutes,
+                                end_conditions_json,
+                                next_run_at_ms,
+                                now,
+                            ],
+                        )
+                        .map_err(|error| format!("update monitoring plan: {error}"))?;
+                    request.expected_revision.unwrap_or(0) + 1
+                } else {
+                    // 血缘开行经唯一 owner（票 07）：仅新建分支开行，编辑既有草稿
+                    // 不写血缘行；重复 id 报错（现主键冲突行为）由 owner 保持。
+                    open_lineage(transaction, &operation_id, session_id, "monitor-draft")?;
+                    transaction
+                        .execute(
+                            "INSERT INTO geo_post_publish_monitor_plans(
+                            id,operation_id,source_operation_id,created_by_session_id,
+                            publish_execution_id,baseline_id,baseline_policy_version,
+                            baseline_question_pool_id,baseline_question_pool_revision,
+                            engine_ids_json,interval_minutes,end_conditions_json,policy_version,
+                            revision,status,schedule_id,run_count,next_run_at_ms,
+                            created_at,updated_at,activated_at,completed_at)
+                         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,
+                                 1,'draft',NULL,0,?14,?15,?15,NULL,NULL)",
+                            params![
+                                plan_id,
+                                operation_id,
+                                source_operation_id,
+                                session_id,
+                                request.publish_execution_id,
+                                request.baseline_id,
+                                baseline_policy,
+                                question_pool_id,
+                                question_pool_revision,
+                                engine_ids_json,
+                                request.interval_minutes,
+                                end_conditions_json,
+                                POLICY_VERSION,
+                                next_run_at_ms,
+                                now,
+                            ],
+                        )
+                        .map_err(|error| format!("insert monitoring plan: {error}"))?;
+                    1
+                };
 
-        let existing_plan_id = request.plan_id.clone();
-        let sequence: i64 = transaction
-            .query_row(
-                "SELECT COUNT(*)+1 FROM geo_post_publish_monitor_plans",
-                [],
-                |row| row.get(0),
-            )
-            .map_err(|error| format!("allocate monitoring plan sequence: {error}"))?;
-        let plan_id = existing_plan_id.unwrap_or_else(|| {
-            stable_id(
-                "monitor-plan",
-                &format!(
-                    "{workspace_id}|{}|{}|{sequence}",
-                    request.publish_execution_id, request.baseline_id
-                ),
-            )
-        });
-        let operation_id = stable_id("geo-operation-monitor", &plan_id);
-        let now = now_iso(now_ms);
-        let next_run_at_ms = now_ms.saturating_add(request.interval_minutes * 60_000);
-        let end_conditions_json = serde_json::to_string(&request.end_conditions)
-            .map_err(|error| format!("serialize monitoring end conditions: {error}"))?;
-        let engine_ids_json = serde_json::to_string(&request.engine_ids)
-            .map_err(|error| format!("serialize monitoring engines: {error}"))?;
-        let revision = if request.plan_id.is_some() {
-            transaction
-                .execute(
-                    "UPDATE geo_post_publish_monitor_plans
-                     SET source_operation_id=?2,publish_execution_id=?3,baseline_id=?4,
-                         baseline_policy_version=?5,baseline_question_pool_id=?6,
-                         baseline_question_pool_revision=?7,engine_ids_json=?8,
-                         interval_minutes=?9,end_conditions_json=?10,revision=revision+1,
-                         next_run_at_ms=?11,updated_at=?12
-                     WHERE id=?1 AND status='draft'",
-                    params![
-                        plan_id,
-                        source_operation_id,
-                        request.publish_execution_id,
-                        request.baseline_id,
-                        baseline_policy,
-                        question_pool_id,
-                        question_pool_revision,
-                        engine_ids_json,
-                        request.interval_minutes,
-                        end_conditions_json,
-                        next_run_at_ms,
-                        now,
-                    ],
-                )
-                .map_err(|error| format!("update monitoring plan: {error}"))?;
-            request.expected_revision.unwrap_or(0) + 1
-        } else {
-            // 血缘开行经唯一 owner（票 07）：仅新建分支开行，编辑既有草稿
-            // 不写血缘行；重复 id 报错（现主键冲突行为）由 owner 保持。
-            open_lineage(&transaction, &operation_id, session_id, "monitor-draft")?;
-            transaction
-                .execute(
-                    "INSERT INTO geo_post_publish_monitor_plans(
-                        id,operation_id,source_operation_id,created_by_session_id,
-                        publish_execution_id,baseline_id,baseline_policy_version,
-                        baseline_question_pool_id,baseline_question_pool_revision,
-                        engine_ids_json,interval_minutes,end_conditions_json,policy_version,
-                        revision,status,schedule_id,run_count,next_run_at_ms,
-                        created_at,updated_at,activated_at,completed_at)
-                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,
-                             1,'draft',NULL,0,?14,?15,?15,NULL,NULL)",
-                    params![
-                        plan_id,
-                        operation_id,
-                        source_operation_id,
-                        session_id,
-                        request.publish_execution_id,
-                        request.baseline_id,
-                        baseline_policy,
-                        question_pool_id,
-                        question_pool_revision,
-                        engine_ids_json,
-                        request.interval_minutes,
-                        end_conditions_json,
-                        POLICY_VERSION,
-                        next_run_at_ms,
-                        now,
-                    ],
-                )
-                .map_err(|error| format!("insert monitoring plan: {error}"))?;
-            1
-        };
-
-        for item in &publish_items {
-            let snapshot = json!({
-                "article": serde_json::from_str::<Value>(&item.8).unwrap_or(Value::Null),
-                "channel": serde_json::from_str::<Value>(&item.9).unwrap_or(Value::Null),
-                "brandNames": serde_json::from_str::<Value>(&brand_names_json).unwrap_or(json!([])),
-                "competitorNames": serde_json::from_str::<Value>(&competitors_json).unwrap_or(json!([])),
-            });
-            transaction
-                .execute(
-                    "INSERT INTO geo_post_publish_monitor_items(
-                        plan_id,publish_item_id,article_id,channel_kind,external_request_sn,
-                        external_order_id,external_content_id,idempotency_key,object_url,snapshot_json)
-                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
-                    params![
-                        plan_id, item.0, item.1, item.2, item.3, item.4, item.5, item.6,
-                        item.7, snapshot.to_string(),
-                    ],
-                )
-                .map_err(|error| format!("freeze monitoring publish item: {error}"))?;
-        }
-        for question in &questions {
-            transaction
-                .execute(
-                    "INSERT INTO geo_post_publish_monitor_questions(
-                        plan_id,baseline_unit_id,question_id,question_text,engine_id,provider_snapshot_json)
-                     VALUES (?1,?2,?3,?4,?5,?6)",
-                    params![plan_id, question.0, question.1, question.2, question.3, question.4],
-                )
-                .map_err(|error| format!("freeze monitoring baseline question: {error}"))?;
-        }
-        transaction
-            .commit()
-            .map_err(|error| format!("commit monitoring plan: {error}"))?;
+                for item in &publish_items {
+                    let snapshot = json!({
+                        "article": serde_json::from_str::<Value>(&item.8).unwrap_or(Value::Null),
+                        "channel": serde_json::from_str::<Value>(&item.9).unwrap_or(Value::Null),
+                        "brandNames": serde_json::from_str::<Value>(&brand_names_json).unwrap_or(json!([])),
+                        "competitorNames": serde_json::from_str::<Value>(&competitors_json).unwrap_or(json!([])),
+                    });
+                    transaction
+                    .execute(
+                        "INSERT INTO geo_post_publish_monitor_items(
+                            plan_id,publish_item_id,article_id,channel_kind,external_request_sn,
+                            external_order_id,external_content_id,idempotency_key,object_url,snapshot_json)
+                         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+                        params![
+                            plan_id, item.0, item.1, item.2, item.3, item.4, item.5, item.6,
+                            item.7, snapshot.to_string(),
+                        ],
+                    )
+                    .map_err(|error| format!("freeze monitoring publish item: {error}"))?;
+                }
+                for question in &questions {
+                    transaction
+                    .execute(
+                        "INSERT INTO geo_post_publish_monitor_questions(
+                            plan_id,baseline_unit_id,question_id,question_text,engine_id,provider_snapshot_json)
+                         VALUES (?1,?2,?3,?4,?5,?6)",
+                        params![plan_id, question.0, question.1, question.2, question.3, question.4],
+                    )
+                    .map_err(|error| format!("freeze monitoring baseline question: {error}"))?;
+                }
+                Ok((plan_id, revision))
+            },
+        )?;
         let projection = read_plan(&connection, workspace_id, &plan_id, now_ms)?;
         debug_assert_eq!(projection.revision, revision);
         Ok(projection)
@@ -1309,8 +1293,8 @@ impl BrandWorkspaceStore {
         now_ms: i64,
     ) -> Result<Option<PostPublishMonitorPlanProjection>, String> {
         let workspace = self.workspace(workspace_id)?;
-        let connection = open_database(&workspace)?;
-        require_monitor_session(&connection, session_id)?;
+        let connection = BrandWorkspaceStore::open(&workspace)?;
+        gates::MONITOR_SESSION.enforce(&connection, session_id)?;
         let id = connection
             .query_row(
                 "SELECT id FROM geo_post_publish_monitor_plans ORDER BY updated_at DESC,id DESC LIMIT 1",
@@ -1331,8 +1315,8 @@ impl BrandWorkspaceStore {
         now_ms: i64,
     ) -> Result<PostPublishMonitorPlanProjection, String> {
         let workspace = self.workspace(workspace_id)?;
-        let connection = open_database(&workspace)?;
-        require_monitor_session(&connection, session_id)?;
+        let connection = BrandWorkspaceStore::open(&workspace)?;
+        gates::MONITOR_SESSION.enforce(&connection, session_id)?;
         read_plan(&connection, workspace_id, &request.plan_id, now_ms)
     }
 
@@ -1345,7 +1329,7 @@ impl BrandWorkspaceStore {
         now_ms: i64,
     ) -> Result<Option<PostPublishMonitorPlanProjection>, String> {
         let workspace = self.workspace(workspace_id)?;
-        let connection = open_database(&workspace)?;
+        let connection = BrandWorkspaceStore::open(&workspace)?;
         let id = connection
             .query_row(
                 "SELECT id FROM geo_post_publish_monitor_plans ORDER BY updated_at DESC,id DESC LIMIT 1",
@@ -1365,7 +1349,7 @@ impl BrandWorkspaceStore {
         now_ms: i64,
     ) -> Result<PostPublishMonitorPlanProjection, String> {
         let workspace = self.workspace(workspace_id)?;
-        let connection = open_database(&workspace)?;
+        let connection = BrandWorkspaceStore::open(&workspace)?;
         read_plan(&connection, workspace_id, plan_id, now_ms)
     }
 
@@ -1415,39 +1399,41 @@ impl BrandWorkspaceStore {
         now_ms: i64,
     ) -> Result<PostPublishMonitorPlanProjection, String> {
         let workspace = self.workspace(workspace_id)?;
-        let mut connection = open_database(&workspace)?;
-        require_monitor_session(&connection, session_id)?;
-        let transaction = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|error| format!("activate monitoring plan transaction: {error}"))?;
-        let changed = transaction
-            .execute(
-                "UPDATE geo_post_publish_monitor_plans
-                 SET status='active',schedule_id=?2,revision=revision+1,
-                     activated_at=?3,updated_at=?3
-                 WHERE id=?1 AND revision=?4 AND status='draft'",
-                params![
-                    request.plan_id,
-                    schedule_id,
-                    now_iso(now_ms),
-                    request.expected_revision
-                ],
-            )
-            .map_err(|error| format!("activate monitoring plan: {error}"))?;
-        if changed != 1 {
-            return Err("post_publish_monitor_revision_conflict".to_string());
-        }
-        // 血缘行迁移经唯一 owner（票 07）：计划 UPDATE 的 status='draft' 门卫
-        // 已保证现态 monitor-draft 在 from 集内。
-        set_monitor_operation_state(
-            &transaction,
-            &request.plan_id,
-            "monitor-active",
-            "activate monitoring operation",
+        let mut connection = BrandWorkspaceStore::open(&workspace)?;
+        gates::MONITOR_SESSION.enforce(&connection, session_id)?;
+        with_immediate_tx(
+            &mut connection,
+            "activate monitoring plan transaction",
+            "commit monitoring activation",
+            |transaction| {
+                let changed = transaction
+                    .execute(
+                        "UPDATE geo_post_publish_monitor_plans
+                     SET status='active',schedule_id=?2,revision=revision+1,
+                         activated_at=?3,updated_at=?3
+                     WHERE id=?1 AND revision=?4 AND status='draft'",
+                        params![
+                            request.plan_id,
+                            schedule_id,
+                            now_iso(now_ms),
+                            request.expected_revision
+                        ],
+                    )
+                    .map_err(|error| format!("activate monitoring plan: {error}"))?;
+                if changed != 1 {
+                    return Err("post_publish_monitor_revision_conflict".to_string());
+                }
+                // 血缘行迁移经唯一 owner（票 07）：计划 UPDATE 的 status='draft' 门卫
+                // 已保证现态 monitor-draft 在 from 集内。
+                set_monitor_operation_state(
+                    transaction,
+                    &request.plan_id,
+                    "monitor-active",
+                    "activate monitoring operation",
+                )?;
+                Ok(())
+            },
         )?;
-        transaction
-            .commit()
-            .map_err(|error| format!("commit monitoring activation: {error}"))?;
         read_plan(&connection, workspace_id, &request.plan_id, now_ms)
     }
 
@@ -1459,40 +1445,42 @@ impl BrandWorkspaceStore {
         now_ms: i64,
     ) -> Result<PostPublishMonitorPlanProjection, String> {
         let workspace = self.workspace(workspace_id)?;
-        let mut connection = open_database(&workspace)?;
-        require_monitor_session(&connection, session_id)?;
-        let transaction = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|error| format!("retry monitoring unit transaction: {error}"))?;
-        let changed = transaction
-            .execute(
-                "UPDATE geo_post_publish_monitor_units
-                 SET status='failed',revision=revision+1,next_attempt_at_ms=?4,
-                     error_code='manual-retry-requested',error_message='用户仅重试此失败监测单元'
-                 WHERE id=?1 AND plan_id=?2 AND revision=?3 AND status='failed'
-                   AND EXISTS(SELECT 1 FROM geo_post_publish_monitor_plans
-                              WHERE id=?2 AND status='active')",
-                params![
-                    request.unit_id,
-                    request.plan_id,
-                    request.expected_unit_revision,
-                    now_ms
-                ],
-            )
-            .map_err(|error| format!("retry monitoring unit: {error}"))?;
-        if changed != 1 {
-            return Err("post_publish_monitor_unit_revision_conflict".to_string());
-        }
-        transaction
-            .execute(
-                "UPDATE geo_post_publish_monitor_runs SET status='running',finished_at=NULL
-                 WHERE id=(SELECT run_id FROM geo_post_publish_monitor_units WHERE id=?1)",
-                [&request.unit_id],
-            )
-            .map_err(|error| format!("reopen monitoring run for exact retry: {error}"))?;
-        transaction
-            .commit()
-            .map_err(|error| format!("commit monitoring unit retry: {error}"))?;
+        let mut connection = BrandWorkspaceStore::open(&workspace)?;
+        gates::MONITOR_SESSION.enforce(&connection, session_id)?;
+        with_immediate_tx(
+            &mut connection,
+            "retry monitoring unit transaction",
+            "commit monitoring unit retry",
+            |transaction| {
+                let changed = transaction
+                .execute(
+                    "UPDATE geo_post_publish_monitor_units
+                     SET status='failed',revision=revision+1,next_attempt_at_ms=?4,
+                         error_code='manual-retry-requested',error_message='用户仅重试此失败监测单元'
+                     WHERE id=?1 AND plan_id=?2 AND revision=?3 AND status='failed'
+                       AND EXISTS(SELECT 1 FROM geo_post_publish_monitor_plans
+                                  WHERE id=?2 AND status='active')",
+                    params![
+                        request.unit_id,
+                        request.plan_id,
+                        request.expected_unit_revision,
+                        now_ms
+                    ],
+                )
+                .map_err(|error| format!("retry monitoring unit: {error}"))?;
+                if changed != 1 {
+                    return Err("post_publish_monitor_unit_revision_conflict".to_string());
+                }
+                transaction
+                    .execute(
+                        "UPDATE geo_post_publish_monitor_runs SET status='running',finished_at=NULL
+                     WHERE id=(SELECT run_id FROM geo_post_publish_monitor_units WHERE id=?1)",
+                        [&request.unit_id],
+                    )
+                    .map_err(|error| format!("reopen monitoring run for exact retry: {error}"))?;
+                Ok(())
+            },
+        )?;
         read_plan(&connection, workspace_id, &request.plan_id, now_ms)
     }
 
@@ -1505,7 +1493,7 @@ impl BrandWorkspaceStore {
             return Err("post_publish_monitor_wake_reference_mismatch".to_string());
         }
         let workspace = self.workspace(&reference.workspace_id)?;
-        let connection = open_database(&workspace)?;
+        let connection = BrandWorkspaceStore::open(&workspace)?;
         let (stored_schedule_id, source_session_id, status): (Option<String>, String, String) =
             connection
                 .query_row(
@@ -1531,7 +1519,7 @@ impl BrandWorkspaceStore {
     fn active_post_publish_monitor_contexts(&self) -> Result<Vec<MonitorPlanContext>, String> {
         let mut contexts = Vec::new();
         for workspace in self.list_workspaces()? {
-            let connection = open_database(&workspace)?;
+            let connection = BrandWorkspaceStore::open(&workspace)?;
             let mut statement = connection
                 .prepare(
                     "SELECT id,created_by_session_id,schedule_id
@@ -1943,7 +1931,7 @@ fn create_due_run(
     context: &MonitorPlanContext,
     now_ms: i64,
 ) -> Result<Option<String>, String> {
-    let mut connection = open_database(workspace)?;
+    let mut connection = BrandWorkspaceStore::open(workspace)?;
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|error| format!("create monitoring run transaction: {error}"))?;
@@ -2176,67 +2164,72 @@ fn claim_next_unit(
     context: &MonitorPlanContext,
     now_ms: i64,
 ) -> Result<Option<ClaimedMonitorUnit>, String> {
-    let mut connection = open_database(workspace)?;
-    let transaction = connection
-        .transaction_with_behavior(TransactionBehavior::Immediate)
-        .map_err(|error| format!("claim monitoring unit transaction: {error}"))?;
-    let row = transaction
-        .query_row(
-            "SELECT unit.id,unit.run_id,unit.kind,unit.attempt_number,unit.payload_json
-             FROM geo_post_publish_monitor_units unit
-             JOIN geo_post_publish_monitor_runs run ON run.id=unit.run_id
-             JOIN geo_post_publish_monitor_plans plan ON plan.id=unit.plan_id
-             WHERE unit.plan_id=?1 AND plan.status='active' AND run.status='running'
-               AND (
-                 unit.status='pending'
-                 OR (unit.status='failed' AND unit.next_attempt_at_ms IS NOT NULL AND unit.next_attempt_at_ms<=?2)
-                 OR (unit.status='running' AND unit.lease_until_ms IS NOT NULL AND unit.lease_until_ms<=?2)
-               )
-             ORDER BY run.ordinal,
-                      CASE unit.kind WHEN 'publish-status' THEN 1 WHEN 'access-indexing' THEN 2 ELSE 3 END,
-                      unit.id LIMIT 1",
-            params![context.plan_id, now_ms],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, i64>(3)?,
-                    row.get::<_, String>(4)?,
-                ))
-            },
-        )
-        .optional()
-        .map_err(|error| format!("read next monitoring unit: {error}"))?;
-    let Some((unit_id, run_id, kind, prior_attempt, payload_json)) = row else {
+    let mut connection = BrandWorkspaceStore::open(workspace)?;
+    let claimed = with_immediate_tx(
+        &mut connection,
+        "claim monitoring unit transaction",
+        "commit monitoring unit claim",
+        |transaction| {
+            let row = transaction
+            .query_row(
+                "SELECT unit.id,unit.run_id,unit.kind,unit.attempt_number,unit.payload_json
+                 FROM geo_post_publish_monitor_units unit
+                 JOIN geo_post_publish_monitor_runs run ON run.id=unit.run_id
+                 JOIN geo_post_publish_monitor_plans plan ON plan.id=unit.plan_id
+                 WHERE unit.plan_id=?1 AND plan.status='active' AND run.status='running'
+                   AND (
+                     unit.status='pending'
+                     OR (unit.status='failed' AND unit.next_attempt_at_ms IS NOT NULL AND unit.next_attempt_at_ms<=?2)
+                     OR (unit.status='running' AND unit.lease_until_ms IS NOT NULL AND unit.lease_until_ms<=?2)
+                   )
+                 ORDER BY run.ordinal,
+                          CASE unit.kind WHEN 'publish-status' THEN 1 WHEN 'access-indexing' THEN 2 ELSE 3 END,
+                          unit.id LIMIT 1",
+                params![context.plan_id, now_ms],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, String>(4)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|error| format!("read next monitoring unit: {error}"))?;
+            let Some((unit_id, run_id, kind, prior_attempt, payload_json)) = row else {
+                return Ok(None);
+            };
+            let attempt_number = prior_attempt + 1;
+            let claim_token = sha256_hex(format!("{unit_id}|{attempt_number}|{now_ms}"));
+            let changed = transaction
+            .execute(
+                "UPDATE geo_post_publish_monitor_units
+                 SET status='running',revision=revision+1,attempt_number=?2,claim_token=?3,
+                     lease_until_ms=?4,next_attempt_at_ms=NULL,error_code=NULL,error_message=NULL
+                 WHERE id=?1 AND attempt_number=?5
+                   AND (status='pending' OR status='failed' OR (status='running' AND lease_until_ms<=?6))",
+                params![unit_id, attempt_number, claim_token, now_ms + CLAIM_LEASE_MS, prior_attempt, now_ms],
+            )
+            .map_err(|error| format!("claim monitoring unit: {error}"))?;
+            if changed != 1 {
+                return Ok(None);
+            }
+            transaction
+            .execute(
+                "INSERT INTO geo_post_publish_monitor_attempts(
+                    unit_id,attempt_number,claim_token,status,started_at,finished_at,error_code,error_message)
+                 VALUES (?1,?2,?3,'running',?4,NULL,NULL,NULL)",
+                params![unit_id, attempt_number, claim_token, now_iso(now_ms)],
+            )
+            .map_err(|error| format!("insert monitoring attempt: {error}"))?;
+            Ok(Some((unit_id, run_id, kind, claim_token, payload_json)))
+        },
+    )?;
+    let Some((unit_id, run_id, kind, claim_token, payload_json)) = claimed else {
         return Ok(None);
     };
-    let attempt_number = prior_attempt + 1;
-    let claim_token = digest(format!("{unit_id}|{attempt_number}|{now_ms}"));
-    let changed = transaction
-        .execute(
-            "UPDATE geo_post_publish_monitor_units
-             SET status='running',revision=revision+1,attempt_number=?2,claim_token=?3,
-                 lease_until_ms=?4,next_attempt_at_ms=NULL,error_code=NULL,error_message=NULL
-             WHERE id=?1 AND attempt_number=?5
-               AND (status='pending' OR status='failed' OR (status='running' AND lease_until_ms<=?6))",
-            params![unit_id, attempt_number, claim_token, now_ms + CLAIM_LEASE_MS, prior_attempt, now_ms],
-        )
-        .map_err(|error| format!("claim monitoring unit: {error}"))?;
-    if changed != 1 {
-        return Ok(None);
-    }
-    transaction
-        .execute(
-            "INSERT INTO geo_post_publish_monitor_attempts(
-                unit_id,attempt_number,claim_token,status,started_at,finished_at,error_code,error_message)
-             VALUES (?1,?2,?3,'running',?4,NULL,NULL,NULL)",
-            params![unit_id, attempt_number, claim_token, now_iso(now_ms)],
-        )
-        .map_err(|error| format!("insert monitoring attempt: {error}"))?;
-    transaction
-        .commit()
-        .map_err(|error| format!("commit monitoring unit claim: {error}"))?;
     Ok(Some(ClaimedMonitorUnit {
         id: unit_id,
         run_id,
@@ -2256,39 +2249,41 @@ fn settle_unit_success(
     evidence: Value,
     now_ms: i64,
 ) -> Result<(), String> {
-    let mut connection = open_database(workspace)?;
-    let transaction = connection
-        .transaction_with_behavior(TransactionBehavior::Immediate)
-        .map_err(|error| format!("settle monitoring success transaction: {error}"))?;
-    let changed = transaction
-        .execute(
-            "UPDATE geo_post_publish_monitor_units
-             SET status='succeeded',revision=revision+1,claim_token=NULL,lease_until_ms=NULL,
-                 next_attempt_at_ms=NULL,evidence_json=?3,observed_at=?4,
-                 error_code=NULL,error_message=NULL
-             WHERE id=?1 AND claim_token=?2 AND status='running'",
-            params![
-                claim.id,
-                claim.claim_token,
-                evidence.to_string(),
-                now_iso(now_ms)
-            ],
-        )
-        .map_err(|error| format!("settle monitoring success: {error}"))?;
-    if changed != 1 {
-        return Err("post_publish_monitor_unit_claim_conflict".to_string());
-    }
-    transaction
-        .execute(
-            "UPDATE geo_post_publish_monitor_attempts
-             SET status='succeeded',finished_at=?3
-             WHERE unit_id=?1 AND claim_token=?2 AND status='running'",
-            params![claim.id, claim.claim_token, now_iso(now_ms)],
-        )
-        .map_err(|error| format!("settle monitoring success attempt: {error}"))?;
-    transaction
-        .commit()
-        .map_err(|error| format!("commit monitoring success: {error}"))?;
+    let mut connection = BrandWorkspaceStore::open(workspace)?;
+    with_immediate_tx(
+        &mut connection,
+        "settle monitoring success transaction",
+        "commit monitoring success",
+        |transaction| {
+            let changed = transaction
+                .execute(
+                    "UPDATE geo_post_publish_monitor_units
+                 SET status='succeeded',revision=revision+1,claim_token=NULL,lease_until_ms=NULL,
+                     next_attempt_at_ms=NULL,evidence_json=?3,observed_at=?4,
+                     error_code=NULL,error_message=NULL
+                 WHERE id=?1 AND claim_token=?2 AND status='running'",
+                    params![
+                        claim.id,
+                        claim.claim_token,
+                        evidence.to_string(),
+                        now_iso(now_ms)
+                    ],
+                )
+                .map_err(|error| format!("settle monitoring success: {error}"))?;
+            if changed != 1 {
+                return Err("post_publish_monitor_unit_claim_conflict".to_string());
+            }
+            transaction
+                .execute(
+                    "UPDATE geo_post_publish_monitor_attempts
+                 SET status='succeeded',finished_at=?3
+                 WHERE unit_id=?1 AND claim_token=?2 AND status='running'",
+                    params![claim.id, claim.claim_token, now_iso(now_ms)],
+                )
+                .map_err(|error| format!("settle monitoring success attempt: {error}"))?;
+            Ok(())
+        },
+    )?;
     refresh_run_and_plan(workspace, &claim.run_id, &claim.plan_id, now_ms)
 }
 
@@ -2298,81 +2293,83 @@ fn settle_unit_failure(
     failure: MonitorProviderFailure,
     now_ms: i64,
 ) -> Result<(), String> {
-    let mut connection = open_database(workspace)?;
-    let transaction = connection
-        .transaction_with_behavior(TransactionBehavior::Immediate)
-        .map_err(|error| format!("settle monitoring failure transaction: {error}"))?;
-    let attempt_number: i64 = transaction
-        .query_row(
-            "SELECT attempt_number FROM geo_post_publish_monitor_units
-             WHERE id=?1 AND claim_token=?2 AND status='running'",
-            params![claim.id, claim.claim_token],
-            |row| row.get(0),
-        )
-        .optional()
-        .map_err(|error| format!("read monitoring failed attempt: {error}"))?
-        .ok_or_else(|| "post_publish_monitor_unit_claim_conflict".to_string())?;
-    let next_attempt_at = if failure.retryable {
-        RETRY_BACKOFF_MS
-            .get((attempt_number - 1) as usize)
-            .map(|delay| now_ms.saturating_add(*delay))
-    } else {
-        None
-    };
-    transaction
-        .execute(
-            "UPDATE geo_post_publish_monitor_units
-             SET status='failed',revision=revision+1,claim_token=NULL,lease_until_ms=NULL,
-                 next_attempt_at_ms=?3,evidence_json=NULL,observed_at=NULL,
-                 error_code=?4,error_message=?5
-             WHERE id=?1 AND claim_token=?2 AND status='running'",
-            params![
-                claim.id,
-                claim.claim_token,
-                next_attempt_at,
-                failure.code,
-                bounded_error(&failure.message),
-            ],
-        )
-        .map_err(|error| format!("settle monitoring failure: {error}"))?;
-    transaction
-        .execute(
-            "UPDATE geo_post_publish_monitor_attempts
-             SET status='failed',finished_at=?3,error_code=?4,error_message=?5
-             WHERE unit_id=?1 AND claim_token=?2 AND status='running'",
-            params![
-                claim.id,
-                claim.claim_token,
-                now_iso(now_ms),
-                failure.code,
-                bounded_error(&failure.message),
-            ],
-        )
-        .map_err(|error| format!("settle monitoring failure attempt: {error}"))?;
-    // 票 14 计划级暂停：sidecar 余额预检返回 insufficient_balance（402，
-    // 非重试）时整计划落 paused——跳过后续 wake 与全部单元工作，零扣点；
-    // 充值/余额恢复后由到期锚点的只读余额探测自动恢复。
-    if failure.code == "insufficient_balance" {
-        transaction
-            .execute(
-                "UPDATE geo_post_publish_monitor_plans
-                 SET status='paused',revision=revision+1,updated_at=?2
-                 WHERE id=?1 AND status='active'",
-                params![claim.plan_id, now_iso(now_ms)],
-            )
-            .map_err(|error| format!("pause monitoring plan: {error}"))?;
-        // 血缘行迁移经唯一 owner（票 07）：暂停分支门卫计划 'active'——
-        // claim 本身要求 active 且单遍串行，现态必为 monitor-active。
-        set_monitor_operation_state(
-            &transaction,
-            &claim.plan_id,
-            "monitor-paused",
-            "pause monitoring operation",
-        )?;
-    }
-    transaction
-        .commit()
-        .map_err(|error| format!("commit monitoring failure: {error}"))?;
+    let mut connection = BrandWorkspaceStore::open(workspace)?;
+    with_immediate_tx(
+        &mut connection,
+        "settle monitoring failure transaction",
+        "commit monitoring failure",
+        |transaction| {
+            let attempt_number: i64 = transaction
+                .query_row(
+                    "SELECT attempt_number FROM geo_post_publish_monitor_units
+                 WHERE id=?1 AND claim_token=?2 AND status='running'",
+                    params![claim.id, claim.claim_token],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(|error| format!("read monitoring failed attempt: {error}"))?
+                .ok_or_else(|| "post_publish_monitor_unit_claim_conflict".to_string())?;
+            let next_attempt_at = if failure.retryable {
+                RETRY_BACKOFF_MS
+                    .get((attempt_number - 1) as usize)
+                    .map(|delay| now_ms.saturating_add(*delay))
+            } else {
+                None
+            };
+            transaction
+                .execute(
+                    "UPDATE geo_post_publish_monitor_units
+                 SET status='failed',revision=revision+1,claim_token=NULL,lease_until_ms=NULL,
+                     next_attempt_at_ms=?3,evidence_json=NULL,observed_at=NULL,
+                     error_code=?4,error_message=?5
+                 WHERE id=?1 AND claim_token=?2 AND status='running'",
+                    params![
+                        claim.id,
+                        claim.claim_token,
+                        next_attempt_at,
+                        failure.code,
+                        bounded_error(&failure.message),
+                    ],
+                )
+                .map_err(|error| format!("settle monitoring failure: {error}"))?;
+            transaction
+                .execute(
+                    "UPDATE geo_post_publish_monitor_attempts
+                 SET status='failed',finished_at=?3,error_code=?4,error_message=?5
+                 WHERE unit_id=?1 AND claim_token=?2 AND status='running'",
+                    params![
+                        claim.id,
+                        claim.claim_token,
+                        now_iso(now_ms),
+                        failure.code,
+                        bounded_error(&failure.message),
+                    ],
+                )
+                .map_err(|error| format!("settle monitoring failure attempt: {error}"))?;
+            // 票 14 计划级暂停：sidecar 余额预检返回 insufficient_balance（402，
+            // 非重试）时整计划落 paused——跳过后续 wake 与全部单元工作，零扣点；
+            // 充值/余额恢复后由到期锚点的只读余额探测自动恢复。
+            if failure.code == "insufficient_balance" {
+                transaction
+                    .execute(
+                        "UPDATE geo_post_publish_monitor_plans
+                     SET status='paused',revision=revision+1,updated_at=?2
+                     WHERE id=?1 AND status='active'",
+                        params![claim.plan_id, now_iso(now_ms)],
+                    )
+                    .map_err(|error| format!("pause monitoring plan: {error}"))?;
+                // 血缘行迁移经唯一 owner（票 07）：暂停分支门卫计划 'active'——
+                // claim 本身要求 active 且单遍串行，现态必为 monitor-active。
+                set_monitor_operation_state(
+                    transaction,
+                    &claim.plan_id,
+                    "monitor-paused",
+                    "pause monitoring operation",
+                )?;
+            }
+            Ok(())
+        },
+    )?;
     refresh_run_and_plan(workspace, &claim.run_id, &claim.plan_id, now_ms)
 }
 
@@ -2382,73 +2379,75 @@ fn refresh_run_and_plan(
     plan_id: &str,
     now_ms: i64,
 ) -> Result<(), String> {
-    let mut connection = open_database(workspace)?;
-    let transaction = connection
-        .transaction_with_behavior(TransactionBehavior::Immediate)
-        .map_err(|error| format!("refresh monitoring run transaction: {error}"))?;
-    let (total, succeeded, active, retryable): (i64, i64, i64, i64) = transaction
-        .query_row(
-            "SELECT COUNT(*),
-                    SUM(CASE WHEN status='succeeded' THEN 1 ELSE 0 END),
-                    SUM(CASE WHEN status IN ('pending','running') THEN 1 ELSE 0 END),
-                    SUM(CASE WHEN status='failed' AND next_attempt_at_ms IS NOT NULL THEN 1 ELSE 0 END)
-             FROM geo_post_publish_monitor_units WHERE run_id=?1",
-            [run_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-        )
-        .map_err(|error| format!("read monitoring run totals: {error}"))?;
-    if active == 0 && retryable == 0 {
-        let status = if total > 0 && succeeded == total {
-            "succeeded"
-        } else if succeeded > 0 {
-            "partial"
-        } else {
-            "failed"
-        };
-        transaction
-            .execute(
-                "UPDATE geo_post_publish_monitor_runs
-                 SET status=?2,finished_at=COALESCE(finished_at,?3)
-                 WHERE id=?1 AND status='running'",
-                params![run_id, status, now_iso(now_ms)],
-            )
-            .map_err(|error| format!("finalize monitoring run: {error}"))?;
-        let (run_count, end_json): (i64, String) = transaction
+    let mut connection = BrandWorkspaceStore::open(workspace)?;
+    with_immediate_tx(
+        &mut connection,
+        "refresh monitoring run transaction",
+        "commit monitoring run refresh",
+        |transaction| {
+            let (total, succeeded, active, retryable): (i64, i64, i64, i64) = transaction
             .query_row(
-                "SELECT run_count,end_conditions_json FROM geo_post_publish_monitor_plans WHERE id=?1",
-                [plan_id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                "SELECT COUNT(*),
+                        SUM(CASE WHEN status='succeeded' THEN 1 ELSE 0 END),
+                        SUM(CASE WHEN status IN ('pending','running') THEN 1 ELSE 0 END),
+                        SUM(CASE WHEN status='failed' AND next_attempt_at_ms IS NOT NULL THEN 1 ELSE 0 END)
+                 FROM geo_post_publish_monitor_units WHERE run_id=?1",
+                [run_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
-            .map_err(|error| format!("read monitoring completion condition: {error}"))?;
-        let end: PostPublishMonitorEndConditions = serde_json::from_str(&end_json)
-            .map_err(|error| format!("parse monitoring completion condition: {error}"))?;
-        if end.deadline.is_some_and(|deadline| deadline <= now_ms)
-            || end.max_runs.is_some_and(|maximum| run_count >= maximum)
-        {
-            let now = now_iso(now_ms);
-            transaction
-                .execute(
-                    "UPDATE geo_post_publish_monitor_plans
-                     SET status='completed',revision=revision+1,next_run_at_ms=NULL,
-                         completed_at=?2,updated_at=?2 WHERE id=?1 AND status='active'",
-                    params![plan_id, now],
+            .map_err(|error| format!("read monitoring run totals: {error}"))?;
+            if active == 0 && retryable == 0 {
+                let status = if total > 0 && succeeded == total {
+                    "succeeded"
+                } else if succeeded > 0 {
+                    "partial"
+                } else {
+                    "failed"
+                };
+                transaction
+                    .execute(
+                        "UPDATE geo_post_publish_monitor_runs
+                     SET status=?2,finished_at=COALESCE(finished_at,?3)
+                     WHERE id=?1 AND status='running'",
+                        params![run_id, status, now_iso(now_ms)],
+                    )
+                    .map_err(|error| format!("finalize monitoring run: {error}"))?;
+                let (run_count, end_json): (i64, String) = transaction
+                .query_row(
+                    "SELECT run_count,end_conditions_json FROM geo_post_publish_monitor_plans WHERE id=?1",
+                    [plan_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
                 )
-                .map_err(|error| format!("complete monitoring plan: {error}"))?;
-            // 血缘行迁移经唯一 owner（票 07）：此写不看计划门——末单元余额
-            // 不足时本函数经 settle_unit_failure 尾随进入，计划已落 paused
-            // （上方 UPDATE 0 行 no-op）而血缘仍被推到 completed（镜像破裂，
-            // from 集按真实代码含 paused）。
-            set_monitor_operation_state(
-                &transaction,
-                plan_id,
-                "monitor-completed",
-                "complete monitoring operation",
-            )?;
-        }
-    }
-    transaction
-        .commit()
-        .map_err(|error| format!("commit monitoring run refresh: {error}"))
+                .map_err(|error| format!("read monitoring completion condition: {error}"))?;
+                let end: PostPublishMonitorEndConditions = serde_json::from_str(&end_json)
+                    .map_err(|error| format!("parse monitoring completion condition: {error}"))?;
+                if end.deadline.is_some_and(|deadline| deadline <= now_ms)
+                    || end.max_runs.is_some_and(|maximum| run_count >= maximum)
+                {
+                    let now = now_iso(now_ms);
+                    transaction
+                        .execute(
+                            "UPDATE geo_post_publish_monitor_plans
+                         SET status='completed',revision=revision+1,next_run_at_ms=NULL,
+                             completed_at=?2,updated_at=?2 WHERE id=?1 AND status='active'",
+                            params![plan_id, now],
+                        )
+                        .map_err(|error| format!("complete monitoring plan: {error}"))?;
+                    // 血缘行迁移经唯一 owner（票 07）：此写不看计划门——末单元余额
+                    // 不足时本函数经 settle_unit_failure 尾随进入，计划已落 paused
+                    // （上方 UPDATE 0 行 no-op）而血缘仍被推到 completed（镜像破裂，
+                    // from 集按真实代码含 paused）。
+                    set_monitor_operation_state(
+                        transaction,
+                        plan_id,
+                        "monitor-completed",
+                        "complete monitoring operation",
+                    )?;
+                }
+            }
+            Ok(())
+        },
+    )
 }
 
 fn recover_expired_units(
@@ -2456,39 +2455,41 @@ fn recover_expired_units(
     plan_id: &str,
     now_ms: i64,
 ) -> Result<(), String> {
-    let mut connection = open_database(workspace)?;
-    let transaction = connection
-        .transaction_with_behavior(TransactionBehavior::Immediate)
-        .map_err(|error| format!("recover stale monitoring leases transaction: {error}"))?;
-    transaction
-        .execute(
-            "UPDATE geo_post_publish_monitor_attempts
-             SET status='failed',finished_at=?3,error_code='stale-lease-recovered',
-                 error_message='应用退出或进程中断，持久租约已到期'
-             WHERE status='running' AND unit_id IN (
-                 SELECT id FROM geo_post_publish_monitor_units
-                 WHERE plan_id=?1 AND status='running' AND lease_until_ms<=?2
-             )",
-            params![plan_id, now_ms, now_iso(now_ms)],
-        )
-        .map_err(|error| format!("recover stale monitoring attempts: {error}"))?;
-    transaction
-        .execute(
-            "UPDATE geo_post_publish_monitor_units
-             SET status='failed',revision=revision+1,claim_token=NULL,lease_until_ms=NULL,
-                 next_attempt_at_ms=?3,error_code='stale-lease-recovered',
-                 error_message='应用退出或进程中断，已从持久租约恢复，仅重试此监测单元'
-             WHERE plan_id=?1 AND status='running' AND lease_until_ms<=?2",
-            params![plan_id, now_ms, now_ms],
-        )
-        .map_err(|error| format!("recover stale monitoring leases: {error}"))?;
-    transaction
-        .commit()
-        .map_err(|error| format!("commit stale monitoring lease recovery: {error}"))
+    let mut connection = BrandWorkspaceStore::open(workspace)?;
+    with_immediate_tx(
+        &mut connection,
+        "recover stale monitoring leases transaction",
+        "commit stale monitoring lease recovery",
+        |transaction| {
+            transaction
+                .execute(
+                    "UPDATE geo_post_publish_monitor_attempts
+                 SET status='failed',finished_at=?3,error_code='stale-lease-recovered',
+                     error_message='应用退出或进程中断，持久租约已到期'
+                 WHERE status='running' AND unit_id IN (
+                     SELECT id FROM geo_post_publish_monitor_units
+                     WHERE plan_id=?1 AND status='running' AND lease_until_ms<=?2
+                 )",
+                    params![plan_id, now_ms, now_iso(now_ms)],
+                )
+                .map_err(|error| format!("recover stale monitoring attempts: {error}"))?;
+            transaction
+                .execute(
+                    "UPDATE geo_post_publish_monitor_units
+                 SET status='failed',revision=revision+1,claim_token=NULL,lease_until_ms=NULL,
+                     next_attempt_at_ms=?3,error_code='stale-lease-recovered',
+                     error_message='应用退出或进程中断，已从持久租约恢复，仅重试此监测单元'
+                 WHERE plan_id=?1 AND status='running' AND lease_until_ms<=?2",
+                    params![plan_id, now_ms, now_ms],
+                )
+                .map_err(|error| format!("recover stale monitoring leases: {error}"))?;
+            Ok(())
+        },
+    )
 }
 
 fn monitor_plan_completed(workspace: &BrandWorkspace, plan_id: &str) -> Result<bool, String> {
-    let connection = open_database(workspace)?;
+    let connection = BrandWorkspaceStore::open(workspace)?;
     connection
         .query_row(
             "SELECT status='completed' FROM geo_post_publish_monitor_plans WHERE id=?1",
@@ -2509,69 +2510,71 @@ fn resume_or_defer_paused_monitor_plan(
     balance_sufficient: bool,
     now_ms: i64,
 ) -> Result<(), String> {
-    let mut connection = open_database(workspace)?;
-    let transaction = connection
-        .transaction_with_behavior(TransactionBehavior::Immediate)
-        .map_err(|error| format!("resume monitoring plan transaction: {error}"))?;
-    let row = transaction
-        .query_row(
-            "SELECT status,next_run_at_ms,interval_minutes
-             FROM geo_post_publish_monitor_plans WHERE id=?1",
-            [&context.plan_id],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, Option<i64>>(1)?,
-                    row.get::<_, i64>(2)?,
-                ))
-            },
-        )
-        .optional()
-        .map_err(|error| format!("read paused monitoring plan: {error}"))?;
-    let Some((status, next_run_at_ms, interval_minutes)) = row else {
-        return Ok(());
-    };
-    if status != "paused" {
-        return Ok(());
-    }
-    let now = now_iso(now_ms);
-    if balance_sufficient {
-        transaction
-            .execute(
-                "UPDATE geo_post_publish_monitor_plans
-                 SET status='active',revision=revision+1,updated_at=?2
-                 WHERE id=?1 AND status='paused'",
-                params![context.plan_id, now],
-            )
-            .map_err(|error| format!("resume monitoring plan: {error}"))?;
-        // 血缘行迁移经唯一 owner（票 07）：resume 只门卫计划 'paused'——
-        // 正常自 monitor-paused 来；末单元余额不足的镜像破裂后计划
-        // paused 而血缘已是 completed，余额恢复即 completed→active。
-        set_monitor_operation_state(
-            &transaction,
-            &context.plan_id,
-            "monitor-active",
-            "resume monitoring operation",
-        )?;
-    } else {
-        let mut next_anchor = next_run_at_ms
-            .unwrap_or(now_ms)
-            .saturating_add(interval_minutes * 60_000);
-        while next_anchor <= now_ms {
-            next_anchor = next_anchor.saturating_add(interval_minutes * 60_000);
-        }
-        transaction
-            .execute(
-                "UPDATE geo_post_publish_monitor_plans
-                 SET next_run_at_ms=?2,revision=revision+1,updated_at=?3
-                 WHERE id=?1 AND status='paused'",
-                params![context.plan_id, next_anchor, now],
-            )
-            .map_err(|error| format!("defer paused monitoring anchor: {error}"))?;
-    }
-    transaction
-        .commit()
-        .map_err(|error| format!("commit paused monitoring resolution: {error}"))?;
+    let mut connection = BrandWorkspaceStore::open(workspace)?;
+    with_immediate_tx(
+        &mut connection,
+        "resume monitoring plan transaction",
+        "commit paused monitoring resolution",
+        |transaction| {
+            let row = transaction
+                .query_row(
+                    "SELECT status,next_run_at_ms,interval_minutes
+                 FROM geo_post_publish_monitor_plans WHERE id=?1",
+                    [&context.plan_id],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, Option<i64>>(1)?,
+                            row.get::<_, i64>(2)?,
+                        ))
+                    },
+                )
+                .optional()
+                .map_err(|error| format!("read paused monitoring plan: {error}"))?;
+            let Some((status, next_run_at_ms, interval_minutes)) = row else {
+                return Ok(());
+            };
+            if status != "paused" {
+                return Ok(());
+            }
+            let now = now_iso(now_ms);
+            if balance_sufficient {
+                transaction
+                    .execute(
+                        "UPDATE geo_post_publish_monitor_plans
+                     SET status='active',revision=revision+1,updated_at=?2
+                     WHERE id=?1 AND status='paused'",
+                        params![context.plan_id, now],
+                    )
+                    .map_err(|error| format!("resume monitoring plan: {error}"))?;
+                // 血缘行迁移经唯一 owner（票 07）：resume 只门卫计划 'paused'——
+                // 正常自 monitor-paused 来；末单元余额不足的镜像破裂后计划
+                // paused 而血缘已是 completed，余额恢复即 completed→active。
+                set_monitor_operation_state(
+                    transaction,
+                    &context.plan_id,
+                    "monitor-active",
+                    "resume monitoring operation",
+                )?;
+            } else {
+                let mut next_anchor = next_run_at_ms
+                    .unwrap_or(now_ms)
+                    .saturating_add(interval_minutes * 60_000);
+                while next_anchor <= now_ms {
+                    next_anchor = next_anchor.saturating_add(interval_minutes * 60_000);
+                }
+                transaction
+                    .execute(
+                        "UPDATE geo_post_publish_monitor_plans
+                     SET next_run_at_ms=?2,revision=revision+1,updated_at=?3
+                     WHERE id=?1 AND status='paused'",
+                        params![context.plan_id, next_anchor, now],
+                    )
+                    .map_err(|error| format!("defer paused monitoring anchor: {error}"))?;
+            }
+            Ok(())
+        },
+    )?;
     Ok(())
 }
 
@@ -2715,7 +2718,7 @@ impl PostPublishMonitorExecutor {
         context: &MonitorPlanContext,
         now_ms: i64,
     ) -> Result<(), String> {
-        let (status, next_run_at_ms): (String, Option<i64>) = open_database(workspace)?
+        let (status, next_run_at_ms): (String, Option<i64>) = BrandWorkspaceStore::open(workspace)?
             .query_row(
                 "SELECT status,next_run_at_ms FROM geo_post_publish_monitor_plans WHERE id=?1",
                 [&context.plan_id],
@@ -2803,7 +2806,7 @@ pub fn start_post_publish_monitor_scheduler_background(store: BrandWorkspaceStor
 pub fn has_active_post_publish_monitor_for_session(session_id: &str) -> Result<bool, String> {
     let store = super::production_store()?;
     for workspace in store.list_workspaces()? {
-        let connection = open_database(&workspace)?;
+        let connection = BrandWorkspaceStore::open(&workspace)?;
         // paused 计划仍持有持久 owner：余额探测与恢复后的巡检都要附着
         // 来源 Session Sidecar，不能因暂停而释放进程。
         let found: bool = connection
@@ -3135,7 +3138,7 @@ mod tests {
             "actual-b"
         );
         assert_eq!(baseline_evidence["rawEvidence"], json!({"output":[]}));
-        let connection = open_database(&fixture.workspace).unwrap();
+        let connection = BrandWorkspaceStore::open(&fixture.workspace).unwrap();
         let item: (String,String,String,String,String) = connection.query_row(
             "SELECT external_request_sn,external_order_id,idempotency_key,object_url,article_id FROM geo_post_publish_monitor_items WHERE plan_id=?1",
             [&plan.id],
@@ -3169,7 +3172,7 @@ mod tests {
         let (fixture, plan) = fixture(2);
         // 监测 item 快照在 prepare 时即从冻结基线带走竞品名单（v1 基线行
         //  competitors_json 走列缺省 '[]'，本 fixture 显式携带一名竞品）。
-        let connection = open_database(&fixture.workspace).unwrap();
+        let connection = BrandWorkspaceStore::open(&fixture.workspace).unwrap();
         let snapshot: String = connection
             .query_row(
                 "SELECT snapshot_json FROM geo_post_publish_monitor_items WHERE plan_id=?1",
@@ -3195,7 +3198,7 @@ mod tests {
             .await
             .unwrap();
 
-        let connection = open_database(&fixture.workspace).unwrap();
+        let connection = BrandWorkspaceStore::open(&fixture.workspace).unwrap();
         let payload: String = connection
             .query_row(
                 "SELECT payload_json FROM geo_post_publish_monitor_units
@@ -3228,7 +3231,7 @@ mod tests {
         assert!(executor.accept(monitor_context.clone()));
         hook.first_pass_reached.notified().await;
 
-        let connection = open_database(&fixture.workspace).unwrap();
+        let connection = BrandWorkspaceStore::open(&fixture.workspace).unwrap();
         connection
             .execute(
                 "UPDATE geo_post_publish_monitor_units
@@ -3377,7 +3380,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(second.id, first.id);
-        let connection = open_database(&fixture.workspace).unwrap();
+        let connection = BrandWorkspaceStore::open(&fixture.workspace).unwrap();
         let attempts: Vec<String> = {
             let mut statement = connection.prepare("SELECT status FROM geo_post_publish_monitor_attempts WHERE unit_id=?1 ORDER BY attempt_number").unwrap();
             statement
@@ -3394,7 +3397,7 @@ mod tests {
         let (fixture, plan) = fixture(2);
         let due = fixture.now_ms + 15 * 60 * 1_000;
         create_due_run(&fixture.workspace, &context(&fixture, &plan.id), due).unwrap();
-        let connection = open_database(&fixture.workspace).unwrap();
+        let connection = BrandWorkspaceStore::open(&fixture.workspace).unwrap();
         connection.execute("UPDATE geo_post_publish_monitor_units SET status='failed',revision=2,error_code='fixture',error_message='fixture' WHERE kind IN ('publish-status','access-indexing')", []).unwrap();
         let units: Vec<(String, String)> = {
             let mut statement = connection.prepare("SELECT id,kind FROM geo_post_publish_monitor_units WHERE kind IN ('publish-status','access-indexing') ORDER BY kind").unwrap();
@@ -3420,7 +3423,7 @@ mod tests {
                 due + 1,
             )
             .unwrap();
-        let connection = open_database(&fixture.workspace).unwrap();
+        let connection = BrandWorkspaceStore::open(&fixture.workspace).unwrap();
         let target_state: (i64,Option<i64>) = connection.query_row("SELECT revision,next_attempt_at_ms FROM geo_post_publish_monitor_units WHERE id=?1", [&target.0], |row| Ok((row.get(0)?,row.get(1)?))).unwrap();
         let sibling_state: (i64,Option<i64>) = connection.query_row("SELECT revision,next_attempt_at_ms FROM geo_post_publish_monitor_units WHERE id=?1", [&sibling.0], |row| Ok((row.get(0)?,row.get(1)?))).unwrap();
         assert_eq!(target_state, (3, Some(due + 1)));
@@ -3459,7 +3462,7 @@ mod tests {
         )
         .unwrap()
         .is_none());
-        let connection = open_database(&fixture.workspace).unwrap();
+        let connection = BrandWorkspaceStore::open(&fixture.workspace).unwrap();
         let count: i64 = connection
             .query_row(
                 "SELECT COUNT(*) FROM geo_post_publish_monitor_runs WHERE plan_id=?1",
@@ -3474,7 +3477,7 @@ mod tests {
     async fn deadline_stops_task_without_arming_an_observation_run() {
         let (fixture, plan) = fixture(9);
         let due = fixture.now_ms + 15 * 60 * 1_000;
-        let connection = open_database(&fixture.workspace).unwrap();
+        let connection = BrandWorkspaceStore::open(&fixture.workspace).unwrap();
         connection
             .execute(
                 "UPDATE geo_post_publish_monitor_plans SET end_conditions_json=?2 WHERE id=?1",
@@ -3505,7 +3508,7 @@ mod tests {
             schedule_completion.completed.lock().unwrap().as_slice(),
             ["managed-task-14"]
         );
-        let connection = open_database(&fixture.workspace).unwrap();
+        let connection = BrandWorkspaceStore::open(&fixture.workspace).unwrap();
         let run_count: i64 = connection
             .query_row(
                 "SELECT COUNT(*) FROM geo_post_publish_monitor_runs WHERE plan_id=?1",
@@ -3678,7 +3681,7 @@ mod tests {
             .unwrap();
         assert_eq!(still_paused.status, "paused");
         assert_eq!(still_paused.run_count, 1);
-        let connection = open_database(&fixture.workspace).unwrap();
+        let connection = BrandWorkspaceStore::open(&fixture.workspace).unwrap();
         let patrol_attempts: i64 = connection
             .query_row(
                 "SELECT COUNT(*) FROM geo_post_publish_monitor_attempts
@@ -3738,7 +3741,7 @@ mod tests {
         assert_eq!(resumed.run_count, 2);
         assert_eq!(provider.calls.lock().unwrap().len(), 6);
         assert_eq!(resumed.latest_run.as_ref().unwrap().status, "succeeded");
-        let connection = open_database(&fixture.workspace).unwrap();
+        let connection = BrandWorkspaceStore::open(&fixture.workspace).unwrap();
         let operation_state: String = connection
             .query_row(
                 "SELECT state FROM geo_operations WHERE id=?1",
@@ -3776,7 +3779,7 @@ mod tests {
         let monitor_context = context(&fixture, &plan.id);
 
         let lineage_state = |plan_id: &str| -> String {
-            let connection = open_database(&fixture.workspace).unwrap();
+            let connection = BrandWorkspaceStore::open(&fixture.workspace).unwrap();
             connection
                 .query_row(
                     "SELECT state FROM geo_operations WHERE id=(

@@ -17,6 +17,7 @@ mod geo_operations;
 mod knowledge;
 mod materials;
 mod notifications;
+mod persistence;
 mod post_publish_monitoring;
 mod publish_scheduler;
 mod question_pools;
@@ -245,7 +246,7 @@ impl BrandWorkspaceStore {
             created_at: now.clone(),
             updated_at: now,
         };
-        initialize_database(&workspace)?;
+        persistence::initialize_database(&workspace)?;
         catalog.workspaces.push(workspace.clone());
         catalog.current_workspace_id = Some(id);
         self.write_catalog_unlocked(&catalog)?;
@@ -274,7 +275,7 @@ impl BrandWorkspaceStore {
         validate_session_id(&session.id)?;
         let workspace = self.workspace(workspace_id)?;
         let now = Utc::now().to_rfc3339();
-        let connection = open_database(&workspace)?;
+        let connection = BrandWorkspaceStore::open(&workspace)?;
         connection
             .execute(
                 "INSERT INTO brand_sessions
@@ -308,7 +309,7 @@ impl BrandWorkspaceStore {
         include_archived: bool,
     ) -> Result<Vec<BrandSession>, String> {
         let workspace = self.workspace(workspace_id)?;
-        let connection = open_database(&workspace)?;
+        let connection = BrandWorkspaceStore::open(&workspace)?;
         let sql = if include_archived {
             "SELECT id, title, title_source, created_at, last_active_at, archived_at
              FROM brand_sessions ORDER BY last_active_at DESC"
@@ -344,7 +345,7 @@ impl BrandWorkspaceStore {
             return Err("会话标题须为 1–120 个字符".to_string());
         }
         let workspace = self.workspace(workspace_id)?;
-        let connection = open_database(&workspace)?;
+        let connection = BrandWorkspaceStore::open(&workspace)?;
         let changed = connection
             .execute(
                 "UPDATE brand_sessions
@@ -368,7 +369,7 @@ impl BrandWorkspaceStore {
     ) -> Result<BrandSession, String> {
         validate_session_id(session_id)?;
         let workspace = self.workspace(workspace_id)?;
-        let connection = open_database(&workspace)?;
+        let connection = BrandWorkspaceStore::open(&workspace)?;
         let archived_at = archived.then(|| Utc::now().to_rfc3339());
         let changed = connection
             .execute(
@@ -390,7 +391,7 @@ impl BrandWorkspaceStore {
     ) -> Result<SessionDeletionPreview, String> {
         validate_session_id(session_id)?;
         let workspace = self.workspace(workspace_id)?;
-        let mut connection = open_database(&workspace)?;
+        let mut connection = BrandWorkspaceStore::open(&workspace)?;
         let session = self
             .session(&workspace, session_id)?
             .ok_or_else(|| "会话不存在".to_string())?;
@@ -472,7 +473,7 @@ impl BrandWorkspaceStore {
     ) -> Result<(), String> {
         validate_session_id(session_id)?;
         let workspace = self.workspace(workspace_id)?;
-        let connection = open_database(&workspace)?;
+        let connection = BrandWorkspaceStore::open(&workspace)?;
         let admitted = connection
             .execute(
                 "UPDATE session_deletion_intents
@@ -495,7 +496,7 @@ impl BrandWorkspaceStore {
         confirmation_token: &str,
     ) -> Result<(), String> {
         let workspace = self.workspace(workspace_id)?;
-        let connection = open_database(&workspace)?;
+        let connection = BrandWorkspaceStore::open(&workspace)?;
         connection
             .execute(
                 "DELETE FROM session_deletion_intents
@@ -513,7 +514,7 @@ impl BrandWorkspaceStore {
         confirmation_token: &str,
     ) -> Result<(), String> {
         let workspace = self.workspace(workspace_id)?;
-        let connection = open_database(&workspace)?;
+        let connection = BrandWorkspaceStore::open(&workspace)?;
         let changed = connection
             .execute(
                 "UPDATE session_deletion_intents
@@ -535,7 +536,7 @@ impl BrandWorkspaceStore {
         confirmation_token: &str,
     ) -> Result<(), String> {
         let workspace = self.workspace(workspace_id)?;
-        let mut connection = open_database(&workspace)?;
+        let mut connection = BrandWorkspaceStore::open(&workspace)?;
         let transaction = connection
             .transaction()
             .map_err(|error| format!("start brand deletion finalize: {error}"))?;
@@ -580,7 +581,7 @@ impl BrandWorkspaceStore {
 
     pub fn workspace_session_ids(&self, workspace_id: &str) -> Result<Vec<String>, String> {
         let workspace = self.workspace(workspace_id)?;
-        let connection = open_database(&workspace)?;
+        let connection = BrandWorkspaceStore::open(&workspace)?;
         let mut statement = connection
             .prepare("SELECT id FROM brand_sessions")
             .map_err(|error| format!("list brand sessions for deletion: {error}"))?;
@@ -597,7 +598,7 @@ impl BrandWorkspaceStore {
         workspace_id: &str,
     ) -> Result<WorkspaceDeletionPreview, String> {
         let workspace = self.workspace(workspace_id)?;
-        let mut connection = open_database(&workspace)?;
+        let mut connection = BrandWorkspaceStore::open(&workspace)?;
         Self::ensure_workspace_deletion_intents(&connection)?;
         let transaction = connection
             .transaction()
@@ -672,7 +673,7 @@ impl BrandWorkspaceStore {
         confirmation_token: &str,
     ) -> Result<(), String> {
         let workspace = self.workspace(workspace_id)?;
-        let connection = open_database(&workspace)?;
+        let connection = BrandWorkspaceStore::open(&workspace)?;
         Self::ensure_workspace_deletion_intents(&connection)?;
         let admitted = connection
             .execute(
@@ -695,7 +696,7 @@ impl BrandWorkspaceStore {
         confirmation_token: &str,
     ) -> Result<(), String> {
         let workspace = self.workspace(workspace_id)?;
-        let connection = open_database(&workspace)?;
+        let connection = BrandWorkspaceStore::open(&workspace)?;
         Self::ensure_workspace_deletion_intents(&connection)?;
         connection
             .execute(
@@ -724,7 +725,7 @@ impl BrandWorkspaceStore {
             .ok_or_else(|| "品牌工作区不存在".to_string())?;
         let workspace = catalog.workspaces.remove(index);
         {
-            let connection = open_database(&workspace)?;
+            let connection = BrandWorkspaceStore::open(&workspace)?;
             Self::ensure_workspace_deletion_intents(&connection)?;
             let admitted: i64 = connection
                 .query_row(
@@ -751,7 +752,7 @@ impl BrandWorkspaceStore {
         workspace: &BrandWorkspace,
         session_id: &str,
     ) -> Result<Option<BrandSession>, String> {
-        let connection = open_database(workspace)?;
+        let connection = BrandWorkspaceStore::open(workspace)?;
         let mut session = connection
             .query_row(
                 "SELECT id, title, title_source, created_at, last_active_at, archived_at
@@ -953,99 +954,9 @@ fn validate_session_id(value: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn initialize_database(workspace: &BrandWorkspace) -> Result<(), String> {
-    let connection = open_database(workspace)?;
-    connection
-        .execute_batch(
-            "CREATE TABLE IF NOT EXISTS brand_workspace (
-                singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
-                id TEXT NOT NULL UNIQUE,
-                name TEXT NOT NULL,
-                product_lines_json TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
-             );
-             CREATE TABLE IF NOT EXISTS brand_sessions (
-                id TEXT PRIMARY KEY,
-                title TEXT NOT NULL,
-                title_source TEXT NOT NULL CHECK(title_source IN ('default', 'auto', 'user')),
-                created_at TEXT NOT NULL,
-                last_active_at TEXT NOT NULL,
-                archived_at TEXT
-             );
-             CREATE INDEX IF NOT EXISTS brand_sessions_activity
-                ON brand_sessions(archived_at, last_active_at DESC);
-             CREATE TABLE IF NOT EXISTS knowledge_facts (
-                id TEXT PRIMARY KEY,
-                fact_key TEXT NOT NULL,
-                version INTEGER NOT NULL,
-                value_json TEXT NOT NULL,
-                created_at TEXT NOT NULL
-             );
-             CREATE TABLE IF NOT EXISTS geo_operations (
-                id TEXT PRIMARY KEY,
-                session_id TEXT REFERENCES brand_sessions(id) ON DELETE SET NULL,
-                state TEXT NOT NULL,
-                created_at TEXT NOT NULL
-             );
-             CREATE TABLE IF NOT EXISTS geo_artifacts (
-                id TEXT PRIMARY KEY,
-                operation_id TEXT REFERENCES geo_operations(id) ON DELETE SET NULL,
-                session_id TEXT REFERENCES brand_sessions(id) ON DELETE SET NULL,
-                kind TEXT NOT NULL,
-                knowledge_version INTEGER,
-                created_at TEXT NOT NULL
-             );
-             CREATE TABLE IF NOT EXISTS publish_orders (
-                id TEXT PRIMARY KEY,
-                operation_id TEXT REFERENCES geo_operations(id) ON DELETE SET NULL,
-                state TEXT NOT NULL,
-                created_at TEXT NOT NULL
-             );
-             CREATE TABLE IF NOT EXISTS observations (
-                id TEXT PRIMARY KEY,
-                operation_id TEXT REFERENCES geo_operations(id) ON DELETE SET NULL,
-                observed_at TEXT NOT NULL,
-                evidence_json TEXT NOT NULL
-             );
-             CREATE TABLE IF NOT EXISTS session_deletion_intents (
-                token TEXT PRIMARY KEY,
-                session_id TEXT NOT NULL REFERENCES brand_sessions(id) ON DELETE CASCADE,
-                expires_at INTEGER NOT NULL,
-                admitted_at INTEGER,
-                transcript_deleted_at INTEGER
-             );",
-        )
-        .map_err(|error| format!("initialize brand database: {error}"))?;
-    ensure_column(
-        &connection,
-        "session_deletion_intents",
-        "admitted_at",
-        "INTEGER",
-    )?;
-    ensure_column(
-        &connection,
-        "session_deletion_intents",
-        "transcript_deleted_at",
-        "INTEGER",
-    )?;
-    geo_operations::ensure_schema(&connection)?;
-    connection
-        .execute(
-            "INSERT OR REPLACE INTO brand_workspace
-                (singleton, id, name, product_lines_json, created_at, updated_at)
-             VALUES (1, ?1, ?2, ?3, ?4, ?5)",
-            params![
-                workspace.id,
-                workspace.name,
-                serde_json::to_string(&workspace.product_lines).unwrap_or_else(|_| "[]".into()),
-                workspace.created_at,
-                workspace.updated_at,
-            ],
-        )
-        .map_err(|error| format!("write brand identity: {error}"))?;
-    Ok(())
-}
+// initialize_database 已随迁移编排归位持久化内核（ADR-0014 决策 1）；
+// ensure_column/column_exists 是各域 ensure_schema 共用的 schema 机器，
+// 留守本模块。
 
 fn ensure_column(
     connection: &Connection,
@@ -1171,60 +1082,6 @@ fn rename_table_in_ddl(ddl: &str, from: &str, to: &str) -> Result<String, String
         .strip_prefix(&header)
         .ok_or_else(|| format!("unexpected {from} schema header"))?;
     Ok(format!("CREATE TABLE {to}{rest}"))
-}
-
-fn open_database(workspace: &BrandWorkspace) -> Result<Connection, String> {
-    let connection = Connection::open(workspace.root_path.join("project.sqlite"))
-        .map_err(|error| format!("open brand database: {error}"))?;
-    connection
-        .busy_timeout(std::time::Duration::from_secs(5))
-        .map_err(|error| format!("configure brand database timeout: {error}"))?;
-    connection
-        .execute_batch("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;")
-        .map_err(|error| format!("configure brand database: {error}"))?;
-    geo_operations::ensure_schema(&connection)?;
-    knowledge::ensure_schema(&connection)?;
-    materials::ensure_schema(&connection)?;
-    question_pools::ensure_schema(&connection)?;
-    geo_baselines::ensure_schema(&connection)?;
-    topic_plans::ensure_schema(&connection)?;
-    articles::ensure_schema(&connection)?;
-    distribution_plans::ensure_schema(&connection)?;
-    publish_scheduler::ensure_schema(&connection)?;
-    post_publish_monitoring::ensure_schema(&connection)?;
-    let has_geo_artifacts: i64 = connection
-        .query_row(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='geo_artifacts'",
-            [],
-            |row| row.get(0),
-        )
-        .map_err(|error| format!("inspect artifact schema state: {error}"))?;
-    if has_geo_artifacts == 1 {
-        ensure_column(&connection, "geo_artifacts", "knowledge_version", "INTEGER")?;
-    }
-    let has_deletion_intents: i64 = connection
-        .query_row(
-            "SELECT COUNT(*) FROM sqlite_master
-             WHERE type = 'table' AND name = 'session_deletion_intents'",
-            [],
-            |row| row.get(0),
-        )
-        .map_err(|error| format!("inspect brand database migration state: {error}"))?;
-    if has_deletion_intents == 1 {
-        ensure_column(
-            &connection,
-            "session_deletion_intents",
-            "admitted_at",
-            "INTEGER",
-        )?;
-        ensure_column(
-            &connection,
-            "session_deletion_intents",
-            "transcript_deleted_at",
-            "INTEGER",
-        )?;
-    }
-    Ok(connection)
 }
 
 fn session_from_row(row: &rusqlite::Row<'_>, workspace_id: &str) -> rusqlite::Result<BrandSession> {
@@ -1682,7 +1539,7 @@ mod tests {
             .unwrap();
 
         assert!(store.list_sessions(&brand.id, true).unwrap().is_empty());
-        let connection = open_database(&brand).unwrap();
+        let connection = BrandWorkspaceStore::open(&brand).unwrap();
         let count = |sql: String| {
             connection
                 .query_row(&sql, [], |row| row.get::<_, i64>(0))
@@ -1770,10 +1627,12 @@ mod tests {
             .unwrap();
         drop(legacy);
 
-        // 任意一次数据库打开都会执行 ensure_schema 迁移。
+        // 忘掉登记＝「新进程首开」的进程内等价路径：下一次 open() 重走
+        // 全套 ensure_schema 迁移，把旧外键形态重建掉。
+        super::persistence::forget_migration(&brand);
         store.list_sessions(&brand.id, false).unwrap();
 
-        let connection = open_database(&brand).unwrap();
+        let connection = BrandWorkspaceStore::open(&brand).unwrap();
         let schema: String = connection
             .query_row(
                 "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'geo_question_pools'",
@@ -1885,7 +1744,7 @@ mod tests {
     }
 
     fn seed_knowledge_chain(brand: &BrandWorkspace) {
-        let connection = open_database(brand).unwrap();
+        let connection = BrandWorkspaceStore::open(brand).unwrap();
         let now = Utc::now().to_rfc3339();
         connection
             .execute(
@@ -1927,7 +1786,7 @@ mod tests {
 
     fn seed_geo_provenance_rows(brand: &BrandWorkspace, session_id: &str) {
         seed_knowledge_chain(brand);
-        let connection = open_database(brand).unwrap();
+        let connection = BrandWorkspaceStore::open(brand).unwrap();
         let now = Utc::now().to_rfc3339();
         for (id, state) in [
             ("operation-pool", "question-pool-confirmed"),
@@ -2094,7 +1953,7 @@ mod tests {
     }
 
     fn seed_shared_data(brand: &BrandWorkspace, session_id: &str) {
-        let connection = open_database(brand).unwrap();
+        let connection = BrandWorkspaceStore::open(brand).unwrap();
         connection
             .execute(
                 "INSERT INTO knowledge_facts (id, fact_key, version, value_json, created_at)
@@ -2133,7 +1992,7 @@ mod tests {
     }
 
     fn shared_row_counts(brand: &BrandWorkspace) -> [i64; 5] {
-        let connection = open_database(brand).unwrap();
+        let connection = BrandWorkspaceStore::open(brand).unwrap();
         let count = |table: &str| {
             connection
                 .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {

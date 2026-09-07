@@ -1,5 +1,5 @@
+use super::persistence::{canonical_json, gates, with_immediate_tx};
 use super::*;
-use rusqlite::TransactionBehavior;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 
@@ -8,11 +8,6 @@ use std::collections::{HashMap, HashSet};
 /// policyVersion 不符的 provider 快照，TS 侧组装必须逐字符相等才能过闸。
 const POLICY_VERSION: &str = "js-ai-dev-four-path-distribution-v1";
 const MAX_CANDIDATES: usize = 30;
-
-fn canonical_json<T: ?Sized + Serialize>(value: &T) -> Result<String, String> {
-    serde_json::to_string(value)
-        .map_err(|error| format!("serialize distribution plan json: {error}"))
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -268,8 +263,8 @@ impl BrandWorkspaceStore {
         request: DistributionPlanningContextRequest,
     ) -> Result<DistributionPlanningContext, String> {
         let workspace = self.workspace(workspace_id)?;
-        let connection = open_database(&workspace)?;
-        require_distribution_session(&connection, session_id)?;
+        let connection = BrandWorkspaceStore::open(&workspace)?;
+        gates::DISTRIBUTION_SESSION.enforce(&connection, session_id)?;
         read_distribution_context(&connection, request.article_operation_id.as_deref())
     }
 
@@ -280,8 +275,8 @@ impl BrandWorkspaceStore {
         _request: DistributionPlanLatestRequest,
     ) -> Result<Option<Value>, String> {
         let workspace = self.workspace(workspace_id)?;
-        let connection = open_database(&workspace)?;
-        require_distribution_session(&connection, session_id)?;
+        let connection = BrandWorkspaceStore::open(&workspace)?;
+        gates::DISTRIBUTION_SESSION.enforce(&connection, session_id)?;
         let plan_id = connection
             .query_row(
                 "SELECT id FROM geo_distribution_plans
@@ -304,8 +299,8 @@ impl BrandWorkspaceStore {
         request: DistributionPlanGetRequest,
     ) -> Result<Value, String> {
         let workspace = self.workspace(workspace_id)?;
-        let connection = open_database(&workspace)?;
-        require_distribution_session(&connection, session_id)?;
+        let connection = BrandWorkspaceStore::open(&workspace)?;
+        gates::DISTRIBUTION_SESSION.enforce(&connection, session_id)?;
         require_distribution_plan_visibility(&connection, &request.plan_id, session_id, true)?;
         read_distribution_plan(&connection, workspace_id, &request.plan_id)
     }
@@ -318,8 +313,8 @@ impl BrandWorkspaceStore {
         _request: ChannelPreferencesGetRequest,
     ) -> Result<ChannelPreferencesPayload, String> {
         let workspace = self.workspace(workspace_id)?;
-        let connection = open_database(&workspace)?;
-        require_distribution_session(&connection, session_id)?;
+        let connection = BrandWorkspaceStore::open(&workspace)?;
+        gates::DISTRIBUTION_SESSION.enforce(&connection, session_id)?;
         read_channel_preferences(&connection)
     }
 
@@ -331,8 +326,8 @@ impl BrandWorkspaceStore {
     ) -> Result<ChannelPreferencesPayload, String> {
         validate_channel_preferences(&request.preferences)?;
         let workspace = self.workspace(workspace_id)?;
-        let connection = open_database(&workspace)?;
-        require_distribution_session(&connection, session_id)?;
+        let connection = BrandWorkspaceStore::open(&workspace)?;
+        gates::DISTRIBUTION_SESSION.enforce(&connection, session_id)?;
         let now = Utc::now().to_rfc3339();
         connection
             .execute(
@@ -343,8 +338,8 @@ impl BrandWorkspaceStore {
                    excluded_json=excluded.excluded_json,
                    updated_at=excluded.updated_at",
                 params![
-                    canonical_json(&request.preferences.additional_preference_channels)?,
-                    canonical_json(&request.preferences.excluded_preference_channels)?,
+                    canonical_json(&request.preferences.additional_preference_channels, "distribution plan json")?,
+                    canonical_json(&request.preferences.excluded_preference_channels, "distribution plan json")?,
                     now
                 ],
             )
@@ -377,188 +372,195 @@ impl BrandWorkspaceStore {
         // author or loosen the snapshot frozen into a distribution plan.
         let spend_limits = crate::distribution_spend_limits::read_distribution_spend_limits();
         let workspace = self.workspace(workspace_id)?;
-        let mut connection = open_database(&workspace)?;
-        require_distribution_session(&connection, session_id)?;
-        let transaction = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|error| format!("prepare distribution plan transaction: {error}"))?;
-        let context = read_distribution_context(&transaction, Some(&request.article_operation_id))?;
-        if normalize_compare(&request.industry) != normalize_compare(&context.industry) {
-            return Err("distribution_plan_industry_snapshot_mismatch".to_string());
-        }
-        let article_map = context
-            .articles
-            .iter()
-            .map(|article| (article.id.as_str(), article))
-            .collect::<HashMap<_, _>>();
-        let mut article_ids = Vec::new();
-        let mut articles = Vec::new();
-        for article_id in &request.article_ids {
-            if article_ids.contains(article_id) {
-                return Err("distribution_plan_article_duplicate".to_string());
-            }
-            let article = article_map
-                .get(article_id.as_str())
-                .ok_or_else(|| "distribution_plan_approved_article_mismatch".to_string())?;
-            article_ids.push(article_id.clone());
-            articles.push((*article).clone());
-        }
-        if articles.is_empty() {
-            return Err("distribution_plan_approved_articles_required".to_string());
-        }
-        // 被动路证据改为现场探测（js_ai 语义）：来源由 Node 探测产出，这里做
-        // 结构与溯源校验——question_id/question 必须命中已确认问题池，URL 必须
-        // 是合法 http(s)，id 唯一；article_ids 不信任请求，按权威映射重盖。
-        let pool_questions = context
-            .questions
-            .iter()
-            .map(|question| (question.id.as_str(), question))
-            .collect::<HashMap<_, _>>();
-        let mut question_sources = Vec::new();
-        let mut source_ids = HashSet::new();
-        for source in &request.question_sources {
-            if !source_ids.insert(source.id.clone()) {
-                return Err("distribution_plan_question_source_duplicate".to_string());
-            }
-            let pool_question = pool_questions
-                .get(source.question_id.as_str())
-                .ok_or_else(|| "distribution_plan_question_not_in_confirmed_pool".to_string())?;
-            if normalize_compare(&source.question) != normalize_compare(&pool_question.question) {
-                return Err("distribution_plan_question_text_mismatch".to_string());
-            }
-            let url = source.url.trim();
-            if !(url.starts_with("http://") || url.starts_with("https://")) {
-                return Err("distribution_plan_question_source_url_invalid".to_string());
-            }
-            let mut derived = source.clone();
-            derived.article_ids = pool_question
-                .article_ids
-                .iter()
-                .filter(|article_id| article_ids.contains(article_id))
-                .cloned()
-                .collect();
-            question_sources.push(derived);
-        }
+        let mut connection = BrandWorkspaceStore::open(&workspace)?;
+        gates::DISTRIBUTION_SESSION.enforce(&connection, session_id)?;
+        let (plan_id, claim_token) = with_immediate_tx(
+            &mut connection,
+            "prepare distribution plan transaction",
+            "commit distribution plan preparation",
+            |transaction| {
+                let context =
+                    read_distribution_context(transaction, Some(&request.article_operation_id))?;
+                if normalize_compare(&request.industry) != normalize_compare(&context.industry) {
+                    return Err("distribution_plan_industry_snapshot_mismatch".to_string());
+                }
+                let article_map = context
+                    .articles
+                    .iter()
+                    .map(|article| (article.id.as_str(), article))
+                    .collect::<HashMap<_, _>>();
+                let mut article_ids = Vec::new();
+                let mut articles = Vec::new();
+                for article_id in &request.article_ids {
+                    if article_ids.contains(article_id) {
+                        return Err("distribution_plan_article_duplicate".to_string());
+                    }
+                    let article = article_map
+                        .get(article_id.as_str())
+                        .ok_or_else(|| "distribution_plan_approved_article_mismatch".to_string())?;
+                    article_ids.push(article_id.clone());
+                    articles.push((*article).clone());
+                }
+                if articles.is_empty() {
+                    return Err("distribution_plan_approved_articles_required".to_string());
+                }
+                // 被动路证据改为现场探测（js_ai 语义）：来源由 Node 探测产出，这里做
+                // 结构与溯源校验——question_id/question 必须命中已确认问题池，URL 必须
+                // 是合法 http(s)，id 唯一；article_ids 不信任请求，按权威映射重盖。
+                let pool_questions = context
+                    .questions
+                    .iter()
+                    .map(|question| (question.id.as_str(), question))
+                    .collect::<HashMap<_, _>>();
+                let mut question_sources = Vec::new();
+                let mut source_ids = HashSet::new();
+                for source in &request.question_sources {
+                    if !source_ids.insert(source.id.clone()) {
+                        return Err("distribution_plan_question_source_duplicate".to_string());
+                    }
+                    let pool_question = pool_questions
+                        .get(source.question_id.as_str())
+                        .ok_or_else(|| {
+                            "distribution_plan_question_not_in_confirmed_pool".to_string()
+                        })?;
+                    if normalize_compare(&source.question)
+                        != normalize_compare(&pool_question.question)
+                    {
+                        return Err("distribution_plan_question_text_mismatch".to_string());
+                    }
+                    let url = source.url.trim();
+                    if !(url.starts_with("http://") || url.starts_with("https://")) {
+                        return Err("distribution_plan_question_source_url_invalid".to_string());
+                    }
+                    let mut derived = source.clone();
+                    derived.article_ids = pool_question
+                        .article_ids
+                        .iter()
+                        .filter(|article_id| article_ids.contains(article_id))
+                        .cloned()
+                        .collect();
+                    question_sources.push(derived);
+                }
 
-        let plan_id = Uuid::new_v4().to_string();
-        let operation_id = Uuid::new_v4().to_string();
-        let artifact_id = Uuid::new_v4().to_string();
-        let claim_token = Uuid::new_v4().to_string();
-        let now = Utc::now().to_rfc3339();
-        // 被动证据为空不再构成初始阻断（用户裁决 2026-08-18）：探测失败只降级。
-        let blocking_issues = json!([
-            "distribution-provider-unavailable",
-            "channel-candidate-unavailable",
-            "article-channel-unassigned"
-        ]);
-        let assignments = articles
-            .iter()
-            .map(|article| {
-                json!({
-                    "articleId": article.id,
-                    "resourceId": Value::Null,
-                    "reason": "unassigned",
-                    "scheduledAt": request.publish_start_at,
-                })
-            })
-            .collect::<Vec<_>>();
-        let provider_snapshot = json!({
-            "slot": "distribution",
-            "provider": "超级媒介",
-            "endpointFamily": "chaojimeijie-resource-api",
-            "policyVersion": POLICY_VERSION,
-            "fetchedAt": Value::Null,
-            "mediaTotal": 0,
-            "weMediaTotal": 0,
-        });
-        let projection = json!({
-            "id": plan_id,
-            "operationId": operation_id,
-            "workspaceId": workspace_id,
-            "createdBySessionId": session_id,
-            "articleOperationId": context.article_operation_id,
-            "policyVersion": POLICY_VERSION,
-            "status": "discovering",
-            "revision": 0,
-            "industry": context.industry,
-            "targetAudience": request.target_audience.trim(),
-            "questionSources": question_sources,
-            "preferredResourceIds": request.preferred_resource_ids,
-            "mappingMode": request.mapping_mode,
-            "ratio": request.ratio,
-            "articles": articles,
-            "providerState": "pending",
-            "providerSnapshot": provider_snapshot,
-            "resourceSnapshot": [],
-            "candidates": [],
-            "selectedResourceIds": [],
-            "assignments": assignments,
-            "perArticleMaxPoints": spend_limits.per_article_max_points,
-            "totalMaxPoints": spend_limits.per_execution_max_points,
-            "budgetCny": request.budget_cny,
-            "publishStartAt": request.publish_start_at,
-            "discoverySummary": empty_discovery_summary(),
-            "blockingIssues": blocking_issues,
-            "createdAt": now,
-            "updatedAt": now,
-            "confirmedAt": Value::Null,
-        });
-        reject_secret_shaped_data(&projection)?;
-        // 血缘行开行经唯一 owner（票 05）。
-        open_lineage(
-            &transaction,
-            &operation_id,
-            session_id,
-            "distribution-discovering",
-        )?;
-        transaction
-            .execute(
-                "INSERT INTO geo_artifacts
+                let plan_id = Uuid::new_v4().to_string();
+                let operation_id = Uuid::new_v4().to_string();
+                let artifact_id = Uuid::new_v4().to_string();
+                let claim_token = Uuid::new_v4().to_string();
+                let now = Utc::now().to_rfc3339();
+                // 被动证据为空不再构成初始阻断（用户裁决 2026-08-18）：探测失败只降级。
+                let blocking_issues = json!([
+                    "distribution-provider-unavailable",
+                    "channel-candidate-unavailable",
+                    "article-channel-unassigned"
+                ]);
+                let assignments = articles
+                    .iter()
+                    .map(|article| {
+                        json!({
+                            "articleId": article.id,
+                            "resourceId": Value::Null,
+                            "reason": "unassigned",
+                            "scheduledAt": request.publish_start_at,
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                let provider_snapshot = json!({
+                    "slot": "distribution",
+                    "provider": "超级媒介",
+                    "endpointFamily": "chaojimeijie-resource-api",
+                    "policyVersion": POLICY_VERSION,
+                    "fetchedAt": Value::Null,
+                    "mediaTotal": 0,
+                    "weMediaTotal": 0,
+                });
+                let projection = json!({
+                    "id": plan_id,
+                    "operationId": operation_id,
+                    "workspaceId": workspace_id,
+                    "createdBySessionId": session_id,
+                    "articleOperationId": context.article_operation_id,
+                    "policyVersion": POLICY_VERSION,
+                    "status": "discovering",
+                    "revision": 0,
+                    "industry": context.industry,
+                    "targetAudience": request.target_audience.trim(),
+                    "questionSources": question_sources,
+                    "preferredResourceIds": request.preferred_resource_ids,
+                    "mappingMode": request.mapping_mode,
+                    "ratio": request.ratio,
+                    "articles": articles,
+                    "providerState": "pending",
+                    "providerSnapshot": provider_snapshot,
+                    "resourceSnapshot": [],
+                    "candidates": [],
+                    "selectedResourceIds": [],
+                    "assignments": assignments,
+                    "perArticleMaxPoints": spend_limits.per_article_max_points,
+                    "totalMaxPoints": spend_limits.per_execution_max_points,
+                    "budgetCny": request.budget_cny,
+                    "publishStartAt": request.publish_start_at,
+                    "discoverySummary": empty_discovery_summary(),
+                    "blockingIssues": blocking_issues,
+                    "createdAt": now,
+                    "updatedAt": now,
+                    "confirmedAt": Value::Null,
+                });
+                reject_secret_shaped_data(&projection)?;
+                // 血缘行开行经唯一 owner（票 05）。
+                open_lineage(
+                    transaction,
+                    &operation_id,
+                    session_id,
+                    "distribution-discovering",
+                )?;
+                transaction
+                    .execute(
+                        "INSERT INTO geo_artifacts
                     (id, operation_id, session_id, kind, knowledge_version, created_at)
                  VALUES (?1, ?2, ?3, 'distribution-plan', ?4, ?5)",
-                params![
-                    artifact_id,
-                    operation_id,
-                    session_id,
-                    context.knowledge_version,
-                    now
-                ],
-            )
-            .map_err(|error| format!("create distribution artifact: {error}"))?;
-        transaction
-            .execute(
-                "INSERT INTO geo_distribution_plans
+                        params![
+                            artifact_id,
+                            operation_id,
+                            session_id,
+                            context.knowledge_version,
+                            now
+                        ],
+                    )
+                    .map_err(|error| format!("create distribution artifact: {error}"))?;
+                transaction
+                    .execute(
+                        "INSERT INTO geo_distribution_plans
                     (id, operation_id, created_by_session_id, article_operation_id,
                      knowledge_version, policy_version, status, revision,
                      discovery_claim_token, provider_snapshot_json, resource_snapshot_json,
                      projection_json, created_at, updated_at, confirmed_at)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'discovering', 0, ?7, ?8, '[]', ?9, ?10, ?10, NULL)",
-                params![
-                    plan_id,
-                    operation_id,
+                        params![
+                            plan_id,
+                            operation_id,
+                            session_id,
+                            context.article_operation_id,
+                            context.knowledge_version,
+                            POLICY_VERSION,
+                            claim_token,
+                            canonical_json(&provider_snapshot, "distribution plan json")?,
+                            canonical_json(&projection, "distribution plan json")?,
+                            now,
+                        ],
+                    )
+                    .map_err(|error| format!("persist distribution plan: {error}"))?;
+                insert_distribution_audit(
+                    transaction,
+                    &plan_id,
+                    0,
+                    "prepared",
                     session_id,
-                    context.article_operation_id,
-                    context.knowledge_version,
-                    POLICY_VERSION,
-                    claim_token,
-                    canonical_json(&provider_snapshot)?,
-                    canonical_json(&projection)?,
-                    now,
-                ],
-            )
-            .map_err(|error| format!("persist distribution plan: {error}"))?;
-        insert_distribution_audit(
-            &transaction,
-            &plan_id,
-            0,
-            "prepared",
-            session_id,
-            &json!({"articleIds": article_ids, "questionSourceIds": source_ids}),
-            &now,
+                    &json!({"articleIds": article_ids, "questionSourceIds": source_ids}),
+                    &now,
+                )?;
+                Ok((plan_id, claim_token))
+            },
         )?;
-        transaction
-            .commit()
-            .map_err(|error| format!("commit distribution plan preparation: {error}"))?;
         Ok(DistributionPlanPreparation {
             plan: read_distribution_plan(&connection, workspace_id, &plan_id)?,
             claim_token,
@@ -573,20 +575,27 @@ impl BrandWorkspaceStore {
     ) -> Result<Value, String> {
         validate_discovery_result(&request)?;
         let workspace = self.workspace(workspace_id)?;
-        let mut connection = open_database(&workspace)?;
-        require_distribution_session(&connection, session_id)?;
-        let transaction = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|error| format!("finish distribution discovery transaction: {error}"))?;
-        require_distribution_plan_visibility(&transaction, &request.plan_id, session_id, false)?;
-        let (revision, status, claim_token, projection_json, operation_id): (
-            i64,
-            String,
-            Option<String>,
-            String,
-            String,
-        ) = transaction
-            .query_row(
+        let mut connection = BrandWorkspaceStore::open(&workspace)?;
+        gates::DISTRIBUTION_SESSION.enforce(&connection, session_id)?;
+        with_immediate_tx(
+            &mut connection,
+            "finish distribution discovery transaction",
+            "commit distribution discovery",
+            |transaction| {
+                require_distribution_plan_visibility(
+                    transaction,
+                    &request.plan_id,
+                    session_id,
+                    false,
+                )?;
+                let (revision, status, claim_token, projection_json, operation_id): (
+                i64,
+                String,
+                Option<String>,
+                String,
+                String,
+            ) = transaction
+                .query_row(
                 "SELECT revision, status, discovery_claim_token, projection_json, operation_id
                  FROM geo_distribution_plans WHERE id=?1",
                 [&request.plan_id],
@@ -603,150 +612,150 @@ impl BrandWorkspaceStore {
             .optional()
             .map_err(|error| format!("read claimed distribution plan: {error}"))?
             .ok_or_else(|| "distribution_plan_not_found".to_string())?;
-        if status != "discovering" {
-            return Err("distribution_plan_discovery_already_finished".to_string());
-        }
-        if revision != request.expected_revision {
-            return Err("distribution_plan_revision_conflict".to_string());
-        }
-        if claim_token.as_deref() != Some(request.claim_token.as_str()) {
-            return Err("distribution_plan_claim_conflict".to_string());
-        }
-        let mut projection: Value = serde_json::from_str(&projection_json)
-            .map_err(|error| format!("parse distribution plan projection: {error}"))?;
-        validate_discovery_against_plan(&request, &projection)?;
-        let next_status = if request.provider_state == "available"
-            && request
-                .candidates
-                .as_array()
-                .is_some_and(|items| !items.is_empty())
-        {
-            "draft"
-        } else {
-            "unavailable"
-        };
-        let next_revision = revision + 1;
-        let now = Utc::now().to_rfc3339();
-        set_projection_field(&mut projection, "status", json!(next_status))?;
-        set_projection_field(&mut projection, "revision", json!(next_revision))?;
-        set_projection_field(
-            &mut projection,
-            "providerState",
-            json!(request.provider_state),
-        )?;
-        set_projection_field(
-            &mut projection,
-            "providerSnapshot",
-            request.provider_snapshot.clone(),
-        )?;
-        set_projection_field(
-            &mut projection,
-            "resourceSnapshot",
-            request.resource_snapshot.clone(),
-        )?;
-        set_projection_field(&mut projection, "candidates", request.candidates.clone())?;
-        set_projection_field(
-            &mut projection,
-            "selectedResourceIds",
-            request.selected_resource_ids.clone(),
-        )?;
-        set_projection_field(&mut projection, "assignments", request.assignments.clone())?;
-        set_projection_field(
-            &mut projection,
-            "discoverySummary",
-            request.discovery_summary.clone(),
-        )?;
-        set_projection_field(
-            &mut projection,
-            "blockingIssues",
-            request.blocking_issues.clone(),
-        )?;
-        // 召回输入快照（右侧面板四路召回展示）：新 Sidecar 携带则落进投影；
-        // 旧 Sidecar 缺省时保持原状（字段可缺省）。
-        if let Some(active_recall_sources) = &request.active_recall_sources {
-            set_projection_field(
-                &mut projection,
-                "activeRecallSources",
-                active_recall_sources.clone(),
-            )?;
-        }
-        if let Some(preference_channel_names) = &request.preference_channel_names {
-            set_projection_field(
-                &mut projection,
-                "preferenceChannelNames",
-                preference_channel_names.clone(),
-            )?;
-        }
-        // 被动路对齐渠道列表与引用站点显示名映射（2026-08-27 用户裁决二轮）：
-        // 新 Sidecar 携带则落进投影；旧 Sidecar 缺省时保持原状（字段可缺省）。
-        if let Some(passive_aligned_channels) = &request.passive_aligned_channels {
-            set_projection_field(
-                &mut projection,
-                "passiveAlignedChannels",
-                passive_aligned_channels.clone(),
-            )?;
-        }
-        if let Some(citation_site_names) = &request.citation_site_names {
-            set_projection_field(
-                &mut projection,
-                "citationSiteNames",
-                citation_site_names.clone(),
-            )?;
-        }
-        // 偏好路命中清单（2026-08-28 用户裁决 Q12）：新 Sidecar 携带则落进投影；
-        // 旧 Sidecar 缺省时保持原状（字段可缺省）。
-        if let Some(preference_matched_channels) = &request.preference_matched_channels {
-            set_projection_field(
-                &mut projection,
-                "preferenceMatchedChannels",
-                preference_matched_channels.clone(),
-            )?;
-        }
-        set_projection_field(&mut projection, "updatedAt", json!(now))?;
-        reject_secret_shaped_data(&projection)?;
-        transaction
-            .execute(
-                "UPDATE geo_distribution_plans
+                if status != "discovering" {
+                    return Err("distribution_plan_discovery_already_finished".to_string());
+                }
+                if revision != request.expected_revision {
+                    return Err("distribution_plan_revision_conflict".to_string());
+                }
+                if claim_token.as_deref() != Some(request.claim_token.as_str()) {
+                    return Err("distribution_plan_claim_conflict".to_string());
+                }
+                let mut projection: Value = serde_json::from_str(&projection_json)
+                    .map_err(|error| format!("parse distribution plan projection: {error}"))?;
+                validate_discovery_against_plan(&request, &projection)?;
+                let next_status = if request.provider_state == "available"
+                    && request
+                        .candidates
+                        .as_array()
+                        .is_some_and(|items| !items.is_empty())
+                {
+                    "draft"
+                } else {
+                    "unavailable"
+                };
+                let next_revision = revision + 1;
+                let now = Utc::now().to_rfc3339();
+                set_projection_field(&mut projection, "status", json!(next_status))?;
+                set_projection_field(&mut projection, "revision", json!(next_revision))?;
+                set_projection_field(
+                    &mut projection,
+                    "providerState",
+                    json!(request.provider_state),
+                )?;
+                set_projection_field(
+                    &mut projection,
+                    "providerSnapshot",
+                    request.provider_snapshot.clone(),
+                )?;
+                set_projection_field(
+                    &mut projection,
+                    "resourceSnapshot",
+                    request.resource_snapshot.clone(),
+                )?;
+                set_projection_field(&mut projection, "candidates", request.candidates.clone())?;
+                set_projection_field(
+                    &mut projection,
+                    "selectedResourceIds",
+                    request.selected_resource_ids.clone(),
+                )?;
+                set_projection_field(&mut projection, "assignments", request.assignments.clone())?;
+                set_projection_field(
+                    &mut projection,
+                    "discoverySummary",
+                    request.discovery_summary.clone(),
+                )?;
+                set_projection_field(
+                    &mut projection,
+                    "blockingIssues",
+                    request.blocking_issues.clone(),
+                )?;
+                // 召回输入快照（右侧面板四路召回展示）：新 Sidecar 携带则落进投影；
+                // 旧 Sidecar 缺省时保持原状（字段可缺省）。
+                if let Some(active_recall_sources) = &request.active_recall_sources {
+                    set_projection_field(
+                        &mut projection,
+                        "activeRecallSources",
+                        active_recall_sources.clone(),
+                    )?;
+                }
+                if let Some(preference_channel_names) = &request.preference_channel_names {
+                    set_projection_field(
+                        &mut projection,
+                        "preferenceChannelNames",
+                        preference_channel_names.clone(),
+                    )?;
+                }
+                // 被动路对齐渠道列表与引用站点显示名映射（2026-08-27 用户裁决二轮）：
+                // 新 Sidecar 携带则落进投影；旧 Sidecar 缺省时保持原状（字段可缺省）。
+                if let Some(passive_aligned_channels) = &request.passive_aligned_channels {
+                    set_projection_field(
+                        &mut projection,
+                        "passiveAlignedChannels",
+                        passive_aligned_channels.clone(),
+                    )?;
+                }
+                if let Some(citation_site_names) = &request.citation_site_names {
+                    set_projection_field(
+                        &mut projection,
+                        "citationSiteNames",
+                        citation_site_names.clone(),
+                    )?;
+                }
+                // 偏好路命中清单（2026-08-28 用户裁决 Q12）：新 Sidecar 携带则落进投影；
+                // 旧 Sidecar 缺省时保持原状（字段可缺省）。
+                if let Some(preference_matched_channels) = &request.preference_matched_channels {
+                    set_projection_field(
+                        &mut projection,
+                        "preferenceMatchedChannels",
+                        preference_matched_channels.clone(),
+                    )?;
+                }
+                set_projection_field(&mut projection, "updatedAt", json!(now))?;
+                reject_secret_shaped_data(&projection)?;
+                transaction
+                    .execute(
+                        "UPDATE geo_distribution_plans
                  SET status=?2, revision=?3, discovery_claim_token=NULL,
                      provider_snapshot_json=?4, resource_snapshot_json=?5,
                      projection_json=?6, updated_at=?7
                  WHERE id=?1 AND revision=?8 AND discovery_claim_token=?9",
-                params![
-                    request.plan_id,
-                    next_status,
+                        params![
+                            request.plan_id,
+                            next_status,
+                            next_revision,
+                            canonical_json(&request.provider_snapshot, "distribution plan json")?,
+                            canonical_json(&request.resource_snapshot, "distribution plan json")?,
+                            canonical_json(&projection, "distribution plan json")?,
+                            now,
+                            request.expected_revision,
+                            request.claim_token,
+                        ],
+                    )
+                    .map_err(|error| format!("finish distribution discovery: {error}"))?;
+                // 血缘行迁移经唯一 owner（票 05）；operation_id 已随 plan 行读出，
+                // 行缺失时 owner 保持缺失行 no-op（旧 UPDATE 0 行被忽略的语义）。
+                set_lineage_state(
+                    transaction,
+                    &operation_id,
+                    if next_status == "draft" {
+                        "distribution-plan-draft"
+                    } else {
+                        "distribution-unavailable"
+                    },
+                )?;
+                insert_distribution_audit(
+                    transaction,
+                    &request.plan_id,
                     next_revision,
-                    canonical_json(&request.provider_snapshot)?,
-                    canonical_json(&request.resource_snapshot)?,
-                    canonical_json(&projection)?,
-                    now,
-                    request.expected_revision,
-                    request.claim_token,
-                ],
-            )
-            .map_err(|error| format!("finish distribution discovery: {error}"))?;
-        // 血缘行迁移经唯一 owner（票 05）；operation_id 已随 plan 行读出，
-        // 行缺失时 owner 保持缺失行 no-op（旧 UPDATE 0 行被忽略的语义）。
-        set_lineage_state(
-            &transaction,
-            &operation_id,
-            if next_status == "draft" {
-                "distribution-plan-draft"
-            } else {
-                "distribution-unavailable"
+                    "discovered",
+                    session_id,
+                    &json!({"providerState": request.provider_state, "status": next_status}),
+                    &now,
+                )?;
+                Ok(())
             },
         )?;
-        insert_distribution_audit(
-            &transaction,
-            &request.plan_id,
-            next_revision,
-            "discovered",
-            session_id,
-            &json!({"providerState": request.provider_state, "status": next_status}),
-            &now,
-        )?;
-        transaction
-            .commit()
-            .map_err(|error| format!("commit distribution discovery: {error}"))?;
         read_distribution_plan(&connection, workspace_id, &request.plan_id)
     }
 
@@ -758,14 +767,21 @@ impl BrandWorkspaceStore {
     ) -> Result<Value, String> {
         validate_edit_payload(&request.edit)?;
         let workspace = self.workspace(workspace_id)?;
-        let mut connection = open_database(&workspace)?;
-        require_distribution_session(&connection, session_id)?;
-        let transaction = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|error| format!("edit distribution plan transaction: {error}"))?;
-        require_distribution_plan_visibility(&transaction, &request.plan_id, session_id, false)?;
-        let (revision, status, projection_json): (i64, String, String) = transaction
-            .query_row(
+        let mut connection = BrandWorkspaceStore::open(&workspace)?;
+        gates::DISTRIBUTION_SESSION.enforce(&connection, session_id)?;
+        with_immediate_tx(
+            &mut connection,
+            "edit distribution plan transaction",
+            "commit distribution plan edit",
+            |transaction| {
+                require_distribution_plan_visibility(
+                    transaction,
+                    &request.plan_id,
+                    session_id,
+                    false,
+                )?;
+                let (revision, status, projection_json): (i64, String, String) = transaction
+                    .query_row(
                 "SELECT revision, status, projection_json FROM geo_distribution_plans WHERE id=?1",
                 [&request.plan_id],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
@@ -773,74 +789,74 @@ impl BrandWorkspaceStore {
             .optional()
             .map_err(|error| format!("read distribution plan edit target: {error}"))?
             .ok_or_else(|| "distribution_plan_not_found".to_string())?;
-        if status == "confirmed" {
-            return Err("distribution_plan_confirmed_immutable".to_string());
-        }
-        if status == "discovering" {
-            return Err("distribution_plan_discovery_incomplete".to_string());
-        }
-        if revision != request.expected_revision {
-            return Err("distribution_plan_revision_conflict".to_string());
-        }
-        let mut projection: Value = serde_json::from_str(&projection_json)
-            .map_err(|error| format!("parse distribution plan projection: {error}"))?;
-        let edit = request
-            .edit
-            .as_object()
-            .ok_or_else(|| "distribution_plan_edit_invalid".to_string())?;
-        for key in [
-            "selectedResourceIds",
-            "assignments",
-            "budgetCny",
-            "publishStartAt",
-            "blockingIssues",
-        ] {
-            set_projection_field(
-                &mut projection,
-                key,
-                edit.get(key)
-                    .cloned()
-                    .ok_or_else(|| "distribution_plan_edit_invalid".to_string())?,
-            )?;
-        }
-        let next_revision = revision + 1;
-        let now = Utc::now().to_rfc3339();
-        set_projection_field(&mut projection, "revision", json!(next_revision))?;
-        set_projection_field(&mut projection, "updatedAt", json!(now))?;
-        reject_secret_shaped_data(&projection)?;
-        let changed = transaction
+                if status == "confirmed" {
+                    return Err("distribution_plan_confirmed_immutable".to_string());
+                }
+                if status == "discovering" {
+                    return Err("distribution_plan_discovery_incomplete".to_string());
+                }
+                if revision != request.expected_revision {
+                    return Err("distribution_plan_revision_conflict".to_string());
+                }
+                let mut projection: Value = serde_json::from_str(&projection_json)
+                    .map_err(|error| format!("parse distribution plan projection: {error}"))?;
+                let edit = request
+                    .edit
+                    .as_object()
+                    .ok_or_else(|| "distribution_plan_edit_invalid".to_string())?;
+                for key in [
+                    "selectedResourceIds",
+                    "assignments",
+                    "budgetCny",
+                    "publishStartAt",
+                    "blockingIssues",
+                ] {
+                    set_projection_field(
+                        &mut projection,
+                        key,
+                        edit.get(key)
+                            .cloned()
+                            .ok_or_else(|| "distribution_plan_edit_invalid".to_string())?,
+                    )?;
+                }
+                let next_revision = revision + 1;
+                let now = Utc::now().to_rfc3339();
+                set_projection_field(&mut projection, "revision", json!(next_revision))?;
+                set_projection_field(&mut projection, "updatedAt", json!(now))?;
+                reject_secret_shaped_data(&projection)?;
+                let changed = transaction
             .execute(
                 "UPDATE geo_distribution_plans SET revision=?2, projection_json=?3, updated_at=?4
                  WHERE id=?1 AND revision=?5 AND status!='confirmed'",
                 params![
                     request.plan_id,
                     next_revision,
-                    canonical_json(&projection)?,
+                    canonical_json(&projection, "distribution plan json")?,
                     now,
                     revision
                 ],
             )
             .map_err(|error| format!("edit distribution plan: {error}"))?;
-        if changed != 1 {
-            return Err("distribution_plan_revision_conflict".to_string());
-        }
-        insert_distribution_audit_with_reason(
-            &transaction,
-            &request.plan_id,
-            next_revision,
-            "edited",
-            session_id,
-            &request.edit,
-            request
-                .reason
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty()),
-            &now,
+                if changed != 1 {
+                    return Err("distribution_plan_revision_conflict".to_string());
+                }
+                insert_distribution_audit_with_reason(
+                    transaction,
+                    &request.plan_id,
+                    next_revision,
+                    "edited",
+                    session_id,
+                    &request.edit,
+                    request
+                        .reason
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty()),
+                    &now,
+                )?;
+                Ok(())
+            },
         )?;
-        transaction
-            .commit()
-            .map_err(|error| format!("commit distribution plan edit: {error}"))?;
         read_distribution_plan(&connection, workspace_id, &request.plan_id)
     }
 
@@ -851,80 +867,93 @@ impl BrandWorkspaceStore {
         request: DistributionPlanConfirmRequest,
     ) -> Result<Value, String> {
         let workspace = self.workspace(workspace_id)?;
-        let mut connection = open_database(&workspace)?;
-        require_distribution_session(&connection, session_id)?;
-        let transaction = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|error| format!("confirm distribution plan transaction: {error}"))?;
-        require_distribution_plan_visibility(&transaction, &request.plan_id, session_id, false)?;
-        let (revision, status, projection_json, operation_id): (i64, String, String, String) =
-            transaction
-                .query_row(
-                    "SELECT revision, status, projection_json, operation_id
+        let mut connection = BrandWorkspaceStore::open(&workspace)?;
+        gates::DISTRIBUTION_SESSION.enforce(&connection, session_id)?;
+        with_immediate_tx(
+            &mut connection,
+            "confirm distribution plan transaction",
+            "commit distribution plan confirmation",
+            |transaction| {
+                require_distribution_plan_visibility(
+                    transaction,
+                    &request.plan_id,
+                    session_id,
+                    false,
+                )?;
+                let (revision, status, projection_json, operation_id): (
+                    i64,
+                    String,
+                    String,
+                    String,
+                ) = transaction
+                    .query_row(
+                        "SELECT revision, status, projection_json, operation_id
                  FROM geo_distribution_plans WHERE id=?1",
-                    [&request.plan_id],
-                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-                )
-                .optional()
-                .map_err(|error| format!("read distribution plan confirmation target: {error}"))?
-                .ok_or_else(|| "distribution_plan_not_found".to_string())?;
-        if status == "confirmed" {
-            return Err("distribution_plan_already_confirmed".to_string());
-        }
-        if status != "draft" {
-            return Err("distribution_plan_not_confirmable".to_string());
-        }
-        if revision != request.expected_revision {
-            return Err("distribution_plan_revision_conflict".to_string());
-        }
-        let mut projection: Value = serde_json::from_str(&projection_json)
-            .map_err(|error| format!("parse distribution plan projection: {error}"))?;
-        let issues = confirmation_issues(&projection)?;
-        if !issues.is_empty() {
-            return Err(format!(
-                "distribution_plan_confirmation_blocked:{}",
-                issues.join(",")
-            ));
-        }
-        let next_revision = revision + 1;
-        let now = Utc::now().to_rfc3339();
-        set_projection_field(&mut projection, "status", json!("confirmed"))?;
-        set_projection_field(&mut projection, "revision", json!(next_revision))?;
-        set_projection_field(&mut projection, "confirmedAt", json!(now))?;
-        set_projection_field(&mut projection, "updatedAt", json!(now))?;
-        let changed = transaction
-            .execute(
-                "UPDATE geo_distribution_plans
+                        [&request.plan_id],
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                    )
+                    .optional()
+                    .map_err(|error| {
+                        format!("read distribution plan confirmation target: {error}")
+                    })?
+                    .ok_or_else(|| "distribution_plan_not_found".to_string())?;
+                if status == "confirmed" {
+                    return Err("distribution_plan_already_confirmed".to_string());
+                }
+                if status != "draft" {
+                    return Err("distribution_plan_not_confirmable".to_string());
+                }
+                if revision != request.expected_revision {
+                    return Err("distribution_plan_revision_conflict".to_string());
+                }
+                let mut projection: Value = serde_json::from_str(&projection_json)
+                    .map_err(|error| format!("parse distribution plan projection: {error}"))?;
+                let issues = confirmation_issues(&projection)?;
+                if !issues.is_empty() {
+                    return Err(format!(
+                        "distribution_plan_confirmation_blocked:{}",
+                        issues.join(",")
+                    ));
+                }
+                let next_revision = revision + 1;
+                let now = Utc::now().to_rfc3339();
+                set_projection_field(&mut projection, "status", json!("confirmed"))?;
+                set_projection_field(&mut projection, "revision", json!(next_revision))?;
+                set_projection_field(&mut projection, "confirmedAt", json!(now))?;
+                set_projection_field(&mut projection, "updatedAt", json!(now))?;
+                let changed = transaction
+                    .execute(
+                        "UPDATE geo_distribution_plans
                  SET status='confirmed', revision=?2, projection_json=?3,
                      updated_at=?4, confirmed_at=?4
                  WHERE id=?1 AND revision=?5 AND status='draft'",
-                params![
-                    request.plan_id,
+                        params![
+                            request.plan_id,
+                            next_revision,
+                            canonical_json(&projection, "distribution plan json")?,
+                            now,
+                            revision
+                        ],
+                    )
+                    .map_err(|error| format!("confirm distribution plan: {error}"))?;
+                if changed != 1 {
+                    return Err("distribution_plan_revision_conflict".to_string());
+                }
+                // 血缘行迁移经唯一 owner（票 05）；镜像不变量——confirm 的 status
+                // 门卫（='draft'）已保证现态 distribution-plan-draft 在 from 集内。
+                set_lineage_state(transaction, &operation_id, "distribution-plan-confirmed")?;
+                insert_distribution_audit(
+                    transaction,
+                    &request.plan_id,
                     next_revision,
-                    canonical_json(&projection)?,
-                    now,
-                    revision
-                ],
-            )
-            .map_err(|error| format!("confirm distribution plan: {error}"))?;
-        if changed != 1 {
-            return Err("distribution_plan_revision_conflict".to_string());
-        }
-        // 血缘行迁移经唯一 owner（票 05）；镜像不变量——confirm 的 status
-        // 门卫（='draft'）已保证现态 distribution-plan-draft 在 from 集内。
-        set_lineage_state(&transaction, &operation_id, "distribution-plan-confirmed")?;
-        insert_distribution_audit(
-            &transaction,
-            &request.plan_id,
-            next_revision,
-            "confirmed",
-            session_id,
-            &json!({"confirmed": true}),
-            &now,
+                    "confirmed",
+                    session_id,
+                    &json!({"confirmed": true}),
+                    &now,
+                )?;
+                Ok(())
+            },
         )?;
-        transaction
-            .commit()
-            .map_err(|error| format!("commit distribution plan confirmation: {error}"))?;
         read_distribution_plan(&connection, workspace_id, &request.plan_id)
     }
 }
@@ -1906,29 +1935,13 @@ fn insert_distribution_audit_with_reason(
                 revision,
                 action,
                 session_id,
-                canonical_json(detail)?,
+                canonical_json(detail, "distribution plan json")?,
                 reason,
                 now
             ],
         )
         .map_err(|error| format!("record distribution plan audit: {error}"))?;
     Ok(())
-}
-
-fn require_distribution_session(connection: &Connection, session_id: &str) -> Result<(), String> {
-    validate_session_id(session_id)?;
-    let exists: i64 = connection
-        .query_row(
-            "SELECT COUNT(*) FROM brand_sessions WHERE id=?1",
-            [session_id],
-            |row| row.get(0),
-        )
-        .map_err(|error| format!("read distribution session: {error}"))?;
-    if exists == 1 {
-        Ok(())
-    } else {
-        Err("distribution_plan_session_not_committed".to_string())
-    }
 }
 
 fn validate_short(value: &str, max: usize, code: &str) -> Result<String, String> {
@@ -2044,7 +2057,7 @@ mod tests {
     }
 
     fn seed_authority(workspace: &BrandWorkspace) {
-        let connection = open_database(workspace).unwrap();
+        let connection = BrandWorkspaceStore::open(workspace).unwrap();
         let now = Utc::now().to_rfc3339();
         connection.execute("INSERT INTO knowledge_raw_inputs (id, session_id, input_text, origin, intent, created_at) VALUES ('raw-12','session-12','汽车行业','user-stated','knowledge-update',?1)", [&now]).unwrap();
         connection.execute("INSERT INTO knowledge_fact_candidates (id,raw_input_id,session_id,subject,predicate,scope_json,fact_key,value_json,normalized_value_json,excerpt,confidence,profile_provenance,origin,intent,status,base_version,proposed_at,resolved_at) VALUES ('candidate-12','raw-12','session-12','鲸跃','enterprise-profile.industry','{}','industry','\"汽车\"','\"汽车\"','汽车',1.0,'asked','user-stated','knowledge-update','adopted',0,?1,?1)", [&now]).unwrap();
@@ -2258,7 +2271,7 @@ mod tests {
     #[test]
     fn direct_articles_do_not_invent_per_article_question_hits() {
         let (store, workspace) = setup();
-        let connection = open_database(&workspace).unwrap();
+        let connection = BrandWorkspaceStore::open(&workspace).unwrap();
         connection.execute("UPDATE geo_article_operations SET source_kind='direct', topic_plan_id=NULL, topic_plan_revision=NULL WHERE operation_id='operation-articles'", []).unwrap();
         let context = store
             .distribution_planning_context(

@@ -1,13 +1,12 @@
 use std::collections::{HashMap, HashSet};
 
 use chrono::Utc;
-use rusqlite::{params, OptionalExtension, TransactionBehavior};
+use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use super::{
-    ensure_column, open_database, validate_session_id, BrandWorkspace, BrandWorkspaceStore,
-};
+use super::persistence::{gates, with_immediate_tx};
+use super::{ensure_column, validate_session_id, BrandWorkspace, BrandWorkspaceStore};
 
 const MAX_JSON_BYTES: usize = 128 * 1024;
 // 下列常量表的跨语言对照由 src/shared/geo/geoOperationContract.json 裁决
@@ -504,69 +503,61 @@ impl BrandWorkspaceStore {
     ) -> Result<GeoOperationProjection, String> {
         validate_create(&request)?;
         let workspace = self.workspace(&request.workspace_id)?;
-        let mut connection = open_database(&workspace)?;
-        ensure_schema(&connection)?;
-        let transaction = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|error| format!("start GEO operation transaction: {error}"))?;
-        let session_exists: bool = transaction
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM brand_sessions WHERE id=?1)",
-                [&request.session_id],
-                |row| row.get(0),
-            )
-            .map_err(|error| format!("validate GEO operation Session: {error}"))?;
-        if !session_exists {
-            return Err("geo_operation_session_not_committed".to_string());
-        }
-        if let Some(source_operation_id) = request.source_operation_id.as_deref() {
-            let source_exists: bool = transaction
-                .query_row(
-                    "SELECT EXISTS(
-                        SELECT 1 FROM geo_operations
-                        WHERE id=?1 AND session_id=?2 AND kind!='artifact-lineage'
-                     )",
-                    params![source_operation_id, request.session_id],
-                    |row| row.get(0),
-                )
-                .map_err(|error| format!("validate source GEO operation: {error}"))?;
-            if !source_exists {
-                return Err("geo_operation_source_not_found".to_string());
-            }
-        }
-        let operation_id = Uuid::new_v4().to_string();
-        let now = Utc::now().to_rfc3339();
-        transaction
-            .execute(
-                "INSERT INTO geo_operations
-                    (id, session_id, state, created_at, kind, goal, status,
-                     steps_json, input_refs_json, artifact_refs_json,
-                     pending_confirmation_json, source_operation_id,
-                     update_knowledge, revision,
-                     execution_generation, updated_at)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,'[]',?10,?11,?12,1,0,?4)",
-                params![
-                    operation_id,
-                    request.session_id,
-                    request.status,
-                    now,
-                    request.kind,
-                    request.goal.trim(),
-                    request.status,
-                    json_string(&request.steps, "geo_operation_steps_invalid")?,
-                    json_string(&request.input_refs, "geo_operation_input_refs_invalid")?,
-                    optional_json_string(
-                        request.pending_confirmation.as_ref(),
-                        "geo_operation_confirmation_invalid"
-                    )?,
-                    request.source_operation_id,
-                    request.update_knowledge,
-                ],
-            )
-            .map_err(|error| format!("create GEO operation: {error}"))?;
-        transaction
-            .commit()
-            .map_err(|error| format!("commit GEO operation: {error}"))?;
+        let mut connection = BrandWorkspaceStore::open(&workspace)?;
+        let operation_id = with_immediate_tx(
+            &mut connection,
+            "start GEO operation transaction",
+            "commit GEO operation",
+            |transaction| {
+                gates::GEO_OPERATION_SESSION.enforce(transaction, &request.session_id)?;
+                if let Some(source_operation_id) = request.source_operation_id.as_deref() {
+                    let source_exists: bool = transaction
+                        .query_row(
+                            "SELECT EXISTS(
+                                SELECT 1 FROM geo_operations
+                                WHERE id=?1 AND session_id=?2 AND kind!='artifact-lineage'
+                             )",
+                            params![source_operation_id, request.session_id],
+                            |row| row.get(0),
+                        )
+                        .map_err(|error| format!("validate source GEO operation: {error}"))?;
+                    if !source_exists {
+                        return Err("geo_operation_source_not_found".to_string());
+                    }
+                }
+                let operation_id = Uuid::new_v4().to_string();
+                let now = Utc::now().to_rfc3339();
+                transaction
+                    .execute(
+                        "INSERT INTO geo_operations
+                            (id, session_id, state, created_at, kind, goal, status,
+                             steps_json, input_refs_json, artifact_refs_json,
+                             pending_confirmation_json, source_operation_id,
+                             update_knowledge, revision,
+                             execution_generation, updated_at)
+                         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,'[]',?10,?11,?12,1,0,?4)",
+                        params![
+                            operation_id,
+                            request.session_id,
+                            request.status,
+                            now,
+                            request.kind,
+                            request.goal.trim(),
+                            request.status,
+                            json_string(&request.steps, "geo_operation_steps_invalid")?,
+                            json_string(&request.input_refs, "geo_operation_input_refs_invalid")?,
+                            optional_json_string(
+                                request.pending_confirmation.as_ref(),
+                                "geo_operation_confirmation_invalid"
+                            )?,
+                            request.source_operation_id,
+                            request.update_knowledge,
+                        ],
+                    )
+                    .map_err(|error| format!("create GEO operation: {error}"))?;
+                Ok(operation_id)
+            },
+        )?;
         self.get_geo_operation(&request.workspace_id, &operation_id)
     }
 
@@ -577,8 +568,7 @@ impl BrandWorkspaceStore {
     ) -> Result<GeoOperationProjection, String> {
         validate_identity(operation_id, "geo_operation_id_invalid")?;
         let workspace = self.workspace(workspace_id)?;
-        let connection = open_database(&workspace)?;
-        ensure_schema(&connection)?;
+        let connection = BrandWorkspaceStore::open(&workspace)?;
         read_operation(&connection, workspace_id, operation_id)?
             .ok_or_else(|| "geo_operation_not_found".to_string())
     }
@@ -591,8 +581,7 @@ impl BrandWorkspaceStore {
     ) -> Result<Vec<GeoOperationProjection>, String> {
         validate_session_id(session_id)?;
         let workspace = self.workspace(workspace_id)?;
-        let connection = open_database(&workspace)?;
-        ensure_schema(&connection)?;
+        let connection = BrandWorkspaceStore::open(&workspace)?;
         if request.include_all_sessions {
             return Err("geo_operation_session_scope_required".to_string());
         }
@@ -630,8 +619,7 @@ impl BrandWorkspaceStore {
         workspace_id: &str,
     ) -> Result<GeoOperationUnfinishedList, String> {
         let workspace = self.workspace(workspace_id)?;
-        let connection = open_database(&workspace)?;
-        ensure_schema(&connection)?;
+        let connection = BrandWorkspaceStore::open(&workspace)?;
         // 无主轮（session_id NULL，原会话删除后保留）同样非终态、同样可被
         // 接管——不过滤（票 10 验收实证：过滤会让无主轮对一切新会话不可见）。
         let unfinished_filter =
@@ -797,102 +785,108 @@ impl BrandWorkspaceStore {
     ) -> Result<GeoOperationProjection, String> {
         validate_mutation(&request)?;
         let workspace = self.workspace(&request.workspace_id)?;
-        let mut connection = open_database(&workspace)?;
-        ensure_schema(&connection)?;
-        let transaction = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|error| format!("start GEO operation mutation: {error}"))?;
-        let mut operation =
-            read_operation(&transaction, &request.workspace_id, &request.operation_id)?
-                .ok_or_else(|| "geo_operation_not_found".to_string())?;
-        if operation.session_id != request.session_id {
-            return Err(geo_operation_control_mismatch_error(&operation));
-        }
-        if operation.revision != request.expected_revision {
-            return Err("geo_operation_revision_conflict".to_string());
-        }
-        if request
-            .expected_execution_generation
-            .is_some_and(|generation| generation != operation.execution_generation)
-        {
-            return Err("geo_operation_execution_generation_conflict".to_string());
-        }
-        if matches!(
-            request.action.as_str(),
-            "update-queue"
-                | "start-step"
-                | "checkpoint"
-                | "complete-step"
-                | "report-step-progress"
-                | "fail-step"
-        ) && operation.execution_sidecar_generation.is_some()
-            && operation.execution_sidecar_generation != request.sidecar_generation
-        {
-            return Err("geo_operation_stale_sidecar_generation".to_string());
-        }
-        apply_action(&mut operation, &request)?;
-        for reference in request.artifact_refs {
-            if !operation.artifact_refs.iter().any(|existing| {
-                existing.kind == reference.kind
-                    && existing.id == reference.id
-                    && existing.revision == reference.revision
-            }) {
-                operation.artifact_refs.push(reference);
-            }
-        }
-        validate_refs(&operation.artifact_refs)?;
-        let now = Utc::now().to_rfc3339();
-        operation.updated_at.clone_from(&now);
-        operation.revision += 1;
-        let terminal_at = TERMINAL_STATUSES
-            .contains(&operation.status.as_str())
-            .then_some(now.clone());
-        operation.terminal_at = terminal_at.clone();
-        let changed = transaction
-            .execute(
-                "UPDATE geo_operations SET state=?1,status=?1,steps_json=?2,
-                    artifact_refs_json=?3,checkpoint_json=?4,pending_confirmation_json=?5,
-                    error_json=?6,revision=?7,updated_at=?8,terminal_at=?9,
-                    queue_reason=?10,queue_position=?11,execution_generation=?12,
-                    execution_sidecar_generation=?13,update_knowledge=?14
-                 WHERE id=?15 AND session_id=?16 AND revision=?17",
-                params![
-                    operation.status,
-                    json_string(&operation.steps, "geo_operation_steps_invalid")?,
-                    json_string(
-                        &operation.artifact_refs,
-                        "geo_operation_artifact_refs_invalid"
-                    )?,
-                    optional_json_string(
-                        operation.checkpoint.as_ref(),
-                        "geo_operation_checkpoint_invalid"
-                    )?,
-                    optional_json_string(
-                        operation.pending_confirmation.as_ref(),
-                        "geo_operation_confirmation_invalid"
-                    )?,
-                    optional_json_string(operation.error.as_ref(), "geo_operation_error_invalid")?,
-                    operation.revision,
-                    operation.updated_at,
-                    terminal_at,
-                    operation.queue_reason,
-                    operation.queue_position,
-                    operation.execution_generation,
-                    operation.execution_sidecar_generation,
-                    operation.update_knowledge,
-                    request.operation_id,
-                    request.session_id,
-                    request.expected_revision,
-                ],
-            )
-            .map_err(|error| format!("mutate GEO operation: {error}"))?;
-        if changed != 1 {
-            return Err("geo_operation_revision_conflict".to_string());
-        }
-        transaction
-            .commit()
-            .map_err(|error| format!("commit GEO operation mutation: {error}"))?;
-        self.get_geo_operation(&request.workspace_id, &request.operation_id)
+        let workspace_id = request.workspace_id.clone();
+        let operation_id = request.operation_id.clone();
+        let mut connection = BrandWorkspaceStore::open(&workspace)?;
+        with_immediate_tx(
+            &mut connection,
+            "start GEO operation mutation",
+            "commit GEO operation mutation",
+            |transaction| {
+                let mut operation =
+                    read_operation(transaction, &request.workspace_id, &request.operation_id)?
+                        .ok_or_else(|| "geo_operation_not_found".to_string())?;
+                if operation.session_id != request.session_id {
+                    return Err(geo_operation_control_mismatch_error(&operation));
+                }
+                if operation.revision != request.expected_revision {
+                    return Err("geo_operation_revision_conflict".to_string());
+                }
+                if request
+                    .expected_execution_generation
+                    .is_some_and(|generation| generation != operation.execution_generation)
+                {
+                    return Err("geo_operation_execution_generation_conflict".to_string());
+                }
+                if matches!(
+                    request.action.as_str(),
+                    "update-queue"
+                        | "start-step"
+                        | "checkpoint"
+                        | "complete-step"
+                        | "report-step-progress"
+                        | "fail-step"
+                ) && operation.execution_sidecar_generation.is_some()
+                    && operation.execution_sidecar_generation != request.sidecar_generation
+                {
+                    return Err("geo_operation_stale_sidecar_generation".to_string());
+                }
+                apply_action(&mut operation, &request)?;
+                for reference in request.artifact_refs {
+                    if !operation.artifact_refs.iter().any(|existing| {
+                        existing.kind == reference.kind
+                            && existing.id == reference.id
+                            && existing.revision == reference.revision
+                    }) {
+                        operation.artifact_refs.push(reference);
+                    }
+                }
+                validate_refs(&operation.artifact_refs)?;
+                let now = Utc::now().to_rfc3339();
+                operation.updated_at.clone_from(&now);
+                operation.revision += 1;
+                let terminal_at = TERMINAL_STATUSES
+                    .contains(&operation.status.as_str())
+                    .then_some(now.clone());
+                operation.terminal_at = terminal_at.clone();
+                let changed = transaction
+                    .execute(
+                        "UPDATE geo_operations SET state=?1,status=?1,steps_json=?2,
+                            artifact_refs_json=?3,checkpoint_json=?4,pending_confirmation_json=?5,
+                            error_json=?6,revision=?7,updated_at=?8,terminal_at=?9,
+                            queue_reason=?10,queue_position=?11,execution_generation=?12,
+                            execution_sidecar_generation=?13,update_knowledge=?14
+                         WHERE id=?15 AND session_id=?16 AND revision=?17",
+                        params![
+                            operation.status,
+                            json_string(&operation.steps, "geo_operation_steps_invalid")?,
+                            json_string(
+                                &operation.artifact_refs,
+                                "geo_operation_artifact_refs_invalid"
+                            )?,
+                            optional_json_string(
+                                operation.checkpoint.as_ref(),
+                                "geo_operation_checkpoint_invalid"
+                            )?,
+                            optional_json_string(
+                                operation.pending_confirmation.as_ref(),
+                                "geo_operation_confirmation_invalid"
+                            )?,
+                            optional_json_string(
+                                operation.error.as_ref(),
+                                "geo_operation_error_invalid"
+                            )?,
+                            operation.revision,
+                            operation.updated_at,
+                            terminal_at,
+                            operation.queue_reason,
+                            operation.queue_position,
+                            operation.execution_generation,
+                            operation.execution_sidecar_generation,
+                            operation.update_knowledge,
+                            request.operation_id,
+                            request.session_id,
+                            request.expected_revision,
+                        ],
+                    )
+                    .map_err(|error| format!("mutate GEO operation: {error}"))?;
+                if changed != 1 {
+                    return Err("geo_operation_revision_conflict".to_string());
+                }
+                Ok(())
+            },
+        )?;
+        self.get_geo_operation(&workspace_id, &operation_id)
     }
 
     pub fn attest_geo_operation_external_gate(
@@ -903,7 +897,7 @@ impl BrandWorkspaceStore {
     ) -> Result<GeoOperationProjection, String> {
         validate_external_gate_request(session_id, &request)?;
         let workspace = self.workspace(workspace_id)?;
-        let connection = open_database(&workspace)?;
+        let connection = BrandWorkspaceStore::open(&workspace)?;
         let operation = read_operation(&connection, workspace_id, &request.operation_id)?
             .ok_or_else(|| "geo_operation_not_found".to_string())?;
         if operation.session_id != session_id {
@@ -978,108 +972,123 @@ impl BrandWorkspaceStore {
             return Err("geo_operation_revision_invalid".to_string());
         }
         let workspace = self.workspace(&request.workspace_id)?;
-        let mut connection = open_database(&workspace)?;
-        ensure_schema(&connection)?;
-        let transaction = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|error| format!("start GEO operation takeover: {error}"))?;
-        // 守卫读取不走 read_operation 的整行投影：无主轮（session_id NULL，
-        // 原会话删除后保留）的 session_id 在投影里是 String，NULL 行会让
-        // 读取本身失败——无主轮恰恰是接管的合法标的（票 10 验收实证）。
-        // CAS 成功后 get_geo_operation 读到的是新属主（非 NULL），投影安全。
-        let guard = transaction
-            .query_row(
-                "SELECT session_id,status,revision,taken_over_at
-                 FROM geo_operations WHERE id=?1 AND kind!='artifact-lineage'",
-                [&request.operation_id],
-                |row| {
-                    Ok((
-                        row.get::<_, Option<String>>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, i64>(2)?,
-                        row.get::<_, Option<String>>(3)?,
-                    ))
-                },
-            )
-            .optional()
-            .map_err(|error| format!("read GEO operation takeover guard: {error}"))?;
-        let (operation_session_id, operation_status, operation_revision, operation_taken_over_at) =
-            guard.ok_or_else(|| "geo_operation_not_found".to_string())?;
-        if TERMINAL_STATUSES.contains(&operation_status.as_str()) {
-            return Err(format!(
-                "geo_operation_takeover_terminal:{} (only unfinished rounds can be taken over; start a new operation instead)",
-                operation_status
-            ));
-        }
-        if matches!(
-            operation_status.as_str(),
-            "running" | "queued" | "recovering"
-        ) {
-            return Err(format!(
-                "geo_operation_takeover_running:{} (the owning session is still executing this round; it must pause or finish first)",
-                operation_status
-            ));
-        }
-        if operation_session_id.as_deref() == Some(request.session_id.as_str()) {
-            return Err(
-                "geo_operation_takeover_already_owner (this session already owns this operation; continue with inspect_geo_operations)"
-                    .to_string(),
-            );
-        }
-        if operation_revision != request.expected_revision {
-            if operation_taken_over_at.is_some() {
-                return Err(format!(
-                    "geo_operation_takeover_conflict:taken_over_by={} (another session took over this round first)",
-                    operation_session_id.as_deref().unwrap_or("<ownerless>")
-                ));
-            }
-            return Err("geo_operation_revision_conflict".to_string());
-        }
-        let previous_owner_session_id = operation_session_id;
-        let now = Utc::now().to_rfc3339();
-        // CAS 的属主比对必须 NULL 感知：无主轮的 previous owner 是 NULL，
-        // SQL 三值逻辑下 `session_id=NULL` 恒不成立会把合法接管误判为
-        // revision 冲突（票 10 验收实证）。
-        let changed = transaction
-            .execute(
-                "UPDATE geo_operations SET session_id=?1,revision=revision+1,updated_at=?2,
-                    taken_over_from_session_id=?3,taken_over_at=?2
-                 WHERE id=?4
-                   AND ((?3 IS NULL AND session_id IS NULL) OR session_id=?3)
-                   AND revision=?5",
-                params![
-                    request.session_id,
-                    now,
+        let mut connection = BrandWorkspaceStore::open(&workspace)?;
+        let (
+            previous_owner_session_id,
+            now,
+            transferred_article_operations,
+            transferred_question_pools,
+        ) = with_immediate_tx(
+            &mut connection,
+            "start GEO operation takeover",
+            "commit GEO operation takeover",
+            |transaction| {
+                // 守卫读取不走 read_operation 的整行投影：无主轮（session_id NULL，
+                // 原会话删除后保留）的 session_id 在投影里是 String，NULL 行会让
+                // 读取本身失败——无主轮恰恰是接管的合法标的（票 10 验收实证）。
+                // CAS 成功后 get_geo_operation 读到的是新属主（非 NULL），投影安全。
+                let guard = transaction
+                    .query_row(
+                        "SELECT session_id,status,revision,taken_over_at
+                         FROM geo_operations WHERE id=?1 AND kind!='artifact-lineage'",
+                        [&request.operation_id],
+                        |row| {
+                            Ok((
+                                row.get::<_, Option<String>>(0)?,
+                                row.get::<_, String>(1)?,
+                                row.get::<_, i64>(2)?,
+                                row.get::<_, Option<String>>(3)?,
+                            ))
+                        },
+                    )
+                    .optional()
+                    .map_err(|error| format!("read GEO operation takeover guard: {error}"))?;
+                let (
+                    operation_session_id,
+                    operation_status,
+                    operation_revision,
+                    operation_taken_over_at,
+                ) = guard.ok_or_else(|| "geo_operation_not_found".to_string())?;
+                if TERMINAL_STATUSES.contains(&operation_status.as_str()) {
+                    return Err(format!(
+                        "geo_operation_takeover_terminal:{} (only unfinished rounds can be taken over; start a new operation instead)",
+                        operation_status
+                    ));
+                }
+                if matches!(
+                    operation_status.as_str(),
+                    "running" | "queued" | "recovering"
+                ) {
+                    return Err(format!(
+                        "geo_operation_takeover_running:{} (the owning session is still executing this round; it must pause or finish first)",
+                        operation_status
+                    ));
+                }
+                if operation_session_id.as_deref() == Some(request.session_id.as_str()) {
+                    return Err(
+                        "geo_operation_takeover_already_owner (this session already owns this operation; continue with inspect_geo_operations)"
+                            .to_string(),
+                    );
+                }
+                if operation_revision != request.expected_revision {
+                    if operation_taken_over_at.is_some() {
+                        return Err(format!(
+                            "geo_operation_takeover_conflict:taken_over_by={} (another session took over this round first)",
+                            operation_session_id.as_deref().unwrap_or("<ownerless>")
+                        ));
+                    }
+                    return Err("geo_operation_revision_conflict".to_string());
+                }
+                let previous_owner_session_id = operation_session_id;
+                let now = Utc::now().to_rfc3339();
+                // CAS 的属主比对必须 NULL 感知：无主轮的 previous owner 是 NULL，
+                // SQL 三值逻辑下 `session_id=NULL` 恒不成立会把合法接管误判为
+                // revision 冲突（票 10 验收实证）。
+                let changed = transaction
+                    .execute(
+                        "UPDATE geo_operations SET session_id=?1,revision=revision+1,updated_at=?2,
+                            taken_over_from_session_id=?3,taken_over_at=?2
+                         WHERE id=?4
+                           AND ((?3 IS NULL AND session_id IS NULL) OR session_id=?3)
+                           AND revision=?5",
+                        params![
+                            request.session_id,
+                            now,
+                            previous_owner_session_id,
+                            request.operation_id,
+                            request.expected_revision,
+                        ],
+                    )
+                    .map_err(|error| format!("persist GEO operation takeover: {error}"))?;
+                if changed != 1 {
+                    return Err("geo_operation_revision_conflict".to_string());
+                }
+                // 无主轮没有原所有者名下的工作集，随行转移按 0 计；有主轮照旧
+                // 在同一事务内转移未批准文章与待选池。
+                let (transferred_article_operations, transferred_question_pools) =
+                    match previous_owner_session_id.as_deref() {
+                        None => (0, 0),
+                        Some(previous_owner) => (
+                            super::articles::transfer_unapproved_article_work(
+                                transaction,
+                                previous_owner,
+                                &request.session_id,
+                            )?,
+                            super::question_pools::transfer_awaiting_selection_pools(
+                                transaction,
+                                previous_owner,
+                                &request.session_id,
+                            )?,
+                        ),
+                    };
+                Ok((
                     previous_owner_session_id,
-                    request.operation_id,
-                    request.expected_revision,
-                ],
-            )
-            .map_err(|error| format!("persist GEO operation takeover: {error}"))?;
-        if changed != 1 {
-            return Err("geo_operation_revision_conflict".to_string());
-        }
-        // 无主轮没有原所有者名下的工作集，随行转移按 0 计；有主轮照旧
-        // 在同一事务内转移未批准文章与待选池。
-        let (transferred_article_operations, transferred_question_pools) =
-            match previous_owner_session_id.as_deref() {
-                None => (0, 0),
-                Some(previous_owner) => (
-                    super::articles::transfer_unapproved_article_work(
-                        &transaction,
-                        previous_owner,
-                        &request.session_id,
-                    )?,
-                    super::question_pools::transfer_awaiting_selection_pools(
-                        &transaction,
-                        previous_owner,
-                        &request.session_id,
-                    )?,
-                ),
-            };
-        transaction
-            .commit()
-            .map_err(|error| format!("commit GEO operation takeover: {error}"))?;
+                    now,
+                    transferred_article_operations,
+                    transferred_question_pools,
+                ))
+            },
+        )?;
         let operation = self.get_geo_operation(&request.workspace_id, &request.operation_id)?;
         Ok(GeoOperationTakeoverReceipt {
             operation,
@@ -1098,82 +1107,83 @@ fn transition_workspace_operations(
     statuses: &[&str],
     target_status: &str,
 ) -> Result<Vec<GeoOperationProjection>, String> {
-    let mut connection = open_database(workspace)?;
-    ensure_schema(&connection)?;
-    let transaction = connection
-        .transaction_with_behavior(TransactionBehavior::Immediate)
-        .map_err(|error| format!("start GEO recovery transaction: {error}"))?;
-    let mut statement = transaction
-        .prepare(
-            "SELECT id FROM geo_operations
-             WHERE kind!='artifact-lineage'
-               AND (?1 IS NULL OR session_id=?1)
-               AND (?2 IS NULL OR execution_sidecar_generation=?2)
-               AND status IN ('running','queued','recovering')
-             ORDER BY updated_at,id",
-        )
-        .map_err(|error| format!("prepare GEO recovery list: {error}"))?;
-    let ids = statement
-        .query_map(params![session_id, sidecar_generation], |row| {
-            row.get::<_, String>(0)
-        })
-        .map_err(|error| format!("query GEO recovery list: {error}"))?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| format!("read GEO recovery list: {error}"))?;
-    drop(statement);
+    let mut connection = BrandWorkspaceStore::open(workspace)?;
+    let transitioned = with_immediate_tx(
+        &mut connection,
+        "start GEO recovery transaction",
+        "commit GEO recovery transaction",
+        |transaction| {
+            let mut statement = transaction
+                .prepare(
+                    "SELECT id FROM geo_operations
+                     WHERE kind!='artifact-lineage'
+                       AND (?1 IS NULL OR session_id=?1)
+                       AND (?2 IS NULL OR execution_sidecar_generation=?2)
+                       AND status IN ('running','queued','recovering')
+                     ORDER BY updated_at,id",
+                )
+                .map_err(|error| format!("prepare GEO recovery list: {error}"))?;
+            let ids = statement
+                .query_map(params![session_id, sidecar_generation], |row| {
+                    row.get::<_, String>(0)
+                })
+                .map_err(|error| format!("query GEO recovery list: {error}"))?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| format!("read GEO recovery list: {error}"))?;
+            drop(statement);
 
-    let now = Utc::now().to_rfc3339();
-    let mut transitioned = Vec::new();
-    for id in ids {
-        let mut operation = read_operation(&transaction, &workspace.id, &id)?
-            .ok_or_else(|| "geo_operation_not_found".to_string())?;
-        if !statuses.contains(&operation.status.as_str()) {
-            continue;
-        }
-        if operation
-            .checkpoint
-            .as_ref()
-            .is_none_or(|checkpoint| !checkpoint.safe_to_resume)
-        {
-            operation.checkpoint = Some(derived_recovery_checkpoint(&operation, &now));
-        }
-        operation.status = target_status.to_string();
-        operation.queue_reason = None;
-        operation.queue_position = None;
-        operation.execution_sidecar_generation = None;
-        operation.execution_generation += 1;
-        operation.revision += 1;
-        operation.updated_at.clone_from(&now);
-        operation.terminal_at = None;
-        let changed = transaction
-            .execute(
-                "UPDATE geo_operations SET state=?1,status=?1,checkpoint_json=?2,
-                    revision=?3,execution_generation=?4,
-                    execution_sidecar_generation=NULL,queue_reason=NULL,
-                    queue_position=NULL,updated_at=?5,terminal_at=NULL
-                 WHERE id=?6 AND revision=?7",
-                params![
-                    operation.status,
-                    optional_json_string(
-                        operation.checkpoint.as_ref(),
-                        "geo_operation_checkpoint_invalid"
-                    )?,
-                    operation.revision,
-                    operation.execution_generation,
-                    operation.updated_at,
-                    operation.id,
-                    operation.revision - 1,
-                ],
-            )
-            .map_err(|error| format!("persist GEO recovery checkpoint: {error}"))?;
-        if changed != 1 {
-            return Err("geo_operation_revision_conflict".to_string());
-        }
-        transitioned.push(operation);
-    }
-    transaction
-        .commit()
-        .map_err(|error| format!("commit GEO recovery transaction: {error}"))?;
+            let now = Utc::now().to_rfc3339();
+            let mut transitioned = Vec::new();
+            for id in ids {
+                let mut operation = read_operation(transaction, &workspace.id, &id)?
+                    .ok_or_else(|| "geo_operation_not_found".to_string())?;
+                if !statuses.contains(&operation.status.as_str()) {
+                    continue;
+                }
+                if operation
+                    .checkpoint
+                    .as_ref()
+                    .is_none_or(|checkpoint| !checkpoint.safe_to_resume)
+                {
+                    operation.checkpoint = Some(derived_recovery_checkpoint(&operation, &now));
+                }
+                operation.status = target_status.to_string();
+                operation.queue_reason = None;
+                operation.queue_position = None;
+                operation.execution_sidecar_generation = None;
+                operation.execution_generation += 1;
+                operation.revision += 1;
+                operation.updated_at.clone_from(&now);
+                operation.terminal_at = None;
+                let changed = transaction
+                    .execute(
+                        "UPDATE geo_operations SET state=?1,status=?1,checkpoint_json=?2,
+                            revision=?3,execution_generation=?4,
+                            execution_sidecar_generation=NULL,queue_reason=NULL,
+                            queue_position=NULL,updated_at=?5,terminal_at=NULL
+                         WHERE id=?6 AND revision=?7",
+                        params![
+                            operation.status,
+                            optional_json_string(
+                                operation.checkpoint.as_ref(),
+                                "geo_operation_checkpoint_invalid"
+                            )?,
+                            operation.revision,
+                            operation.execution_generation,
+                            operation.updated_at,
+                            operation.id,
+                            operation.revision - 1,
+                        ],
+                    )
+                    .map_err(|error| format!("persist GEO recovery checkpoint: {error}"))?;
+                if changed != 1 {
+                    return Err("geo_operation_revision_conflict".to_string());
+                }
+                transitioned.push(operation);
+            }
+            Ok(transitioned)
+        },
+    )?;
     Ok(transitioned)
 }
 
@@ -1802,7 +1812,6 @@ pub(super) fn mark_artifacts_affected_by_knowledge_change(
     fact_key: &str,
     now: &str,
 ) -> Result<Vec<GeoArtifactFreshnessProjection>, String> {
-    ensure_schema(transaction)?;
     let mut statement = transaction
         .prepare(
             "SELECT artifact.id
@@ -2582,7 +2591,7 @@ mod tests {
 
         // session-operation 名下的文章工作：5 篇 draft_ready，其中 2 篇已批准，
         // 待审 3 篇。标题只写敏感标记，证明元信息列表不携带标题/正文。
-        let connection = open_database(&workspace).unwrap();
+        let connection = BrandWorkspaceStore::open(&workspace).unwrap();
         connection
             .pragma_update(None, "foreign_keys", "OFF")
             .unwrap();
@@ -2829,7 +2838,7 @@ mod tests {
         );
 
         // 存量旧轮（列存在之前落库）：NULL 读回 None，摘要不臆断。
-        let connection = open_database(&workspace).unwrap();
+        let connection = BrandWorkspaceStore::open(&workspace).unwrap();
         connection
             .execute(
                 "INSERT INTO geo_operations(id,session_id,state,created_at,kind,goal,
@@ -3402,7 +3411,7 @@ mod tests {
             })
             .unwrap();
 
-        let connection = open_database(&workspace).unwrap();
+        let connection = BrandWorkspaceStore::open(&workspace).unwrap();
         connection
             .pragma_update(None, "foreign_keys", "OFF")
             .unwrap();
@@ -3932,7 +3941,7 @@ mod tests {
         // A 的未批准工作集：3 篇未批准草稿 + 2 篇已批准文章。
         // 另有：全批准的文章操作（品牌产物，不转移）、B 自己的草稿（不动）、
         // awaiting-selection 池（随行）与 confirmed 池（不转移）。
-        let connection = open_database(&workspace).unwrap();
+        let connection = BrandWorkspaceStore::open(&workspace).unwrap();
         connection
             .pragma_update(None, "foreign_keys", "OFF")
             .unwrap();
@@ -4121,7 +4130,7 @@ mod tests {
         // A→B 转移不误伤他人工作集：B 自己原生的草稿操作（row 7）不在
         // A 的转移范围内，owner 覆盖仍为空。
         {
-            let connection = open_database(&workspace).unwrap();
+            let connection = BrandWorkspaceStore::open(&workspace).unwrap();
             let foreign_owner: Option<String> = connection
                 .query_row(
                     "SELECT owner_session_id FROM geo_article_operations
@@ -4306,7 +4315,7 @@ mod tests {
 
         // 转移不误伤：全批准操作与 confirmed 池不转移（品牌产物，历次
         // 接管后 owner 覆盖仍为空）。
-        let connection = open_database(&workspace).unwrap();
+        let connection = BrandWorkspaceStore::open(&workspace).unwrap();
         for (sql, label) in [
             (
                 "SELECT owner_session_id FROM geo_article_operations
@@ -4376,7 +4385,7 @@ mod tests {
 
         // 原会话删除：轮次保留、引用置空（brand_workspace.rs 的 SET NULL 语义）。
         {
-            let connection = open_database(&workspace).unwrap();
+            let connection = BrandWorkspaceStore::open(&workspace).unwrap();
             connection
                 .execute(
                     "DELETE FROM brand_sessions WHERE id='session-operation'",
