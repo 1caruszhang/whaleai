@@ -287,7 +287,6 @@ pub(super) fn initialize_database(workspace: &BrandWorkspace) -> Result<(), Stri
 
 /// 会话闸 SQL 错误的呈现口径：绝大多数闸带上下文串；materials 吞细节
 /// 映射固定码（现状逐字保留）。
-#[allow(dead_code)]
 pub(crate) enum SessionGateSqlError {
     /// `format!("{context}: {error}")`。
     Context(&'static str),
@@ -296,14 +295,12 @@ pub(crate) enum SessionGateSqlError {
 }
 
 /// 会话闸声明：声明＝错误码＋有无 validate 前置＋SQL 错误呈现。
-#[allow(dead_code)]
 pub(crate) struct SessionGate {
     pub error_code: &'static str,
     pub validate_identity: bool,
     pub sql_error: SessionGateSqlError,
 }
 
-#[allow(dead_code)]
 impl SessionGate {
     pub(crate) fn enforce(&self, connection: &Connection, session_id: &str) -> Result<(), String> {
         if self.validate_identity {
@@ -331,7 +328,6 @@ impl SessionGate {
 /// MATERIALS_SESSION/DISTRIBUTION_SESSION，票 04 已消费 GEO_BASELINE/
 /// DASHBOARD/TOPIC_PLAN/QUESTION_POOL/GEO_OPERATION——10 闸全部接驳完毕，
 /// 域内变体清零）。
-#[allow(dead_code)]
 pub(crate) mod gates {
     use super::{SessionGate, SessionGateSqlError};
 
@@ -435,11 +431,9 @@ pub(crate) fn with_immediate_tx<T>(
 ) -> Result<T, String> {
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
-        .map_err(|error| format!("{start_context}: {error}"))?;
+        .map_err(sql_err(start_context))?;
     let result = body(&transaction)?;
-    transaction
-        .commit()
-        .map_err(|error| format!("{commit_context}: {error}"))?;
+    transaction.commit().map_err(sql_err(commit_context))?;
     Ok(result)
 }
 
@@ -449,8 +443,7 @@ pub(crate) fn with_immediate_tx<T>(
 /// article session"))` 等价 `.map_err(|error| format!("validate article
 /// session: {error}"))`。只收 String 目标这一层；类型化错误落候选 4 的
 /// envelope 声明表，此处不做半截工程。
-// 本票纯增量：生产调用点零迁移，消费方在清零票 02–04（立项票内仅测试引用）。
-#[allow(dead_code)]
+// 消费现状：内核 with_immediate_tx 两处；域文件按决策 6 仅纯等价站点随需接驳。
 pub(crate) fn sql_err(context: &'static str) -> impl Fn(rusqlite::Error) -> String {
     move |error| format!("{context}: {error}")
 }
