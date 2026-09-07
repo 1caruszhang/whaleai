@@ -43,7 +43,15 @@ export function contentPromptVersionAtLeast(
   return match !== null && Number(match[1]) >= minimum;
 }
 
-/** 品牌指称序门（D21）开始追诉的最低内容策略版本：v8→v9 落地。 */
+/**
+ * 品牌指称序门（D21）开始追诉的最低内容策略版本：v8→v9 落地。
+ *
+ * 两线 v9 磕撞（票 #44 三评裁决，阈值保留 9）：main 线的 v9 是「段→部分」
+ * 措辞微调、其 prompt 从未承载指称序；若存在该线 v9 落库存量稿，批准时会
+ * 被一条其生成时未要求的规则拦下（信息明确、改两词即过）。反之提到 10 会
+ * 把本线 v9 稿静默豁免——误拦可见可自纠，误豁静默失防，故从 9。D20 行已
+ * 登记该编号收纳关系。
+ */
 export const BRAND_NAME_ORDER_MIN_POLICY_VERSION = 9;
 
 /** 版本行审计里的 policyVersion（生成期写入；编辑版由 Rust 继承基准版）。 */
@@ -893,14 +901,24 @@ function classifyBodyLines(
   });
 }
 
-/** 可检正文的指称文本（序判定用）：标题行/围栏块剔除，图片与链接 URL 抹除。 */
-function reviewableBrandMentionText(body: string): string {
+/**
+ * 可检正文文本（加粗门反查与指称序序判定共用的遍历形状）：标题行/围栏块
+ * 剔除，行内按调用方给的盲区函数抹除后拼接。序判定传图片/链接盲区（要看
+ * 到加粗块），加粗反查传含加粗块的完整盲区。
+ */
+function checkableText(
+  body: string,
+  blindSpotsOf: (line: string) => Array<[number, number]>,
+): string {
   return classifyBodyLines(body)
     .filter((entry) => entry.checkable)
-    .map((entry) =>
-      removeSpans(entry.line, lineImageLinkBlindSpots(entry.line)),
-    )
+    .map((entry) => removeSpans(entry.line, blindSpotsOf(entry.line)))
     .join("\n");
+}
+
+/** 可检正文的指称文本（序判定用）：标题行/围栏块剔除，图片与链接 URL 抹除。 */
+function reviewableBrandMentionText(body: string): string {
+  return checkableText(body, lineImageLinkBlindSpots);
 }
 
 /**
@@ -943,12 +961,7 @@ function unboldedBrandMentions(
   body: string,
   brandNames: readonly string[],
 ): string[] {
-  const remainder = classifyBodyLines(body)
-    .filter((entry) => entry.checkable)
-    .map((entry) =>
-      removeSpans(entry.line, lineBrandMentionBlindSpots(entry.line)),
-    )
-    .join("\n");
+  const remainder = checkableText(body, lineBrandMentionBlindSpots);
   return [
     ...new Set(
       brandNames
@@ -1020,6 +1033,11 @@ const LIST_ITEM_LINE_RE = /^(\s*(?:[-*+]|\d{1,2}[.)])\s+)(.*)$/;
 const LIST_LABEL_SYMBOL_PREFIX_RE = /^[✅✔✓★☆▪◆◇●○•·\s]+/;
 const LIST_LABEL_SENTENCE_PUNCT_RE = /[。！？；，、,.!?;]/;
 const LIST_LABEL_FORBIDDEN_CHAR_RE = /[*[\]()`]/;
+/**
+ * 空格型停用词闸（D22「叙述句开头不是标签」）：只收无歧义的叙述起笔——
+ * 人称代词与承接/收束连接词。「建议/需要/可以」类兼可构成真标签
+ * （建议收藏清单、可选配置）的词不收，漏加粗无阻断代价、误拦标签更伤。
+ */
 const LIST_LABEL_STOP_WORDS: ReadonlySet<string> = new Set([
   "我们",
   "你",
@@ -1036,9 +1054,6 @@ const LIST_LABEL_STOP_WORDS: ReadonlySet<string> = new Set([
   "总之",
   "综上",
   "注意",
-  "建议",
-  "需要",
-  "可以",
 ]);
 
 export function autoBoldListLabels(body: string): string {
@@ -1215,9 +1230,7 @@ export function deterministicArticleReview(
           source: "deterministic",
           category: "output-contract",
           severity: "blocking",
-          message:
-            `品牌指称序违约：正文首次出现品牌指称必须使用全称` +
-            `「${fullName}」（当前第一次出现的是「${occurrences[0].name}」）。`,
+          message: `品牌指称序违约：正文首次出现品牌指称必须使用全称「${fullName}」（当前第一次出现的是「${occurrences[0].name}」）。`,
         });
       }
       const firstFullIndex = occurrences.findIndex(
@@ -1231,9 +1244,7 @@ export function deterministicArticleReview(
           source: "deterministic",
           category: "output-contract",
           severity: "blocking",
-          message:
-            `品牌指称序违约：首次全称「${fullName}」之后应统一使用已确认简称` +
-            `「${preferredShort}」，请勿在后文再次使用全称。`,
+          message: `品牌指称序违约：首次全称「${fullName}」之后应统一使用已确认简称「${preferredShort}」，请勿在后文再次使用全称。`,
         });
       }
     }

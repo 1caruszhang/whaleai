@@ -612,6 +612,13 @@ describe("list-item label auto-bolding（用户裁决 2026-09-04）", () => {
     );
   });
 
+  it("bolds space-form labels that merely start with an ambiguous verb", () => {
+    // 三评收窄：建议/需要/可以兼可构成真标签，不进停用词表。
+    expect(autoBoldListLabels("- 建议收藏清单 新手先看这三项。")).toBe(
+      "- **建议收藏清单** 新手先看这三项。",
+    );
+  });
+
   it("skips pure-number labels and sentence-like long labels", () => {
     const body = [
       "- 2024 年行业报告显示增长。",

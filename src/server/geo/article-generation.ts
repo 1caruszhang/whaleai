@@ -932,14 +932,13 @@ export class ArticleGenerationService {
         context.article.rankingDimensions ?? undefined,
       // 指称序豁免（用户裁决 2026-09-03）：只豁免 v8 及更早的存量稿，不
       // 追诉旧稿形态；v9 起（指称序落地版本）照常复检——人工编辑路径
-      // 不走生成期管线，批准门是指称序在人工路径上的唯一防线。版本戳读
-      // 版本行审计：review_json 在首审前恒为 null，只有 model_audit 从
+      // 不走生成期管线，批准门是指称序在人工路径上的唯一防线。版本戳只
+      // 读版本行审计：review_json 首审前恒为 null（能进 claimReview 的版本
+      // 必无 review_json，那条腿是死路；若未来开放同版本复审，首审戳恒为
+      // 当前版本、会压过生成时戳反而误追诉存量稿），只有 model_audit 从
       // 生成起就带 policyVersion（编辑版由 Rust 继承基准版戳）。
       brandNameOrderEnforced: contentPromptVersionAtLeast(
-        context.article.currentVersion?.review?.policyVersion ??
-          modelAuditPolicyVersion(
-            context.article.currentVersion?.modelAudit,
-          ),
+        modelAuditPolicyVersion(context.article.currentVersion?.modelAudit),
         BRAND_NAME_ORDER_MIN_POLICY_VERSION,
       ),
     });

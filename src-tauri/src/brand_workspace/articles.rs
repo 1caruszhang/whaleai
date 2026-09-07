@@ -1,4 +1,4 @@
-use super::persistence::{gates, with_immediate_tx};
+use super::persistence::{gates, sql_err, with_immediate_tx};
 use super::*;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -1039,7 +1039,7 @@ impl BrandWorkspaceStore {
                         |row| row.get(0),
                     )
                     .optional()
-                    .map_err(|error| format!("read base article version audit: {error}"))?;
+                    .map_err(sql_err("read base article version audit"))?;
                 let base_policy_version = base_model_audit_json
                     .and_then(|value| serde_json::from_str::<Value>(&value).ok())
                     .and_then(|audit| {
