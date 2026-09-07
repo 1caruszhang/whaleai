@@ -25,8 +25,9 @@
  */
 
 import {
+  firstProfileValue,
   projectBrandProfile,
-  resolveBrandName,
+  type BrandProfile,
   type BrandProfileFact,
 } from "./profileInjection";
 
@@ -192,20 +193,44 @@ export function mergeRankingCompetitorTiers(
 }
 
 /**
- * ranking 的唯一名单投影：目标品牌来自身份事实（无身份事实才回退 workspace
- * 名），竞品来自 immutable plannedFacts 中已确认的 competitors（直接层），
- * 不足 5 家时用 potentialCompetitors（潜在层，相近场景/替代品类）按序补足
- * ——两层都只含真实检索来源的名称（ADR-0007 两层名单，用户裁决 2026-08-30）。
- * 选五家时保持「直接层在前、补位在后」的顺序；正文可自由调整这五家在
- * 陈列位 2–6 的顺序。合并后不足 5 家 fail-closed（错误码常量随内核所有，
- * 工具层 rankingCompetitorRequirement 自本模块进口拼装）。
+ * ranking 陈列位 1 指称裁决（用户裁决 2026-09-03，随票 #43 名单语义只出
+ * 自内核规则自画像模块迁入）：简称优先——陈列位 1 的小节标题与篇内指称
+ * 用已确认简称（展示位省字数，与标题简称优先同哲学；全称留在首段全称/
+ * 简称关系句，若该约定启用）。无已确认简称回退全称，身份事实都没有才
+ * 回退 workspace 名。正文注入的「品牌：」行仍用 profileInjection 的
+ * resolveBrandName（全称优先），两者分工不同，勿混用。
+ */
+export function resolveRankingTargetBrand(
+  profile: BrandProfile,
+  workspaceName: string,
+): string {
+  return (
+    firstProfileValue(profile, "shortNames") ??
+    firstProfileValue(profile, "fullName") ??
+    workspaceName
+  );
+}
+
+/**
+ * ranking 的唯一名单投影：目标品牌用 resolveRankingTargetBrand（简称优先，
+ * 无已确认简称回退全称、都无才回退 workspace 名——陈列位 1 是篇内展示位，
+ * 用户裁决 2026-09-03），竞品来自 immutable plannedFacts 中已确认的
+ * competitors（直接层），不足 5 家时用 potentialCompetitors（潜在层，相近
+ * 场景/替代品类）按序补足——两层都只含真实检索来源的名称（ADR-0007 两层
+ * 名单，用户裁决 2026-08-30）。选五家时保持「直接层在前、补位在后」的顺序；
+ * 正文可自由调整这五家在陈列位 2–6 的顺序。合并后不足 5 家 fail-closed
+ * （错误码常量随内核所有，工具层 rankingCompetitorRequirement 自本模块进口
+ * 拼装）。
  */
 export function resolveRankingRoster<T extends BrandProfileFact>(
   facts: readonly T[],
   workspaceBrandName: string,
 ): RankingRoster {
   const profile = projectBrandProfile(facts);
-  const targetBrand = resolveBrandName(profile, workspaceBrandName).trim();
+  const targetBrand = resolveRankingTargetBrand(
+    profile,
+    workspaceBrandName,
+  ).trim();
   const competitors = mergeRankingCompetitorTiers(
     profile.competitors ?? [],
     profile.potentialCompetitors ?? [],

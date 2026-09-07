@@ -20,7 +20,7 @@ import {
   sameBrandIdentity,
   titleRedLineCompetitors,
 } from "./competitorRoster";
-import { buildArticleGenerationMessages } from "./articleGeneration";
+import { buildArticleGenerationMessages, deterministicArticleReview } from "./articleGeneration";
 
 describe("ranking competitor cross-process contract", () => {
   it("insufficient-code 常量与 rankingCompetitorContract.json 裁判严格相等（票 #43 review 补充 pin）", () => {
@@ -148,6 +148,99 @@ describe("ranking roster projection（自 articleGeneration.test.ts 原样搬移
         "工作区名称",
       ),
     ).toThrow("article_generation_ranking_competitors_insufficient:2");
+  });
+
+  it("resolves the ranking slot-1 brand to the confirmed short name first", () => {
+    // 用户裁决 2026-09-03：陈列位 1 是篇内展示位，指称用已确认简称（与标题
+    // 简称优先同哲学）；无已确认简称回退全称，身份事实都没有才回退
+    // workspace 名。确定性门的小节标题校验是全称∪简称超集，简称标题照常过门。
+    // （v10 合并时自 articleGeneration.test.ts 随名单内核迁入。）
+    const rankingFacts = [
+      {
+        factKey: "brand-name",
+        predicate: "enterprise-profile.fullname",
+        normalizedValueJson: '"广州造卤先生有限公司"',
+      },
+      {
+        factKey: "brand-short",
+        predicate: "enterprise-profile.shortnames",
+        normalizedValueJson: '["炊班主干蒸菜"]',
+      },
+      {
+        factKey: "competitors",
+        predicate: "enterprise-profile.competitors",
+        normalizedValueJson: '["竞品甲","竞品乙","竞品丙","竞品丁","竞品戊"]',
+      },
+    ];
+    const roster = resolveRankingRoster(rankingFacts, "工作区名称");
+    expect(roster.targetBrand).toBe("炊班主干蒸菜");
+    const dimensions = [
+      "服务范围",
+      "核心项目",
+      "适用人群",
+      "服务方式",
+      "区域覆盖",
+      "选择要点",
+    ];
+    const messages = buildArticleGenerationMessages({
+      brandName: "广州造卤先生有限公司",
+      productLine: "本地服务",
+      targetRegion: "成都",
+      contentType: "ranking",
+      topic: "本地服务怎么选",
+      requestedTitle: "本地服务六家对比",
+      constraints: "",
+      plannedFacts: rankingFacts,
+      rankingDimensions: dimensions,
+    });
+    expect(messages.user).toContain("目标品牌固定为陈列位 1：炊班主干蒸菜");
+    // 无已确认简称：回退全称，行为与现状一致。
+    expect(
+      resolveRankingRoster(
+        rankingFacts.filter((fact) => fact.factKey !== "brand-short"),
+        "工作区名称",
+      ).targetBrand,
+    ).toBe("广州造卤先生有限公司");
+    // 身份事实都没有：回退 workspace 名。
+    expect(
+      resolveRankingRoster(
+        [
+          {
+            factKey: "competitors",
+            predicate: "enterprise-profile.competitors",
+            normalizedValueJson:
+              '["竞品甲","竞品乙","竞品丙","竞品丁","竞品戊"]',
+          },
+        ],
+        "工作区名称",
+      ).targetBrand,
+    ).toBe("工作区名称");
+    // 陈列位 1 小节标题用简称：门的实体校验是全称∪简称超集，照常过门。
+    const section = (name: string) => [
+      name,
+      ...dimensions.map((dimension) => `- **${dimension}**：信息`),
+    ];
+    const shortHeadingBody = [
+      "# 本地服务六家对比",
+      "",
+      ...[
+        "炊班主干蒸菜",
+        "竞品甲",
+        "竞品乙",
+        "竞品丙",
+        "竞品丁",
+        "竞品戊",
+      ].flatMap((name, index) => section(`## ${index + 1}. ${name}`)),
+    ].join("\n");
+    expect(
+      deterministicArticleReview({
+        body: shortHeadingBody,
+        facts: rankingFacts,
+        contentType: "ranking",
+        workspaceBrandName: "工作区名称",
+        expectedRankingDimensions: dimensions
+      }).filter((issue) => issue.severity === "blocking"),
+    ).toEqual([]);
   });
 
   it("excludes workspace self names and related brands from the ranking roster", () => {

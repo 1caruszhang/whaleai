@@ -8,11 +8,11 @@
 
 导出面（语义现状冻结，等价搬家不收敛语义）：
 
-- **投影族**：`resolveRankingRoster`（身份排除＋两层合并＋直接层在前取 5＋<5 fail-closed，错误码常量 `RANKING_COMPETITORS_INSUFFICIENT_CODE` 随内核所有）；`filterValidRankingCompetitors`；`mergeRankingCompetitorTiers`；`titleRedLineCompetitors`（标题红线：两层原始串联、**无身份排除**——禁令名单宁滥勿缺，默认刻意，见漂移台账）；卡面竞品行投影（`competitorCardRowField` 两层并栏＋`competitorCardTierOrder` 直接层在前＋`competitorCardPotentialDividerAt`「潜在」分界插入位＋层级判定谓词 `isDirectCompetitorTierField` / `isPotentialCompetitorTierField`——消费方做层级判定一律进口谓词，不写裸序号或裸字段名比较，确认卡投影与渲染卡片消费）。
+- **投影族**：`resolveRankingRoster`（身份排除＋两层合并＋直接层在前取 5＋<5 fail-closed，错误码常量 `RANKING_COMPETITORS_INSUFFICIENT_CODE` 随内核所有；目标品牌取值走 `resolveRankingTargetBrand`）；`resolveRankingTargetBrand`（陈列位 1 指称裁决，用户裁决 2026-09-03：**简称优先**——已确认 shortNames[0]，无简称回退 fullName[0]，身份事实都没有才回退 workspace 名；陈列位 1 是篇内展示位省字数，与标题简称优先同哲学；正文注入的「品牌：」行仍走 profileInjection 的 `resolveBrandName`（全称优先），两者分工不同勿混用；票 #44 时随「名单语义只出自内核」规则自画像模块迁入）；`filterValidRankingCompetitors`；`mergeRankingCompetitorTiers`；`titleRedLineCompetitors`（标题红线：两层原始串联、**无身份排除**——禁令名单宁滥勿缺，默认刻意，见漂移台账）；卡面竞品行投影（`competitorCardRowField` 两层并栏＋`competitorCardTierOrder` 直接层在前＋`competitorCardPotentialDividerAt`「潜在」分界插入位＋层级判定谓词 `isDirectCompetitorTierField` / `isPotentialCompetitorTierField` / `isCompetitorTierField`——消费方做层级判定一律进口谓词，不写裸序号或裸字段名比较，确认卡投影与渲染卡片消费）。
 - **身份判定族**（自 material-import 迁入，管线降为消费方）：`sameBrandIdentity`／`isSimilarSelfName`／`dropSelfReferences`。
-- **具名键（两把钥匙并存，不合而钉之）**：`rosterIdentityKey`（排行键：剥 markdown 强调字符＋全角折叠＋Unicode lowercase＋空白折叠；与 Rust 镜像 `normalize_ranking_entity_name` 的一致子集由契约向量钉死）；`competitorIdentityKey`（富化键：繁→简映射＋括号中缀剥离＋小写；TS 单侧，常规单测覆盖）。`toSimplifiedChinese` 高频繁→简映射表随富化键入内核。
+- **具名键（两把钥匙并存，不合而钉之）**：`rosterIdentityKey`（排行键：剥 markdown 强调字符＋全角折叠＋Unicode lowercase＋空白折叠；与 Rust 镜像 `normalize_ranking_entity_name` 的一致子集由契约向量钉死）；`competitorIdentityKey`（富化键：繁→简映射＋括号中缀剥离＋小写；TS 单侧，常规单测覆盖）。`toSimplifiedChinese` 高频繁→简映射表随富化键入内核；`foldFullWidthAndLowercase`（全角折叠＋Unicode lowercase 的共用折叠，消费方进口不自写副本）。
 - **旧审计头解码**：`decodeCompetitorEvidence`／`collectCompetitorDetails`／`formatCompetitorDisplayNames`／`formatCompetitorFactValue`（只读兼容存量，原 competitorDetails 模块溶入后删文件）。
-- **类型**：`RankingRoster`／`RankingCompetitorIdentity`／`CompetitorDisplayDetail`。
+- **类型**：`RankingRoster`／`RankingCompetitorIdentity`／`RosterSelfReferenceFact`（dropSelfReferences 的行形状）／`CompetitorDisplayDetail`。
 
 明确不入内核（原地保留、进口内核）：富化管线的存在/关系/地域闸、续枪与候选解析、材料腿证据闸（`hasCompetitorEvidence`／`dropUnsupportedMaterialCompetitors`）；`deriveCompetitorScope`（地域锚语义）；`RankingCompetitorConfirmationGate`（会话交互，留工具层）；`rankingCompetitorRequirement`（UX 文案，错误码常量自内核进口）。
 

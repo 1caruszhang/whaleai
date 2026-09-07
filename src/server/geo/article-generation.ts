@@ -4,12 +4,16 @@ import {
   ARTICLE_IMAGE_CANDIDATE_INJECTION_LIMIT,
   ARTICLE_IMAGE_QUOTA_BY_TYPE,
   autoBoldBrandMentions,
+  autoBoldListLabels,
   buildArticleGenerationMessages,
   buildArticleReflectionMessages,
   buildArticleRepairMessages,
   buildDirectTitleMessages,
   buildRankingDimensionMessages,
   combineArticleReview,
+  contentPromptVersionAtLeast,
+  BRAND_NAME_ORDER_MIN_POLICY_VERSION,
+  modelAuditPolicyVersion,
   dealNarrativeSeeds,
   deterministicArticleReview,
   parseArticleReflection,
@@ -42,6 +46,7 @@ import { XIAOJING_GEO_PROVIDER_DEFAULTS } from "../../shared/geo/providerCapabil
 
 /** 反思 LLM 审核开关：用户裁定（2026-08-18）先只审格式，暂停语义反思。 */
 const REFLECTION_REVIEW_ENABLED = false;
+
 import { managementApi } from "../utils/management-api-client";
 import { warnCompoundAnchorValues } from "./anchor-patrol";
 import type { GeoBillingPermitPort } from "./billing-permit";
@@ -673,25 +678,29 @@ export class ArticleGenerationService {
         requestedTitle,
       );
       // ADR-0009 生成期管线：parse → 确定性修复 → 确定性审核 →（blocking
-      // 时）一次有界修复 → 复检 → 落库/失败。确定性修复（品牌自动加粗、
-      // 配图超限裁剪）对初稿与修复稿各跑一遍；预检从 ranking 扩展到全部
-      // 类型（§5），格式违约在生成期就地消解，不再漏到批准门爆出。人工
-      // 编辑路径（claimReview）不走本管线——审核门仍是人工编辑唯一防线。
+      // 时）一次有界修复 → 复检 → 落库/失败。确定性修复（列表标签自动加粗、
+      // 品牌自动加粗、配图超限裁剪）对初稿与修复稿各跑一遍；预检从 ranking
+      // 扩展到全部类型（§5），格式违约在生成期就地消解，不再漏到批准门爆出。
+      // 人工编辑路径（claimReview）不走本管线——审核门仍是人工编辑唯一防线。
       const imageQuota =
         ARTICLE_IMAGE_QUOTA_BY_TYPE[context.article.contentType];
       const deterministicallyRepaired = (candidate: string) =>
         trimMaterialImagePlaceholders(
-          autoBoldBrandMentions(candidate, context.article.plannedFacts),
+          autoBoldBrandMentions(
+            autoBoldListLabels(candidate),
+            context.article.plannedFacts,
+          ),
           imageQuota,
         );
       const blockingIssuesOf = (candidate: string) =>
-        deterministicArticleReview(
-          candidate,
-          context.article.plannedFacts,
-          context.article.contentType,
-          context.brandName,
-          rankingDimensions ?? context.article.rankingDimensions ?? undefined,
-        ).filter((issue) => issue.severity === "blocking");
+        deterministicArticleReview({
+          body: candidate,
+          facts: context.article.plannedFacts,
+          contentType: context.article.contentType,
+          workspaceBrandName: context.brandName,
+          expectedRankingDimensions:
+            rankingDimensions ?? context.article.rankingDimensions ?? undefined,
+        }).filter((issue) => issue.severity === "blocking");
       let body = deterministicallyRepaired(parsed);
       let blocking = blockingIssuesOf(body);
       let repairUsed = false;
@@ -912,15 +921,27 @@ export class ArticleGenerationService {
   }): Promise<ArticleProjection> {
     this.assertIdentity(input);
     const { context, body } = await this.persistence.claimReview(input);
-    const deterministic = deterministicArticleReview(
-      body.body,
-      context.article.plannedFacts,
-      context.article.contentType,
-      context.brandName,
+    const deterministic = deterministicArticleReview({
+      body: body.body,
+      facts: context.article.plannedFacts,
+      contentType: context.article.contentType,
+      workspaceBrandName: context.brandName,
       // 注入清单随文落库（ADR-0009 Decision 2）：批准门对照清单复检；
       // 存量稿无清单时门内回退与第一家集合比对。
-      context.article.rankingDimensions ?? undefined,
-    );
+      expectedRankingDimensions:
+        context.article.rankingDimensions ?? undefined,
+      // 指称序豁免（用户裁决 2026-09-03）：只豁免 v8 及更早的存量稿，不
+      // 追诉旧稿形态；v9 起（指称序落地版本）照常复检——人工编辑路径
+      // 不走生成期管线，批准门是指称序在人工路径上的唯一防线。版本戳只
+      // 读版本行审计：review_json 首审前恒为 null（能进 claimReview 的版本
+      // 必无 review_json，那条腿是死路；若未来开放同版本复审，首审戳恒为
+      // 当前版本、会压过生成时戳反而误追诉存量稿），只有 model_audit 从
+      // 生成起就带 policyVersion（编辑版由 Rust 继承基准版戳）。
+      brandNameOrderEnforced: contentPromptVersionAtLeast(
+        modelAuditPolicyVersion(context.article.currentVersion?.modelAudit),
+        BRAND_NAME_ORDER_MIN_POLICY_VERSION,
+      ),
+    });
     // 用户裁定（2026-08-18）：审核先只做格式确定性检查，反思 LLM 审核暂停
     // （省一次 LLM 调用与等待；恢复时改回 REFLECTION_REVIEW_ENABLED=true）。
     if (!REFLECTION_REVIEW_ENABLED) {
