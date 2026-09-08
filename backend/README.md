@@ -128,6 +128,7 @@ creation）按未命中输入价计、缓存读按命中价计；折点内部以
 | `POST /admin/ledger/topup` | 运营 JWT | 充值入账 `{accountId, points, note?}`，落 `topup` 流水 |
 | `POST /admin/ledger/adjust` | 运营 JWT | 运营调点 `{accountId, delta≠0, note 必填}`，落 `adjust` 流水；调减不得动用冻结中的点数（409） |
 | `GET /admin/accounts/:accountId/ledger` | 运营 JWT | 余额 + 流水（最新在前，`?limit=1..200` 默认 50） |
+| `GET /config/preference-channels` | Bearer | 偏好召回名单下发（桌面端分发计划拉取）：`?codes=13,18` 为官方「行业分类」码集（≤32 个）。**回落语义（用户裁决 2026-09-08：行业名单是完整名单不是增量）**：码集命中行业行 → 只回行业行（通用不并集）；codes 缺省/为空/无命中 → 只回通用行（category=0 兜底）。返回 `{channels:[{name,domain?,exact,kind?,resourceId?}]}`——绑定行（勾选落库）带 `kind`/`resourceId`（桌面按资源 id 相等命中，P2 接入），名称行不带（走名称/域名匹配）；同核心名去重时绑定行优先：同名名称行让位（不同资源的绑定行互不去重）。行业隔离在本端点完成 |
 
 价目表（服务端唯一权威，`src/domain/pricing.ts`，与《计费标准》公示同源）：
 材料导入 20/份；问题池 15/次；基线探测 5/问；主题规划 20（重生成 10）；
@@ -237,6 +238,12 @@ OSS 账单对账，不动 `ledger_entries`（Σdelta == balance 不变量）；�
 | `POST /admin/ui/accounts/:accountId/adjust` | 会话 cookie | 调点（正负整数 ≠0，备注必填），落 `adjust` 流水 |
 | `POST /admin/ui/accounts/:accountId/note` | 会话 cookie | 设置/清除账号备注（运营内部标识「这是谁的号」，≤500 字，空串即清除；存 `accounts.admin_note`，不进用户投影、不落流水） |
 | `POST /admin/ui/accounts/:accountId/reset-password` | 会话 cookie | 重置密码（新密码 ≥8 位 + 确认输入防手误）：`password_version+1`（旧 access JWT 即失效）、`must_change_password=1`（用户下次登录强制改成自己的密码）、吊销全部会话（`revoked_reason=admin_password_reset`）；不校验旧密码、不签发用户会话 |
+| `GET /admin/preference-channels` | 会话 cookie | 偏好召回名单管理页（GET `?industry=&q=`）：顶部行业下拉即切换（带一个内联 `onchange` 即时提交——用户裁决 2026-09-08，运营台零 JS 纪律的唯一例外）；名单区常驻展示——「通用名单」（恒展开）+「行业专属名单」按行业用原生 `<details>` 默认折叠、点击展开（当前查看的行业自动展开；均为零 JS 原生折叠）；添加只一个动作——渠道名输入（原生 `<datalist>` 候选提示，当前行业快照前 500 个不重名 + 本次搜索结果预渲染）→ 搜索（`q` 包含匹配 ≤50 条，名称完全一致的行预勾选）→ 「确认添加到本行业」（行业由当前视图以隐藏字段携带，无第二个行业下拉；行业无专属条目时在添加卡明示兜底语义）；行业候选只含本行业渠道（自媒体按 industry_category、媒体按 channel_type 映射，规则在 `pool-industry-match.ts` 与桌面码表/别名/匹配器逐条一致；官方 GEO 标记仅展示不入选——它是召回质量信号不是行业归属；0·通用=不过滤全池）。绑定行显示形态与快照在售状态（status≠2 标红「已下架」） |
+| `POST /admin/ui/preference-channels` | 会话 cookie | 手动添加名称条目（按核心名整族匹配的旧口子）：`{category, name(1-200), domain(≤200,可选), exact}`。**页面已不再暴露此表单**（单行业视图只走勾选绑定），接口保留供种子类名称条目的维护与测试；category 必须在品牌所属行业码白名单（0=通用，1-26）内 |
+| `POST /admin/ui/preference-channels/pick` | 会话 cookie | 勾选确认（绑定条目）：`{category, pick:<kind>:<resource_id>=on …, viewIndustry?}`（≤50 勾）；每勾一行落一条 `(category, kind, resource_id, name=挂牌名, domain=entrance 域名, exact=1)`，字段取自池快照（上游权威，不取表单回传）；引用不在快照内/勾选键被篡改 → 400 零写入；同（category, kind, resource_id）重复确认静默跳过；303 跳回 `viewIndustry` 行业视图（缺省/非法回落通用视图） |
+| `POST /admin/ui/preference-channels/:id/category` | 会话 cookie | 行内改行业（只改 category；名称/资源不可改，要改就删了重选）；成功后 303 跳到**目标行业**视图（行出现在哪里操作者就看到哪里）；404 = 条目不存在 |
+| `POST /admin/ui/preference-channels/snapshot/refresh` | 会话 cookie | 手动刷新池快照：经 `DistributionUpstream` 签名客户端串行拉取 `/media\|we-media/resource`（size=200/页，页间 120ms 限速+单页重试×3，全池 ~2.5 万条约 1 分钟，同步 POST 后 303 回原行业视图）；两类全部拉完才落库（整类替换，任一页重试耗尽仍失败则零写入、旧快照保持，报错带类别与页号），成功后页面展示「池快照：YYYY-MM-DD HH:mm」 |
+| `POST /admin/ui/preference-channels/:id/delete` | 会话 cookie | 删除名单条目（`viewIndustry?` 携带当前视图行业，303 跳回原视图）；改动即时生效（下次分发计划发现即用新名单） |
 | `GET /admin/accounts/:accountId` | 会话 cookie | 账号对账页：余额三口径 + 点数流水 + 计费操作（permit 扣点口径）+ 发布订单 + Provider 计量 + 对话计量 |
 
 形态与安全：纯模板字符串渲染 + 统一 `esc()` 转义（手机号/备注等一切回显），
@@ -386,7 +393,7 @@ curl -s "$B/gw/distribution/media/resource?page=1&size=20" -H "authorization: Be
 curl -s "$B/gw/distribution/we-media/resource?page=2&size=15" -H "authorization: Bearer $ACCESS"
 ```
 
-## 数据表（迁移 `0001_accounts_sessions_ledger` + `0002_billing_permits` + `0003_ledger_entry_seq` + `0004_chat_usage_metering` + `0005_provider_usage_metering` + `0006_publish_orders` + `0007_publish_order_spend_limits` + `0008_permit_last_activity` + `0009_accounts_admin_note`）
+## 数据表（迁移 `0001_accounts_sessions_ledger` + `0002_billing_permits` + `0003_ledger_entry_seq` + `0004_chat_usage_metering` + `0005_provider_usage_metering` + `0006_publish_orders` + `0007_publish_order_spend_limits` + `0008_permit_last_activity` + `0009_accounts_admin_note` + `0010_preference_channels` + `0011_preference_channel_pick_flow` + `0012_pool_snapshot_category_geo`）
 
 - `accounts`：手机号唯一、scrypt 哈希、`password_version`（JWT `pv` 对账）、
   `status`（active/disabled）、`must_change_password`、`balance`（账面总余额，
@@ -419,6 +426,30 @@ curl -s "$B/gw/distribution/we-media/resource?page=2&size=15" -H "authorization:
 - `publish_orders`（0006/0007）：超级媒介订单与点数冻结权威；保存服务器侧
   下单价、换算点数、`execution_id`/`item_id` 和两级冻结上限。未退款订单按
   账号 + execution 聚合；上限校验和预扣冻结在同一事务内完成。
+- `preference_channels`（0010/0011）：偏好召回名单（运营权威）。`category` 是
+  「品牌所属行业」选择器（两张官方附录的行业并集：1-25 与桌面
+  `WE_MEDIA_INDUSTRY_NAMES` 逐条一致，26=工业贸易为媒体附录独有类目的
+  补位码）：0=通用兜底；`exact`=1 按核心名精确匹配。0011 扩列支持两类
+  条目：`kind=''` + `resource_id=NULL` 为名称条目（0010 种子与手输口子，
+  按名称/域名匹配）；`kind='media'|'we-media'` + `resource_id` 为池内资源
+  绑定行（勾选确认落库，桌面按 id 相等命中，挂牌名漂移不再断裂）。下发
+  去重绑定行优先（同名核心的名称行让位，不同资源的绑定行互不去重）。
+  种子十项 = 原桌面硬编码内置名单（全通用），不迁移——运营在页面渐进
+  删除重绑；只经 /admin 页面与 `GET /config/preference-channels` 读写，
+  不落任何账号归属。
+- `distribution_pool_snapshot`（0011/0012）：资源池快照（上游无名称搜索，
+  「点击匹配」自建）：`(kind, resource_id)` 主键 + `name/domain/status/
+  price_cents/geo_count/category_code/geo/fetched_at`；管理页手动全量刷新
+  （两类全部拉完才整类替换落库，失败零写入），搜索与勾选确认只打本表——
+  勾选落库的挂牌名与 entrance 域名都取自本表（上游权威）。价格仅作展示
+  对比，下单计价权威仍走 `distribution_resource_cache`；status 用上游资源
+  状态词表（2=已通过/在售，其余未上架，页面标红「已下架」）。
+  `category_code`（0012）按形态解释（同码不同义，绝不跨形态比较）：媒体
+  =channel_type（频道类型附录），自媒体=industry_category（行业分类附录
+  1-25）——行业联动搜索按此过滤候选（映射规则在
+  `src/domain/pool-industry-match.ts`，与桌面 distributionPlan.ts 的
+  码表/别名/匹配器逐条一致）；`geo`=1 即官方 GEO 标记，仅结果展示
+  不参与行业入选（召回质量信号，非行业归属）。
 
 迁 PostgreSQL 路径：业务层只依赖 `SqlClient` 接口（`src/db/client.ts`），
 表结构用 ANSI 形态（TEXT 主键、ISO 时间戳、INTEGER 布尔），迁移 SQL 直接

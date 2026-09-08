@@ -9,9 +9,11 @@ import {
   assignDistributionChannels,
   buildDistributionCandidates,
   distributionPlanBlockingIssues,
+  industryCodesFor,
   normalizeDistributionResource,
   selectPassiveSources,
   validateDistributionPlanStartInput,
+  WE_MEDIA_INDUSTRY_NAMES,
   type DistributionActiveRecallSource,
   type DistributionPlanEditInput,
   type DistributionPlanProjection,
@@ -357,6 +359,97 @@ function unavailableSnapshot(): DistributionProviderSnapshot {
   };
 }
 
+// ── 偏好基础名单拉取（运营台云端下发，2026-09）────────────────────────────
+
+/**
+ * 偏好拉取的行业码集：「品牌所属行业」选择器（backend
+ * PREFERENCE_CATEGORY_NAMES 的取数侧），不是渠道形态分类——1-25 经
+ * WE_MEDIA_INDUSTRY_NAMES 现成口径；26=工业贸易是媒体附录独有类目的补位
+ * 码（自媒体附录无工业类目，工业/制造/化工/能源/物流线品牌靠别名表→
+ * 「工业」碎片命中它，否则行业隔离对这些行业无法生效）。
+ */
+const PREFERENCE_EXTRA_INDUSTRY_NAMES: Readonly<Record<number, string>> = {
+  26: "工业贸易",
+};
+
+export function preferenceIndustryCodes(industry: string): number[] {
+  return [
+    ...industryCodesFor(industry, WE_MEDIA_INDUSTRY_NAMES),
+    ...industryCodesFor(industry, PREFERENCE_EXTRA_INDUSTRY_NAMES),
+  ];
+}
+
+/** 单次拉取超时：配置面 best-effort，不能吊死计划发现。 */
+const PREFERENCE_PULL_TIMEOUT_MS = 5_000;
+/** 下发条目上限（对齐 backend 侧名单规模护栏）。 */
+const PREFERENCE_LIST_MAX = 100;
+
+/**
+ * 严格解析 /config/preference-channels 响应（反 TypeError 炸计划发现）：
+ * 逐条校验——名称字符串且 1-200 字、domain 缺省或非空字符串、exact 必须
+ * 布尔；顶层或任一条目形状不符即整体作废（空数组），绝不把半坏数据喂进
+ * 偏好匹配（响应来自自家 backend 的固定契约，半坏即契约漂移）。超过
+ * 100 条在第 100 条截断（名单规模护栏，不算形状违规）。
+ */
+export function parsePreferenceChannelsResponse(
+  payload: unknown,
+): PreferenceChannelEntry[] {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    return [];
+  }
+  const channels = (payload as { channels?: unknown }).channels;
+  if (!Array.isArray(channels)) return [];
+  const entries: PreferenceChannelEntry[] = [];
+  for (const item of channels) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return [];
+    const record = item as Record<string, unknown>;
+    if (typeof record.name !== "string") return [];
+    const name = record.name.trim();
+    if (name.length === 0 || Array.from(name).length > 200) return [];
+    if (
+      record.domain !== undefined &&
+      (typeof record.domain !== "string" || record.domain.trim().length === 0)
+    ) {
+      return [];
+    }
+    if (typeof record.exact !== "boolean") return [];
+    const domain =
+      typeof record.domain === "string" ? record.domain.trim() : undefined;
+    entries.push({
+      name,
+      ...(domain ? { domain } : {}),
+      exact: record.exact,
+    });
+    if (entries.length >= PREFERENCE_LIST_MAX) break;
+  }
+  return entries;
+}
+
+/**
+ * 网关拉取（billing 通道同款 Bearer 口径）：5s 超时、非 2xx 抛类型化错误。
+ * 错误消息只含状态码语义（preference_pull_http_502），不含 token/响应体。
+ */
+export async function fetchPreferenceChannelsFromGateway(input: {
+  baseUrl: string;
+  accessToken: string;
+  codes: readonly number[];
+  fetchImpl?: typeof fetch;
+}): Promise<PreferenceChannelEntry[]> {
+  const query =
+    input.codes.length > 0 ? `?codes=${[...input.codes].join(",")}` : "";
+  const response = await (input.fetchImpl ?? fetch)(
+    `${input.baseUrl.replace(/\/+$/, "")}/config/preference-channels${query}`,
+    {
+      headers: { authorization: `Bearer ${input.accessToken}` },
+      signal: AbortSignal.timeout(PREFERENCE_PULL_TIMEOUT_MS),
+    },
+  );
+  if (!response.ok) {
+    throw new Error(`preference_pull_http_${response.status}`);
+  }
+  return parsePreferenceChannelsResponse(await response.json());
+}
+
 export class DistributionPlanningService {
   private readonly resourceCache: Partial<
     Record<
@@ -390,6 +483,14 @@ export class DistributionPlanningService {
     private readonly accountPageFetch: (
       url: string,
     ) => Promise<string | null> = fetchCitationPageHtml,
+    /**
+     * 偏好基础名单拉取（运营台下发，2026-09）：入参为计划的官方行业分类
+     * 码集（空 = 只拉通用行）。best-effort——失败在 start() 内降级为空
+     * 名单并打脱敏告警，本轮偏好路无命中。缺省（无网关/开发直连）恒为空。
+     */
+    private readonly fetchPreferenceBase?: (
+      codes: readonly number[],
+    ) => Promise<readonly PreferenceChannelEntry[]>,
   ) {}
 
   private assertIdentity(input: {
@@ -660,10 +761,8 @@ export class DistributionPlanningService {
       const questionSources = await this.resolveCitationAccounts(
         probeOutcome.sources,
       ).catch(() => probeOutcome.sources);
-      const preferenceChannels: PreferenceChannelEntry[] =
-        resolvePreferenceChannels(preferenceSettings);
-      // 召回输入快照（右侧面板四路召回展示）：主动路原始渠道与偏好生效名单
-      // 随发现结果一起落进投影，供用户对照「召回了什么 vs 匹配了什么」。
+      // 召回输入快照（右侧面板四路召回展示）：主动路原始渠道随发现结果
+      // 一起落进投影，供用户对照「召回了什么 vs 匹配了什么」。
       const activeRecallSources: DistributionActiveRecallSource[] =
         activeSources.map((source) => ({
           title: source.title,
@@ -671,14 +770,32 @@ export class DistributionPlanningService {
           articleIds: source.articleIds ?? [],
           reason: source.reason ?? null,
         }));
-      const preferenceChannelNames = preferenceChannels.map(
-        (entry) => entry.name,
-      );
       const preparation = await this.persistence.prepare({
         ...source,
         questionSources,
       });
       const base = preparation.plan;
+      // 偏好基础名单（2026-09 起运营台按行业下发）：计划行业 → 品牌所属
+      // 行业码集（preferenceIndustryCodes，空行业=空码集只拉通用行）→
+      // 网关拉取。best-effort——失败/坏响应降级空名单并打脱敏告警，只损失
+      // 偏好路证据；无网关/开发直连 fetchPreferenceBase 缺省 = 空基础名单，
+      // 仅剩本地 overlay 增补可用。
+      const preferenceBase = this.fetchPreferenceBase
+        ? await this.fetchPreferenceBase(
+            preferenceIndustryCodes(base.industry),
+          ).catch((error: unknown) => {
+            console.warn(
+              "[preference-channels] pull failed:",
+              error instanceof Error ? error.message : "unknown",
+            );
+            return [] as const;
+          })
+        : ([] as const);
+      const preferenceChannels: PreferenceChannelEntry[] =
+        resolvePreferenceChannels(preferenceBase, preferenceSettings);
+      const preferenceChannelNames = preferenceChannels.map(
+        (entry) => entry.name,
+      );
       let media: { total: number; items: GeoDistributionResource[] };
       let weMedia: { total: number; items: GeoDistributionResource[] };
       try {

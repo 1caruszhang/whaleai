@@ -9,6 +9,9 @@ import type {
 import {
   DistributionPlanningService,
   createDistributionPlanPort,
+  fetchPreferenceChannelsFromGateway,
+  parsePreferenceChannelsResponse,
+  preferenceIndustryCodes,
   type DistributionPlanPersistencePort,
 } from "./distribution-plan";
 import type { GeoDistributionCapability } from "./provider-capabilities";
@@ -394,7 +397,84 @@ describe("DistributionPlanningService", () => {
     expect(stored.questionSources[0]?.resolvedAccountName).toBeUndefined();
   });
 
-  it("passes preferenceMatchedChannels through finishDiscovery (Q12, 2026-08-28)", async () => {
+  it("pulls the ops-console preference base by industry codes and passes matched rows through finishDiscovery (Q12)", async () => {
+    const { port } = persistence();
+    const fetchPreferenceBase = vi.fn(async () => [
+      { name: "汽车日报", exact: true },
+      { name: "不存在的渠道", exact: true },
+    ]);
+    const service = new DistributionPlanningService(
+      { workspaceId: "workspace", sessionId: "session" },
+      port,
+      provider(),
+      keywordSearch(),
+      () => new Date("2026-08-15T00:00:00.000Z"),
+      undefined,
+      undefined,
+      fetchPreferenceBase,
+    );
+    await service.start({
+      workspaceId: "workspace",
+      sessionId: "session",
+      source,
+    });
+    // 计划行业「汽车改装」→ 官方行业分类码集 {7}（汽车，industryCodesFor
+    // 整串包含口径）；空码集不会出现——基础名单恒以码集拉取（通用行由
+    // 服务端兜底下发）。
+    expect(fetchPreferenceBase).toHaveBeenCalledTimes(1);
+    expect(fetchPreferenceBase).toHaveBeenCalledWith([7]);
+    const call = vi.mocked(port.finishDiscovery).mock.calls[0]![0];
+    expect(call.preferenceChannelNames).toEqual(["汽车日报", "不存在的渠道"]);
+    // 偏好命中清单在配额前逐名单项计算并随投影落库；每项一行，未命中项
+    // matched=false（名单录错/渠道下架型）如实透传。
+    const rows = call.preferenceMatchedChannels ?? [];
+    expect(rows.length).toBe(2);
+    const matched = rows.find((row) => row.entryName === "汽车日报");
+    expect(matched).toMatchObject({ matched: true, recommended: true });
+    const missing = rows.find((row) => row.entryName === "不存在的渠道");
+    expect(missing).toMatchObject({ matched: false, recommended: false });
+  });
+
+  it("degrades to an empty preference base when the ops-console pull fails", async () => {
+    const { port } = persistence();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const fetchPreferenceBase = vi.fn(async () => {
+      throw new Error("preference_pull_http_502");
+    });
+    const service = new DistributionPlanningService(
+      { workspaceId: "workspace", sessionId: "session" },
+      port,
+      provider(),
+      keywordSearch(),
+      () => new Date("2026-08-15T00:00:00.000Z"),
+      undefined,
+      undefined,
+      fetchPreferenceBase,
+    );
+    const result = await service.start({
+      workspaceId: "workspace",
+      sessionId: "session",
+      source,
+    });
+    // 拉取失败只损失偏好路证据：计划照常产出，名单为空、无偏好证据。
+    expect(result.status).toBe("draft");
+    const call = vi.mocked(port.finishDiscovery).mock.calls[0]![0];
+    expect(call.preferenceChannelNames).toEqual([]);
+    expect(call.preferenceMatchedChannels).toEqual([]);
+    expect(
+      result.candidates.every((candidate) =>
+        candidate.evidence.every((item) => item.path !== "preference"),
+      ),
+    ).toBe(true);
+    // 脱敏告警：只有错误码语义，不含 token/响应体。
+    expect(warn).toHaveBeenCalledWith(
+      "[preference-channels] pull failed:",
+      "preference_pull_http_502",
+    );
+    warn.mockRestore();
+  });
+
+  it("runs with an empty preference base when no gateway fetcher is configured", async () => {
     const { port } = persistence();
     const service = new DistributionPlanningService(
       { workspaceId: "workspace", sessionId: "session" },
@@ -403,25 +483,14 @@ describe("DistributionPlanningService", () => {
       keywordSearch(),
       () => new Date("2026-08-15T00:00:00.000Z"),
     );
-    await service.start({
+    const result = await service.start({
       workspaceId: "workspace",
       sessionId: "session",
       source,
     });
-    // 偏好命中清单在配额前逐名单项计算并随投影落库（内置十项）；
-    // 每项一行，未命中项 matched=false（名单录错/渠道下架型）如实透传。
-    expect(port.finishDiscovery).toHaveBeenCalledWith(
-      expect.objectContaining({
-        preferenceMatchedChannels: expect.any(Array),
-      }),
-    );
+    expect(result.status).toBe("draft");
     const call = vi.mocked(port.finishDiscovery).mock.calls[0]![0];
-    const rows = call.preferenceMatchedChannels ?? [];
-    expect(rows.length).toBeGreaterThan(0);
-    for (const row of rows) {
-      expect(row.entryName).toBeTruthy();
-      expect(typeof row.matched).toBe("boolean");
-    }
+    expect(call.preferenceChannelNames).toEqual([]);
   });
 
   it("coalesces concurrent resource loads, caches for 30 minutes, and refetches after TTL", async () => {
@@ -701,5 +770,124 @@ describe("DistributionPlanningService billing permits (ticket 07)", () => {
       sessionId: "session",
     });
     expect(readPermits.calls).toEqual([]);
+  });
+});
+
+describe("preference channel gateway pull (ops-console base list)", () => {
+  it("parses strict shapes and discards the whole list on any malformed entry", () => {
+    expect(parsePreferenceChannelsResponse(null)).toEqual([]);
+    expect(parsePreferenceChannelsResponse({ channels: "nope" })).toEqual([]);
+    expect(parsePreferenceChannelsResponse([1, 2])).toEqual([]);
+    // 任一条目坏形状 → 整单作废（自家 backend 固定契约，半坏即契约漂移），
+    // 不部分透传。
+    expect(
+      parsePreferenceChannelsResponse({
+        channels: [
+          { name: "  红餐网  ", domain: "canyinj.com", exact: true },
+          { name: "" },
+        ],
+      }),
+    ).toEqual([]);
+    expect(
+      parsePreferenceChannelsResponse({ channels: [{ name: 42 }] }),
+    ).toEqual([]);
+    expect(
+      parsePreferenceChannelsResponse({ channels: ["junk"] }),
+    ).toEqual([]);
+    expect(
+      parsePreferenceChannelsResponse({
+        channels: [{ name: "x".repeat(201), exact: true }],
+      }),
+    ).toEqual([]);
+    expect(
+      parsePreferenceChannelsResponse({
+        channels: [{ name: "红餐网", domain: "", exact: true }],
+      }),
+    ).toEqual([]);
+    expect(
+      parsePreferenceChannelsResponse({
+        channels: [{ name: "红餐网", domain: "canyinj.com" }],
+      }),
+    ).toEqual([]);
+    // 合法形状逐条透传（trim、domain 缺省、exact 布尔）。
+    expect(
+      parsePreferenceChannelsResponse({
+        channels: [
+          { name: "  红餐网  ", domain: "canyinj.com", exact: true },
+          { name: "列举网", exact: false },
+        ],
+      }),
+    ).toEqual([
+      { name: "红餐网", domain: "canyinj.com", exact: true },
+      { name: "列举网", exact: false },
+    ]);
+    // 条目上限：超长名单截断到 100，不是形状违规。
+    const capped = parsePreferenceChannelsResponse({
+      channels: Array.from({ length: 150 }, () => ({
+        name: "渠道",
+        exact: true,
+      })),
+    });
+    expect(capped).toHaveLength(100);
+  });
+
+  it("fetches from the gateway with bearer token and codes query", async () => {
+    const fetchImpl = vi.fn(
+      async (_input: RequestInfo | URL, _init?: RequestInit) =>
+        Response.json({ channels: [{ name: "红餐网", exact: true }] }),
+    );
+    const channels = await fetchPreferenceChannelsFromGateway({
+      baseUrl: "https://gw.example.com/",
+      accessToken: "token-1",
+      codes: [7, 13],
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+    expect(channels).toEqual([{ name: "红餐网", exact: true }]);
+    expect(fetchImpl).toHaveBeenCalledWith(
+      "https://gw.example.com/config/preference-channels?codes=7,13",
+      expect.objectContaining({
+        headers: { authorization: "Bearer token-1" },
+      }),
+    );
+    // 空码集 = 无 query（只拉通用兜底行）。
+    await fetchPreferenceChannelsFromGateway({
+      baseUrl: "https://gw.example.com",
+      accessToken: "token-1",
+      codes: [],
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+    expect(vi.mocked(fetchImpl).mock.calls[1]![0]).toBe(
+      "https://gw.example.com/config/preference-channels",
+    );
+  });
+
+  it("throws a typed status-only error on non-2xx (no body/token leak)", async () => {
+    const fetchImpl = vi.fn(
+      async () => new Response("upstream secret body", { status: 502 }),
+    );
+    await expect(
+      fetchPreferenceChannelsFromGateway({
+        baseUrl: "https://gw.example.com",
+        accessToken: "token-1",
+        codes: [],
+        fetchImpl: fetchImpl as unknown as typeof fetch,
+      }),
+    ).rejects.toThrow("preference_pull_http_502");
+  });
+});
+
+describe("preferenceIndustryCodes (brand-industry selector incl. industry-trade supplement)", () => {
+  it("maps common industries through the we-media vocabulary", () => {
+    expect(preferenceIndustryCodes("汽车改装")).toEqual([7]);
+    expect(preferenceIndustryCodes("餐饮")).toEqual([13]);
+    expect(preferenceIndustryCodes("  ")).toEqual([]);
+  });
+
+  it("covers industry-trade brands via the 26 supplement (media-appendix orphan)", () => {
+    // 工业/制造/化工/能源/物流线：自媒体附录无类目，经别名表→「工业」
+    // 碎片命中补位码 26，否则这些行业只能落通用、行业隔离失效。
+    expect(preferenceIndustryCodes("工业")).toEqual([26]);
+    expect(preferenceIndustryCodes("化工制造")).toEqual([26]);
+    expect(preferenceIndustryCodes("物流贸易")).toEqual([26]);
   });
 });

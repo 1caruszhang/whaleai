@@ -21,6 +21,27 @@ import { listPermitHistory } from '../domain/permits';
 import { listPublishOrdersForAccount } from '../domain/publish-orders';
 import { listChatUsageRecords } from '../domain/chat-usage';
 import { listProviderUsageRecords } from '../domain/provider-usage';
+import {
+  addPreferenceChannel,
+  addPreferenceChannelBindings,
+  deletePreferenceChannel,
+  listPreferenceChannels,
+  updatePreferenceChannelCategory,
+  PREFERENCE_CATEGORY_NAMES,
+  type PreferenceChannelBindingPick,
+  type PreferenceChannelRow,
+} from '../domain/preference-channels';
+import {
+  listPoolSnapshotNames,
+  poolRefKey,
+  poolSnapshotByRefs,
+  poolSnapshotStats,
+  refreshDistributionPoolSnapshot,
+  searchPoolSnapshot,
+  type PoolKind,
+  type PoolSnapshotRow,
+  type PoolSnapshotStats,
+} from '../domain/distribution-pool-snapshot';
 import { DistributionUpstream } from '../gateway/distribution-upstream';
 import type { UpstreamCallResult } from '../gateway/distribution-upstream';
 import { AppError } from '../errors';
@@ -32,15 +53,36 @@ import { phoneSchema } from './schemas';
  * /admin 与 /admin/accounts/:accountId，表单动作统一挂 /admin/ui/*，路径与
  * JSON API 不重合、边界清晰（现状最小扰动）。
  *
- * 形态取舍：纯服务端渲染（模板字符串 + esc() 转义 helper，零客户端 JS、
- * 零新依赖、不引入前端构建链）；写操作走表单 POST + 303 See Other（PRG），
- * 刷新/回退不重放。会话凭证复用 signAdminToken 的运营 JWT（audience=
+ * 形态取舍：纯服务端渲染（模板字符串 + esc() 转义 helper，零新依赖、
+ * 不引入前端构建链）；写操作走表单 POST + 303 See Other（PRG），
+ * 刷新/回退不重放。客户端 JS 仅一处内联例外：偏好名单页行业下拉的
+ * onchange 即时提交（用户裁决 2026-09-08，详见 preferenceChannelsHtml
+ * 注释）。会话凭证复用 signAdminToken 的运营 JWT（audience=
  * xiaojing-admin）放 HttpOnly;SameSite=Lax cookie——无服务端会话表、天然
  * 过期；SameSite=Lax 挡住跨站表单 POST（CSRF 主要面）。运营密码错误经共享
  * AdminLoginThrottle 递增延时（与 JSON 登录同一实例）。
  */
 
 const ADMIN_SESSION_COOKIE = 'xiaojing_admin';
+
+/** 池快照拉取：上游单页上限 200；页间 sleep 限速（全池 ~125 页/两类）。 */
+const POOL_SNAPSHOT_PAGE_SIZE = 200;
+const POOL_SNAPSHOT_PAGE_DELAY_MS = 120;
+
+/** 快照搜索结果上限（勾选确认同上限：表单一次最多 50 个勾）。 */
+const POOL_SEARCH_RESULT_LIMIT = 50;
+
+/**
+ * 搜索框 datalist 预渲染候选上限（零客户端 JS 的输入提示）：头部候选
+ * 之外的名字由「当前搜索结果」并入兜底——输入提示是辅助，完整检索仍靠
+ * 回车/搜索按钮。
+ */
+const POOL_SUGGESTION_LIMIT = 500;
+
+const POOL_KIND_LABELS: Record<string, string> = {
+  media: '媒体',
+  'we-media': '自媒体',
+};
 
 /** 表单/表格渲染统一转义：所有用户与运营输入回显必经此处（防 XSS）。 */
 function esc(value: string | number | null | undefined): string {
@@ -72,8 +114,12 @@ td.wrap{white-space:normal;max-width:360px;word-break:break-all}
 .error{background:#fdecea;border:1px solid #f2b8b5;color:#8f1d17;border-radius:8px;padding:10px 14px;margin:0 0 12px}
 .muted{color:#7b8a99;font-size:12px}
 form.inline{display:inline;margin:0}
+form.inline select{width:auto;margin-right:6px}
+details{margin:0 0 8px}
+summary{cursor:pointer;font-weight:600}
 label{display:block;margin:10px 0 2px;font-size:13px;color:#3d4c5a}
-input{width:240px;max-width:100%;box-sizing:border-box;padding:6px 8px;border:1px solid #cbd5e0;border-radius:6px;font:inherit}
+input,select{width:240px;max-width:100%;box-sizing:border-box;padding:6px 8px;border:1px solid #cbd5e0;border-radius:6px;font:inherit}
+input[type=checkbox]{width:auto;padding:0;margin-right:6px}
 button{padding:6px 14px;border:0;border-radius:6px;background:#1f6feb;color:#fff;font:inherit;cursor:pointer;margin-top:10px}
 button.secondary{background:#5b6b7b;margin-top:0}
 a{color:#1f6feb}
@@ -127,9 +173,12 @@ function errorPageHtml(message: string, backHref: string): string {
 function headerHtml(): string {
   return `<header class="top">
   <h1>鲸杉geo · 运营台</h1>
-  <form class="inline" method="post" action="/admin/logout">
-    <button class="secondary" type="submit">退出登录</button>
-  </form>
+  <div>
+    <a href="/admin">账号</a> · <a href="/admin/preference-channels">偏好名单</a>
+    <form class="inline" method="post" action="/admin/logout" style="margin-left:12px">
+      <button class="secondary" type="submit">退出登录</button>
+    </form>
+  </div>
 </header>`;
 }
 
@@ -400,6 +449,211 @@ ${chatRows || emptyRow(6, '暂无对话计量')}
   );
 }
 
+/**
+ * 偏好召回名单管理页（单行业视图）：顶部行业下拉即切换（GET ?industry=），
+ * 名单常驻两张区——通用名单（恒展开，兜底）+ 各行业专属名单（原生
+ * <details> 按类别折叠，当前查看的行业自动展开）；行业没有专属条目时明示
+ * 该行业计划回落通用（下发语义，用户裁决 2026-09-08：码集命中行业行只发
+ * 行业行，通用不并集）。
+ * 添加只有一个动作：输入渠道名（datalist 候选与结果按当前行业过滤，规则
+ * 与保底召回垂类匹配同一语义）→ 精确命中预勾选 → 「确认添加到本行业」
+ * （行业由当前视图以隐藏字段定死，不再出现第二个行业下拉）。行内可改
+ * 行业/删除。除行业下拉的一个内联 onchange 即时提交（用户裁决
+ * 2026-09-08：切行业立即联动候选，纯 HTML 无此机制，记为运营台零 JS
+ * 纪律的唯一例外）外零客户端 JS：搜索 GET 渲染结果区，写操作
+ * POST+PRG 303。
+ */
+function preferenceChannelsHtml(
+  rows: PreferenceChannelRow[],
+  stats: PoolSnapshotStats,
+  snapshotByRef: Map<string, PoolSnapshotRow>,
+  searchQuery: string,
+  searchResults: PoolSnapshotRow[] | null,
+  suggestions: readonly string[],
+  industry: number,
+): string {
+  const industryLabel = `${industry} · ${PREFERENCE_CATEGORY_NAMES[industry] ?? ''}`;
+  const addToLabel = industry === 0 ? '到通用名单' : `到 ${industryLabel}`;
+  const industryRows = rows.filter(row => row.category === industry);
+  const universalRows = rows.filter(row => row.category === 0);
+
+  const listTable = (listRows: readonly PreferenceChannelRow[], emptyHint: string): string =>
+    listRows.length === 0
+      ? `<p class="muted">${esc(emptyHint)}</p>`
+      : `<table>
+    <thead><tr><th>渠道名</th><th>域名</th><th>形态</th><th>匹配方式</th><th>快照状态</th><th>添加时间</th><th>操作</th></tr></thead>
+    <tbody>
+${listRows.map(row => preferenceRowHtml(row, snapshotByRef, industry)).join('\n')}
+    </tbody>
+  </table>`;
+
+  // 全部行业的名单常驻页面（用户裁决 2026-09-08）：通用名单恒展开；各行业
+  // 专属名单用原生 <details> 按类别默认折叠、点击展开——零 JS 的折叠机制，
+  // 当前查看的行业自动展开（切换行业后视线直接落在自家名单上）。
+  const industryDetails = Object.entries(PREFERENCE_CATEGORY_NAMES)
+    .filter(([rawCode]) => Number(rawCode) !== 0)
+    .map(([rawCode, label]) => {
+      const code = Number(rawCode);
+      const sectionRows = rows.filter(row => row.category === code);
+      if (sectionRows.length === 0) return null;
+      return `<details${industry === code ? ' open' : ''}>
+    <summary>${esc(code)} · ${esc(label)} 专属名单（${sectionRows.length} 条）</summary>
+${listTable(sectionRows, '')}
+  </details>`;
+    })
+    .filter(section => section !== null)
+    .join('\n');
+  const industrySectionCount = rows.filter(row => row.category !== 0).length;
+  const listCards = `<section class="card">
+  <h2>通用名单（${universalRows.length} 条，兜底：行业无专属名单的计划使用）</h2>
+  ${listTable(universalRows, '通用名单为空：没有行业专属名单的计划将没有任何偏好渠道。')}
+</section>
+<section class="card">
+  <h2>行业专属名单（${industrySectionCount} 条，点击行业展开）</h2>
+  ${industryDetails || '<p class="muted">还没有任何行业专属名单——各行业的计划当前都只用通用名单（兜底）；给行业添加渠道后这里按行业折叠展示。</p>'}
+</section>`;
+
+  const snapshotTime =
+    stats.fetchedAt === null
+      ? '尚未拉取'
+      : `${stats.fetchedAt.slice(0, 16).replace('T', ' ')}（媒体+自媒体共 ${esc(stats.rows)} 条）`;
+  let searchArea = '';
+  if (searchResults !== null) {
+    if (stats.rows === 0) {
+      searchArea = `  <p class="warn">池快照为空：请先点上方「刷新池快照」再搜索。</p>`;
+    } else if (searchResults.length === 0) {
+      searchArea = `  <p class="muted">该行业候选内没有名称包含「${esc(searchQuery)}」的渠道；换个关键词，或把行业切到「0 · 通用」搜全池。</p>`;
+    } else {
+      // 名称与关键词完全一致的行预勾选：从 datalist 选中精确名回车后，
+      // 意中的行已处于待确认状态，直接点确认（零 JS 下「下拉选中」无事件
+      // 可挂，预勾选是最短的等价交互）。
+      const exactHint =
+        searchResults.some(result => result.name === searchQuery)
+          ? `    <p class="muted">名称与关键词完全一致的行已预勾选。</p>\n`
+          : '';
+      const resultRows = searchResults
+        .map(
+          result => `    <tr>
+      <td><input type="checkbox" name="pick:${esc(result.kind)}:${esc(result.resource_id)}"${result.name === searchQuery ? ' checked' : ''}></td>
+      <td class="wrap">${esc(result.name)}</td>
+      <td>${esc(POOL_KIND_LABELS[result.kind] ?? result.kind)}</td>
+      <td>¥${esc(yuan(result.price_cents))}</td>
+      <td>${poolStatusHtml(result)}</td>
+      <td>${result.geo_count > 0 ? `GEO ×${esc(result.geo_count)}` : '<span class="muted">-</span>'}</td>
+    </tr>`,
+        )
+        .join('\n');
+      const industryHint =
+        industry !== 0
+          ? `  <p class="muted">候选已按「${esc(industry)} · ${esc(
+              PREFERENCE_CATEGORY_NAMES[industry] ?? '',
+            )}」过滤（自媒体按行业分类、媒体按频道类型映射；GEO 标记仅展示不入选）。</p>\n`
+          : '';
+      searchArea = `${industryHint}  <form method="post" action="/admin/ui/preference-channels/pick">
+    <input type="hidden" name="category" value="${esc(industry)}">
+    <input type="hidden" name="viewIndustry" value="${esc(industry)}">
+${exactHint}    <table>
+      <thead><tr><th>勾选</th><th>渠道名</th><th>形态</th><th>价格</th><th>在售状态</th><th>GEO</th></tr></thead>
+      <tbody>
+${resultRows}
+      </tbody>
+    </table>
+    <button type="submit">确认添加${esc(addToLabel)}</button>
+    <p class="muted">每勾一行落一条绑定条目（按资源 id 命中，挂牌名/域名取自快照）；结果最多显示 ${esc(POOL_SEARCH_RESULT_LIMIT)} 条。</p>
+  </form>`;
+    }
+  }
+  const suggestionOptions = suggestions
+    .map(name => `    <option value="${esc(name)}"></option>`)
+    .join('\n');
+  return page(
+    '偏好名单',
+    `<main>
+${headerHtml()}
+<p><a href="/admin">返回账号列表</a></p>
+<p class="muted">每个行业一份偏好名单：行业有专属名单时，该行业的计划只用专属名单；行业没有时才回落通用名单（品牌未填行业同）。改动即时生效（下次计划发现即用新名单）。绑定条目按资源 id 命中。</p>
+<section class="card">
+  <h2>资源池快照</h2>
+  <p>池快照：${esc(snapshotTime)}</p>
+  <form class="inline" method="post" action="/admin/ui/preference-channels/snapshot/refresh">
+    <input type="hidden" name="viewIndustry" value="${esc(industry)}">
+    <button type="submit">刷新池快照</button>
+  </form>
+  <p class="muted">从上游全量拉取媒体+自媒体资源（约 2.5 万条，约 1 分钟，期间请勿关闭页面）；搜索与勾选都只打本地快照。</p>
+</section>
+<section class="card">
+  <h2>添加渠道${esc(addToLabel)}</h2>${industry !== 0 && industryRows.length === 0 ? `\n  <p class="muted">该行业还没有专属条目——此行业的计划当前使用通用名单（兜底）。</p>` : ''}
+  <datalist id="poolNameSuggestions">
+${suggestionOptions}
+  </datalist>
+  <form method="get" action="/admin/preference-channels">
+    <label for="qIndustry">当前行业（切换视图与候选过滤；0·通用 = 通用名单与全池候选）</label>
+    <select id="qIndustry" name="industry" onchange="this.form.submit()">
+${categoryOptionsHtml(industry)}
+    </select>
+    <label for="q">渠道名（输入时有候选提示；候选与结果按当前行业过滤）</label>
+    <input id="q" name="q" maxlength="100" list="poolNameSuggestions" value="${esc(searchQuery)}" placeholder="如：蓝色河畔">
+    <button type="submit">搜索</button>
+  </form>
+  <p class="muted">切换行业后页面立即刷新，输入提示与搜索结果随之切换到该行业；从候选中选中完整名称后回车，命中的行已预勾选，点「确认添加」即完成。候选只含本行业渠道（自媒体按行业分类、媒体按频道类型映射；GEO 标记仅展示不入选）；要全池挑选请把行业切到「0 · 通用」。</p>
+${searchArea}
+</section>
+${listCards}
+</main>`,
+  );
+}
+
+function preferenceRowHtml(
+  row: PreferenceChannelRow,
+  snapshotByRef: Map<string, PoolSnapshotRow>,
+  viewIndustry: number,
+): string {
+  const snapshot =
+    row.kind === '' || row.resource_id === null
+      ? undefined
+      : snapshotByRef.get(poolRefKey(row.kind, row.resource_id));
+  const kindLabel = row.kind === '' ? '名称条目' : (POOL_KIND_LABELS[row.kind] ?? row.kind);
+  const matchLabel = row.kind === '' ? (row.exact === 1 ? '精确' : '严格/模糊') : '按 id 绑定';
+  const statusCell = row.kind === '' ? '<span class="muted">-</span>' : poolStatusHtml(snapshot);
+  return `    <tr>
+      <td class="wrap">${esc(row.name)}</td>
+      <td class="wrap">${row.domain === '' ? '<span class="muted">-</span>' : esc(row.domain)}</td>
+      <td>${esc(kindLabel)}</td>
+      <td>${esc(matchLabel)}</td>
+      <td>${statusCell}</td>
+      <td>${esc(row.created_at)}</td>
+      <td>
+        <form class="inline" method="post" action="/admin/ui/preference-channels/${encodeURIComponent(row.id)}/category">
+          <select name="category" aria-label="改行业">
+${categoryOptionsHtml(row.category)}
+          </select>
+          <button class="secondary" type="submit">改行业</button>
+        </form>
+        <form class="inline" method="post" action="/admin/ui/preference-channels/${encodeURIComponent(row.id)}/delete">
+          <input type="hidden" name="viewIndustry" value="${esc(viewIndustry)}">
+          <button class="secondary" type="submit">删除</button>
+        </form>
+      </td>
+    </tr>`;
+}
+
+/** 池快照在售状态格：2=已通过（在售）；其余状态按未上架标红；无快照行灰提示。 */
+function poolStatusHtml(snapshot: PoolSnapshotRow | undefined): string {
+  if (!snapshot) return '<span class="muted">快照缺失</span>';
+  if (snapshot.status === 2) return '在售';
+  if (snapshot.status === null) return '<span class="muted">状态未知</span>';
+  return '<span class="neg">已下架</span>';
+}
+
+function categoryOptionsHtml(selected: number): string {
+  return Object.entries(PREFERENCE_CATEGORY_NAMES)
+    .map(
+      ([code, label]) =>
+        `      <option value="${esc(code)}"${Number(code) === selected ? ' selected' : ''}>${esc(code)} · ${esc(label)}</option>`,
+    )
+    .join('\n');
+}
+
 // ── 表单校验（字符串入参；金额走字符串解析避免浮点尾差）─────────────────
 
 const loginFormSchema = z.object({ password: z.string().min(1, '请输入运营密码。').max(128) });
@@ -442,6 +696,48 @@ const resetPasswordFormSchema = z
 
 const accountIdParamSchema = z.string().min(1, 'accountId 不能为空').max(64);
 
+/** 偏好名单条目：category 走码白名单（domain 层再校验），checkbox 缺省=未勾选。 */
+const preferenceChannelFormSchema = z.object({
+  category: z.string().trim().regex(/^\d{1,3}$/, '行业类目无效。'),
+  name: z.string().trim().min(1, '渠道名不能为空。').max(200, '渠道名最长 200 字。'),
+  domain: z.string().trim().max(200, '域名最长 200 字。'),
+  exact: z.string().optional(),
+});
+
+const preferenceChannelIdParamSchema = z.string().min(1, '条目 id 不能为空').max(64);
+
+/** 行内改行业表单（只允许改 category，名称/资源不可改）。 */
+const preferenceChannelCategoryFormSchema = z.object({
+  category: z.string().trim().regex(/^\d{1,3}$/, '行业类目无效。'),
+});
+
+/** 勾选确认表单：category 走码白名单；pick:* 勾选键单独解析（zod 默认剥未知键）。 */
+const preferencePickFormSchema = z.object({
+  category: z.string().trim().regex(/^\d{1,3}$/, '行业类目无效。'),
+});
+
+/** 勾选键形态：pick:<kind>:<resource_id>，checkbox 勾选值恒为 'on'。 */
+const PREFERENCE_PICK_KEY_PATTERN = /^pick:(media|we-media):(\d{1,10})$/;
+
+function parsePreferencePicks(form: Record<string, string>): { kind: PoolKind; resourceId: number }[] {
+  const picks: { kind: PoolKind; resourceId: number }[] = [];
+  const seen = new Set<string>();
+  for (const [key, value] of Object.entries(form)) {
+    if (!key.startsWith('pick:')) continue;
+    const match = PREFERENCE_PICK_KEY_PATTERN.exec(key);
+    if (!match || value !== 'on') {
+      throw new AppError('validation_error', '勾选项无效。', 400);
+    }
+    const kind = match[1] as PoolKind;
+    const resourceId = Number.parseInt(match[2], 10);
+    const ref = poolRefKey(kind, resourceId);
+    if (seen.has(ref)) continue;
+    seen.add(ref);
+    picks.push({ kind, resourceId });
+  }
+  return picks;
+}
+
 /** 表单解析：application/x-www-form-urlencoded 的纯文本字段（文件字段拒绝）。 */
 async function parseFormBody(c: {
   req: { parseBody(): Promise<Record<string, string | File>> };
@@ -460,6 +756,21 @@ async function parseFormBody(c: {
     fields[key] = value;
   }
   return fields;
+}
+
+/** PRG 回跳目标：指向行业视图（0=默认通用视图）。 */
+function preferenceViewHref(industry: number): string {
+  return industry === 0
+    ? '/admin/preference-channels'
+    : `/admin/preference-channels?industry=${industry}`;
+}
+
+/** 表单携带的当前视图行业（改行业/删除/确认/刷新后跳回原视图）；非法值回落 0。 */
+function parseViewIndustry(form: Record<string, string>): number {
+  const raw = form.viewIndustry;
+  if (raw === undefined || !/^\d{1,3}$/.test(raw)) return 0;
+  const value = Number.parseInt(raw, 10);
+  return value in PREFERENCE_CATEGORY_NAMES ? value : 0;
 }
 
 export function createAdminPageRoutes(deps: BackendDeps, throttle: AdminLoginThrottle) {
@@ -668,6 +979,182 @@ export function createAdminPageRoutes(deps: BackendDeps, throttle: AdminLoginThr
       }
       adminResetAccountPassword(deps, accountId.data, parsed.data.newPassword);
       return c.redirect(backHref, 303);
+    } catch (error) {
+      if (error instanceof AppError) return htmlError(c, error.message, backHref, error.status);
+      throw error;
+    }
+  });
+
+  routes.get('/admin/preference-channels', requireAdminPage, c => {
+    const backHref = '/admin/preference-channels';
+    const searchQuery = (c.req.query('q') ?? '').trim();
+    if (Array.from(searchQuery).length > 100) {
+      return htmlError(c, '搜索关键词最长 100 字。', backHref, 400);
+    }
+    const industryRaw = (c.req.query('industry') ?? '0').trim();
+    if (!/^\d{1,3}$/.test(industryRaw) || !(Number(industryRaw) in PREFERENCE_CATEGORY_NAMES)) {
+      return htmlError(c, '行业类目无效。', backHref, 400);
+    }
+    const industry = Number.parseInt(industryRaw, 10);
+    const rows = listPreferenceChannels(deps.db);
+    const boundRefs = rows
+      .filter(row => row.kind !== '' && row.resource_id !== null)
+      .map(row => ({ kind: row.kind, resourceId: row.resource_id as number }));
+    const snapshotByRef = poolSnapshotByRefs(deps.db, boundRefs);
+    const stats = poolSnapshotStats(deps.db);
+    const searchResults =
+      searchQuery === ''
+        ? null
+        : searchPoolSnapshot(deps.db, searchQuery, POOL_SEARCH_RESULT_LIMIT, industry);
+    // datalist 候选：头部不重名候选 + 当前搜索结果名（覆盖头部之外命中）。
+    const suggestions = listPoolSnapshotNames(deps.db, POOL_SUGGESTION_LIMIT, industry);
+    if (searchResults !== null) {
+      const seen = new Set(suggestions);
+      for (const result of searchResults) {
+        if (result.name === '' || seen.has(result.name)) continue;
+        seen.add(result.name);
+        suggestions.push(result.name);
+      }
+    }
+    return c.html(
+      preferenceChannelsHtml(rows, stats, snapshotByRef, searchQuery, searchResults, suggestions, industry),
+    );
+  });
+
+  routes.post('/admin/ui/preference-channels', requireAdminPage, async c => {
+    const backHref = '/admin/preference-channels';
+    try {
+      const form = await parseFormBody(c);
+      const parsed = preferenceChannelFormSchema.safeParse(form);
+      if (!parsed.success) {
+        return htmlError(c, parsed.error.issues[0]?.message ?? '表单参数无效。', backHref, 400);
+      }
+      addPreferenceChannel(deps, {
+        category: Number.parseInt(parsed.data.category, 10),
+        name: parsed.data.name,
+        domain: parsed.data.domain,
+        exact: parsed.data.exact === 'on',
+      });
+      return c.redirect(backHref, 303);
+    } catch (error) {
+      if (error instanceof AppError) return htmlError(c, error.message, backHref, error.status);
+      throw error;
+    }
+  });
+
+  routes.post('/admin/ui/preference-channels/pick', requireAdminPage, async c => {
+    const backHref = '/admin/preference-channels';
+    try {
+      const form = await parseFormBody(c);
+      const parsed = preferencePickFormSchema.safeParse(form);
+      if (!parsed.success) {
+        return htmlError(c, parsed.error.issues[0]?.message ?? '表单参数无效。', backHref, 400);
+      }
+      const picks = parsePreferencePicks(form);
+      if (picks.length === 0) {
+        return htmlError(c, '请先勾选要添加的渠道。', backHref, 400);
+      }
+      if (picks.length > POOL_SEARCH_RESULT_LIMIT) {
+        return htmlError(c, `一次最多添加 ${POOL_SEARCH_RESULT_LIMIT} 条勾选。`, backHref, 400);
+      }
+      // 勾选引用必须全部落在当前快照内（name/domain 取快照上游权威值，
+      // 不取表单回传）；快照已刷新导致引用失效则整批拒绝零写入。
+      const snapshotByRef = poolSnapshotByRefs(deps.db, picks);
+      const resolved: PreferenceChannelBindingPick[] = [];
+      for (const pick of picks) {
+        const snapshot = snapshotByRef.get(poolRefKey(pick.kind, pick.resourceId));
+        if (!snapshot) {
+          return htmlError(
+            c,
+            '勾选的渠道不在池快照内（快照可能已刷新），请返回重新搜索勾选。',
+            backHref,
+            400,
+          );
+        }
+        resolved.push({
+          kind: pick.kind,
+          resourceId: pick.resourceId,
+          name: snapshot.name,
+          domain: snapshot.domain,
+        });
+      }
+      addPreferenceChannelBindings(deps, {
+        category: Number.parseInt(parsed.data.category, 10),
+        picks: resolved,
+      });
+      return c.redirect(preferenceViewHref(parseViewIndustry(form)), 303);
+    } catch (error) {
+      if (error instanceof AppError) return htmlError(c, error.message, backHref, error.status);
+      throw error;
+    }
+  });
+
+  routes.post('/admin/ui/preference-channels/:id/category', requireAdminPage, async c => {
+    const backHref = '/admin/preference-channels';
+    try {
+      const id = preferenceChannelIdParamSchema.safeParse(c.req.param('id'));
+      if (!id.success) {
+        return htmlError(c, '条目 id 无效。', backHref, 404);
+      }
+      const form = await parseFormBody(c);
+      const parsed = preferenceChannelCategoryFormSchema.safeParse(form);
+      if (!parsed.success) {
+        return htmlError(c, parsed.error.issues[0]?.message ?? '表单参数无效。', backHref, 400);
+      }
+      const newCategory = Number.parseInt(parsed.data.category, 10);
+      updatePreferenceChannelCategory(deps, id.data, newCategory);
+      // 改行业后落到目标行业视图——行出现在哪里，操作者就看到哪里。
+      return c.redirect(preferenceViewHref(newCategory), 303);
+    } catch (error) {
+      if (error instanceof AppError) return htmlError(c, error.message, backHref, error.status);
+      throw error;
+    }
+  });
+
+  routes.post('/admin/ui/preference-channels/snapshot/refresh', requireAdminPage, async c => {
+    const backHref = '/admin/preference-channels';
+    try {
+      const form = await parseFormBody(c);
+      const fetchPage = async (kind: PoolKind, page: number) => {
+        const result = await upstream.listResources(kind, page, POOL_SNAPSHOT_PAGE_SIZE);
+        return result.ok
+          ? {
+              total: result.data.total,
+              items: result.data.items.map(item => ({
+                resourceId: item.id,
+                name: item.name,
+                domain: item.entranceDomain,
+                priceCents: item.priceCents,
+                status: item.status,
+                geoCount: item.geoCount,
+                categoryCode: item.categoryCode,
+              })),
+            }
+          : null;
+      };
+      await refreshDistributionPoolSnapshot(
+        deps,
+        fetchPage,
+        ms => new Promise(resolve => setTimeout(resolve, ms)),
+        POOL_SNAPSHOT_PAGE_DELAY_MS,
+      );
+      return c.redirect(preferenceViewHref(parseViewIndustry(form)), 303);
+    } catch (error) {
+      if (error instanceof AppError) return htmlError(c, error.message, backHref, error.status);
+      throw error;
+    }
+  });
+
+  routes.post('/admin/ui/preference-channels/:id/delete', requireAdminPage, async c => {
+    const backHref = '/admin/preference-channels';
+    try {
+      const id = preferenceChannelIdParamSchema.safeParse(c.req.param('id'));
+      if (!id.success) {
+        return htmlError(c, '条目 id 无效。', backHref, 404);
+      }
+      const form = await parseFormBody(c);
+      deletePreferenceChannel(deps.db, id.data);
+      return c.redirect(preferenceViewHref(parseViewIndustry(form)), 303);
     } catch (error) {
       if (error instanceof AppError) return htmlError(c, error.message, backHref, error.status);
       throw error;

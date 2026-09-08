@@ -112,6 +112,9 @@ describe('migrations', () => {
         '0007_publish_order_spend_limits',
         '0008_permit_last_activity',
         '0009_accounts_admin_note',
+        '0010_preference_channels',
+        '0011_preference_channel_pick_flow',
+        '0012_pool_snapshot_category_geo',
       ]);
       expect(migrateDatabase(db)).toEqual([]);
 
@@ -129,6 +132,8 @@ describe('migrations', () => {
         'provider_usage_records',
         'publish_orders',
         'distribution_resource_cache',
+        'preference_channels',
+        'distribution_pool_snapshot',
         'schema_migrations',
       ]) {
         expect(tables).toContain(expected);

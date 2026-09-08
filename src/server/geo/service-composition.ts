@@ -13,6 +13,7 @@
 import { createHash } from 'node:crypto';
 
 import { ARTICLE_IMAGE_CANDIDATE_INJECTION_LIMIT } from '../../shared/geo/articleGeneration';
+import type { PreferenceChannelEntry } from '../../shared/geo/channelRecall';
 import {
   ArticleGenerationService,
   createArticlePort,
@@ -21,6 +22,7 @@ import { GeoBaselineService, createGeoBaselinePort } from './baseline';
 import {
   createDistributionPlanPort,
   DistributionPlanningService,
+  fetchPreferenceChannelsFromGateway,
 } from './distribution-plan';
 import { createKnowledgeAuthority } from './knowledge-authority';
 import {
@@ -37,6 +39,10 @@ import {
   getXiaojingGeoProviderCapabilitiesForRequest,
 } from './provider-runtime';
 import { createTopicPlanPort, TopicPlanService } from './topic-plan';
+import {
+  resolveXiaojingAccountAccessToken,
+  resolveXiaojingGatewayBaseUrl,
+} from '../xiaojing-native-secret';
 
 export interface GeoServiceIdentity {
   workspaceId: string;
@@ -136,6 +142,22 @@ export function geoServices(
   const billingChannel = () =>
     unbilled ? undefined : getXiaojingGeoBillingPermitChannelForRequest(token);
 
+  // 偏好基础名单拉取（2026-09 运营台下发）：网关地址 + 账号 token（请求级
+  // 优先、env 兜底，与 billingChannel 同口径——Sidecar 长跑后 env token
+  // 过期的教训）齐备才启用；拉取失败由服务内 best-effort 降级。
+  const preferenceBaseFetcher = (
+    requestToken: string | undefined,
+  ): ((
+    codes: readonly number[],
+  ) => Promise<readonly PreferenceChannelEntry[]>) | undefined => {
+    const baseUrl = resolveXiaojingGatewayBaseUrl();
+    const accessToken =
+      requestToken?.trim() || resolveXiaojingAccountAccessToken();
+    if (!baseUrl || !accessToken) return undefined;
+    return (codes) =>
+      fetchPreferenceChannelsFromGateway({ baseUrl, accessToken, codes });
+  };
+
   let questionPool: QuestionPoolService | undefined;
   let topicPlan: TopicPlanService | undefined;
   let article: ArticleGenerationService | undefined;
@@ -215,6 +237,8 @@ export function geoServices(
         capabilities.keywordSearch,
         undefined,
         billingChannel(),
+        undefined,
+        preferenceBaseFetcher(token),
       );
       if (!unbilled) distributionRuntime = { key, service: distribution };
       return distribution;
