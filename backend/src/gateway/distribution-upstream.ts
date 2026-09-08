@@ -47,6 +47,22 @@ export interface UpstreamResourceSnapshot {
   status: number | null;
 }
 
+/** 资源列表条目（池快照拉取用）：entranceDomain 取入口链接主机名，缺省空串。 */
+export interface UpstreamPoolResource {
+  id: number;
+  name: string;
+  entranceDomain: string;
+  priceCents: number;
+  status: number | null;
+  geoCount: number;
+  /**
+   * 结构化类目码，按形态解释（同码不同义）：媒体 = channel_type（频道类型
+   * 附录），自媒体 = industry_category（行业分类附录 1-25）；上游缺省/异形
+   * 为 null（行业过滤只认结构化码，null 不参与垂类匹配）。
+   */
+  categoryCode: number | null;
+}
+
 export type UpstreamCallResult<T> =
   | { ok: true; data: T; text: string }
   /**
@@ -60,6 +76,17 @@ interface UpstreamEnvelope {
   code?: number;
   message?: string;
   data?: unknown;
+}
+
+/** entrance_link（string|null）→ 主机名；非 URL/空值返回空串（快照 domain 列口径）。 */
+function entranceHostname(link: unknown): string {
+  if (typeof link !== 'string' || link.trim() === '') return '';
+  try {
+    const host = new URL(link).hostname;
+    return Array.from(host).length > 200 ? '' : host;
+  } catch {
+    return '';
+  }
 }
 
 function kindPath(kind: PublishOrderKind): string {
@@ -248,5 +275,52 @@ export class DistributionUpstream {
       },
       text,
     };
+  }
+
+  /**
+   * 资源分页列表（池快照全量刷新，偏好名单匹配挑选流程）：GET
+   * /media|we-media/resource 仅 page/size（size ≤ 200）。形态不符（total
+   * 非数、items 非列表）归一为 502 fail——刷新要的是全量可信数据，半坏
+   * 页面宁可整次失败重来（调用侧零写入）。价格缺失记 0（快照价格只作
+   * 展示对比，计价权威仍走 queryResource 的缓存）。
+   */
+  async listResources(
+    kind: PublishOrderKind,
+    page: number,
+    size: number,
+  ): Promise<UpstreamCallResult<{ total: number; items: UpstreamPoolResource[] }>> {
+    const { status, envelope, text } = await this.call(
+      `${kindPath(kind)}/resource`,
+      this.signedFlat({ page, size }),
+    );
+    if (status < 200 || status >= 300 || envelope.code !== 200) {
+      return DistributionUpstream.fail(status, text);
+    }
+    const data = envelope.data as Record<string, unknown> | null | undefined;
+    const total = data?.total;
+    if (typeof total !== 'number' || !Number.isInteger(total) || total < 0) {
+      return DistributionUpstream.fail(status, text);
+    }
+    const rawItems = data?.items;
+    if (!Array.isArray(rawItems)) {
+      return DistributionUpstream.fail(status, text);
+    }
+    const items: UpstreamPoolResource[] = [];
+    for (const raw of rawItems) {
+      const item = raw as Record<string, unknown>;
+      if (typeof item.id !== 'number' || !Number.isInteger(item.id) || item.id <= 0) continue;
+      const rawCategory = kind === 'media' ? item.channel_type : item.industry_category;
+      items.push({
+        id: item.id,
+        name: typeof item.name === 'string' ? item.name : '',
+        entranceDomain: entranceHostname(item.entrance_link),
+        priceCents: priceToCents(item.price as string | number | null | undefined) ?? 0,
+        status: typeof item.status === 'number' ? item.status : null,
+        geoCount: Array.isArray(item.geo_platforms) ? item.geo_platforms.length : 0,
+        categoryCode:
+          typeof rawCategory === 'number' && Number.isInteger(rawCategory) ? rawCategory : null,
+      });
+    }
+    return { ok: true, data: { total, items }, text };
   }
 }

@@ -412,7 +412,7 @@ function RecallBreakdown({ plan }: { plan: DistributionPlanProjection }) {
               {item.path === "preference" &&
                 (plan.preferenceChannelNames?.length ?? 0) > 0 && (
                   <span className="ml-1 text-xs font-normal text-[var(--ink-subtle)]">
-                    （内置验证名单）
+                    （运营配置名单）
                   </span>
                 )}
             </span>

@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  DEFAULT_PREFERENCE_CHANNELS,
   accountKeyFromUrl,
   accountNameFromTitle,
   accountNameMatchesChannel,
@@ -142,8 +141,16 @@ describe("channel recall ported from js_ai", () => {
     expect(fuzzyMatchScore(netease, "南郡新闻（网易号）")).toBe(0.5);
   });
 
-  it("resolves the preference list as (defaults − excluded) + additions", () => {
-    const resolved = resolvePreferenceChannels({
+  it("resolves the preference list as (base − excluded) + additions", () => {
+    // 基础名单现由运营台按行业下发（backend preference_channels），合成
+    // 语义不变：(基础 − 排除) + 用户增补，名称/注册域名去重。
+    const base = [
+      { name: "蓝色河畔（GEO排名）", exact: true },
+      { name: "济南时报（官方头条号）", exact: true },
+      { name: "咸阳新闻网（GEO排名）", exact: true },
+      { name: "咸宁网主站", exact: true },
+    ];
+    const resolved = resolvePreferenceChannels(base, {
       excludedPreferenceChannels: ["蓝色河畔（GEO排名）"],
       additionalPreferenceChannels: [
         { name: "用户手输渠道", domain: "custom.example.com" },
@@ -151,12 +158,10 @@ describe("channel recall ported from js_ai", () => {
     });
     const names = resolved.map((entry) => entry.name);
     expect(names).not.toContain("蓝色河畔（GEO排名）");
-    // 2026-08-27 用户裁决：内置名单恢复 js_ai 原始十项（用户预置名单），
-    // 其中未在候选快照里出现的名字由下次计划运行的偏好路逐名验证。
     expect(names).toContain("济南时报（官方头条号）");
     expect(names).toContain("咸阳新闻网（GEO排名）");
     expect(names).toContain("咸宁网主站");
-    expect(names).toHaveLength(10);
+    expect(names).toHaveLength(4);
     expect(names).toContain("用户手输渠道");
     // 全角/半角括号归一后精确相等。
     expect(
@@ -195,14 +200,13 @@ describe("channel recall ported from js_ai", () => {
     ).toBe(true);
   });
 
-  it("ships the same built-in preference baseline as js_ai", () => {
-    expect(DEFAULT_PREFERENCE_CHANNELS).toHaveLength(10);
-    expect(
-      DEFAULT_PREFERENCE_CHANNELS.every((entry) => entry.exact === true),
-    ).toBe(true);
+  it("keeps the built-in baseline semantics now served by the ops console", () => {
+    // 内置十项已种子化进 backend 0010_preference_channels（全部通用、
+    // 精确匹配）；共享层不再持有名单本身，仅保留归一与匹配语义。
     expect(normalizeChannelName("南郡新闻（官方头条号）")).toBe(
       normalizeChannelName("南郡新闻(官方头条号)"),
     );
+    expect(resolvePreferenceChannels([])).toEqual([]);
   });
 
   it("parses global recall output with the registered-domain gate", () => {

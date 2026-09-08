@@ -4,7 +4,8 @@
  *
  * 1. 名称/域名匹配器——strictMatchScore（0/0.8/1.0，纠链级）与
  *    fuzzyMatchScore（0–1，≥0.4 视为疑似命中）；
- * 2. 偏好名单——内置 exact 名单 + 用户增删 overlay，domain-first + 名称回落；
+ * 2. 偏好名单——运营台按行业下发的基础名单 + 用户增删 overlay 合成，
+ *    domain-first + 名称回落；
  * 3. 全局单次召回（主动路）——topics+行业+衍生关键词 → 渠道+主题编号的
  *    prompt 构造、容错解析与编号收敛。
  *
@@ -1012,34 +1013,19 @@ export function normalizeChannelName(value: string): string {
     .replace(/\s+/g, " ");
 }
 
-// ── 偏好名单（js_ai preferenceChannels，名单与语义逐条一致） ───────────────
+// ── 偏好名单（js_ai preferenceChannels 契约；基础名单由运营台按行业下发）──
 
 /**
- * 内置精选名单：产品侧人工策展的「常在召回」渠道，精确名匹配。
- * 2026-08-27 用户裁决：恢复 js_ai 原始十项（用户预置名单）；候选快照里
- * 未见的名字（咸宁网主站等）是否在全池存在，由下一次计划运行的偏好路
- * 逐名命中结果验证（右侧面板偏好召回块 ✓=同名资源在池且价内）。
- * 2026-08-28 用户裁决修正：「安庆新闻网」是名单录错的渠道名（全池从未
- * 存在；池内存活的是「安庆都市网（可发GEO）」¥8，status=2）——按用户
- * 指认改为后者，名单 10 项全部池内存活。
+ * 生效偏好清单 = (基础名单 − 排除) + 用户增补，按名称与注册域名去重。
+ * 基础名单自 2026-09 起由运营台云端下发（backend preference_channels 表，
+ * GET /config/preference-channels?codes=… 按官方行业分类码过滤，0=通用
+ * 兜底）——桌面端在分发计划发现时 best-effort 拉取后传入；无网关/拉取
+ * 失败 = 空基础名单，偏好路本轮无命中（与被动/主动路 best-effort 降级
+ * 同哲学）。用户 overlay（本地 geo_channel_preferences）继续在其上叠加。
  */
-export const DEFAULT_PREFERENCE_CHANNELS: ReadonlyArray<PreferenceChannelEntry> =
-  [
-    { name: "蓝色河畔（GEO排名）", exact: true },
-    { name: "红安网（GEO排名）", exact: true },
-    { name: "咸宁网主站", exact: true },
-    { name: "咸阳新闻网（GEO排名）", exact: true },
-    { name: "盐城网", exact: true },
-    { name: "南郡新闻（官方头条号）", exact: true },
-    { name: "济南时报（官方头条号）", exact: true },
-    { name: "安庆都市网（可发GEO）", exact: true },
-    { name: "博客园（GEO 优化首选，秒发带联系方式）", exact: true },
-    { name: "列举网（AI包收录）", exact: true },
-  ];
-
-/** 生效偏好清单 = (内置 − 排除) + 用户增补，按名称与注册域名去重。 */
 export function resolvePreferenceChannels(
-  settings: PreferenceChannelSettings | undefined,
+  base: readonly PreferenceChannelEntry[],
+  settings?: PreferenceChannelSettings,
 ): PreferenceChannelEntry[] {
   const excluded = new Set(
     (settings?.excludedPreferenceChannels ?? []).map((entry) =>
@@ -1051,9 +1037,7 @@ export function resolvePreferenceChannels(
     (entry.domain !== undefined &&
       excluded.has(entry.domain.trim().toLowerCase()));
 
-  const kept = DEFAULT_PREFERENCE_CHANNELS.filter(
-    (entry) => !isExcluded(entry),
-  );
+  const kept = base.filter((entry) => !isExcluded(entry));
   const additional = (settings?.additionalPreferenceChannels ?? [])
     .filter(
       (entry) =>
