@@ -278,3 +278,31 @@ backend 下发前去重逐条一致的合成（绑定行按 (kind,resourceId) �
 清单内，本轮未触碰——id 绑定语义以本文档与 channelRecall.ts 注释为准。
 验证：桌面全量（unit/dom/integration 全绿）＋typecheck＋lint 链全绿；
 backend 149/149。
+
+### P3 实施记录（2026-09-08 晚，已并轨 main）
+
+三项全量落地，均用现有列无新迁移：
+
+1. **校验名单按钮（P3.1）**：`DistributionUpstream.queryResources` 批查
+   （上游 ≤200 id/次；价格缺失记 0——展示口径，计价权威仍走单查缓存）；
+   域层 `verifyPoolSnapshotRefs` 去重分批、全部成功才事务回写
+   name/price_cents/status、上游除名删行、失败 502 零写入；路由
+   `POST /admin/ui/preference-channels/snapshot/verify`（PRG 回原行业
+   视图），按钮在「资源池快照」卡。fetched_at 不动——「池快照：时间」
+   语义只锚全量刷新。
+2. **回调增量刷新（P3.2）**：`/callbacks/distribution` event=1 在定价缓存
+   刷新后顺带回写快照行（`applyPoolSnapshotRefUpdate`）：上游仍有 →
+   UPDATE 已存在行；上游查无=下架 → DELETE 该行；**新上架资源不插桩**
+   （/resource/query 无 domain/类目/平台列，半空行会污染搜索候选，等
+   下次全量刷新收录）。
+3. **定时刷新（P3.3，用户裁决口径）**：进程内定时（`distribution-pool-
+   scheduler.ts`，不引入 cron、无新鉴权面）——每日 04:00（服务器时区）
+   ＋启动时快照为空/超 24h 补刷；复用全量刷新编排（失败零写入只打
+   `[pool-snapshot]` 脱敏日志）；与手动刷新按钮共享进程内互斥（对方在
+   跑 → 409 忙返回，绝不并发重入）；定时器 unref 不阻塞关服。手动刷新
+   路由的 fetchPage 构造随迁调度模块（单一出口）。
+
+验证：backend typecheck + 156/156 全绿；根 lint 链全绿。测试新增：批查
+回写/除名删除/未绑定行不受影响/失败零写入、回调刷新/不插桩/删行、
+04:00 锚点/过期判定纯函数、启动补刷/新鲜跳过/每日排班重排、并发手动
+刷新 409。

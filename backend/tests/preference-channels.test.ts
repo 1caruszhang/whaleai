@@ -3,6 +3,12 @@ import type { Hono } from 'hono';
 import type { BackendEnv } from '../src/http/app';
 import { refreshDistributionPoolSnapshot } from '../src/domain/distribution-pool-snapshot';
 import {
+  isSnapshotStale,
+  nextDailyRefreshAt,
+  startDistributionPoolScheduler,
+  type PoolSchedulerTimers,
+} from '../src/domain/distribution-pool-scheduler';
+import {
   getJson,
   provisionLoggedInAccount,
   startTestBackend,
@@ -1093,5 +1099,159 @@ describe('pool snapshot refresh guard (runaway upstream)', () => {
     expect(
       tb.db.get<{ count: number }>('SELECT COUNT(*) AS count FROM distribution_pool_snapshot', [])!.count,
     ).toBe(0);
+  });
+});
+
+describe('pool snapshot scheduler (P3.3, in-process daily refresh)', () => {
+  let tb: TestBackend | undefined;
+
+  afterEach(async () => {
+    await tb?.cleanup();
+  });
+
+  async function snapshotCount(): Promise<number> {
+    return tb!.db.get<{ count: number }>(
+      'SELECT COUNT(*) AS count FROM distribution_pool_snapshot',
+      [],
+    )!.count;
+  }
+
+  /** 轮询等待异步补刷落库（启动补刷不经请求返回值，只能观测库）。 */
+  async function waitUntil(
+    probe: () => Promise<boolean>,
+    timeoutMs = 2_000,
+  ): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      if (await probe()) return;
+      if (Date.now() > deadline) throw new Error('waitUntil timeout');
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+  }
+
+  /** 手动可控定时器：记录排班延迟、由测试显式触发。 */
+  function manualTimers(): {
+    timers: PoolSchedulerTimers;
+    fire: () => void;
+    scheduledDelay: () => number;
+  } {
+    let callback: (() => void) | undefined;
+    let delay = Number.NaN;
+    return {
+      timers: {
+        schedule: (cb: () => void, ms: number) => {
+          callback = cb;
+          delay = ms;
+          return {
+            clear: () => {
+              callback = undefined;
+            },
+          };
+        },
+      },
+      fire: () => callback?.(),
+      scheduledDelay: () => delay,
+    };
+  }
+
+  it('anchors the daily run at 04:00 local time and rolls over once passed', () => {
+    const localAt = (hour: number): Date => {
+      const date = new Date();
+      date.setHours(hour, 0, 0, 0);
+      return date;
+    };
+    const day = 24 * 3_600_000;
+    // 03:00 → 今日 04:00；恰 04:00 与 05:00 → 明日 04:00（任何时区皆成立）。
+    expect(nextDailyRefreshAt(localAt(3))).toBe(localAt(4).getTime());
+    expect(nextDailyRefreshAt(localAt(4))).toBe(localAt(4).getTime() + day);
+    expect(nextDailyRefreshAt(localAt(5))).toBe(localAt(4).getTime() + day);
+  });
+
+  it('treats an empty or over-24h snapshot as stale', () => {
+    const now = Date.parse('2026-09-08T12:00:00.000Z');
+    expect(isSnapshotStale({ rows: 0, fetchedAt: null }, now)).toBe(true);
+    expect(isSnapshotStale({ rows: 24_612, fetchedAt: null }, now)).toBe(true);
+    expect(
+      isSnapshotStale({ rows: 10, fetchedAt: '2026-09-08T11:00:00.000Z' }, now),
+    ).toBe(false);
+    expect(
+      isSnapshotStale({ rows: 10, fetchedAt: '2026-09-07T11:59:00.000Z' }, now),
+    ).toBe(true);
+  });
+
+  it('catches up a stale snapshot at startup, schedules the daily timer and skips a fresh one', async () => {
+    const { fetch, paths } = fakePoolUpstream({
+      media: [poolItem(1, '媒体一号')],
+      weMedia: [poolItem(2, '自媒体一号')],
+    });
+    tb = await startTestBackend({
+      fetch,
+      config: { adminLoginThrottleUnitMs: 1 },
+      initialNowMs: PICK_FIXED_MS,
+    });
+    let now = PICK_FIXED_MS;
+    const { timers, fire, scheduledDelay } = manualTimers();
+    // 空快照 = 过期：启动即补刷（异步，失败只打日志——这里成功落库）。
+    const scheduler = startDistributionPoolScheduler(
+      { db: tb.db, config: tb.config, now: () => now, fetchImpl: fetch },
+      timers,
+    );
+    await waitUntil(async () => (await snapshotCount()) === 2);
+    expect(paths.filter(path => path.includes('/resource?'))).toHaveLength(2);
+    // 每日排班：延迟 = 下一个本地 04:00 与当前时刻之差；触发后重排下一班。
+    expect(scheduledDelay()).toBe(nextDailyRefreshAt(new Date(now)) - now);
+    paths.length = 0;
+    fire();
+    await waitUntil(async () =>
+      paths.filter(path => path.includes('/resource?')).length >= 2,
+    );
+    expect(scheduledDelay()).toBe(nextDailyRefreshAt(new Date(now)) - now);
+    // 快照新鲜（刚补刷过）：重启调度器不再触发立即补刷。
+    paths.length = 0;
+    scheduler.stop();
+    now += 3_600_000;
+    const again = startDistributionPoolScheduler(
+      { db: tb.db, config: tb.config, now: () => now, fetchImpl: fetch },
+      manualTimers().timers,
+    );
+    await new Promise(resolve => setTimeout(resolve, 50));
+    expect(paths).toHaveLength(0);
+    again.stop();
+  });
+
+  it('answers a concurrent manual refresh with a busy 409 instead of re-entering', async () => {
+    // 第一笔手动刷新卡在上游（可控闸门）；第二笔立即收到 409 忙信号，
+    // 释放后第一笔正常 303 落库——定时/手动共享同一互斥。
+    const base = fakePoolUpstream({
+      media: [poolItem(1, '媒体一号')],
+      weMedia: [poolItem(2, '自媒体一号')],
+    });
+    let gateFirst = true;
+    let release: () => void = () => {};
+    const gate = new Promise<void>(resolve => {
+      release = resolve;
+    });
+    const fetch = (async (input: unknown) => {
+      if (gateFirst) {
+        gateFirst = false;
+        await gate;
+      }
+      return await base.fetch(input as Parameters<typeof base.fetch>[0]);
+    }) as typeof globalThis.fetch;
+    tb = await startTestBackend({
+      fetch,
+      config: { adminLoginThrottleUnitMs: 1 },
+      initialNowMs: PICK_FIXED_MS,
+    });
+    const cookie = await pageLogin(tb.app);
+    const slow = postForm(tb.app, '/admin/ui/preference-channels/snapshot/refresh', {}, cookie);
+    await new Promise(resolve => setTimeout(resolve, 30));
+    const busy = await postForm(tb.app, '/admin/ui/preference-channels/snapshot/refresh', {}, cookie);
+    expect(busy.status).toBe(409);
+    expect((await busy.text()).includes('池快照刷新正在进行中')).toBe(true);
+    release();
+    const done = await slow;
+    expect(done.status).toBe(303);
+    expect(await snapshotCount()).toBe(2);
   });
 });
