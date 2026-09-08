@@ -266,3 +266,15 @@ P3 完成后：三项均用现有列**无需新迁移**；分块方案部署生�
 传 params 数组；运营台零 JS（行业下拉 onchange 唯一例外）；非测试注释
 禁用「同源」一词（票 #41）；测试模式 startTestBackend/app.request + 查库
 断言零写入；工作区若有他票在途文件（以 git status 为准）不碰。
+
+### P2 实施记录（2026-09-08 晚，已并轨 main）
+
+按交接节任务清单全量落地。除清单外两处随动：`resolvePreferenceChannels`
+（shared channelRecall.ts）原合并循环只透传 name/exact/domain——绑定字段
+会被剥掉且同名绑定行（媒体+自媒体同名号）会被全名去重吞掉，已改为与
+backend 下发前去重逐条一致的合成（绑定行按 (kind,resourceId) 引用去重、
+互不去重、同核心名名称行让位）；`pool-industry-match.ts` 清一个 P1 遗留
+未使用变量（lint 链闸）。契约注释（portContract.ts）在票 #45 在途文件
+清单内，本轮未触碰——id 绑定语义以本文档与 channelRecall.ts 注释为准。
+验证：桌面全量（unit/dom/integration 全绿）＋typecheck＋lint 链全绿；
+backend 149/149。

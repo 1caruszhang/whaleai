@@ -387,9 +387,11 @@ const PREFERENCE_LIST_MAX = 100;
 /**
  * 严格解析 /config/preference-channels 响应（反 TypeError 炸计划发现）：
  * 逐条校验——名称字符串且 1-200 字、domain 缺省或非空字符串、exact 必须
- * 布尔；顶层或任一条目形状不符即整体作废（空数组），绝不把半坏数据喂进
- * 偏好匹配（响应来自自家 backend 的固定契约，半坏即契约漂移）。超过
- * 100 条在第 100 条截断（名单规模护栏，不算形状违规）。
+ * 布尔；绑定字段 kind/resourceId 成对出现（kind 白名单 media|we-media、
+ * resourceId 正整数），单字段出现即契约漂移；顶层或任一条目形状不符即整体
+ * 作废（空数组），绝不把半坏数据喂进偏好匹配（响应来自自家 backend 的固定
+ * 契约，半坏即契约漂移）。超过 100 条在第 100 条截断（名单规模护栏，不算
+ * 形状违规）。
  */
 export function parsePreferenceChannelsResponse(
   payload: unknown,
@@ -413,12 +415,32 @@ export function parsePreferenceChannelsResponse(
       return [];
     }
     if (typeof record.exact !== "boolean") return [];
+    const hasKind = record.kind !== undefined;
+    const hasResourceId = record.resourceId !== undefined;
+    if (hasKind !== hasResourceId) return [];
+    let kind: "media" | "we-media" | undefined;
+    let resourceId: number | undefined;
+    if (hasKind) {
+      if (record.kind !== "media" && record.kind !== "we-media") return [];
+      if (
+        typeof record.resourceId !== "number" ||
+        !Number.isInteger(record.resourceId) ||
+        record.resourceId <= 0
+      ) {
+        return [];
+      }
+      kind = record.kind;
+      resourceId = record.resourceId;
+    }
     const domain =
       typeof record.domain === "string" ? record.domain.trim() : undefined;
     entries.push({
       name,
       ...(domain ? { domain } : {}),
       exact: record.exact,
+      ...(kind !== undefined && resourceId !== undefined
+        ? { kind, resourceId }
+        : {}),
     });
     if (entries.length >= PREFERENCE_LIST_MAX) break;
   }
