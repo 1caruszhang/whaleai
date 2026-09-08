@@ -282,6 +282,40 @@ export class DistributionUpstream {
   }
 
   /**
+   * 资源批量查询（池快照校验/回调增量刷新，偏好名单 P3）：/resource/query
+   * 按 id 列表批查（上游上限 200/次，调用方负责分批）；未收录 id 上游不
+   * 返回条目。与 queryResource 单查的差别：价格缺失记 0 而非失败——快照
+   * 价格只作展示对比（与 listResources 同口径），下单计价权威仍走单查缓存。
+   */
+  async queryResources(
+    kind: PublishOrderKind,
+    resourceIds: readonly number[],
+  ): Promise<UpstreamCallResult<UpstreamResourceSnapshot[]>> {
+    if (resourceIds.length === 0) {
+      return { ok: true, data: [], text: '' };
+    }
+    const { status, envelope, text } = await this.call(
+      `${kindPath(kind)}/resource/query`,
+      this.signedList({ id: resourceIds.map(String) }),
+    );
+    if (status < 200 || status >= 300 || envelope.code !== 200) {
+      return DistributionUpstream.fail(status, text);
+    }
+    const items = Array.isArray(envelope.data) ? (envelope.data as Record<string, unknown>[]) : [];
+    const snapshots: UpstreamResourceSnapshot[] = [];
+    for (const item of items) {
+      if (typeof item.id !== 'number' || !Number.isInteger(item.id) || item.id <= 0) continue;
+      snapshots.push({
+        id: item.id,
+        name: typeof item.name === 'string' ? item.name : '',
+        priceCents: priceToCents(item.price as string | number | null | undefined) ?? 0,
+        status: typeof item.status === 'number' ? item.status : null,
+      });
+    }
+    return { ok: true, data: snapshots, text };
+  }
+
+  /**
    * 资源分页列表（池快照全量刷新，偏好名单匹配挑选流程）：GET
    * /media|we-media/resource 仅 page/size（size ≤ 200）。形态不符（total
    * 非数、items 非列表）归一为 502 fail——刷新要的是全量可信数据，半坏

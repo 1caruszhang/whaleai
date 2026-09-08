@@ -298,3 +298,97 @@ export async function refreshDistributionPoolSnapshot(
   }
   return { fetchedAtIso, counts };
 }
+
+/** 校验/回调回写的单行刷新载荷（/resource/query 的解析投影）。 */
+export interface PoolRefWriteback {
+  resourceId: number;
+  name: string;
+  priceCents: number;
+  status: number | null;
+}
+
+/**
+ * 单个 (kind,id) 的池快照行回写（回调增量刷新，P3.2）：上游仍有此资源则
+ * 刷新 name/price_cents/status——只 UPDATE 已存在的行，行不存在（新上架
+ * 资源）不插桩：/resource/query 不含 domain/类目/平台列，插出来的半空行会
+ * 混进搜索候选，新资源等下一次全量刷新收录。update=null 表示上游查无此
+ * 资源=下架，删除该快照行（名单页「快照缺失」展示、pick 校验天然拒绝
+ * 失效引用）。fetched_at 不动——行溯源时刻仍是全量刷新时刻，页面
+ * 「池快照：时间」语义不被增量回写扰动。
+ */
+export function applyPoolSnapshotRefUpdate(
+  db: SqlClient,
+  kind: PoolKind,
+  resourceId: number,
+  update: PoolRefWriteback | null,
+): void {
+  if (update === null) {
+    db.run(
+      'DELETE FROM distribution_pool_snapshot WHERE kind = ? AND resource_id = ?',
+      [kind, resourceId],
+    );
+    return;
+  }
+  db.run(
+    'UPDATE distribution_pool_snapshot SET name = ?, price_cents = ?, status = ? WHERE kind = ? AND resource_id = ?',
+    [update.name, update.priceCents, update.status, kind, resourceId],
+  );
+}
+
+/**
+ * 校验名单（P3.1，管理页「校验名单」按钮）：全表绑定行 (kind,id) 分批
+ * 200/批回源批查，回写快照行 name/price_cents/status；上游查无此资源=
+ * 下架，删除该快照行（与回调增量刷新同一语义）。两类所有批全部成功才
+ * 落库（任一批失败整次失败零写入，旧快照保持——与全量刷新同一纪律）；
+ * fetched_at 不动（见 applyPoolSnapshotRefUpdate）。返回刷新/下架行数供
+ * 调用方观测。
+ */
+export async function verifyPoolSnapshotRefs(
+  deps: BackendDeps,
+  refs: ReadonlyArray<{ kind: PoolKind; resourceId: number }>,
+  fetchBatch: (
+    kind: PoolKind,
+    ids: readonly number[],
+  ) => Promise<PoolRefWriteback[] | null>,
+): Promise<{ refreshed: number; delisted: number }> {
+  const unique = new Map<string, { kind: PoolKind; resourceId: number }>();
+  for (const ref of refs) {
+    if (!Number.isInteger(ref.resourceId) || ref.resourceId <= 0) continue;
+    const key = poolRefKey(ref.kind, ref.resourceId);
+    if (!unique.has(key)) unique.set(key, ref);
+  }
+  const byKind: Record<PoolKind, number[]> = { media: [], 'we-media': [] };
+  for (const ref of unique.values()) byKind[ref.kind].push(ref.resourceId);
+
+  const updates: Array<{ kind: PoolKind; item: PoolRefWriteback }> = [];
+  const delisted: Array<{ kind: PoolKind; resourceId: number }> = [];
+  const batchSize = 200;
+  for (const kind of POOL_KINDS) {
+    const ids = byKind[kind];
+    for (let start = 0; start < ids.length; start += batchSize) {
+      const batch = ids.slice(start, start + batchSize);
+      const result = await fetchBatch(kind, batch);
+      if (result === null) {
+        throw new AppError(
+          'upstream_unavailable',
+          `上游资源批查失败（${kind}，待校验 ${ids.length} 条），池快照未更新。`,
+          502,
+        );
+      }
+      const found = new Set(result.map(item => item.resourceId));
+      for (const item of result) updates.push({ kind, item });
+      for (const id of batch) {
+        if (!found.has(id)) delisted.push({ kind, resourceId: id });
+      }
+    }
+  }
+  deps.db.transaction(() => {
+    for (const { kind, item } of updates) {
+      applyPoolSnapshotRefUpdate(deps.db, kind, item.resourceId, item);
+    }
+    for (const ref of delisted) {
+      applyPoolSnapshotRefUpdate(deps.db, ref.kind, ref.resourceId, null);
+    }
+  });
+  return { refreshed: updates.length, delisted: delisted.length };
+}

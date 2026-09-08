@@ -294,8 +294,18 @@ function fakePoolUpstream(pool: {
   const paths: string[] = [];
   const fetch = async (input: unknown): Promise<Response> => {
     const url = new URL(typeof input === 'string' ? input : String((input as Request).url));
-    paths.push(`${url.pathname}?page=${url.searchParams.get('page')}&size=${url.searchParams.get('size')}`);
     if (pool.failNow?.()) return new Response('upstream boom', { status: 500 });
+    // /resource/query 批查（校验名单）：按 id[] 过滤返回 {id,name,price,status}。
+    if (url.pathname === '/api/media/resource/query' || url.pathname === '/api/we-media/resource/query') {
+      paths.push(url.pathname);
+      const items = url.pathname === '/api/media/resource/query' ? pool.media : pool.weMedia;
+      const ids = url.searchParams.getAll('id[]').map(value => Number.parseInt(value, 10));
+      const found = items
+        .filter(item => ids.includes(item.id))
+        .map(item => ({ id: item.id, name: item.name, price: item.price, status: item.status }));
+      return Response.json({ code: 200, data: found });
+    }
+    paths.push(`${url.pathname}?page=${url.searchParams.get('page')}&size=${url.searchParams.get('size')}`);
     const items = url.pathname === '/api/media/resource'
       ? pool.media
       : url.pathname === '/api/we-media/resource'
@@ -419,6 +429,90 @@ describe('preference channel pick flow (pool snapshot + id binding)', () => {
     expect(
       tb.db.get<{ fetched_at: string }>('SELECT fetched_at FROM distribution_pool_snapshot WHERE resource_id = 1', []),
     ).toMatchObject({ fetched_at: '2026-09-08T03:04:05.000Z' });
+  });
+
+  it('verifies bound rows via batch query: rewrite name/price/status, delist removed, PRG back', async () => {
+    // 绑定 101（媒体）与 202（自媒体）；未绑定的 102 不参与校验（批查 id
+    // 只含名单绑定行）。保留数组引用：校验前直接改伪造上游，模拟挂牌漂移
+    // 与除名。
+    const media = [
+      poolItem(101, '蓝色河畔', { price: 45, channel_type: 18, geo_platforms: [] }),
+      poolItem(102, '旁观者网', { price: 30, geo_platforms: [] }),
+    ];
+    const weMedia = [poolItem(202, '美食号', { price: '8.00', industry_category: 13, geo_platforms: [] })];
+    const { paths } = await startWithPool({ media, weMedia });
+    const cookie = await pageLogin(tb.app);
+    const pick = await postForm(tb.app, '/admin/ui/preference-channels/pick', {
+      category: '13',
+      viewIndustry: '13',
+      'pick:media:101': 'on',
+      'pick:we-media:202': 'on',
+    }, cookie);
+    expect(pick.status).toBe(303);
+    paths.length = 0;
+    // 上游漂移：101 改名/涨价/状态 3（未上架）；202 除名（批查不返回）。
+    media[0] = { ...media[0]!, name: '蓝色河畔（新挂牌）', price: 99, status: 3 };
+    weMedia.splice(0, 1);
+
+    const verify = await postForm(
+      tb.app,
+      '/admin/ui/preference-channels/snapshot/verify',
+      { viewIndustry: '13' },
+      cookie,
+    );
+    expect(verify.status).toBe(303);
+    expect(verify.headers.get('location')).toBe('/admin/preference-channels?industry=13');
+    // 批查只打名单绑定行（200/批；名称条目与未绑定快照行不回源）。
+    expect(paths).toEqual(['/api/media/resource/query', '/api/we-media/resource/query']);
+    // 101 回写名称/价格/状态；fetched_at 不动（行溯源仍是全量刷新时刻）。
+    expect(
+      tb.db.get<{ name: string; price_cents: number; status: number; fetched_at: string }>(
+        "SELECT name, price_cents, status, fetched_at FROM distribution_pool_snapshot WHERE kind = 'media' AND resource_id = 101",
+        [],
+      ),
+    ).toMatchObject({ name: '蓝色河畔（新挂牌）', price_cents: 9900, status: 3, fetched_at: '2026-09-08T03:04:05.000Z' });
+    // 202 上游除名 = 下架：快照行删除；未绑定的 102 与名单行均不受影响。
+    expect(
+      tb.db.get<{ name: string }>(
+        "SELECT name FROM distribution_pool_snapshot WHERE kind = 'we-media' AND resource_id = 202",
+        [],
+      ),
+    ).toBeUndefined();
+    expect(
+      tb.db.get<{ name: string }>('SELECT name FROM distribution_pool_snapshot WHERE resource_id = 102', []),
+    ).toMatchObject({ name: '旁观者网' });
+    expect(
+      tb.db.get<{ resource_id: number }>('SELECT resource_id FROM preference_channels WHERE resource_id = 202', []),
+    ).toMatchObject({ resource_id: 202 });
+    // 页面口径：101 状态 3 显示「已下架」，202 绑定行显示「快照缺失」。
+    const html = await (
+      await getHtml(tb.app, '/admin/preference-channels?industry=13', cookie)
+    ).text();
+    expect(html).toContain('已下架');
+    expect(html).toContain('快照缺失');
+  });
+
+  it('keeps the snapshot untouched when the verify batch query fails', async () => {
+    const media = [poolItem(101, '蓝色河畔', { channel_type: 18, geo_platforms: [] })];
+    let fail = false;
+    await startWithPool({ media, weMedia: [], failNow: () => fail });
+    const cookie = await pageLogin(tb.app);
+    const pick = await postForm(tb.app, '/admin/ui/preference-channels/pick', {
+      category: '13',
+      'pick:media:101': 'on',
+    }, cookie);
+    expect(pick.status).toBe(303);
+    media[0] = { ...media[0]!, name: '改名后的蓝色河畔' };
+    fail = true;
+    const broken = await postForm(tb.app, '/admin/ui/preference-channels/snapshot/verify', {}, cookie);
+    expect(broken.status).toBe(502);
+    // 零写入：行仍在且保持全量刷新时的名称。
+    expect(
+      tb.db.get<{ name: string }>(
+        "SELECT name FROM distribution_pool_snapshot WHERE kind = 'media' AND resource_id = 101",
+        [],
+      ),
+    ).toMatchObject({ name: '蓝色河畔' });
   });
 
   it('searches the snapshot with contains matching, status coloring and escaped echo', async () => {
