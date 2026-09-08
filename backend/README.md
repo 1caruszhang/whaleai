@@ -238,7 +238,7 @@ OSS 账单对账，不动 `ledger_entries`（Σdelta == balance 不变量）；�
 | `POST /admin/ui/accounts/:accountId/adjust` | 会话 cookie | 调点（正负整数 ≠0，备注必填），落 `adjust` 流水 |
 | `POST /admin/ui/accounts/:accountId/note` | 会话 cookie | 设置/清除账号备注（运营内部标识「这是谁的号」，≤500 字，空串即清除；存 `accounts.admin_note`，不进用户投影、不落流水） |
 | `POST /admin/ui/accounts/:accountId/reset-password` | 会话 cookie | 重置密码（新密码 ≥8 位 + 确认输入防手误）：`password_version+1`（旧 access JWT 即失效）、`must_change_password=1`（用户下次登录强制改成自己的密码）、吊销全部会话（`revoked_reason=admin_password_reset`）；不校验旧密码、不签发用户会话 |
-| `GET /admin/preference-channels` | 会话 cookie | 偏好召回名单管理页（GET `?industry=&q=`）：顶部行业下拉即切换（带一个内联 `onchange` 即时提交——用户裁决 2026-09-08，运营台零 JS 纪律的唯一例外）；名单区常驻展示——「通用名单」（恒展开）+「行业专属名单」按行业用原生 `<details>` 默认折叠、点击展开（当前查看的行业自动展开；均为零 JS 原生折叠）；添加只一个动作——渠道名输入（原生 `<datalist>` 候选提示，当前行业快照前 500 个不重名 + 本次搜索结果预渲染）→ 搜索（`q` 包含匹配 ≤50 条，名称完全一致的行预勾选）→ 「确认添加到本行业」（行业由当前视图以隐藏字段携带，无第二个行业下拉；行业无专属条目时在添加卡明示兜底语义）；行业候选只含本行业渠道（自媒体按 industry_category、媒体按 channel_type 映射，规则在 `pool-industry-match.ts` 与桌面码表/别名/匹配器逐条一致；官方 GEO 标记仅展示不入选——它是召回质量信号不是行业归属；0·通用=不过滤全池）。绑定行显示形态与快照在售状态（status≠2 标红「已下架」） |
+| `GET /admin/preference-channels` | 会话 cookie | 偏好召回名单管理页（GET `?industry=&q=&u=`）：顶部行业下拉即切换（带一个内联 `onchange` 即时提交——用户裁决 2026-09-08，运营台零 JS 纪律的唯一例外）；名单区常驻展示——「通用名单」（恒展开）+「行业专属名单」按行业用原生 `<details>` 默认折叠、点击展开（当前查看的行业自动展开；均为零 JS 原生折叠）；添加只一个动作——渠道名输入（原生 `<datalist>` 候选提示，当前行业快照前 500 个不重名 + 本次搜索结果预渲染）→ 搜索（`q` 包含匹配 ≤50 条，名称完全一致的行预勾选）→ 「确认添加到本行业」（行业由当前视图以隐藏字段携带，无第二个行业下拉；行业无专属条目时在添加卡明示兜底语义）；行业候选只含本行业渠道（自媒体按 industry_category、媒体按 channel_type 映射，规则在 `pool-industry-match.ts` 与桌面码表/别名/匹配器逐条一致；官方 GEO 标记仅展示不入选——它是召回质量信号不是行业归属；0·通用=不过滤全池）；「包含未分类」复选框（`u=1`，用户裁决 2026-09-08 下午）把快照缺行业类目的渠道（category_code NULL/0/100）并入行业候选与 datalist——消除回落语义下未分类资源进不了行业专属名单的操作死角，营销专区 13/14/15 仍排除（打包卖法不是渠道），缺省不勾 = 现状行为。绑定行显示形态与快照在售状态（status≠2 标红「已下架」） |
 | `POST /admin/ui/preference-channels` | 会话 cookie | 手动添加名称条目（按核心名整族匹配的旧口子）：`{category, name(1-200), domain(≤200,可选), exact}`。**页面已不再暴露此表单**（单行业视图只走勾选绑定），接口保留供种子类名称条目的维护与测试；category 必须在品牌所属行业码白名单（0=通用，1-26）内 |
 | `POST /admin/ui/preference-channels/pick` | 会话 cookie | 勾选确认（绑定条目）：`{category, pick:<kind>:<resource_id>=on …, viewIndustry?}`（≤50 勾）；每勾一行落一条 `(category, kind, resource_id, name=挂牌名, domain=entrance 域名, exact=1)`，字段取自池快照（上游权威，不取表单回传）；引用不在快照内/勾选键被篡改 → 400 零写入；同（category, kind, resource_id）重复确认静默跳过；303 跳回 `viewIndustry` 行业视图（缺省/非法回落通用视图） |
 | `POST /admin/ui/preference-channels/:id/category` | 会话 cookie | 行内改行业（只改 category；名称/资源不可改，要改就删了重选）；成功后 303 跳到**目标行业**视图（行出现在哪里操作者就看到哪里）；404 = 条目不存在 |
@@ -393,7 +393,7 @@ curl -s "$B/gw/distribution/media/resource?page=1&size=20" -H "authorization: Be
 curl -s "$B/gw/distribution/we-media/resource?page=2&size=15" -H "authorization: Bearer $ACCESS"
 ```
 
-## 数据表（迁移 `0001_accounts_sessions_ledger` + `0002_billing_permits` + `0003_ledger_entry_seq` + `0004_chat_usage_metering` + `0005_provider_usage_metering` + `0006_publish_orders` + `0007_publish_order_spend_limits` + `0008_permit_last_activity` + `0009_accounts_admin_note` + `0010_preference_channels` + `0011_preference_channel_pick_flow` + `0012_pool_snapshot_category_geo`）
+## 数据表（迁移 `0001_accounts_sessions_ledger` + `0002_billing_permits` + `0003_ledger_entry_seq` + `0004_chat_usage_metering` + `0005_provider_usage_metering` + `0006_publish_orders` + `0007_publish_order_spend_limits` + `0008_permit_last_activity` + `0009_accounts_admin_note` + `0010_preference_channels` + `0011_preference_channel_pick_flow` + `0012_pool_snapshot_category_geo` + `0013_pool_snapshot_platform_fans`）
 
 - `accounts`：手机号唯一、scrypt 哈希、`password_version`（JWT `pv` 对账）、
   `status`（active/disabled）、`must_change_password`、`balance`（账面总余额，
@@ -449,7 +449,9 @@ curl -s "$B/gw/distribution/we-media/resource?page=2&size=15" -H "authorization:
   1-25）——行业联动搜索按此过滤候选（映射规则在
   `src/domain/pool-industry-match.ts`，与桌面 distributionPlan.ts 的
   码表/别名/匹配器逐条一致）；`geo`=1 即官方 GEO 标记，仅结果展示
-  不参与行业入选（召回质量信号，非行业归属）。
+  不参与行业入选（召回质量信号，非行业归属）；`platform`/`fans_number`
+  （0013）为自媒体辨识列（所属平台 1-21 + 参考粉丝档 1-9，同名跨平台
+  号靠它分辨），媒体为 NULL（辨识用频道类型名展示）。
 
 迁 PostgreSQL 路径：业务层只依赖 `SqlClient` 接口（`src/db/client.ts`），
 表结构用 ANSI 形态（TEXT 主键、ISO 时间戳、INTEGER 布尔），迁移 SQL 直接

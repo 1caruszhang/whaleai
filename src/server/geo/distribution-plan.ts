@@ -776,10 +776,11 @@ export class DistributionPlanningService {
       });
       const base = preparation.plan;
       // 偏好基础名单（2026-09 起运营台按行业下发）：计划行业 → 品牌所属
-      // 行业码集（preferenceIndustryCodes，空行业=空码集只拉通用行）→
-      // 网关拉取。best-effort——失败/坏响应降级空名单并打脱敏告警，只损失
-      // 偏好路证据；无网关/开发直连 fetchPreferenceBase 缺省 = 空基础名单，
-      // 仅剩本地 overlay 增补可用。
+      // 行业码集（preferenceIndustryCodes）→ 网关拉取。空码集 = 行业词
+      // 未填（产品流不可达，Rust 建计划硬门）或词表外行业词（真实可达，
+      // 如 法律服务/殡葬服务 → []，回落通用）。best-effort——失败/坏响应
+      // 降级空名单并打脱敏告警，只损失偏好路证据；无网关/开发直连
+      // fetchPreferenceBase 缺省 = 空基础名单，仅剩本地 overlay 增补可用。
       const preferenceBase = this.fetchPreferenceBase
         ? await this.fetchPreferenceBase(
             preferenceIndustryCodes(base.industry),

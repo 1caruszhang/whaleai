@@ -32,6 +32,10 @@ export interface PoolSnapshotRow {
   category_code: number | null;
   /** 1=官方 GEO 标记（geo_platforms 非空），行业无关。 */
   geo: number;
+  /** 自媒体所属平台码（官方「所属平台」附录）；媒体为 null。 */
+  platform: number | null;
+  /** 自媒体参考粉丝数档位（1-9）；媒体为 null。 */
+  fans_number: number | null;
   fetched_at: string;
 }
 
@@ -44,10 +48,12 @@ export interface PoolSnapshotItem {
   status: number | null;
   geoCount: number;
   categoryCode: number | null;
+  platform: number | null;
+  fansNumber: number | null;
 }
 
 const SNAPSHOT_COLUMNS =
-  'kind, resource_id, name, domain, status, price_cents, geo_count, category_code, geo, fetched_at';
+  'kind, resource_id, name, domain, status, price_cents, geo_count, category_code, geo, platform, fans_number, fetched_at';
 
 /**
  * 整类替换：全量刷新的写入侧——先删该类全部行再批量插入（同一事务），
@@ -65,7 +71,7 @@ export function replacePoolSnapshot(
     const chunkSize = 500;
     for (let start = 0; start < items.length; start += chunkSize) {
       const chunk = items.slice(start, start + chunkSize);
-      const placeholders = chunk.map(() => '(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').join(', ');
+      const placeholders = chunk.map(() => '(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').join(', ');
       const params: unknown[] = [];
       for (const item of chunk) {
         params.push(
@@ -78,6 +84,8 @@ export function replacePoolSnapshot(
           item.geoCount,
           item.categoryCode,
           item.geoCount > 0 ? 1 : 0,
+          item.platform,
+          item.fansNumber,
           fetchedAtIso,
         );
       }
@@ -100,12 +108,24 @@ function escapeLikePattern(value: string): string {
  * 行业（历史/三农等）媒体子句自然消失，只剩自媒体。GEO 标记**不入选**
  * （仅结果表展示）——它是召回质量信号不是行业归属，混入会让行业视图
  * 候选被无关渠道占据。industry 缺省/0 = 不过滤（全池）。
+ *
+ * includeUnclassified（管理页「包含未分类」开关，用户裁决 2026-09-08）：
+ * 并入 category_code IS NULL / 0 / 100（100=媒体「其他频道」，自媒体附录
+ * 无此码天然无命中）——消除「未分类渠道无法进入行业专属名单」的操作死角
+ * （回落语义下已配专属名单的行业不吃通用兜底）。营销专区 13/14/15 仍
+ * 排除——打包卖法不是渠道，未分类开关不改变这一点。
  */
-function industryFilterSql(industry: number | undefined): { clause: string; params: unknown[] } | null {
+function industryFilterSql(
+  industry: number | undefined,
+  includeUnclassified = false,
+): { clause: string; params: unknown[] } | null {
   if (industry === undefined || industry === 0) return null;
   const mediaCodes = [...mediaChannelTypeCodesFor(industry)].sort((a, b) => a - b);
   const parts: string[] = ["(kind = 'we-media' AND category_code = ?)"];
   const params: unknown[] = [industry];
+  if (includeUnclassified) {
+    parts.push('(category_code IS NULL OR category_code = 0 OR category_code = 100)');
+  }
   if (mediaCodes.length > 0) {
     parts.push(`(kind = 'media' AND category_code IN (${mediaCodes.map(() => '?').join(', ')}))`);
     params.push(...mediaCodes);
@@ -123,8 +143,9 @@ export function searchPoolSnapshot(
   query: string,
   limit: number,
   industry?: number,
+  includeUnclassified = false,
 ): PoolSnapshotRow[] {
-  const filter = industryFilterSql(industry);
+  const filter = industryFilterSql(industry, includeUnclassified);
   return db.all<PoolSnapshotRow>(
     `SELECT ${SNAPSHOT_COLUMNS} FROM distribution_pool_snapshot
      WHERE name LIKE ? ESCAPE '\\' ${filter ? `AND ${filter.clause}` : ''}
@@ -162,8 +183,9 @@ export function listPoolSnapshotNames(
   db: SqlClient,
   limit: number,
   industry?: number,
+  includeUnclassified = false,
 ): string[] {
-  const filter = industryFilterSql(industry);
+  const filter = industryFilterSql(industry, includeUnclassified);
   const rows = db.all<{ name: string }>(
     `SELECT name FROM distribution_pool_snapshot
      ${filter ? `WHERE ${filter.clause}` : ''}

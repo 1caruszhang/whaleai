@@ -115,6 +115,7 @@ describe('migrations', () => {
         '0010_preference_channels',
         '0011_preference_channel_pick_flow',
         '0012_pool_snapshot_category_geo',
+        '0013_pool_snapshot_platform_fans',
       ]);
       expect(migrateDatabase(db)).toEqual([]);
 

@@ -279,6 +279,10 @@ interface FakePoolItem {
   channel_type?: number;
   /** 自媒体行业分类码（industry_category，1-25）。 */
   industry_category?: number;
+  /** 自媒体所属平台码（platform，如 6=今日头条）。 */
+  platform?: number;
+  /** 自媒体参考粉丝数档位（fans_number，1-9）。 */
+  fans_number?: number;
 }
 
 /** 伪造超级媒介资源列表：按 page/size 真切片（refresh 走 size=200 串行分页）。 */
@@ -511,6 +515,8 @@ describe('preference channel pick flow (pool snapshot + id binding)', () => {
     expect(food).not.toContain('name="pick:media:104"');
     expect(food).not.toContain('name="pick:we-media:202"');
     expect(food).toContain('候选已按「13 · 美食」过滤');
+    // 辨识列：媒体带频道类型名，自媒体无平台码时只显示形态。
+    expect(food).toContain('媒体 · 食品餐饮');
     // 确认表单行业预选当前搜索行业。
     expect(food).toContain('<option value="13" selected');
     // 无媒体映射的行业（2 历史）：无候选（该行业自媒体也没有），给出空态而非 GEO 兜底。
@@ -530,6 +536,63 @@ describe('preference channel pick flow (pool snapshot + id binding)', () => {
       await getHtml(tb.app, '/admin/preference-channels?industry=0&q=%E5%80%99%E9%80%89', cookie)
     ).text();
     expect(all.match(/name="pick:[a-z-]+:\d+"/g)).toHaveLength(7);
+  });
+
+  it('includes unclassified pool rows in the industry view when u=1 is checked', async () => {
+    await startWithPool({
+      media: [
+        poolItem(101, '候选·蓝色河畔', { channel_type: 18, geo_platforms: [] }), // 食品餐饮 → 美食映射
+        poolItem(104, '候选·杂闻网', { channel_type: 0, geo_platforms: [] }), // 码0 显式未分类
+        poolItem(106, '候选·他频道', { channel_type: 100, geo_platforms: [] }), // 100=其他频道
+        poolItem(107, '候选·无线', { geo_platforms: [] }), // 类目缺省 → NULL
+        poolItem(108, '候选·套餐铺', { channel_type: 13, geo_platforms: [] }), // 营销专区：并入未分类也不入选
+      ],
+      weMedia: [
+        poolItem(201, '候选·美食号', { industry_category: 13, geo_platforms: [] }),
+        poolItem(204, '候选·无名号', { geo_platforms: [] }), // 行业分类缺省 → NULL
+      ],
+    });
+    const cookie = await pageLogin(tb.app);
+    // 缺省不勾 = 现状行为：只行业候选，未分类（NULL/0/100）与营销专区都不出现，
+    // 复选框渲染且未选中。
+    const off = await (
+      await getHtml(tb.app, '/admin/preference-channels?industry=13&q=%E5%80%99%E9%80%89', cookie)
+    ).text();
+    expect(off).toContain('name="u" value="1"');
+    expect(off).not.toContain('value="1" checked');
+    expect(off).toContain('name="pick:media:101"');
+    expect(off).toContain('name="pick:we-media:201"');
+    for (const absent of [104, 106, 107, 108]) {
+      expect(off).not.toContain(`name="pick:media:${absent}"`);
+    }
+    expect(off).not.toContain('name="pick:we-media:204"');
+    // datalist 联动：未分类名不在候选里。
+    expect(off).not.toContain('<option value="候选·杂闻网">');
+    // 勾选 u=1：搜索结果并入 NULL/0/100 未分类（媒体+自媒体），营销专区
+    // 13（套餐系列）仍排除——打包卖法不是渠道；复选框保持选中、提示生效。
+    const on = await (
+      await getHtml(tb.app, '/admin/preference-channels?industry=13&q=%E5%80%99%E9%80%89&u=1', cookie)
+    ).text();
+    expect(on).toContain('value="1" checked');
+    expect(on).toContain('已并入未分类渠道');
+    for (const present of [101, 104, 106, 107]) {
+      expect(on).toContain(`name="pick:media:${present}"`);
+    }
+    expect(on).toContain('name="pick:we-media:201"');
+    expect(on).toContain('name="pick:we-media:204"');
+    expect(on).not.toContain('name="pick:media:108"');
+    // datalist 联动：无搜索词的行业视图候选也含未分类名（u=1 随链接保持）。
+    const onList = await (
+      await getHtml(tb.app, '/admin/preference-channels?industry=13&u=1', cookie)
+    ).text();
+    expect(onList).toContain('<option value="候选·杂闻网">');
+    expect(onList).toContain('<option value="候选·无名号">');
+    expect(onList).not.toContain('<option value="候选·套餐铺">');
+    // 无结果时的空态提示指向开关（不勾时；「无线」只存在于未分类行 107）。
+    const hint = await (
+      await getHtml(tb.app, '/admin/preference-channels?industry=13&q=%E6%97%A0%E7%BA%BF', cookie)
+    ).text();
+    expect(hint).toContain('或勾选「包含未分类」');
   });
 
   it('keeps the operator in the current industry view across pick and delete (PRG)', async () => {
@@ -598,6 +661,36 @@ describe('preference channel pick flow (pool snapshot + id binding)', () => {
     expect(page0).toContain('<td class="wrap">蓝色河畔</td>');
     expect(page0).not.toContain('<details open>');
     expect(page0).not.toContain('手动添加');
+  });
+
+  it('distinguishes same-name cross-platform accounts by platform and fans tier', async () => {
+    await startWithPool({
+      media: [],
+      weMedia: [
+        poolItem(301, '则言鉴闻', { industry_category: 18, platform: 6, fans_number: 4, geo_platforms: [] }),
+        poolItem(302, '则言鉴闻', { industry_category: 18, platform: 5, fans_number: 2, geo_platforms: [] }),
+        poolItem(303, '则言鉴闻', { industry_category: 18, platform: 4, geo_platforms: [] }),
+      ],
+    });
+    const cookie = await pageLogin(tb.app);
+    const html = await (
+      await getHtml(tb.app, '/admin/preference-channels?industry=18&q=%E5%88%99%E8%A8%80%E9%89%B4%E9%97%BB', cookie)
+    ).text();
+    // 三行同名：形态列带平台与粉丝档（无档位则只显示平台），可分辨可分别勾选。
+    expect(html.match(/name="pick:we-media:\d+"/g)).toHaveLength(3);
+    expect(html).toContain('自媒体 · 今日头条 · 1-5万粉');
+    expect(html).toContain('自媒体 · 百家号 · 1-5千粉');
+    expect(html).toContain('自媒体 · 搜狐网');
+    // 勾选「头条号」那条落库，主列表名称旁灰显平台后缀。
+    const pick = await postForm(tb.app, '/admin/ui/preference-channels/pick', {
+      category: '18',
+      'pick:we-media:301': 'on',
+    }, cookie);
+    expect(pick.status).toBe(303);
+    const list = await (
+      await getHtml(tb.app, '/admin/preference-channels?industry=18', cookie)
+    ).text();
+    expect(list).toContain('则言鉴闻 <span class="muted">（今日头条）</span>');
   });
 
   it('scopes datalist suggestions to the selected industry', async () => {
@@ -888,6 +981,8 @@ describe('pool snapshot refresh guard (runaway upstream)', () => {
           status: item.status,
           geoCount: 0,
           categoryCode: null,
+          platform: null,
+          fansNumber: null,
         })),
       };
     };
