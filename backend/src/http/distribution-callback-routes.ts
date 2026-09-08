@@ -6,6 +6,7 @@ import {
   invalidateDistributionResourceCache,
   upsertDistributionResourceCache,
 } from '../domain/distribution-resources';
+import { applyPoolSnapshotRefUpdate } from '../domain/distribution-pool-snapshot';
 import { applyPublishOrderStatus } from '../domain/publish-orders';
 import type { PublishOrderKind } from '../domain/types';
 import { DistributionUpstream } from '../gateway/distribution-upstream';
@@ -95,9 +96,21 @@ export function createDistributionCallbackRoutes(deps: BackendDeps) {
             },
             new Date(deps.now()).toISOString(),
           );
+          // 池快照行顺带回写（偏好名单 P3.2）：只刷新已存在行的
+          // name/price_cents/status，新资源等下一次全量刷新收录。
+          applyPoolSnapshotRefUpdate(deps.db, kind, fetched.data.id, {
+            resourceId: fetched.data.id,
+            name: fetched.data.name,
+            priceCents: fetched.data.priceCents,
+            status: fetched.data.status,
+          });
         }
-        // 上游查无此资源（下架）：失效本地快照，下次下单回源兜底。
-        else invalidateDistributionResourceCache(deps.db, kind, resourceId);
+        // 上游查无此资源（下架）：失效本地快照，下次下单回源兜底；池快照行
+        // 同步删除（名单页「快照缺失」展示、pick 校验天然拒绝失效引用）。
+        else {
+          invalidateDistributionResourceCache(deps.db, kind, resourceId);
+          applyPoolSnapshotRefUpdate(deps.db, kind, resourceId, null);
+        }
         return c.json({ ok: true, event: 'resource', refreshed: Boolean(fetched.data) });
       }
       // 回源失败：失效缓存并回 502，上游重投时再试。

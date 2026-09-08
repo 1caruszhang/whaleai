@@ -38,6 +38,7 @@ import {
   poolSnapshotStats,
   refreshDistributionPoolSnapshot,
   searchPoolSnapshot,
+  verifyPoolSnapshotRefs,
   type PoolKind,
   type PoolSnapshotRow,
   type PoolSnapshotStats,
@@ -591,7 +592,11 @@ ${headerHtml()}
     <input type="hidden" name="viewIndustry" value="${esc(industry)}">
     <button type="submit">刷新池快照</button>
   </form>
-  <p class="muted">从上游全量拉取媒体+自媒体资源（约 2.5 万条，约 1 分钟，期间请勿关闭页面）；搜索与勾选都只打本地快照。</p>
+  <form class="inline" method="post" action="/admin/ui/preference-channels/snapshot/verify">
+    <input type="hidden" name="viewIndustry" value="${esc(industry)}">
+    <button type="submit">校验名单</button>
+  </form>
+  <p class="muted">「刷新池快照」从上游全量拉取媒体+自媒体资源（约 2.5 万条，约 1 分钟，期间请勿关闭页面）；「校验名单」只回源批查名单绑定行（200 条/批，几秒），刷新其名称/价格/在售状态，上游已除名的行从快照删除（名单页显示「快照缺失」）。搜索与勾选都只打本地快照。</p>
 </section>
 <section class="card">
   <h2>添加渠道${esc(addToLabel)}</h2>${industry !== 0 && industryRows.length === 0 ? `\n  <p class="muted">该行业还没有专属条目——此行业的计划当前使用通用名单（兜底）。</p>` : ''}
@@ -1193,6 +1198,37 @@ export function createAdminPageRoutes(deps: BackendDeps, throttle: AdminLoginThr
         ms => new Promise(resolve => setTimeout(resolve, ms)),
         POOL_SNAPSHOT_PAGE_DELAY_MS,
       );
+      return c.redirect(preferenceViewHref(parseViewIndustry(form)), 303);
+    } catch (error) {
+      if (error instanceof AppError) return htmlError(c, error.message, backHref, error.status);
+      throw error;
+    }
+  });
+
+  routes.post('/admin/ui/preference-channels/snapshot/verify', requireAdminPage, async c => {
+    const backHref = '/admin/preference-channels';
+    try {
+      const form = await parseFormBody(c);
+      // 全表绑定行 (kind,id) 去重后分批批查（名称条目无引用，天然不参与）。
+      const refs = listPreferenceChannels(deps.db)
+        .filter(
+          (row): row is PreferenceChannelRow & { kind: PoolKind; resource_id: number } =>
+            (row.kind === 'media' || row.kind === 'we-media') &&
+            row.resource_id !== null &&
+            Number.isInteger(row.resource_id),
+        )
+        .map(row => ({ kind: row.kind, resourceId: row.resource_id }));
+      await verifyPoolSnapshotRefs(deps, refs, async (kind, ids) => {
+        const result = await upstream.queryResources(kind, ids);
+        return result.ok
+          ? result.data.map(item => ({
+              resourceId: item.id,
+              name: item.name,
+              priceCents: item.priceCents,
+              status: item.status,
+            }))
+          : null;
+      });
       return c.redirect(preferenceViewHref(parseViewIndustry(form)), 303);
     } catch (error) {
       if (error instanceof AppError) return htmlError(c, error.message, backHref, error.status);
