@@ -243,6 +243,7 @@ OSS 账单对账，不动 `ledger_entries`（Σdelta == balance 不变量）；�
 | `POST /admin/ui/preference-channels/pick` | 会话 cookie | 勾选确认（绑定条目）：`{category, pick:<kind>:<resource_id>=on …, viewIndustry?}`（≤50 勾）；每勾一行落一条 `(category, kind, resource_id, name=挂牌名, domain=entrance 域名, exact=1)`，字段取自池快照（上游权威，不取表单回传）；引用不在快照内/勾选键被篡改 → 400 零写入；同（category, kind, resource_id）重复确认静默跳过；303 跳回 `viewIndustry` 行业视图（缺省/非法回落通用视图） |
 | `POST /admin/ui/preference-channels/:id/category` | 会话 cookie | 行内改行业（只改 category；名称/资源不可改，要改就删了重选）；成功后 303 跳到**目标行业**视图（行出现在哪里操作者就看到哪里）；404 = 条目不存在 |
 | `POST /admin/ui/preference-channels/snapshot/refresh` | 会话 cookie | 手动刷新池快照：经 `DistributionUpstream` 签名客户端串行拉取 `/media\|we-media/resource`（size=200/页，页间 120ms 限速+单页重试×3，全池 ~2.5 万条约 1 分钟，同步 POST 后 303 回原行业视图）；两类全部拉完才落库（整类替换，任一页重试耗尽仍失败则零写入、旧快照保持，报错带类别与页号），成功后页面展示「池快照：YYYY-MM-DD HH:mm」 |
+| `POST /admin/ui/preference-channels/snapshot/verify` | 会话 cookie | 校验名单（P3.1，`viewIndustry?` 303 回原视图）：全表**绑定行** (kind,id) 去重后按形态分批 200/批回源 `/resource/query` 批查（名称条目与未绑定快照行不回源，几秒完成），回写快照行 name/price_cents/status（其余列与 fetched_at 不动——「池快照：时间」语义不被扰动）；上游查无此资源=下架，删除该快照行（名单页显示「快照缺失」）；任一批失败整次 502 零写入（与全量刷新同一纪律） |
 | `POST /admin/ui/preference-channels/:id/delete` | 会话 cookie | 删除名单条目（`viewIndustry?` 携带当前视图行业，303 跳回原视图）；改动即时生效（下次分发计划发现即用新名单） |
 | `GET /admin/accounts/:accountId` | 会话 cookie | 账号对账页：余额三口径 + 点数流水 + 计费操作（permit 扣点口径）+ 发布订单 + Provider 计量 + 对话计量 |
 
@@ -443,7 +444,10 @@ curl -s "$B/gw/distribution/we-media/resource?page=2&size=15" -H "authorization:
   （两类全部拉完才整类替换落库，失败零写入），搜索与勾选确认只打本表——
   勾选落库的挂牌名与 entrance 域名都取自本表（上游权威）。价格仅作展示
   对比，下单计价权威仍走 `distribution_resource_cache`；status 用上游资源
-  状态词表（2=已通过/在售，其余未上架，页面标红「已下架」）。
+  状态词表（2=已通过/在售，其余未上架，页面标红「已下架」）。增量回写
+  （P3，fetched_at 不动）：管理页「校验名单」按绑定行批查回写
+  name/price_cents/status、上游除名删行；资源变更回调（event=1）单行同
+  口径回写（新上架资源不插桩，等下次全量刷新收录）。
   `category_code`（0012）按形态解释（同码不同义，绝不跨形态比较）：媒体
   =channel_type（频道类型附录），自媒体=industry_category（行业分类附录
   1-25）——行业联动搜索按此过滤候选（映射规则在

@@ -516,6 +516,73 @@ describe('publish ordering: state machine, ledger and callbacks (ticket 08)', ()
     expect((second.body as { order: { points: number } }).order.points).toBe(1600);
   });
 
+  it('refreshes pool snapshot rows from resource-change callbacks (preference P3.2)', async () => {
+    // 池快照预置两行：media:101（回调刷新其挂牌名/价格）与 we-media:999
+    //（回调时上游已除名）。
+    tb.db.run(
+      `INSERT INTO distribution_pool_snapshot
+         (kind, resource_id, name, domain, status, price_cents, geo_count, category_code, geo, platform, fans_number, fetched_at)
+       VALUES
+         ('media', 101, '网易网·转售旧挂牌', 'www.163.com', 2, 8800, 1, 6, 1, NULL, NULL, '2026-08-19T05:00:00.000Z'),
+         ('we-media', 999, '除名候选号', '', 2, 5000, 0, 5, 0, NULL, NULL, '2026-08-19T05:00:00.000Z')`,
+      [],
+    );
+    // 上游仍有此资源：快照行回写上游权威 name/price/status，fetched_at
+    // 不动（行溯源时刻仍是全量刷新时刻）。
+    upstream.setPrice('media', SEED_RESOURCE.id, '100.00');
+    const refreshed = await postCallback(
+      tb,
+      signedCallbackBody({
+        event: 1,
+        payload: { type: 1, id: SEED_RESOURCE.id },
+        timestamp: FIXED_TIMESTAMP_SECONDS,
+      }),
+    );
+    expect(refreshed.status).toBe(200);
+    expect(refreshed.body).toMatchObject({ ok: true, event: 'resource', refreshed: true });
+    expect(
+      tb.db.get<{ name: string; price_cents: number; status: number; fetched_at: string }>(
+        "SELECT name, price_cents, status, fetched_at FROM distribution_pool_snapshot WHERE kind = 'media' AND resource_id = 101",
+        [],
+      ),
+    ).toMatchObject({ name: '网易网', price_cents: 10000, status: 2, fetched_at: '2026-08-19T05:00:00.000Z' });
+    // 新上架资源（快照无行）：不插桩（/resource/query 无 domain/类目列，
+    // 半空行会污染搜索候选），等下一次全量刷新收录。
+    const fresh = await postCallback(
+      tb,
+      signedCallbackBody({
+        event: 1,
+        payload: { type: 2, id: SEED_WE_MEDIA_RESOURCE.id },
+        timestamp: FIXED_TIMESTAMP_SECONDS,
+      }),
+    );
+    expect(fresh.status).toBe(200);
+    expect(
+      tb.db.get<{ name: string }>(
+        "SELECT name FROM distribution_pool_snapshot WHERE kind = 'we-media' AND resource_id = 202",
+        [],
+      ),
+    ).toBeUndefined();
+    // 上游查无此资源=下架：对应快照行删除（名单页「快照缺失」、pick 校验
+    // 天然拒绝失效引用）。
+    const delisted = await postCallback(
+      tb,
+      signedCallbackBody({
+        event: 1,
+        payload: { type: 2, id: 999 },
+        timestamp: FIXED_TIMESTAMP_SECONDS,
+      }),
+    );
+    expect(delisted.status).toBe(200);
+    expect(delisted.body).toMatchObject({ ok: true, event: 'resource', refreshed: false });
+    expect(
+      tb.db.get<{ name: string }>(
+        "SELECT name FROM distribution_pool_snapshot WHERE kind = 'we-media' AND resource_id = 999",
+        [],
+      ),
+    ).toBeUndefined();
+  });
+
   it('keeps 已关闭 frozen and stamps an observation marker', async () => {
     await placeOrder(tb, accessToken, ORDER_INPUT);
     upstream.setStatus(ORDER_INPUT.sn, 9);
