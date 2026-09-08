@@ -209,6 +209,106 @@ describe("channel recall ported from js_ai", () => {
     expect(resolvePreferenceChannels([])).toEqual([]);
   });
 
+  it("matches bound preference entries by (kind,id) equality only", () => {
+    // 绑定行（P2，2026-09-08）：(kind,id) 相等即命中——挂牌名漂移/转售商
+    // 改后缀完全不影响（id 是资源身份）。
+    expect(
+      preferenceEntryMatches(
+        { name: "红餐网", exact: true, kind: "media", resourceId: 42 },
+        {
+          name: "红餐网（GEO 优选）",
+          entranceLink: null,
+          id: 42,
+          kind: "media",
+        },
+      ),
+    ).toBe(true);
+    // id 相等但形态不同 = 串门，不命中（id 仅形态内唯一）。
+    expect(
+      preferenceEntryMatches(
+        { name: "同名号", exact: true, kind: "media", resourceId: 42 },
+        { name: "同名号", entranceLink: null, id: 42, kind: "we-media" },
+      ),
+    ).toBe(false);
+    // 资源侧无 id 投影（旧调用点/旧数据）也不命中——不猜。
+    expect(
+      preferenceEntryMatches(
+        { name: "红餐网", exact: true, kind: "media", resourceId: 42 },
+        { name: "红餐网", entranceLink: null, kind: "media" },
+      ),
+    ).toBe(false);
+    // id 不命中**不回落名称匹配**：绑定的是资源身份，资源不在候选池 =
+    // 如实不命中（哪怕名字逐字相等）。
+    expect(
+      preferenceEntryMatches(
+        { name: "南郡新闻", kind: "media", resourceId: 999 },
+        {
+          name: "南郡新闻（官方头条号）",
+          entranceLink: null,
+          id: 7,
+          kind: "media",
+        },
+      ),
+    ).toBe(false);
+    // 域名相等同样不救绑定行（id 分支先于 domain 分支）。
+    expect(
+      preferenceEntryMatches(
+        {
+          name: "红餐网",
+          domain: "https://www.hongcan.cn",
+          kind: "media",
+          resourceId: 999,
+        },
+        {
+          name: "红餐网",
+          entranceLink: "https://www.hongcan.cn",
+          id: 42,
+          kind: "media",
+        },
+      ),
+    ).toBe(false);
+  });
+
+  it("merges bound rows without name dedup and yields name rows to them", () => {
+    // 绑定行合成语义与 backend 下发前去重逐条一致：互不去重（媒体+自媒体
+    // 同名号是两家资源）、按 (kind,resourceId) 引用去重、同核心名名称行让位。
+    const base = [
+      { name: "同名号", exact: true, kind: "media" as const, resourceId: 1 },
+      { name: "同名号", exact: true, kind: "we-media" as const, resourceId: 2 },
+      { name: "同名号", exact: true, kind: "media" as const, resourceId: 1 },
+      { name: "同名号（GEO 优选）", exact: true },
+      { name: "另一渠道", exact: true },
+    ];
+    const resolved = resolvePreferenceChannels(base, {
+      additionalPreferenceChannels: [{ name: "用户手输渠道" }],
+    });
+    // 两条同名绑定行都在（引用去重只吃掉重复的 (media,1)），绑定字段原样
+    // 保留；同核心名「同名号」的名称行让位给绑定行。
+    expect(resolved).toEqual([
+      { name: "同名号", exact: true, domain: undefined, kind: "media", resourceId: 1 },
+      {
+        name: "同名号",
+        exact: true,
+        domain: undefined,
+        kind: "we-media",
+        resourceId: 2,
+      },
+      { name: "另一渠道", exact: true, domain: undefined },
+      { name: "用户手输渠道", exact: false, domain: undefined },
+    ]);
+    // 半绑定条目（单字段，类型层可达、网关解析层会整单作废）按名称行处理，
+    // 绑定字段不透传。
+    expect(
+      resolvePreferenceChannels([
+        { name: "只有kind", kind: "media" as const },
+        { name: "只有resourceId", resourceId: 9 },
+      ]),
+    ).toEqual([
+      { name: "只有kind", exact: false, domain: undefined },
+      { name: "只有resourceId", exact: false, domain: undefined },
+    ]);
+  });
+
   it("parses global recall output with the registered-domain gate", () => {
     const channels = parseGlobalRecallResult(
       '```json\n[{"name":"搜狐汽车","url":"https://auto.sohu.com","reason":"汽车垂直媒体","topicNumbers":[1,99,0,1.5]},{"name":"无URL渠道","topicNumbers":[1]},{"name":"坏域名","url":"http://localhost/x"}]\n```',

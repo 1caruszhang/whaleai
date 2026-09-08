@@ -1320,11 +1320,14 @@ export function buildDistributionCandidates(input: {
       // 保底路（js_ai path 3 语义）证据不再在此全量挂载——三轮裁决（2026-08-28）
       // 把随机采样下沉到召回层：垂类/GEO 候选先进池，经 t0 全量 + t1 随机 +
       // t2 补足抽样后才挂 fallback 证据（见下方「保底路召回采样」块）。
-      // 偏好路（js_ai preferenceChannels 契约）：内置 exact 名单 + 用户 overlay。
+      // 偏好路（js_ai preferenceChannels 契约）：运营台按行业下发（绑定行
+      // 按 (kind,id) 相等命中，名称条目走名称/域名匹配）+ 用户 overlay。
       const preferenceHit = input.preferenceChannels.find((entry) =>
         preferenceEntryMatches(entry, {
           name: resource.name,
           entranceLink: resource.entranceLink,
+          id: resource.resourceId,
+          kind: resource.kind,
         }),
       );
       if (preferenceHit) {
@@ -1676,13 +1679,16 @@ export function buildDistributionCandidates(input: {
     .slice(0, PASSIVE_ALIGNED_CHANNEL_CAP);
   // ── 偏好命中清单（Q12，2026-08-28）：配额前逐名单项计算，每项一行代表
   //（全名逐字命中者优先，否则包代表规则）；matched=false = 核心名在价内池
-  // 不存在，如实展示（安庆新闻网型）。
+  // 不存在，如实展示（安庆新闻网型）。绑定行（resourceId 在场）按
+  // (kind,id) 相等命中，资源不在价内池同样如实 matched=false。
   const preferenceMatchedChannels: DistributionPreferenceMatchedChannel[] =
     input.preferenceChannels.map((entry) => {
       const members = candidates.filter((candidate) =>
         preferenceEntryMatches(entry, {
           name: candidate.resourceSnapshot.name,
           entranceLink: candidate.resourceSnapshot.entranceLink,
+          id: candidate.resourceSnapshot.resourceId,
+          kind: candidate.resourceSnapshot.kind,
         }),
       );
       if (members.length === 0) {

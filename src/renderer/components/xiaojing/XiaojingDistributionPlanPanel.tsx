@@ -354,7 +354,8 @@ export function buildRecallPathViews(
     ),
   ];
   // 偏好命中清单（Q12，2026-08-28）：配额前逐名单项一行（代表+点数+✓=进入
-  // 推荐；matched=false = 价内池未见同名，如实展示）。旧计划无该字段时回落
+  // 推荐；matched=false = 价内池未见该渠道——名称条目=未见同名，绑定行=
+  // 绑定资源不在池，均如实展示）。旧计划无该字段时回落
   // 到从推荐集反推的 matchedPreferenceNames 口径。
   const preferenceRows = plan.preferenceMatchedChannels ?? [];
   if (preferenceRows.length > 0) {

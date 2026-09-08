@@ -24,12 +24,20 @@ export interface RecallSource {
   reason?: string;
 }
 
-/** 偏好名单条目（js_ai preferenceChannels 契约，至少 name 与 domain 之一）。 */
+/**
+ * 偏好名单条目（js_ai preferenceChannels 契约，至少 name 与 domain 之一）。
+ * 绑定行（运营台勾选落库）成对携带 kind+resourceId，按 (kind,id) 相等命中；
+ * 名称条目（种子/手输）走名称/域名匹配。
+ */
 export interface PreferenceChannelEntry {
   name: string;
   domain?: string;
   /** true=精确名匹配（内置名单）；false=严格→模糊容错（用户手输）。 */
   exact?: boolean;
+  /** 绑定行的池内资源形态（与 resourceId 成对出现/成对缺省）。 */
+  kind?: "media" | "we-media";
+  /** 绑定行的池内资源 id（超级媒介 id，仅形态内唯一）。 */
+  resourceId?: number;
 }
 
 /** 用户偏好 overlay（存储形状；与内置名单合成生效清单）。 */
@@ -300,6 +308,10 @@ export interface ResourceIdentity {
   entranceLink: string | null;
   /** 媒介盒子所属平台枚举（媒体类资源无此字段）。 */
   platform?: number | null;
+  /** 池内资源 id（超级媒介 id；偏好绑定行按 (kind,id) 相等命中）。 */
+  id?: number;
+  /** 池内资源形态（id 仅形态内唯一，跨形态 id 比较必须带形态）。 */
+  kind?: "media" | "we-media";
 }
 
 /** 资源侧的平台族集合：platform 枚举（第一信号）+ 渠道名括号后缀（含别名）+ entranceLink 域名。 */
@@ -1038,7 +1050,11 @@ export function resolvePreferenceChannels(
       excluded.has(entry.domain.trim().toLowerCase()));
 
   const kept = base.filter((entry) => !isExcluded(entry));
-  const additional = (settings?.additionalPreferenceChannels ?? [])
+  // 用户 overlay 是纯名称条目（面板手输不带资源绑定），标注成完整条目类型
+  // 以便与基础名单统一迭代。
+  const additional: PreferenceChannelEntry[] = (
+    settings?.additionalPreferenceChannels ?? []
+  )
     .filter(
       (entry) =>
         !!entry &&
@@ -1054,16 +1070,39 @@ export function resolvePreferenceChannels(
           : undefined,
     }));
 
+  // 绑定行（kind+resourceId 成对在场）整体优先且互不去重（同名号在媒体与
+  // 自媒体是两家资源），按 (kind,resourceId) 引用去重；同核心名的名称行让位
+  // 给绑定行——与 backend 下发前的去重语义逐条一致。
+  const merged: PreferenceChannelEntry[] = [];
+  const seenBoundRefs = new Set<string>();
+  const boundCores = new Set<string>();
+  for (const entry of [...kept, ...additional]) {
+    if (entry.kind === undefined || entry.resourceId == null) continue;
+    const ref = `${entry.kind}:${entry.resourceId}`;
+    if (seenBoundRefs.has(ref)) continue;
+    seenBoundRefs.add(ref);
+    const core = channelNameCoreAll(entry.name).trim().toLowerCase();
+    if (core !== "") boundCores.add(core);
+    merged.push({
+      name: entry.name,
+      exact: entry.exact === true,
+      domain: entry.domain,
+      kind: entry.kind,
+      resourceId: entry.resourceId,
+    });
+  }
   const seenName = new Set<string>();
   const seenDomain = new Set<string>();
-  const merged: PreferenceChannelEntry[] = [];
   for (const entry of [...kept, ...additional]) {
+    if (entry.kind !== undefined && entry.resourceId != null) continue;
     const nameKey = entry.name.toLowerCase();
     if (seenName.has(nameKey)) continue;
     const reg = entry.domain
       ? (registeredDomain(entry.domain) ?? entry.domain.toLowerCase())
       : null;
     if (reg && seenDomain.has(reg)) continue;
+    const core = channelNameCoreAll(entry.name).trim().toLowerCase();
+    if (core !== "" && boundCores.has(core)) continue;
     seenName.add(nameKey);
     if (reg) seenDomain.add(reg);
     merged.push({
@@ -1075,11 +1114,20 @@ export function resolvePreferenceChannels(
   return merged;
 }
 
-/** 偏好条目是否命中某资源：domain 优先；exact=精确名相等；否则严格→模糊。 */
+/**
+ * 偏好条目是否命中某资源：绑定行（resourceId 在场）按 (kind,id) 相等命中
+ * ——池内 id 仅形态内唯一（pick 流引用键即 (kind,id) 双键），纯 id 跨形态
+ * 会串门；id 不命中**不回落名称匹配**，绑定行绑的是资源身份，资源不在候选
+ * 池=如实不命中（matched=false 展示口径已有）。名称条目走 domain 优先；
+ * exact=精确名相等；否则严格→模糊。
+ */
 export function preferenceEntryMatches(
   entry: PreferenceChannelEntry,
   resource: ResourceIdentity,
 ): boolean {
+  if (entry.resourceId != null) {
+    return resource.id === entry.resourceId && resource.kind === entry.kind;
+  }
   if (entry.domain) {
     const entryDomain = registeredDomain(entry.domain);
     const resourceDomain = registeredDomain(resource.entranceLink);

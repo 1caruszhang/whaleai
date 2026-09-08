@@ -435,6 +435,48 @@ describe("DistributionPlanningService", () => {
     expect(missing).toMatchObject({ matched: false, recommended: false });
   });
 
+  it("matches bound preference rows by (kind,id) through the whole plan flow (P2)", async () => {
+    const { port } = persistence();
+    // 绑定行名字与池内挂牌名完全无关（转售商改名形态）：只有 id 相等能命中；
+    // 第二条拿媒体 id 绑自媒体形态 = 跨形态串门，必须不命中（不回落名称）。
+    const fetchPreferenceBase = vi.fn(async () => [
+      { name: "某转售挂牌变体", exact: true, kind: "media" as const, resourceId: 11 },
+      { name: "跨形态串门条目", exact: true, kind: "we-media" as const, resourceId: 11 },
+    ]);
+    const service = new DistributionPlanningService(
+      { workspaceId: "workspace", sessionId: "session" },
+      port,
+      provider(),
+      keywordSearch(),
+      () => new Date("2026-08-15T00:00:00.000Z"),
+      undefined,
+      undefined,
+      fetchPreferenceBase,
+    );
+    await service.start({
+      workspaceId: "workspace",
+      sessionId: "session",
+      source,
+    });
+    const call = vi.mocked(port.finishDiscovery).mock.calls[0]![0];
+    expect(call.preferenceChannelNames).toEqual([
+      "某转售挂牌变体",
+      "跨形态串门条目",
+    ]);
+    const rows = call.preferenceMatchedChannels ?? [];
+    expect(rows.length).toBe(2);
+    // (media,11) 命中池内「汽车日报」——绑定行形态天然正确，名字漂移无感。
+    const bound = rows.find((row) => row.entryName === "某转售挂牌变体");
+    expect(bound).toMatchObject({
+      matched: true,
+      recommended: true,
+      representativeName: "汽车日报",
+    });
+    // (we-media,11) 形态不符 = 不命中；同 id 的媒体资源在场也不救（无名称回落）。
+    const crossKind = rows.find((row) => row.entryName === "跨形态串门条目");
+    expect(crossKind).toMatchObject({ matched: false, recommended: false });
+  });
+
   it("degrades to an empty preference base when the ops-console pull fails", async () => {
     const { port } = persistence();
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
@@ -829,6 +871,53 @@ describe("preference channel gateway pull (ops-console base list)", () => {
       })),
     });
     expect(capped).toHaveLength(100);
+  });
+
+  it("parses bound entries with paired kind/resourceId and rejects drift", () => {
+    // 绑定行（P2）：kind+resourceId 成对在场则原样透传（id 相等命中用）。
+    expect(
+      parsePreferenceChannelsResponse({
+        channels: [
+          {
+            name: "红餐网",
+            exact: true,
+            kind: "media",
+            resourceId: 42,
+          },
+          { name: "列举网", exact: false },
+        ],
+      }),
+    ).toEqual([
+      { name: "红餐网", exact: true, kind: "media", resourceId: 42 },
+      { name: "列举网", exact: false },
+    ]);
+    // kind 白名单之外 → 整单作废。
+    expect(
+      parsePreferenceChannelsResponse({
+        channels: [{ name: "红餐网", exact: true, kind: "video", resourceId: 42 }],
+      }),
+    ).toEqual([]);
+    // resourceId 非正整数（0/负数/小数/字符串）→ 整单作废。
+    for (const resourceId of [0, -1, 1.5, "42"]) {
+      expect(
+        parsePreferenceChannelsResponse({
+          channels: [
+            { name: "红餐网", exact: true, kind: "media", resourceId },
+          ],
+        }),
+      ).toEqual([]);
+    }
+    // 成对校验：单字段出现（有 kind 无 resourceId / 反之）→ 契约漂移，整单作废。
+    expect(
+      parsePreferenceChannelsResponse({
+        channels: [{ name: "红餐网", exact: true, kind: "media" }],
+      }),
+    ).toEqual([]);
+    expect(
+      parsePreferenceChannelsResponse({
+        channels: [{ name: "红餐网", exact: true, resourceId: 42 }],
+      }),
+    ).toEqual([]);
   });
 
   it("fetches from the gateway with bearer token and codes query", async () => {

@@ -77,7 +77,6 @@ function matchesCategoryName(industry: string, name: string): boolean {
     if (!industry.includes(term)) continue;
     if (fragments.some(fragment => name.includes(fragment))) return true;
   }
-  const industryChars = Array.from(industry);
   const nameChars = Array.from(name);
   for (let i = 0; i + 2 <= nameChars.length; i += 1) {
     if (industry.includes(nameChars.slice(i, i + 2).join(''))) return true;
