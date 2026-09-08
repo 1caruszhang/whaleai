@@ -36,13 +36,13 @@ import {
   poolRefKey,
   poolSnapshotByRefs,
   poolSnapshotStats,
-  refreshDistributionPoolSnapshot,
   searchPoolSnapshot,
   verifyPoolSnapshotRefs,
   type PoolKind,
   type PoolSnapshotRow,
   type PoolSnapshotStats,
 } from '../domain/distribution-pool-snapshot';
+import { runDistributionPoolRefreshOnce } from '../domain/distribution-pool-scheduler';
 import { DistributionUpstream } from '../gateway/distribution-upstream';
 import {
   FANS_NUMBER_NAMES,
@@ -70,10 +70,6 @@ import { phoneSchema } from './schemas';
  */
 
 const ADMIN_SESSION_COOKIE = 'xiaojing_admin';
-
-/** 池快照拉取：上游单页上限 200；页间 sleep 限速（全池 ~125 页/两类）。 */
-const POOL_SNAPSHOT_PAGE_SIZE = 200;
-const POOL_SNAPSHOT_PAGE_DELAY_MS = 120;
 
 /** 快照搜索结果上限（勾选确认同上限：表单一次最多 50 个勾）。 */
 const POOL_SEARCH_RESULT_LIMIT = 50;
@@ -1173,31 +1169,11 @@ export function createAdminPageRoutes(deps: BackendDeps, throttle: AdminLoginThr
     const backHref = '/admin/preference-channels';
     try {
       const form = await parseFormBody(c);
-      const fetchPage = async (kind: PoolKind, page: number) => {
-        const result = await upstream.listResources(kind, page, POOL_SNAPSHOT_PAGE_SIZE);
-        return result.ok
-          ? {
-              total: result.data.total,
-              items: result.data.items.map(item => ({
-                resourceId: item.id,
-                name: item.name,
-                domain: item.entranceDomain,
-                priceCents: item.priceCents,
-                status: item.status,
-                geoCount: item.geoCount,
-                categoryCode: item.categoryCode,
-                platform: item.platform,
-                fansNumber: item.fansNumber,
-              })),
-            }
-          : null;
-      };
-      await refreshDistributionPoolSnapshot(
-        deps,
-        fetchPage,
-        ms => new Promise(resolve => setTimeout(resolve, ms)),
-        POOL_SNAPSHOT_PAGE_DELAY_MS,
-      );
+      // 互斥出口（与 P3.3 定时刷新共享）：任一方在跑，本次立即忙返回。
+      const outcome = await runDistributionPoolRefreshOnce(deps);
+      if (!outcome.ran) {
+        return htmlError(c, '池快照刷新正在进行中（定时任务或另一窗口），请稍后再试。', backHref, 409);
+      }
       return c.redirect(preferenceViewHref(parseViewIndustry(form)), 303);
     } catch (error) {
       if (error instanceof AppError) return htmlError(c, error.message, backHref, error.status);

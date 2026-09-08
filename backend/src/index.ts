@@ -5,6 +5,7 @@ import { loadBackendConfig } from './config';
 import { openSqlDatabase } from './db/client';
 import { migrateDatabase } from './db/migrations';
 import { createBackendApp } from './http/app';
+import { startDistributionPoolScheduler } from './domain/distribution-pool-scheduler';
 
 /**
  * 组合根：环境变量 → failfast 配置 → 打开/迁移 SQLite → 起服。
@@ -20,6 +21,9 @@ function main(): void {
   if (applied.length > 0) console.log(`[backend] applied migrations: ${applied.join(', ')}`);
 
   const app = createBackendApp({ db, config, now: () => Date.now() });
+  // 池快照定时刷新（偏好名单 P3.3）：每日 04:00 + 启动时快照超 24h 补刷；
+  // 定时器 unref 不阻塞关服，失败零写入只打日志。
+  startDistributionPoolScheduler({ db, config, now: () => Date.now() });
   const port = Number.parseInt(process.env.PORT ?? '8787', 10);
   const hostname = process.env.HOST ?? '0.0.0.0';
   if (!Number.isInteger(port) || port <= 0) {
