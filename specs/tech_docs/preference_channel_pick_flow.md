@@ -205,3 +205,64 @@ P1 全量落地（backend typecheck + 146/146 全绿；本地预览接真实上�
    上传（单块重试）+ 服务器 `cat` 拼回 + sha256 双端校验后再 `up`**；部署后
    生产需重刷池快照一次（约 1 分钟；已配置的名单不受影响）。生产 SSH
    目标 `root@8.137.194.137`（默认密钥，无跳板）。
+
+### P2/P3 交接（2026-09-08 晚，出发基准）
+
+实现 P2/P3 的 session 从本小节出发（现状为逐处核实代码所得，非推断；
+与上文冲突处以本小节为准）。
+
+**现状核实：P2 与 P3 均未实现。**
+
+- P2 缺口（桌面）：`PreferenceChannelEntry`（channelRecall.ts）仅
+  name/domain/exact；`preferenceEntryMatches` 只有 domain→exact→名称分支；
+  `parsePreferenceChannelsResponse` 只解析 name/domain/exact（kind/resourceId
+  被静默丢弃，无害）。**实施要点**：`ResourceIdentity`（channelRecall.ts）
+  现只带 name/entranceLink/platform，需扩 `id?/kind?`；资源侧
+  `GeoDistributionResource`（provider-capabilities.ts）已带 `id`，kind 由按
+  形态加载的候选环携带——两个调用点在 distributionPlan.ts（保底池证据环
+  与偏好命中清单环）。
+- P3 缺口（backend）：管理页无「校验名单」按钮；回调 event=1 只刷下单
+  定价缓存（distribution-callback-routes.ts 已有 type→kind 映射
+  `type===2?'we-media':'media'` 与 `queryResource(kind,id)` 回源）不刷
+  `distribution_pool_snapshot`；backend 无任何定时刷新机制。
+
+**P2 任务清单（桌面，纯客户端，随桌面版发布生效）**：
+
+1. `PreferenceChannelEntry` 加 `kind?: 'media'|'we-media'`、`resourceId?: number`；
+2. `ResourceIdentity` 加 `id?: number`、`kind?: 'media'|'we-media'`，两个
+   `preferenceEntryMatches` 调用点接线（候选对象已带 id，kind 从加载环取）；
+3. `preferenceEntryMatches`：`entry.resourceId != null` →
+   `resource.id === entry.resourceId && resource.kind === entry.kind`
+   （id 仅形态内唯一——pick 流 `poolRefKey` 就是 (kind,id) 双键，纯 id 跨形态
+   会串门）；**id 不命中不回落名称匹配**——绑定行绑的是资源身份，资源不在
+   候选池=如实不命中（matched=false 展示口径已有）；resourceId 缺省走现有
+   名称分支不变；
+4. `parsePreferenceChannelsResponse` 解析：resourceId 正整数、kind 白名单
+   {'media','we-media'}，两者**要么都在要么都不在**（backend 绑定行成对
+   下发）；形状不符维持「整体作废」严格纪律；
+5. 面板/投影/权重/契约注释随动；测试照 distribution-plan.unit.test.ts
+   fake 注入 + channelRecall 匹配单测（id 命中 / kind 串门不命中 / 名称行
+   不受影响 / 解析严格性含单字段成对校验）。
+
+**P3 任务清单（backend，三项独立、建议按序）**：
+
+1. **「校验名单」按钮**（设计=第三节配置流程第 5 条）：管理页 POST（PRG
+   303 回原视图），全表绑定行 (kind,id) 分批 200/批经
+   `DistributionUpstream.queryResource` 批查，回写快照行
+   name/price_cents/status；测试 startTestBackend 直打 HTTP + 查库断言。
+2. **回调增量刷新**：`distribution-callback-routes.ts` event=1 分支在现有
+   定价缓存刷新后，顺带回写 `distribution_pool_snapshot` 对应行（行字段
+   构造复用上游解析；上游查无此资源=下架——删除该快照行，名单页已有
+   「快照缺失」展示、pick 校验天然拒绝失效引用）。
+3. **定时刷新**（第三节标「另议」，**开工前先与用户确认口径**）：建议
+   backend 进程内定时（每日一次 + 启动时快照超 24h 补刷一次），复用
+   `refreshDistributionPoolSnapshot` 编排（失败零写入只打日志），不引入
+   cron 依赖；替代方案 ECS cron 调管理端点需要鉴权口子，不推荐。
+
+P3 完成后：三项均用现有列**无需新迁移**；分块方案部署生产（见上文
+「下午收尾」第 4 条）+ 部署后重刷一次池快照。
+
+纪律提醒（对全新 session）：迁移只追加；backend `SqlClient.get/all` 显式
+传 params 数组；运营台零 JS（行业下拉 onchange 唯一例外）；非测试注释
+禁用「同源」一词（票 #41）；测试模式 startTestBackend/app.request + 查库
+断言零写入；工作区若有他票在途文件（以 git status 为准）不碰。
