@@ -324,6 +324,18 @@ export const MIGRATIONS: readonly Migration[] = [
       ALTER TABLE distribution_pool_snapshot ADD COLUMN geo INTEGER NOT NULL DEFAULT 0;
     `,
   },
+  {
+    // 快照辨识列（0013）：自媒体同名号在不同平台是不同资源（转售商把
+    // 「则言鉴闻」按头条号/百家号/搜狐号分别挂牌），搜索结果只显示名称
+    // 无法分辨。platform=官方「所属平台」附录码（1 腾讯号…21 微信公众号，
+    // 仅自媒体有），fans_number=参考粉丝数档位（1-9，仅自媒体有）；
+    // 媒体行两者为 NULL，辨识信息用 category_code 的频道类型名展示。
+    name: '0013_pool_snapshot_platform_fans',
+    sql: `
+      ALTER TABLE distribution_pool_snapshot ADD COLUMN platform INTEGER;
+      ALTER TABLE distribution_pool_snapshot ADD COLUMN fans_number INTEGER;
+    `,
+  },
 ];
 
 /** 建表只经本 runner：幂等、每条迁移独立事务、记录进 schema_migrations。 */

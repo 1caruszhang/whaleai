@@ -61,6 +61,10 @@ export interface UpstreamPoolResource {
    * 为 null（行业过滤只认结构化码，null 不参与垂类匹配）。
    */
   categoryCode: number | null;
+  /** 自媒体所属平台码（「所属平台」附录，同名号跨平台辨识）；媒体 null。 */
+  platform: number | null;
+  /** 自媒体参考粉丝数档位（1-9）；媒体 null。 */
+  fansNumber: number | null;
 }
 
 export type UpstreamCallResult<T> =
@@ -319,6 +323,14 @@ export class DistributionUpstream {
         geoCount: Array.isArray(item.geo_platforms) ? item.geo_platforms.length : 0,
         categoryCode:
           typeof rawCategory === 'number' && Number.isInteger(rawCategory) ? rawCategory : null,
+        platform:
+          typeof item.platform === 'number' && Number.isInteger(item.platform)
+            ? item.platform
+            : null,
+        fansNumber:
+          typeof item.fans_number === 'number' && Number.isInteger(item.fans_number)
+            ? item.fans_number
+            : null,
       });
     }
     return { ok: true, data: { total, items }, text };

@@ -118,3 +118,18 @@ export const MEDIA_CHANNEL_TYPE_CODES_BY_INDUSTRY: ReadonlyMap<number, ReadonlyS
 export function mediaChannelTypeCodesFor(industry: number): ReadonlySet<number> {
   return MEDIA_CHANNEL_TYPE_CODES_BY_INDUSTRY.get(industry) ?? new Set<number>();
 }
+
+/** 附录：所属平台（自媒体 platform）——官方文档逐条抄录，搜索结果辨识同名号用。 */
+export const WE_MEDIA_PLATFORM_NAMES: Readonly<Record<number, string>> = {
+  1: '腾讯号', 2: '哔哩哔哩', 3: '网易号', 4: '搜狐网', 5: '百家号',
+  6: '今日头条', 7: '微博', 8: '一点资讯', 9: '新浪号', 10: '小红书',
+  11: '知乎号', 12: 'zaker', 13: '豆瓣', 14: 'UC头条', 15: '东方头条',
+  16: '东方财富号', 17: '车家号', 18: '中金在线号', 19: '雪球号', 20: '凤凰号',
+  21: '微信公众号',
+};
+
+/** 参考粉丝数档位（自媒体 fans_number，1-9）——官方文档逐条抄录。 */
+export const FANS_NUMBER_NAMES: Readonly<Record<number, string>> = {
+  1: '0-1千粉', 2: '1-5千粉', 3: '5千-1万粉', 4: '1-5万粉', 5: '5-10万粉',
+  6: '10万-100万粉', 7: '100万-500万粉', 8: '500万-1000万粉', 9: '1000万粉以上',
+};

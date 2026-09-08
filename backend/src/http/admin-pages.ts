@@ -43,6 +43,11 @@ import {
   type PoolSnapshotStats,
 } from '../domain/distribution-pool-snapshot';
 import { DistributionUpstream } from '../gateway/distribution-upstream';
+import {
+  FANS_NUMBER_NAMES,
+  MEDIA_CHANNEL_TYPE_NAMES,
+  WE_MEDIA_PLATFORM_NAMES,
+} from '../domain/pool-industry-match';
 import type { UpstreamCallResult } from '../gateway/distribution-upstream';
 import { AppError } from '../errors';
 import { phoneSchema } from './schemas';
@@ -456,7 +461,9 @@ ${chatRows || emptyRow(6, '暂无对话计量')}
  * 该行业计划回落通用（下发语义，用户裁决 2026-09-08：码集命中行业行只发
  * 行业行，通用不并集）。
  * 添加只有一个动作：输入渠道名（datalist 候选与结果按当前行业过滤，规则
- * 与保底召回垂类匹配同一语义）→ 精确命中预勾选 → 「确认添加到本行业」
+ * 与保底召回垂类匹配同一语义；可勾选「包含未分类」（u=1）把快照缺行业
+ * 类目的渠道并入候选，消除回落语义下未分类资源进不了行业专属名单的操作
+ * 死角，缺省不勾 = 现状行为）→ 精确命中预勾选 → 「确认添加到本行业」
  * （行业由当前视图以隐藏字段定死，不再出现第二个行业下拉）。行内可改
  * 行业/删除。除行业下拉的一个内联 onchange 即时提交（用户裁决
  * 2026-09-08：切行业立即联动候选，纯 HTML 无此机制，记为运营台零 JS
@@ -471,6 +478,7 @@ function preferenceChannelsHtml(
   searchResults: PoolSnapshotRow[] | null,
   suggestions: readonly string[],
   industry: number,
+  includeUnclassified: boolean,
 ): string {
   const industryLabel = `${industry} · ${PREFERENCE_CATEGORY_NAMES[industry] ?? ''}`;
   const addToLabel = industry === 0 ? '到通用名单' : `到 ${industryLabel}`;
@@ -522,7 +530,9 @@ ${listTable(sectionRows, '')}
     if (stats.rows === 0) {
       searchArea = `  <p class="warn">池快照为空：请先点上方「刷新池快照」再搜索。</p>`;
     } else if (searchResults.length === 0) {
-      searchArea = `  <p class="muted">该行业候选内没有名称包含「${esc(searchQuery)}」的渠道；换个关键词，或把行业切到「0 · 通用」搜全池。</p>`;
+      const unclassifiedHint =
+        industry !== 0 && !includeUnclassified ? '，或勾选「包含未分类」' : '';
+      searchArea = `  <p class="muted">该行业候选内没有名称包含「${esc(searchQuery)}」的渠道；换个关键词${unclassifiedHint}，或把行业切到「0 · 通用」搜全池。</p>`;
     } else {
       // 名称与关键词完全一致的行预勾选：从 datalist 选中精确名回车后，
       // 意中的行已处于待确认状态，直接点确认（零 JS 下「下拉选中」无事件
@@ -536,7 +546,7 @@ ${listTable(sectionRows, '')}
           result => `    <tr>
       <td><input type="checkbox" name="pick:${esc(result.kind)}:${esc(result.resource_id)}"${result.name === searchQuery ? ' checked' : ''}></td>
       <td class="wrap">${esc(result.name)}</td>
-      <td>${esc(POOL_KIND_LABELS[result.kind] ?? result.kind)}</td>
+      <td class="wrap">${poolIdentityHtml(result)}</td>
       <td>¥${esc(yuan(result.price_cents))}</td>
       <td>${poolStatusHtml(result)}</td>
       <td>${result.geo_count > 0 ? `GEO ×${esc(result.geo_count)}` : '<span class="muted">-</span>'}</td>
@@ -547,7 +557,9 @@ ${listTable(sectionRows, '')}
         industry !== 0
           ? `  <p class="muted">候选已按「${esc(industry)} · ${esc(
               PREFERENCE_CATEGORY_NAMES[industry] ?? '',
-            )}」过滤（自媒体按行业分类、媒体按频道类型映射；GEO 标记仅展示不入选）。</p>\n`
+            )}」过滤（自媒体按行业分类、媒体按频道类型映射；GEO 标记仅展示不入选${
+              includeUnclassified ? '；已并入未分类渠道' : ''
+            }）。</p>\n`
           : '';
       searchArea = `${industryHint}  <form method="post" action="/admin/ui/preference-channels/pick">
     <input type="hidden" name="category" value="${esc(industry)}">
@@ -593,9 +605,10 @@ ${categoryOptionsHtml(industry)}
     </select>
     <label for="q">渠道名（输入时有候选提示；候选与结果按当前行业过滤）</label>
     <input id="q" name="q" maxlength="100" list="poolNameSuggestions" value="${esc(searchQuery)}" placeholder="如：蓝色河畔">
+    <label><input type="checkbox" name="u" value="1"${includeUnclassified ? ' checked' : ''}>包含未分类（快照缺行业类目的渠道也进候选）</label>
     <button type="submit">搜索</button>
   </form>
-  <p class="muted">切换行业后页面立即刷新，输入提示与搜索结果随之切换到该行业；从候选中选中完整名称后回车，命中的行已预勾选，点「确认添加」即完成。候选只含本行业渠道（自媒体按行业分类、媒体按频道类型映射；GEO 标记仅展示不入选）；要全池挑选请把行业切到「0 · 通用」。</p>
+  <p class="muted">切换行业后页面立即刷新，输入提示与搜索结果随之切换到该行业；从候选中选中完整名称后回车，命中的行已预勾选，点「确认添加」即完成。候选只含本行业渠道（自媒体按行业分类、媒体按频道类型映射；GEO 标记仅展示不入选），无行业类目的渠道默认不在候选内——勾选「包含未分类」可并入（营销专区套餐类仍排除）；要全池挑选请把行业切到「0 · 通用」。</p>
 ${searchArea}
 </section>
 ${listCards}
@@ -615,8 +628,13 @@ function preferenceRowHtml(
   const kindLabel = row.kind === '' ? '名称条目' : (POOL_KIND_LABELS[row.kind] ?? row.kind);
   const matchLabel = row.kind === '' ? (row.exact === 1 ? '精确' : '严格/模糊') : '按 id 绑定';
   const statusCell = row.kind === '' ? '<span class="muted">-</span>' : poolStatusHtml(snapshot);
+  // 同名跨平台的绑定行加平台后缀（灰显，仅展示——下发名仍是快照挂牌名）。
+  const platformSuffix =
+    snapshot?.platform != null && snapshot.platform in WE_MEDIA_PLATFORM_NAMES
+      ? ` <span class="muted">（${esc(WE_MEDIA_PLATFORM_NAMES[snapshot.platform]!)}）</span>`
+      : '';
   return `    <tr>
-      <td class="wrap">${esc(row.name)}</td>
+      <td class="wrap">${esc(row.name)}${platformSuffix}</td>
       <td class="wrap">${row.domain === '' ? '<span class="muted">-</span>' : esc(row.domain)}</td>
       <td>${esc(kindLabel)}</td>
       <td>${esc(matchLabel)}</td>
@@ -643,6 +661,29 @@ function poolStatusHtml(snapshot: PoolSnapshotRow | undefined): string {
   if (snapshot.status === 2) return '在售';
   if (snapshot.status === null) return '<span class="muted">状态未知</span>';
   return '<span class="neg">已下架</span>';
+}
+
+/**
+ * 搜索结果行的辨识信息：形态 + 平台·粉丝档（自媒体）或频道类型（媒体）。
+ * 同名号跨平台是不同资源（转售商把同一名字按头条号/百家号/搜狐号分别
+ * 挂牌），只显示名称无法分辨勾的是哪一条。
+ */
+function poolIdentityHtml(row: PoolSnapshotRow): string {
+  const kind = POOL_KIND_LABELS[row.kind] ?? row.kind;
+  if (row.kind === 'we-media') {
+    const parts = [kind];
+    if (row.platform !== null && row.platform in WE_MEDIA_PLATFORM_NAMES) {
+      parts.push(WE_MEDIA_PLATFORM_NAMES[row.platform]!);
+    }
+    if (row.fans_number !== null && row.fans_number in FANS_NUMBER_NAMES) {
+      parts.push(FANS_NUMBER_NAMES[row.fans_number]!);
+    }
+    return esc(parts.join(' · '));
+  }
+  if (row.category_code !== null && row.category_code in MEDIA_CHANNEL_TYPE_NAMES) {
+    return esc(`${kind} · ${MEDIA_CHANNEL_TYPE_NAMES[row.category_code]!}`);
+  }
+  return esc(kind);
 }
 
 function categoryOptionsHtml(selected: number): string {
@@ -996,6 +1037,9 @@ export function createAdminPageRoutes(deps: BackendDeps, throttle: AdminLoginThr
       return htmlError(c, '行业类目无效。', backHref, 400);
     }
     const industry = Number.parseInt(industryRaw, 10);
+    // 「包含未分类」开关（u=1）：勾选时行业候选并入无类目渠道，消除
+    // 回落语义下未分类资源进不了行业专属名单的操作死角；缺省 = 现状行为。
+    const includeUnclassified = (c.req.query('u') ?? '') === '1';
     const rows = listPreferenceChannels(deps.db);
     const boundRefs = rows
       .filter(row => row.kind !== '' && row.resource_id !== null)
@@ -1005,9 +1049,9 @@ export function createAdminPageRoutes(deps: BackendDeps, throttle: AdminLoginThr
     const searchResults =
       searchQuery === ''
         ? null
-        : searchPoolSnapshot(deps.db, searchQuery, POOL_SEARCH_RESULT_LIMIT, industry);
+        : searchPoolSnapshot(deps.db, searchQuery, POOL_SEARCH_RESULT_LIMIT, industry, includeUnclassified);
     // datalist 候选：头部不重名候选 + 当前搜索结果名（覆盖头部之外命中）。
-    const suggestions = listPoolSnapshotNames(deps.db, POOL_SUGGESTION_LIMIT, industry);
+    const suggestions = listPoolSnapshotNames(deps.db, POOL_SUGGESTION_LIMIT, industry, includeUnclassified);
     if (searchResults !== null) {
       const seen = new Set(suggestions);
       for (const result of searchResults) {
@@ -1017,7 +1061,16 @@ export function createAdminPageRoutes(deps: BackendDeps, throttle: AdminLoginThr
       }
     }
     return c.html(
-      preferenceChannelsHtml(rows, stats, snapshotByRef, searchQuery, searchResults, suggestions, industry),
+      preferenceChannelsHtml(
+        rows,
+        stats,
+        snapshotByRef,
+        searchQuery,
+        searchResults,
+        suggestions,
+        industry,
+        includeUnclassified,
+      ),
     );
   });
 
@@ -1128,6 +1181,8 @@ export function createAdminPageRoutes(deps: BackendDeps, throttle: AdminLoginThr
                 status: item.status,
                 geoCount: item.geoCount,
                 categoryCode: item.categoryCode,
+                platform: item.platform,
+                fansNumber: item.fansNumber,
               })),
             }
           : null;
