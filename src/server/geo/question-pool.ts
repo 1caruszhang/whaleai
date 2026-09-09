@@ -30,6 +30,7 @@ import { anySignal } from "../utils/cancellation";
 import { managementApi } from "../utils/management-api-client";
 import type { GeoBillingPermitPort } from "./billing-permit";
 import { embedWithDegradation } from "./embedding-fallback";
+import { brandLayerScopeJson } from "./knowledge-authority";
 import type {
   GeoEmbeddingCapability,
   GeoKeywordSearchCapability,
@@ -484,7 +485,7 @@ function productLineFacts(
   return context.facts.filter(
     (fact) =>
       fact.scopeJson.includes(productLine) ||
-      !fact.scopeJson.includes("product-line"),
+      brandLayerScopeJson(fact.scopeJson),
   );
 }
 

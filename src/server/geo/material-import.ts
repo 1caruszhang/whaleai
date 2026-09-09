@@ -47,7 +47,10 @@ import { withAbortSignal } from '../utils/cancellation';
 import { managementApi, managementApiBytes } from '../utils/management-api-client';
 import { GatewayBillingError, type GeoBillingPermitPort } from './billing-permit';
 import type { KnowledgeAuthority, KnowledgeCandidate } from './knowledge-authority';
-import { KNOWLEDGE_EXCERPT_MAX_LENGTH } from './knowledge-authority';
+import {
+  inspectBrandScopeStringList,
+  KNOWLEDGE_EXCERPT_MAX_LENGTH,
+} from './knowledge-authority';
 import { GeoUpstreamHttpError } from './provider-capabilities';
 import type {
   GeoKeywordSearchCapability,
@@ -80,8 +83,14 @@ const DEFAULT_EXTRACTION_TIMEOUT_MS = 10 * 60_000;
  */
 const RESCAN_POOL_PRESCAN_LIMIT = 200;
 /**
- * ranking 陈列位 1 为本品牌、2–6 为真实竞品（5 家）。第一阶段
- * 给用户最多 10 家带地域/同类业务的联网候选，留出确认与去重空间。
+ * 竞品名单缓冲目标（票 #45，用户裁决 2026-09-07）：ranking 陈列位 1 为本
+ * 品牌、2–6 为真实竞品（5 家），给用户最多 10 家候选留出确认与去重空间。
+ * 续搜按**两层合并燃料**计数——已知（确认直接＋确认潜在）＋候选（直接层
+ * ＋潜在层）合计不足 10 家即触发续搜轮。票 #23 的旧口径「只算直接层、目标
+ * 7」在写实跑里反复暴露缺口：7 个直接层候选经用户删行＋排行时身份排除后
+ * 常剩 ≤4 家，排行 fail-closed 频繁触发。潜在层计入达标口径（排行 roster
+ * 组装本就是直接优先＋潜在补位，两层都是排行燃料）。达标续搜不是硬凑：
+ * 存在闸每轮恒开，预算耗尽仍不足时如实呈现实数。
  */
 const COMPETITOR_ENRICHMENT_TARGET = 10;
 
@@ -98,20 +107,52 @@ const COMPETITOR_POTENTIAL_TARGET = 5;
 const COMPETITOR_SOURCE_DOMAIN_CAP = 3;
 
 /**
- * 竞品主名单达标线（用户裁决 2026-08-31 票 #23）：确认卡竞品主名单
- * （已知/已确认竞品 + 联网直接层合并去重）不足 7 家即触发续搜轮。
- * potentialCompetitors 不计入达标口径——潜在层只做排行补位与备查，
- * 不能拿来充主名单家数。达标续搜不是硬凑：存在闸每轮恒开，预算耗尽
- * 仍不足时如实呈现实数。
+ * 分闸丢弃计数（票 #45 观测）：competitor-search 投影随 ok/no_qualified_
+ * suggestions 落盘，只有数字无名字（脱敏纪律），<5 家事后可归因到哪道闸。
+ * existence=存在闸（名字不在语料）；region=地域闸（城市/区县锚白名单）；
+ * relation=关系闸（摘要里名字附近的供应/合作/前东家词）；cap=过闸幸存已满
+ * 后未再审视的截断行；parse=解析层聚合丢弃（坏形状/描述短语/自身关联/
+ * 同品牌/跨层/解析上限；兜底路径里整条坏 JSON 响应也计一次）。
  */
-const COMPETITOR_ROSTER_TARGET = 7;
+interface CompetitorGateDropCounts {
+  existence: number;
+  region: number;
+  relation: number;
+  cap: number;
+  parse: number;
+}
+
+function emptyCompetitorGateDrops(): CompetitorGateDropCounts {
+  return { existence: 0, region: 0, relation: 0, cap: 0, parse: 0 };
+}
+
+/** 快照抽取的两层候选行（ADR-0007 两层名单）：名字逐字取自快照，region 必填。 */
+interface CompetitorTierRows {
+  direct: Array<{ name: string; region: string }>;
+  potential: Array<{ name: string; region: string }>;
+}
 
 /**
- * 续搜轮硬上限（票 #23）：每轮 = 一次换词重写 + 一次检索 + 一次快照重抽，
- * 都是真实网关调用——3 轮封顶防死循环与费用失控。轮次进 competitor-search
- * 投影的 rounds 字段留痕（新增字段，旧消费方可缺省）。
+ * 续搜轮硬上限（票 #23 立项 3 轮，票 #45 提到 5）：每轮 = 一次换词重写 +
+ * 一次检索 + 一次快照重抽，都是真实网关调用——轮次封顶防死循环与费用
+ * 失控。轮次进 competitor-search 投影的 rounds 字段留痕（新增字段，旧
+ * 消方可缺省）。
  */
-const COMPETITOR_CONTINUATION_ROUNDS = 3;
+const COMPETITOR_CONTINUATION_ROUNDS = 5;
+
+/**
+ * 每条检索查询的召回条数（票 #45）：豆包 web_search 的 Count 上限内取
+ * 30——固定 20 时两池查询的原始召回经 URL 去重＋域名封顶后常不足以喂满
+ * 缓冲目标。Provider 侧按 API 实际上限截断，超限不报错。
+ */
+const COMPETITOR_SOURCE_RESULT_COUNT = 30;
+
+/**
+ * 饥饿态域名封顶（票 #45）：续搜某轮补枪语料在标准帽（3 条/域）下零增长
+ * 时，说明语料池被少数域占满——单调放宽到 5 条/域重并一次。防霸屏的
+ * 多样性纪律保留（仍有帽），只是饥饿时给多品牌列表页让出更多位。
+ */
+const COMPETITOR_STARVED_DOMAIN_CAP = 5;
 
 /**
  * 续搜轮换词的目标语料池轮换（票 #23「换词多轮」）：各轮分别逼向品类
@@ -122,6 +163,26 @@ const COMPETITOR_ROUND_QUERY_FORMS = [
   '品类盘点文与多品牌列表页（「品牌有哪些/盘点/名单」）',
   '本地探店与口碑讨论（「口碑/评价/推荐」）',
   '行业榜单文（「排行榜/榜单/十强」）',
+] as const;
+
+/**
+ * 双池查询词纪律（2026-08-31 双池裁决）：材料腿检索词与门卡补搜查询词合成
+ * 共用同一段规则文本——第 1 条目标客户口吻需求问句（招商/比价池），第 2 条
+ * 中立观察者品类盘点（品类分析文/探店口碑/多品牌列表页），禁客户口吻词与
+ * 经营场景限定。两处提示词各自只追加场景专属说明，规则不得分叉。
+ */
+const COMPETITOR_DUAL_POOL_QUERY_RULES = [
+  '两条必须覆盖两个不同的语料池，不得同池近义重复：',
+  '- 第 1 条以【目标客户】的口吻写需求问句——客户带着具体问题搜：目标客户是',
+  '  经营者/采购方（加盟商、企业采购）→「地域 + 品类/项目 + 加盟/合作/供应商',
+  '  哪家好/怎么选」；终端消费者 →「地域 + 品类 + 排行榜/哪家好/口碑」。这条',
+  '  命中的是招商/比价类内容池。',
+  '- 第 2 条以中立的行业观察者口吻写品类盘点——「地域 + 品类 + 品牌 有哪些/',
+  '  盘点/名单」，不得出现加盟、招商、合作、供应商这类客户口吻词，且品类',
+  '  要用品类本身的大众通用词形：去掉经营场景限定词——业务发生在哪不等于',
+  '  品类叫什么（「高校食堂档口」是场景，「干蒸菜」才是品类），行业媒体或',
+  '  普通顾客怎么称呼这个品类就怎么写。这条要命中的是品类分析文章、本地',
+  '  探店/口碑与多品牌并列的列表页——竞品名最密集的语料。',
 ] as const;
 
 /**
@@ -212,6 +273,13 @@ export interface BrandMaterialContext {
   workspaceId: string;
   brandName: string;
   productLines: string[];
+}
+
+/** 门卡补搜结果投影（票 #45）：只有数量，名字在确认卡上。 */
+export interface RankingCompetitorTopUpOutcome {
+  kind: 'ranking-competitor-topup';
+  proposed: number;
+  potentialProposed: number;
 }
 
 export interface MaterialProcessingAttempt {
@@ -718,19 +786,9 @@ function extractionPrompt(
     '',
     '## 竞品检索词（顺手产出，管线瞬时值，不是事实）',
     '读完材料后写 2 条搜索引擎查询词（每条 ≤25 字、含地域），用于检索目标品牌',
-    '的竞品。两条必须覆盖两个不同的语料池，不得同池近义重复：',
-    '- 第 1 条以【目标客户】的口吻写需求问句——客户带着具体问题搜：目标客户是',
-    '  经营者/采购方（加盟商、企业采购）→「地域 + 品类/项目 + 加盟/合作/供应商',
-    '  哪家好/怎么选」；终端消费者 →「地域 + 品类 + 排行榜/哪家好/口碑」。客户',
-    '  是谁由材料决定（与 targetCustomers 字段的判定一致），不套固定模板。这条',
-    '  命中的是招商/比价类内容池。',
-    '- 第 2 条以中立的行业观察者口吻写品类盘点——「地域 + 品类 + 品牌 有哪些/',
-    '  盘点/名单」，不得出现加盟、招商、合作、供应商这类客户口吻词，且品类',
-    '  要用品类本身的大众通用词形：去掉材料里的经营场景限定词——业务发生在',
-    '  哪不等于品类叫什么（「高校食堂档口」是场景，「干蒸菜」才是品类），',
-    '  行业媒体或普通顾客怎么称呼这个品类就怎么写。这条要命中的是品类分析',
-    '  文章、本地探店/口碑与多品牌并列的列表页——竞品名最密集的语料；带',
-    '  客户口吻或场景限定都会把检索拉回自身的招商软文池（2026-08-31 两起',
+    '的竞品。客户是谁由材料决定（与 targetCustomers 字段的判定一致），不套固定模板。',
+    ...COMPETITOR_DUAL_POOL_QUERY_RULES,
+    '  带客户口吻或场景限定都会把检索拉回自身的招商软文池（2026-08-31 两起',
     '  事故：两条全带加盟口吻 0 召回品类品牌；「高校食堂干蒸菜品牌盘点」',
     '  仍困旧池）。',
     '',
@@ -1000,7 +1058,7 @@ function parseCompetitorNames(
     deficit: number;
     regionHints?: readonly string[];
   },
-): { direct: Array<{ name: string; region: string }>; potential: Array<{ name: string; region: string }> } {
+): CompetitorTierRows & { parseDrops: number } {
   const parsed = extractJsonObject(raw);
   if (!Array.isArray(parsed.direct)) throw new Error('model_response_invalid');
   const parseTier = (
@@ -1046,7 +1104,13 @@ function parseCompetitorNames(
   };
   const direct = parseTier(parsed.direct, limits.deficit);
   const potential = parseTier(parsed.potential, COMPETITOR_POTENTIAL_TARGET, direct);
-  return { direct, potential };
+  // 解析层丢弃聚合计数（票 #45 观测）：坏形状/描述短语/自身与关联/同品牌
+  // 去重/跨层互斥/上限截断合并为一个 parse 数——归因到具体原因需开
+  // XIAOJING_DEBUG_COMPETITOR_DUMP 看 extraction-response 原文。
+  const rowCount = (rows: unknown) => (Array.isArray(rows) ? rows.length : 0);
+  const parseDrops = rowCount(parsed.direct) - direct.length
+    + rowCount(parsed.potential) - potential.length;
+  return { direct, potential, parseDrops };
 }
 
 /**
@@ -1061,14 +1125,18 @@ function parseCompetitorSuggestions(
     excludedNames: ReadonlySet<string>;
     deficit: number;
   },
-): CompetitorSuggestion[] {
+): {
+  suggestions: CompetitorSuggestion[];
+  drops: Pick<CompetitorGateDropCounts, 'parse' | 'relation'>;
+} {
   const parsed = extractJsonObject(raw);
   if (!Array.isArray(parsed.competitors)) throw new Error('model_response_invalid');
   const seen: string[] = [];
   const suggestions: CompetitorSuggestion[] = [];
+  const drops = { parse: 0, relation: 0 };
   for (const item of parsed.competitors) {
     if (suggestions.length >= limits.deficit) break;
-    if (!item || typeof item !== 'object' || Array.isArray(item)) continue;
+    if (!item || typeof item !== 'object' || Array.isArray(item)) { drops.parse += 1; continue; }
     const holder = item as Record<string, unknown>;
     // 与主路径同口径：繁体归简、描述短语（引号/「相关」句式）剔除、层内
     // 嵌套互斥；存储名忠实原报不截断（同 brandCoreName 撤销理由）。
@@ -1086,20 +1154,23 @@ function parseCompetitorSuggestions(
       typeof holder.sourceExcerpt === "string"
         ? holder.sourceExcerpt.trim().slice(0, 4_000)
         : "";
-    if (!name || !region || !similarBusiness || !sourceExcerpt) continue;
-    if (/["“”‘’「」『』]/.test(name) || name.includes('相关')) continue;
+    if (!name || !region || !similarBusiness || !sourceExcerpt) { drops.parse += 1; continue; }
+    if (/["“”‘’「」『』]/.test(name) || name.includes('相关')) { drops.parse += 1; continue; }
     // 关系轻门：摘录里名字附近出现供应/合作/前东家等关系词的整条剔除，
     // 拦下模型把上下游改写成竞品的常见错误。
-    if (namedRelation(sourceExcerpt, name, NON_COMPETITOR_RELATION)) continue;
+    if (namedRelation(sourceExcerpt, name, NON_COMPETITOR_RELATION)) {
+      drops.relation += 1;
+      continue;
+    }
     const normalized = competitorIdentityKey(name);
-    if (!passesCompetitorNameGates(name, limits)) continue;
+    if (!passesCompetitorNameGates(name, limits)) { drops.parse += 1; continue; }
     if (seen.some(
       (existing) => existing === normalized || existing.includes(normalized) || normalized.includes(existing),
-    )) continue;
+    )) { drops.parse += 1; continue; }
     seen.push(normalized);
     suggestions.push({ name, region, similarBusiness, sourceExcerpt });
   }
-  return suggestions;
+  return { suggestions, drops };
 }
 
 function extractJsonObject(raw: string): Record<string, unknown> {
@@ -1252,6 +1323,36 @@ export function parseCompetitorSearchQueries(raw: string): string[] {
     .map((query) => query.trim().slice(0, 60))
     .filter(Boolean)
     .slice(0, 2);
+}
+
+/**
+ * 门卡补搜的查询词合成提示（票 #45）：材料导入时检索词由模型读材料顺手
+ * 产出；排行生成门卡时刻没有材料可读，改读已确认档案合成——双池纪律与
+ * 材料腿同一套（第 1 条目标客户口吻需求问句；第 2 条中立观察者品类盘点、
+ * 禁招商词与场景限定），代码零行业词。
+ */
+function rankingCompetitorTopUpQueryPrompt(input: {
+  brandName: string;
+  industry: string;
+  products: readonly string[];
+  serviceArea: string;
+  targetCustomers: readonly string[];
+}): string {
+  return [
+    '你是搜索查询词工程师。读完品牌档案后写 2 条搜索引擎查询词（每条 ≤25 字、'
+    + '含地域），用于检索该品牌的竞品。只返回 JSON，不要 markdown。',
+    '',
+    '## 品牌档案',
+    `- 品牌：${input.brandName}`,
+    `- 行业：${input.industry || '未知'}`,
+    `- 产品/项目：${input.products.join('、') || '未知'}`,
+    `- 服务区域：${input.serviceArea || '未知'}`,
+    `- 目标客户：${input.targetCustomers.join('、') || '未知'}`,
+    '',
+    ...COMPETITOR_DUAL_POOL_QUERY_RULES,
+    '',
+    '输出：{"competitorSearchQueries":["查询词1","查询词2"]}',
+  ].join('\n');
 }
 
 /**
@@ -1713,6 +1814,10 @@ export class MaterialImportService {
     }
     const normalize = competitorIdentityKey;
     const brandCompetitors = new Set<string>();
+    // 已确认潜在层（票 #45 两层合并计数）：只参与达标口径与跳过判断，不进
+    // knownCompetitors——同名允许从潜在层升格直接层（层级是语义判断，升格
+    // 走确认卡裁决，不该被已知集拦死）。
+    const brandPotentialCompetitors = new Set<string>();
     const knownCompetitors = new Set<string>();
     const excludedNames = new Set<string>([normalize(context.brandName)]);
     const excludedDisplay = new Map<string, string>([[normalize(context.brandName), context.brandName]]);
@@ -1752,6 +1857,9 @@ export class MaterialImportService {
           remember(knownDisplay, value);
           if (fact.scope.kind === 'brand') brandCompetitors.add(normalize(value));
         }
+        if (fact.field === 'potentialCompetitors' && fact.scope.kind === 'brand') {
+          brandPotentialCompetitors.add(normalize(value));
+        }
         if (fact.field === 'relatedBrands' || fact.field === 'shortNames' || fact.field === 'fullName') {
           excludedNames.add(normalize(value));
           remember(excludedDisplay, value);
@@ -1768,25 +1876,46 @@ export class MaterialImportService {
       }
     }
     try {
-      const current = await this.authority.inspect({
-        subject: context.brandName,
-        predicate: 'enterprise-profile.competitors',
-        scope: { entityScope: 'brand' },
-      });
-      if (current) {
-        const confirmed = JSON.parse(current.normalizedValueJson) as unknown;
+      const [current, currentPotential] = await Promise.all([
+        this.authority.inspect({
+          subject: context.brandName,
+          predicate: 'enterprise-profile.competitors',
+          scope: { entityScope: 'brand' },
+        }),
+        this.authority.inspect({
+          subject: context.brandName,
+          predicate: 'enterprise-profile.potentialcompetitors',
+          scope: { entityScope: 'brand' },
+        }),
+      ]);
+      const absorb = (
+        fact: { normalizedValueJson: string } | null | undefined,
+        into: 'direct' | 'potential',
+      ) => {
+        if (!fact) return;
+        const confirmed = JSON.parse(fact.normalizedValueJson) as unknown;
         for (const value of Array.isArray(confirmed) ? confirmed : [confirmed]) {
           if (typeof value !== 'string' || !value.trim()) continue;
-          brandCompetitors.add(normalize(value));
-          knownCompetitors.add(normalize(value));
-          remember(knownDisplay, value);
+          if (into === 'direct') {
+            brandCompetitors.add(normalize(value));
+            knownCompetitors.add(normalize(value));
+            remember(knownDisplay, value);
+          } else {
+            brandPotentialCompetitors.add(normalize(value));
+          }
         }
-      }
+      };
+      absorb(current, 'direct');
+      absorb(currentPotential, 'potential');
     } catch {
       // 权威值读取失败时只按本次抽取计数，不阻断富化。
     }
+    // 缓冲达标按两层合并计数（票 #45）：排行 roster 组装本就是直接优先＋
+    // 潜在补位，确认潜在层同样是排行燃料——直接层已满 10 家或两层合计
+    // 满 10 家都视为无需富化。deficit（直接层四点上限口径）仍按已知直接层
+    // 计算，语义不变。
     const deficit = COMPETITOR_ENRICHMENT_TARGET - brandCompetitors.size;
-    if (deficit <= 0) {
+    if (brandCompetitors.size + brandPotentialCompetitors.size >= COMPETITOR_ENRICHMENT_TARGET) {
       logOutcome({ status: 'skipped', errorCode: 'deficit_zero' });
       return [];
     }
@@ -1950,7 +2079,7 @@ export class MaterialImportService {
     const sourceGroups = searchSourcesFn
       ? await Promise.all(queries.map(async (query) => {
           try {
-            return await searchSourcesFn(query, { signal, count: 20 });
+            return await searchSourcesFn(query, { signal, count: COMPETITOR_SOURCE_RESULT_COUNT });
           } catch (error) {
             debugDumpCompetitorSearch({ event: 'search-source-failed', query, error: String(error) });
             // 单 query 检索失败不拖垮另一条；两条全空则走 enable_search 兜底。
@@ -2043,8 +2172,8 @@ export class MaterialImportService {
       };
       const extractNames = async (
         corpusLines: readonly string[],
-      ): Promise<ReturnType<typeof parseCompetitorNames> | null> => {
-        let parsedNames: ReturnType<typeof parseCompetitorNames> | null = null;
+      ): Promise<CompetitorTierRows | null> => {
+        let parsedNames: CompetitorTierRows | null = null;
         for (let attempt = 0; attempt < 2 && parsedNames === null; attempt += 1) {
           let response: string;
           try {
@@ -2069,13 +2198,17 @@ export class MaterialImportService {
             break;
           }
           try {
-            parsedNames = parseCompetitorNames(response, limits);
+            const parsed = parseCompetitorNames(response, limits);
+            gateDrops.parse += parsed.parseDrops;
+            parsedNames = { direct: parsed.direct, potential: parsed.potential };
           } catch {
             // 坏 JSON 重抽一次（同 extractFacts 契约），两次都坏落 invalid。
           }
         }
         return parsedNames;
       };
+      // 分闸丢弃计数跨轮累计（口径见 CompetitorGateDropCounts）。
+      const gateDrops = emptyCompetitorGateDrops();
       // 两层名单走同一组本地闸（存在/关系恒开，地域闸仅城市锚）——分层是
       // 模型的语义判断（用户裁决 2026-08-30），闸门只保「名字真实出自快照」。
       const gateWith = (
@@ -2083,17 +2216,33 @@ export class MaterialImportService {
         corpusSources: readonly CompetitorCorpusSource[],
       ) => (rows: Array<{ name: string; region: string }>, cap: number) => {
         const survivors: Array<{ name: string; region: string; evidence: string; evidenceUrl: string }> = [];
-        for (const { name, region } of rows) {
-          if (survivors.length >= cap) break;
+        for (let index = 0; index < rows.length; index += 1) {
+          const { name, region } = rows[index];
+          if (survivors.length >= cap) {
+            // 只计因截断而未再审视的余行（票 #45 评审修复）：先前按
+            // rows.length - survivors.length 计，会把已被存在/地域/关系闸
+            // 计过而丢弃的行再计入 cap，虚增截断数。
+            gateDrops.cap += rows.length - index;
+            break;
+          }
           const nameNorm = normalizeEvidenceText(name);
-          if (!nameNorm || !corpus.corpusNorm.includes(nameNorm)) continue; // 存在闸（全文语料）
+          if (!nameNorm || !corpus.corpusNorm.includes(nameNorm)) {
+            gateDrops.existence += 1; // 存在闸（全文语料）
+            continue;
+          }
           // 地域闸（仅城市/区县锚）：省级锚无 allowed 白名单，模型自证。
-          if (scope.granularity === 'city' && !regionInServiceScope(region, scope.allowed)) continue;
+          if (scope.granularity === 'city' && !regionInServiceScope(region, scope.allowed)) {
+            gateDrops.region += 1;
+            continue;
+          }
           const matchedIndex = corpus.fullNorms.findIndex((text) => text.includes(nameNorm));
           if (matchedIndex >= 0) {
             // 关系闸（摘要文本）：快照摘要里名字附近出现供应/合作/前东家等
             // 关系词的剔除——正文里的招商措辞不参与，防列表文整页误杀。
-            if (namedRelation(corpus.sourceTexts[matchedIndex], name, NON_COMPETITOR_RELATION)) continue;
+            if (namedRelation(corpus.sourceTexts[matchedIndex], name, NON_COMPETITOR_RELATION)) {
+              gateDrops.relation += 1;
+              continue;
+            }
           }
           let evidence = matchedIndex >= 0 ? corpus.sourceTexts[matchedIndex].slice(0, 200) : '';
           if (
@@ -2127,23 +2276,28 @@ export class MaterialImportService {
       let directSuggestions = gateTier(parsedNames.direct, deficit);
       let potentialSuggestions = gateTier(parsedNames.potential, COMPETITOR_POTENTIAL_TARGET);
 
-      // 达标续搜（票 #23 用户裁决 2026-08-31，升级自两段式补枪）：全天 18 轮
+      // 达标续搜（票 #23 立项，票 #45 升档为两层合并直达缓冲）：全天 18 轮
       // 同品牌实跑名单在 1～7 家间波动，根因是「一篇盘点文列 5-6 家」的密集源
-      // 只在搜索引擎当轮返回里时有时无。改为结果驱动：主名单（已知竞品 +
-      // 直接层合并去重，potential 不计入口径）<7 即续搜——每轮让模型看着已试
-      // 查询词与召回标题重写一条换池新词（代码按 COMPETITOR_ROUND_QUERY_FORMS
+      // 只在搜索引擎当轮返回里时有时无。结果驱动：两层合并燃料（确认直接＋
+      // 确认潜在＋候选直接＋候选潜在）<10（缓冲目标）即续搜——每轮让模型看着
+      // 已试查询词与召回标题重写一条换池新词（代码按 COMPETITOR_ROUND_QUERY_FORMS
       // 轮换目标池），换池补一枪后逐轮合并语料重新抽取重新过闸、名单按
-      // sameBrandIdentity 并集；达标即停，最多 3 轮，预算耗尽如实呈现实数。
+      // sameBrandIdentity 并集；达标即停，最多 5 轮，预算耗尽如实呈现实数。
       // 存在闸每轮恒开：名单可以不足，上卡的每一家必须真实见于某轮语料。
       const roundQueries = [...queries];
       const regionHints = limits.regionHints;
       let continuationRounds = 0;
       let usedRetry = false;
       let mergedSources = sources;
+      // 饥饿域帽（票 #45）：标准帽下单轮零增长才单调放宽，之后各轮沿用。
+      let domainCap = COMPETITOR_SOURCE_DOMAIN_CAP;
+      const rosterFuel = () =>
+        brandCompetitors.size + brandPotentialCompetitors.size
+        + directSuggestions.length + potentialSuggestions.length;
       while (
         searchSourcesFn
         && continuationRounds < COMPETITOR_CONTINUATION_ROUNDS
-        && brandCompetitors.size + directSuggestions.length < COMPETITOR_ROSTER_TARGET
+        && rosterFuel() < COMPETITOR_ENRICHMENT_TARGET
       ) {
         let retryQuery: string | null = null;
         try {
@@ -2176,7 +2330,10 @@ export class MaterialImportService {
         continuationRounds += 1;
         if (!retryQuery) break;
         roundQueries.push(retryQuery);
-        const retryGroup = await searchSourcesFn(retryQuery, { signal, count: 20 })
+        const retryGroup = await searchSourcesFn(retryQuery, {
+          signal,
+          count: COMPETITOR_SOURCE_RESULT_COUNT,
+        })
           .catch((error: unknown) => {
             debugDumpCompetitorSearch({ event: 'search-source-failed', query: retryQuery, error: String(error) });
             return [] as Array<{ title: string; url: string; summary?: string }>;
@@ -2187,10 +2344,22 @@ export class MaterialImportService {
         );
         for (const [url, text] of retryPages) pageTexts.set(url, text);
         const previousCount = mergedSources.length;
-        mergedSources = capSourcesPerDomain(
+        let nextSources = capSourcesPerDomain(
           dedupeSourcesByUrl([...mergedSources, ...retryGroup]),
-          COMPETITOR_SOURCE_DOMAIN_CAP,
+          domainCap,
         );
+        if (nextSources.length === previousCount && domainCap < COMPETITOR_STARVED_DOMAIN_CAP) {
+          // 饥饿放宽（票 #45）：标准帽下本轮零增长说明语料位被少数域占满，
+          // 放宽到饥饿帽重并一次——多样性纪律保留（仍有帽），给换池补枪
+          // 召回的多品牌列表页让出位。重并后同一份语料既供模型快照也供
+          // 存在闸（两条腿看的仍是同一份裁剪结果）。
+          domainCap = COMPETITOR_STARVED_DOMAIN_CAP;
+          nextSources = capSourcesPerDomain(
+            dedupeSourcesByUrl([...mergedSources, ...retryGroup]),
+            domainCap,
+          );
+        }
+        mergedSources = nextSources;
         if (mergedSources.length === previousCount) continue;
         corpusSources = withPageTexts(mergedSources, pageTexts);
         debugDumpCompetitorSearch({
@@ -2236,6 +2405,7 @@ export class MaterialImportService {
         parsedPotential: parsedNames.potential.length,
         directSurvivors: directSuggestions.map((row) => row.name),
         potentialSurvivors: potentialSuggestions.map((row) => row.name),
+        drops: { ...gateDrops },
       });
       if (directSuggestions.length === 0 && potentialSuggestions.length === 0) {
         logOutcome({
@@ -2243,6 +2413,7 @@ export class MaterialImportService {
           errorCode: 'no_qualified_suggestions',
           path: usedRetry ? 'retry' : 'main',
           rounds: continuationRounds,
+          drops: { ...gateDrops },
         });
         return [];
       }
@@ -2252,6 +2423,7 @@ export class MaterialImportService {
         count: directSuggestions.length,
         potentialCount: potentialSuggestions.length,
         rounds: continuationRounds,
+        drops: { ...gateDrops },
       });
       return [
         ...directSuggestions.length > 0 ? [buildEnrichmentFact('competitors', directSuggestions)] : [],
@@ -2292,20 +2464,37 @@ export class MaterialImportService {
     const suggestions: Array<{ name: string; region: string; evidence: string }> = [];
     const seen = new Set<string>();
     let invalidResponses = 0;
+    // 兜底路径分闸计数（票 #45 观测，与主路径同一投影形状）：存在闸在此
+    // 路径明确降级（无快照可比）恒为 0；关系/解析层丢弃由解析器累加。
+    const fallbackDrops = emptyCompetitorGateDrops();
     for (const response of responses) {
       let parsed: CompetitorSuggestion[];
       try {
-        parsed = parseCompetitorSuggestions(response, limits);
+        const result = parseCompetitorSuggestions(response, limits);
+        fallbackDrops.parse += result.drops.parse;
+        fallbackDrops.relation += result.drops.relation;
+        parsed = result.suggestions;
       } catch {
         invalidResponses += 1;
+        fallbackDrops.parse += 1;
         continue;
       }
-      for (const suggestion of parsed) {
-        if (suggestions.length >= deficit) break;
+      for (let index = 0; index < parsed.length; index += 1) {
+        if (suggestions.length >= deficit) {
+          fallbackDrops.cap += parsed.length - index;
+          break;
+        }
+        const suggestion = parsed[index];
         if (scope.granularity === 'city'
-          && !regionInServiceScope(suggestion.region, scope.allowed)) continue;
+          && !regionInServiceScope(suggestion.region, scope.allowed)) {
+          fallbackDrops.region += 1;
+          continue;
+        }
         const normalized = competitorIdentityKey(suggestion.name);
-        if (seen.has(normalized)) continue;
+        if (seen.has(normalized)) {
+          fallbackDrops.parse += 1; // 跨响应同品牌去重，口径同主路径解析层
+          continue;
+        }
         seen.add(normalized);
         suggestions.push({
           name: suggestion.name,
@@ -2323,11 +2512,111 @@ export class MaterialImportService {
         errorCode: invalidResponses === responses.length
           ? 'model_response_invalid'
           : 'no_qualified_suggestions',
+        drops: { ...fallbackDrops },
       });
       return [];
     }
-    logOutcome({ status: 'ok-fallback', path: 'fallback', count: suggestions.length });
+    logOutcome({
+      status: 'ok-fallback',
+      path: 'fallback',
+      count: suggestions.length,
+      drops: { ...fallbackDrops },
+    });
     return [buildEnrichmentFact('competitors', suggestions)];
+  }
+
+  /**
+   * 门卡时刻的竞品补搜（票 #45，用户裁决 2026-09-07）：排行生成因 <5 家
+   * fail-closed（或排行项暂缓）时按缺口重跑富化——查询词改读已确认档案
+   * 合成（无材料可读，双池纪律同材料腿），幸存者经既有 propose 走确认卡
+   * 裁决（inferred/0.5，mergeArraySupplement 保证只有新增名上卡）。闸门
+   * 真实性约束与导入路径完全同一套（存在/关系/身份/地域闸恒开），本方法
+   * 只是富化的第二个触发时机，不是新的名单来源语义。
+   */
+  async topUpRankingCompetitors(
+    context: BrandMaterialContext,
+    signal?: AbortSignal,
+  ): Promise<RankingCompetitorTopUpOutcome> {
+    // 种子事实取自已确认档案：enrichCompetitors 内部会自行补齐
+    // products/serviceArea/身份字段与已确认竞品，这里只补它不水合的
+    // 行业与客户口径画像（供查询词合成与抽取提示词的画像块）。
+    const [industryFact, serviceAreaFact, productsFact, targetCustomersFact, customerCasesFact, coreAdvantagesFact] =
+      await Promise.all([
+        inspectBrandScopeStringList(this.authority, context.brandName, 'enterprise-profile.industry'),
+        inspectBrandScopeStringList(this.authority, context.brandName, 'enterprise-profile.servicearea'),
+        inspectBrandScopeStringList(this.authority, context.brandName, 'enterprise-profile.products'),
+        inspectBrandScopeStringList(this.authority, context.brandName, 'enterprise-profile.targetcustomers'),
+        inspectBrandScopeStringList(this.authority, context.brandName, 'enterprise-profile.customercases'),
+        inspectBrandScopeStringList(this.authority, context.brandName, 'enterprise-profile.coreadvantages'),
+      ]);
+    const seedFacts: ExtractedProfileFact[] = ([
+      { field: 'industry', value: industryFact[0] ?? '' },
+      { field: 'serviceArea', value: serviceAreaFact[0] ?? '' },
+      { field: 'products', value: productsFact },
+      { field: 'targetCustomers', value: targetCustomersFact },
+      { field: 'customerCases', value: customerCasesFact },
+      { field: 'coreAdvantages', value: coreAdvantagesFact },
+    ] as Array<{ field: ExtractedProfileFact['field']; value: string | string[] }>)
+      .filter((fact) => (Array.isArray(fact.value) ? fact.value.length > 0 : Boolean(fact.value)))
+      .map((fact) => ({
+        ...fact,
+        // provenance 标签只作文档语义（enrichCompetitors 不读输入事实的
+        // provenance）：这些值出自已确认档案（经用户裁决），不是材料逐字
+        // 证据，不标 extracted（票 #45 评审修复）。
+        provenance: 'asked' as const,
+        confidence: 1,
+        scope: { kind: 'brand' } as const,
+      }));
+    // 查询词合成 best-effort：失败回落空数组，enrichCompetitors 自用默认
+    // 锚形态（主锚+产品赛道 排行榜/哪家好）。
+    let queries: string[] = [];
+    try {
+      const response = await this.extraction.complete([
+        { role: 'system', content: '只写搜索查询词；只返回 JSON。' },
+        { role: 'user', content: rankingCompetitorTopUpQueryPrompt({
+          brandName: context.brandName,
+          industry: industryFact[0] ?? '',
+          products: productsFact,
+          serviceArea: serviceAreaFact[0] ?? '',
+          targetCustomers: targetCustomersFact,
+        }) },
+      ], { signal, maxTokens: 256 });
+      queries = parseCompetitorSearchQueries(response);
+    } catch {
+      // 合成失败不阻断补搜。
+    }
+    const enriched = await this.enrichCompetitors(context, seedFacts, signal, queries);
+    // 无锚被动说明行（value 为空数组）不是候选，不上卡。
+    const candidates = enriched.filter(
+      (fact) => Array.isArray(fact.value) && fact.value.length > 0,
+    );
+    let proposed = 0;
+    let potentialProposed = 0;
+    for (const fact of candidates) {
+      if (fact.field === 'competitors') proposed = fact.value.length;
+      if (fact.field === 'potentialCompetitors') potentialProposed = fact.value.length;
+      try {
+        await this.authority.propose({
+          rawInput: `ranking-competitor-topup; enterprise-profile:${fact.field}`,
+          origin: 'model-inferred',
+          intent: 'knowledge-update',
+          key: {
+            subject: context.brandName,
+            predicate: `enterprise-profile.${fact.field}`,
+            scope: { entityScope: 'brand' },
+          },
+          value: fact.value,
+          source: {
+            excerpt: fact.sourceExcerpt ?? '排行门卡触发的联网补查（待确认）',
+            confidence: fact.confidence,
+            profileProvenance: fact.provenance,
+          },
+        });
+      } catch {
+        // 单条提议失败不拖垮其余候选；数量口径以本地统计为准。
+      }
+    }
+    return { kind: 'ranking-competitor-topup', proposed, potentialProposed };
   }
 
   /**

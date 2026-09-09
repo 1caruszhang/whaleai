@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   KnowledgeAuthority,
+  brandLayerScopeJson,
   classifyKnowledgeCandidate,
   normalizeFactKey,
   normalizeFactValue,
@@ -146,6 +147,16 @@ function revisionPort(candidateOverrides: Partial<KnowledgeCandidate> = {}): Kno
   };
 }
 
+describe('brandLayerScopeJson', () => {
+  it('treats brand-level keys and missing scope as brand layer, both product-line shapes as not', () => {
+    expect(brandLayerScopeJson('{"entityScope":"brand"}')).toBe(true);
+    expect(brandLayerScopeJson('{"kind":"brand"}')).toBe(true);
+    expect(brandLayerScopeJson(undefined)).toBe(true);
+    expect(brandLayerScopeJson('{"entityScope":"product-line","productLine":"团餐"}')).toBe(false);
+    expect(brandLayerScopeJson('{"kind":"product-line","productLine":"团餐"}')).toBe(false);
+  });
+});
+
 describe('KnowledgeAuthority policy', () => {
   it('uses subject/predicate/scope/effective time as the deterministic fact identity', () => {
     const cn = normalizeFactKey({ subject: ' 品牌 ', predicate: '价格', scope: { region: 'CN' } });
@@ -262,6 +273,46 @@ describe('KnowledgeAuthority array supplement merge', () => {
       disposition: 'awaiting-confirmation',
       valueJson: '["隐形车衣","改色膜","太阳膜"]',
       normalizedValueJson: '["隐形车衣","改色膜","太阳膜"]',
+    });
+  });
+
+  it('adopts a user-stated array verbatim so chat deletions and corrections stick (用户输入最高优先级)', async () => {
+    // 用户裁决 2026-09-07：user-stated 数组提议是替换语义——「删掉改色膜」
+    // 提交去掉该项的完整数组，propose 不得并集改写把删掉的项塞回去；旧
+    // 并集语义下该指令曾被静默吞掉（候选与 current 同值，确认后毫无变化）。
+    const port = fakePort(arrayCurrent(['隐形车衣', '改色膜']));
+    const authority = new KnowledgeAuthority({ workspaceId: 'brand-1', sessionId: 'session-1' }, port);
+    const candidate = await authority.propose({
+      rawInput: '删掉核心产品里的改色膜',
+      origin: 'user-stated',
+      intent: 'knowledge-update',
+      key: { subject: '品牌', predicate: 'enterprise-profile.core-products' },
+      value: ['隐形车衣'],
+      source: { excerpt: '用户指示：删掉核心产品里的改色膜', confidence: 1, profileProvenance: 'asked' },
+    });
+    expect(candidate.status).toBe('awaiting-confirmation');
+    expect(port.submissions[0]).toMatchObject({
+      disposition: 'awaiting-confirmation',
+      valueJson: '["隐形车衣"]',
+      normalizedValueJson: '["隐形车衣"]',
+    });
+  });
+
+  it('still merges model-inferred array candidates as supplements after the user-stated replace split', async () => {
+    // 分层回归：机器来源（富化/材料/探针候选）是部分名单，并集保住已确认
+    // 数据不被部分候选清空。
+    const port = fakePort(arrayCurrent(['竞品甲', '竞品乙']));
+    const authority = new KnowledgeAuthority({ workspaceId: 'brand-1', sessionId: 'session-1' }, port);
+    await authority.propose({
+      rawInput: '联网补查候选',
+      origin: 'model-inferred',
+      intent: 'knowledge-update',
+      key: { subject: '品牌', predicate: 'enterprise-profile.competitors' },
+      value: ['竞品丙'],
+      source: { excerpt: '候选：竞品丙', confidence: 0.5 },
+    });
+    expect(port.submissions[0]).toMatchObject({
+      normalizedValueJson: '["竞品甲","竞品乙","竞品丙"]',
     });
   });
 

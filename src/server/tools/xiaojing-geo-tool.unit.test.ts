@@ -11,6 +11,15 @@ import type { GeoOperationProjection } from '../../shared/geo/operation';
 import type { DistributionPlanProjection } from '../../shared/geo/distributionPlan';
 import type { PublishExecutionProjection } from '../../shared/geo/publishScheduler';
 import {
+  competitorFactAdopted,
+  RankingCompetitorConfirmationGate,
+  rankingCompetitorRequirement,
+  rankingTopUpNarrative,
+  resumePendingRankingGeneration,
+  resumeRankingGenerationAfterKnowledgeDecision,
+  sessionRankingCompetitorGate,
+} from "../geo/ranking-competitor-gate";
+import {
   articleOperationSourceFromGenerateInput,
   brandWorkspaceStateSummary,
   listUnfinishedGeoRounds,
@@ -22,9 +31,6 @@ import {
   geoProbeSamplesFailure,
   planDistributionBudgetCny,
   publishExecutionCardProjection,
-  RankingCompetitorConfirmationGate,
-  rankingCompetitorRequirement,
-  sessionRankingCompetitorGate,
   startGeoOperation,
 } from "./xiaojing-geo-tool";
 
@@ -131,6 +137,41 @@ describe("RankingCompetitorConfirmationGate", () => {
     ).toMatchObject({ issuedAfterUserMessageId: "user-1" });
   });
 
+  it("refreshes deferredItemIds on same-subject re-issue without moving the fence", () => {
+    // 回归：同主体去重保围栏，但暂缓项集合是批次事实，两次发行不同时
+    // 必须按最新发行刷新，否则续跑按过期 itemIds 补错项。
+    const gate = new RankingCompetitorConfirmationGate();
+    gate.issue({
+      subject: "目标品牌",
+      source,
+      issuedAfterUserMessageId: "user-1",
+      deferredItemIds: ["item-1", "item-2"],
+    });
+    gate.advanceFence("user-3");
+
+    gate.issue({
+      subject: "目标品牌",
+      source,
+      issuedAfterUserMessageId: "user-1",
+      deferredItemIds: ["item-3"],
+    });
+    expect(gate.pendingChallenge()).toMatchObject({
+      issuedAfterUserMessageId: "user-3",
+      deferredItemIds: ["item-3"],
+    });
+
+    // 再发行整批 Err 路径（无暂缓项）时同样清空集合。
+    gate.issue({
+      subject: "目标品牌",
+      source,
+      issuedAfterUserMessageId: "user-1",
+    });
+    expect(gate.pendingChallenge()).toMatchObject({
+      issuedAfterUserMessageId: "user-3",
+    });
+    expect(gate.pendingChallenge()?.deferredItemIds).toBeUndefined();
+  });
+
   it("advances the fence past a partially consumed user message", () => {
     // 回归：部分采纳后必须推进围栏。曾经走 issue() 推进，但同主体去重把
     // 它变成空操作，同一条消息可以一轮一轮把「顺带提到」的名字全部直采纳。
@@ -160,6 +201,36 @@ describe("RankingCompetitorConfirmationGate", () => {
       ),
     ).toMatchObject({ subject: "目标品牌", source });
   });
+
+  it("grants the free top-up once per gate card and resets only on clear or a new card", () => {
+    // 用户裁决 2026-09-09：补搜不扣点，成本敞口靠「同一门卡只跑一次」封顶。
+    const gate = new RankingCompetitorConfirmationGate();
+    // 无挂起门卡：补搜没有语境，不放行。
+    expect(gate.claimTopUp()).toBe(false);
+
+    const source = { kind: "confirmed-topic-plan" as const, itemIds: ["item-a"] };
+    gate.issue({ subject: "目标品牌", source, issuedAfterUserMessageId: "user-1", deferredItemIds: ["item-a"] });
+    expect(gate.claimTopUp()).toBe(true);
+    // 用户反复点生成 → 同主体同请求去重，同一张卡不再补搜。
+    expect(gate.claimTopUp()).toBe(false);
+    // 同主体去重刷新暂缓集合仍是同一张卡，额度不重置。
+    gate.issue({ subject: "目标品牌", source, issuedAfterUserMessageId: "user-2", deferredItemIds: ["item-a", "item-b"] });
+    expect(gate.claimTopUp()).toBe(false);
+    // 围栏推进不影响额度。
+    gate.advanceFence("user-3");
+    expect(gate.claimTopUp()).toBe(false);
+
+    // 换卡（不同请求）→ 新额度。
+    gate.issue({ subject: "目标品牌", source: { kind: "confirmed-topic-plan", itemIds: ["item-z"] }, issuedAfterUserMessageId: "user-3" });
+    expect(gate.claimTopUp()).toBe(true);
+    expect(gate.claimTopUp()).toBe(false);
+
+    // 门卡清空（续跑/生成成功）后再发行 → 新额度。
+    gate.clear();
+    expect(gate.claimTopUp()).toBe(false);
+    gate.issue({ subject: "目标品牌", source, issuedAfterUserMessageId: "user-4" });
+    expect(gate.claimTopUp()).toBe(true);
+  });
 });
 
 describe("confirmRankingCompetitors", () => {
@@ -175,7 +246,14 @@ describe("confirmRankingCompetitors", () => {
       },
     }));
     const authority = {
-      inspect: vi.fn(async () => null),
+      inspect: vi.fn(async (key: { predicate: string }) => {
+        // 已确认 3 家竞品：user-stated 替换语义下，工具必须自己拼
+        // 「已确认在前＋新增追加」的全量数组再提议，否则会把既有名单清掉。
+        if (key.predicate === "enterprise-profile.competitors") {
+          return { normalizedValueJson: '["竞品甲","竞品乙","竞品丙"]' };
+        }
+        return null;
+      }),
       propose,
       decide,
     } as never;
@@ -192,7 +270,7 @@ describe("confirmRankingCompetitors", () => {
       expect.objectContaining({
         origin: "user-stated",
         intent: "knowledge-update",
-        value: ["竞品丁", "竞品戊"],
+        value: ["竞品甲", "竞品乙", "竞品丙", "竞品丁", "竞品戊"],
         source: expect.objectContaining({ profileProvenance: "asked" }),
       }),
     );
@@ -204,6 +282,33 @@ describe("confirmRankingCompetitors", () => {
       }),
     );
     expect(result).toMatchObject({ confirmedCount: 5, readyForRanking: true });
+  });
+
+  it("judges readiness on the merged two-tier roster, same as the card hook", async () => {
+    // 票 #45 评审修复：4 直接＋2 潜在——decide-batch 钩子按两层合并 ≥5 续跑，
+    // 聊天补名路径若只数直接层会判「仍不足」，两条触发就不等价。
+    const authority = {
+      inspect: vi.fn(async (key: { predicate: string }) => {
+        if (key.predicate === "enterprise-profile.competitors") {
+          return { normalizedValueJson: '["竞品甲","竞品乙","竞品丙"]' };
+        }
+        if (key.predicate === "enterprise-profile.potentialcompetitors") {
+          return { normalizedValueJson: '["潜在己","潜在庚","竞品甲"]' };
+        }
+        return null;
+      }),
+      propose: vi.fn(async (input) => ({ id: "candidate-ranking", baseVersion: 3, ...input })),
+      decide: vi.fn(async () => ({
+        current: { normalizedValueJson: '["竞品甲","竞品乙","竞品丙","竞品丁"]' },
+      })),
+    } as never;
+    const result = await confirmRankingCompetitors(
+      { subject: "目标品牌", names: ["竞品丁"], userInstruction: "补充竞品丁并确认" },
+      authority,
+    );
+
+    // 潜在层的「竞品甲」与直接层同名，跨层互斥不重复计数。
+    expect(result).toMatchObject({ confirmedCount: 6, readyForRanking: true });
   });
 });
 
@@ -223,6 +328,248 @@ describe("rankingCompetitorRequirement", () => {
     expect(
       rankingCompetitorRequirement(new Error("provider unavailable")),
     ).toBeNull();
+  });
+});
+
+describe("resumePendingRankingGeneration (票 #45)", () => {
+  const operationStub = {
+    id: "operation-resumed",
+    articles: [],
+    deferredRankingItems: [],
+  } as never;
+
+  it("restricts the plan source to the deferred ranking items and clears the gate", async () => {
+    const gate = new RankingCompetitorConfirmationGate();
+    gate.issue({
+      subject: "目标品牌",
+      source: { kind: "confirmed-topic-plan", itemIds: ["item-a", "item-b", "item-rank"] },
+      issuedAfterUserMessageId: "user-1",
+      deferredItemIds: ["item-rank"],
+    });
+    const startOperation = vi.fn(async () => operationStub);
+    const outcome = await resumePendingRankingGeneration({
+      gate,
+      challenge: gate.pendingChallenge()!,
+      startOperation,
+    });
+
+    expect(outcome).toMatchObject({ kind: "ranking-generation-resumed" });
+    // 只补生成暂缓项：itemIds 替换为 deferredItemIds，而不是原全集。
+    expect(startOperation).toHaveBeenCalledWith({
+      kind: "confirmed-topic-plan",
+      itemIds: ["item-rank"],
+    });
+    expect(gate.pendingChallenge()).toBeNull();
+  });
+
+  it("starts only once when the tool path and the card hook resume concurrently (防双发)", async () => {
+    // 票 #45 评审：confirm 工具与 decide-batch 路由钩子可能并发触发同一
+    // 门卡的续跑——单飞语义下共用一次 start，后到者复用先到者的结果。
+    const gate = new RankingCompetitorConfirmationGate();
+    gate.issue({
+      subject: "目标品牌",
+      source: { kind: "confirmed-topic-plan" },
+      issuedAfterUserMessageId: "user-1",
+    });
+    const challenge = gate.pendingChallenge()!;
+    let release: (() => void) | undefined;
+    const startOperation = vi.fn(async () => {
+      await new Promise<void>((resolve) => { release = resolve; });
+      return operationStub;
+    });
+    const firstPromise = resumePendingRankingGeneration({ gate, challenge, startOperation });
+    const secondPromise = resumePendingRankingGeneration({ gate, challenge, startOperation });
+    // 两次调用都已同步进入 start（首次在飞、二次复用），放行后再收结果。
+    release!();
+    const [first, second] = await Promise.all([firstPromise, secondPromise]);
+
+    expect(startOperation).toHaveBeenCalledTimes(1);
+    expect(first).toMatchObject({ kind: "ranking-generation-resumed" });
+    expect(second).toMatchObject({ kind: "ranking-generation-resumed" });
+  });
+
+  it("keys the single flight on challenge identity, not on the tool path's userInstruction", async () => {
+    // 票 #45 评审修复：工具路径的 challenge 由 authorize() 产出、多带
+    // userInstruction；钩子路径读 pendingChallenge()。两者是同一张门卡，
+    // 键若按整对象 stringify 必不同，单飞对「工具×钩子」并发形同虚设。
+    const gate = new RankingCompetitorConfirmationGate();
+    gate.issue({
+      subject: "目标品牌",
+      source: { kind: "confirmed-topic-plan", itemIds: ["item-rank"] },
+      issuedAfterUserMessageId: "user-1",
+      deferredItemIds: ["item-rank"],
+    });
+    const hookChallenge = gate.pendingChallenge()!;
+    const toolChallenge = gate.authorize(
+      { names: ["竞品戊"] },
+      { id: "user-2", content: "确认补上竞品戊" },
+    );
+    expect(toolChallenge).toHaveProperty("userInstruction");
+    let release: (() => void) | undefined;
+    const startOperation = vi.fn(async () => {
+      await new Promise<void>((resolve) => { release = resolve; });
+      return operationStub;
+    });
+    const toolPromise = resumePendingRankingGeneration({
+      gate,
+      challenge: toolChallenge,
+      startOperation,
+      fenceUserMessageId: "user-2",
+    });
+    const hookPromise = resumePendingRankingGeneration({
+      gate,
+      challenge: hookChallenge,
+      startOperation,
+    });
+    release!();
+    const [fromTool, fromHook] = await Promise.all([toolPromise, hookPromise]);
+
+    expect(startOperation).toHaveBeenCalledTimes(1);
+    expect(fromTool).toMatchObject({ kind: "ranking-generation-resumed" });
+    expect(fromHook).toMatchObject({ kind: "ranking-generation-resumed" });
+  });
+
+  it("re-issues the gate when the resumed start still fails below five", async () => {
+    const gate = new RankingCompetitorConfirmationGate();
+    gate.issue({
+      subject: "目标品牌",
+      source: { kind: "direct", count: 1, themes: ["对比"], contentType: "ranking", constraints: "" },
+      issuedAfterUserMessageId: "user-1",
+    });
+    const startOperation = vi.fn(async () => {
+      throw new Error("article_generation_ranking_competitors_insufficient:4");
+    });
+    const outcome = await resumePendingRankingGeneration({
+      gate,
+      challenge: gate.pendingChallenge()!,
+      startOperation,
+      fenceUserMessageId: "user-9",
+    });
+
+    expect(outcome).toMatchObject({
+      kind: "ranking-generation-still-required",
+      requirement: { confirmedCount: 4, missingCount: 1 },
+    });
+    // 门卡重挂（围栏推进到 fenceUserMessageId），供下一轮补名授权。
+    expect(gate.pendingChallenge()).toMatchObject({ issuedAfterUserMessageId: "user-9" });
+  });
+});
+
+describe("rankingTopUpNarrative (票 #45 评审去重)", () => {
+  it("returns an empty suffix for null or empty top-up results", () => {
+    expect(rankingTopUpNarrative(null, "继续生成")).toEqual({ topUp: null, suffix: "" });
+    expect(rankingTopUpNarrative({ proposed: 0, potentialProposed: 0 }, "继续生成"))
+      .toEqual({ topUp: null, suffix: "" });
+  });
+
+  it("builds the shared auto-search narrative with the caller's resume verb", () => {
+    const outcome = rankingTopUpNarrative({ proposed: 3, potentialProposed: 2 }, "续跑暂缓项");
+    expect(outcome.topUp).toEqual({ proposed: 3, potentialProposed: 2 });
+    expect(outcome.suffix).toContain("已自动联网补查到 3 家直接竞品与 2 家潜在竞品候选");
+    expect(outcome.suffix).toContain("确认后达标将自动续跑暂缓项");
+    expect(outcome.suffix).toContain("也可以直接在聊天中回复要补充并确认的竞品名称");
+  });
+});
+
+describe("competitorFactAdopted (票 #45 评审收口)", () => {
+  const current = (predicate: string, scopeJson = "{}") => ({
+    key: { predicate, scopeJson },
+  });
+
+  it("triggers only for adopted brand-scope competitor facts", () => {
+    expect(competitorFactAdopted("adopt-new", current("enterprise-profile.competitors"))).toBe(true);
+    expect(competitorFactAdopted("adopt-edited", current("enterprise-profile.potentialcompetitors"))).toBe(true);
+    expect(competitorFactAdopted("adopt-new", current("Enterprise-Profile.Competitors"))).toBe(true);
+  });
+
+  it("ignores rejects, non-competitor predicates, and product-line scope", () => {
+    expect(competitorFactAdopted("reject-candidate", current("enterprise-profile.competitors"))).toBe(false);
+    expect(competitorFactAdopted("keep-current", current("enterprise-profile.competitors"))).toBe(false);
+    expect(competitorFactAdopted("adopt-new", current("enterprise-profile.relatedbrands"))).toBe(false);
+    // 谓词精确匹配：其他以 .competitors 结尾的键不误触。
+    expect(competitorFactAdopted("adopt-new", current("enterprise-profile.potential.suppliers"))).toBe(false);
+    expect(competitorFactAdopted("adopt-new", null)).toBe(false);
+    // roster 只消费品牌层：产品线 scope 的竞品事实采纳不触发续跑重算。
+    expect(competitorFactAdopted(
+      "adopt-new",
+      current("enterprise-profile.competitors", '{"entityScope":"product-line","productLine":"知识服务"}'),
+    )).toBe(false);
+  });
+});
+
+describe("resumeRankingGenerationAfterKnowledgeDecision (票 #45)", () => {
+  const rosterAuthority = (direct: string[], potential: string[]) => ({
+    inspect: vi.fn(async (key: { predicate: string }) => {
+      const predicate = key.predicate.toLowerCase();
+      if (predicate === "enterprise-profile.competitors") {
+        return { normalizedValueJson: JSON.stringify(direct) };
+      }
+      if (predicate === "enterprise-profile.potentialcompetitors") {
+        return { normalizedValueJson: JSON.stringify(potential) };
+      }
+      return null;
+    }),
+  });
+
+  it("does nothing without a pending gate", async () => {
+    const authority = rosterAuthority(["竞品甲"], []);
+    const gate = new RankingCompetitorConfirmationGate();
+    const result = await resumeRankingGenerationAfterKnowledgeDecision({
+      workspaceId: "ws",
+      sessionId: "session-1",
+      gate,
+      authority: authority as never,
+      startOperation: vi.fn(),
+    });
+    expect(result).toEqual({ resumed: false });
+    expect(authority.inspect).not.toHaveBeenCalled();
+  });
+
+  it("stays idle when the merged roster is still below five after adoption", async () => {
+    const gate = new RankingCompetitorConfirmationGate();
+    gate.issue({
+      subject: "目标品牌",
+      source: { kind: "confirmed-topic-plan" },
+      issuedAfterUserMessageId: "user-1",
+      deferredItemIds: ["item-rank"],
+    });
+    const startOperation = vi.fn(async () => ({ articles: [] }) as never);
+    const result = await resumeRankingGenerationAfterKnowledgeDecision({
+      workspaceId: "ws",
+      sessionId: "session-1",
+      gate,
+      // 直接 3＋潜在 1＝4 <5：潜在补位计入合并口径（两层都是排行燃料）。
+      authority: rosterAuthority(["竞品甲", "竞品乙", "竞品丙"], ["竞品丁"]) as never,
+      startOperation,
+    });
+    expect(result).toEqual({ resumed: false });
+    expect(startOperation).not.toHaveBeenCalled();
+    expect(gate.pendingChallenge()).not.toBeNull();
+  });
+
+  it("auto-resumes the deferred-only generation once the merged roster reaches five", async () => {
+    const gate = new RankingCompetitorConfirmationGate();
+    gate.issue({
+      subject: "目标品牌",
+      source: { kind: "confirmed-topic-plan", itemIds: ["item-a", "item-rank"] },
+      issuedAfterUserMessageId: "user-1",
+      deferredItemIds: ["item-rank"],
+    });
+    const startOperation = vi.fn(async () => ({ articles: [] }) as never);
+    const result = await resumeRankingGenerationAfterKnowledgeDecision({
+      workspaceId: "ws",
+      sessionId: "session-1",
+      gate,
+      // 直接 3＋潜在 2＝5：达标——确认卡补位是真实的排行燃料。
+      authority: rosterAuthority(["竞品甲", "竞品乙", "竞品丙"], ["竞品丁", "竞品戊"]) as never,
+      startOperation,
+    });
+    expect(result).toEqual({ resumed: true });
+    expect(startOperation).toHaveBeenCalledWith({
+      kind: "confirmed-topic-plan",
+      itemIds: ["item-rank"],
+    });
+    expect(gate.pendingChallenge()).toBeNull();
   });
 });
 

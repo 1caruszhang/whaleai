@@ -114,7 +114,12 @@ subject + predicate + sorted scope + effectiveFrom + effectiveTo
 | `model-inferred` | 任意 | 始终保存为待确认/冲突候选，不能合并或替换 authority |
 | 任意 | `chat-observation` | 普通聊天建议门；始终待确认/冲突，不能写 authority |
 
-数组字段（products/customerCases/coreAdvantages 等）的差异是**补充语义而非矛盾**：current 与候选同为 JSON 数组时，propose（含聊天修订 add）把候选值改写为「current 各项在前、候选新增项按 canonicalJson 逐项去重后追加」的并集，分类为 `awaiting-confirmation`——确认卡展示的候选值即 `adopt-new` 后的最终形态，整卡确认一次即完成增量合并，不要求二选一。并集与 current 完全相同（候选无新增）时沿用同值路径：仍落待确认候选，确认后仅合并来源、不升事实版本。只有标量 vs 标量差异、或类型不一致（一边数组一边标量）才判 `conflict` 走二选一。
+数组字段（products/customerCases/coreAdvantages 等）的差异按**来源分语义**（用户裁决 2026-09-07「用户输入最高优先级」，修复「聊天删/改数组被并集静默吞回」的缺陷）：
+
+- **`model-inferred`（富化/材料/探针候选）＝增量并集**：current 与候选同为 JSON 数组时，propose 把候选值改写为「current 各项在前、候选新增项按 canonicalJson 逐项去重后追加」的并集，分类为 `awaiting-confirmation`——机器候选是部分名单，并集保证永不清空已确认数据；确认卡展示的候选值即 `adopt-new` 后的最终形态，整卡确认一次即完成增量合并。并集与 current 完全相同（候选无新增）时沿用同值路径：仍落待确认候选，确认后仅合并来源、不升事实版本。
+- **`user-stated`（聊天修订纪律 / 竞品窄通道）＝整体替换**：用户来源的数组值就是用户裁决的完整数组，propose **逐字采纳、不做并集改写**——「删掉竞品甲」提交去掉甲的完整数组，删除/更正/新增都以提交值为准。配套纪律（系统提示词＋工具描述）：agent 对数组字段的删/改/增都先 `inspect_brand_fact` 读当前权威值、再提交包含全部当项的完整数组，只传部分名单会把没传的项删掉。`confirm_ranking_competitors` 入口在提议前自己拼「已确认在前＋新增去重追加」的全量数组。聊天修订 add（知识卡加行，`revise` 的 add action）语义是「加一条」，仍在 revise 内部走并集，不受本分层影响。
+
+只有标量 vs 标量差异、或类型不一致（一边数组一边标量）才判 `conflict` 走二选一。
 
 候选提交必须同时保存 raw input、结构化 candidate、来源材料引用、最小原文摘录和置信度。企业 Profile 材料候选还保存 `extracted / asked / inferred` provenance；材料入口的 raw input 只保存 material/field/provenance 标识，不复制整份隐私正文。候选确认前不创建或修改 current fact；同值来源也必须经过用户确认后才合并（确认粒度为整卡一次确认，见 ADR 0003）。
 
@@ -143,7 +148,7 @@ subject + predicate + sorted scope + effectiveFrom + effectiveTo
 结构化冲突卡支持：
 
 - `keep-current`：保留当前值，候选终结；
-- `adopt-new`：同值只合并来源且版本不变；异值把旧 current 移入 history并让新值版本 `+1`（数组补充候选的"新值"即 propose 时写入的去重并集，裁决路径无需再做合并）；
+- `adopt-new`：同值只合并来源且版本不变；异值把旧 current 移入 history并让新值版本 `+1`（数组候选的"新值"即 propose 时写入的值——model-inferred 为去重并集，user-stated 为用户提交的完整数组，裁决路径无需再做合并）；
 - `adopt-edited`：采用用户在批量确认卡内编辑后的值（Node 先经同一归一化管道）。编辑值与当前权威同值时仅合并来源；候选行保留原始提议值，审计 before/after 可重建"原值→改值"链路；
 - `split-scope`：必须改变 scope 或 effective time，并对目标键执行 version `0` CAS；
 - `reject-candidate`：拒绝候选，不改 current。
