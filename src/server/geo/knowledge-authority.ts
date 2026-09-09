@@ -403,6 +403,57 @@ function mergeArraySupplement(
  */
 export const KNOWLEDGE_EXCERPT_MAX_LENGTH = 4_000;
 
+/** 解析权威值 JSON 为非空字符串数组：标量包一层，坏 JSON/非字符串项丢弃。 */
+export function parsedStringList(raw: string | null | undefined): string[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    return (Array.isArray(parsed) ? parsed : [parsed])
+      .filter(
+        (value): value is string =>
+          typeof value === "string" && Boolean(value.trim()),
+      )
+      .map((value) => value.trim());
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * 读品牌 scope 权威事实并解析为字符串数组（票 #45 评审收敛：该读取形状
+ * 此前在续跑钩子与门卡补搜种子读取里重复实现）。读取失败返回空数组，
+ * 不阻断调用方降级。
+ */
+export async function inspectBrandScopeStringList(
+  authority: {
+    inspect: (key: FactKeyInput) => Promise<KnowledgeCurrentFact | null>;
+  },
+  subject: string,
+  predicate: string,
+): Promise<string[]> {
+  try {
+    const current = await authority.inspect({
+      subject,
+      predicate,
+      scope: { entityScope: "brand" },
+    });
+    return parsedStringList(current?.normalizedValueJson);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * 事实键的 scopeJson 是否落在品牌整体层。产品线 scope 有两种历史序列化
+ * 形态（抽取侧 `{"kind":"product-line",…}` 与权威键 `{"entityScope":
+ * "product-line",…}`），两者都按子串判——名单类消费方只读品牌层。缺省/
+ * 非字符串视为品牌层（与旧写法一致）。
+ */
+export function brandLayerScopeJson(scopeJson: unknown): boolean {
+  const raw = typeof scopeJson === "string" ? scopeJson : "";
+  return !raw.includes("product-line");
+}
+
 export class KnowledgeAuthority {
   constructor(
     private readonly identity: { workspaceId: string; sessionId: string },
@@ -435,7 +486,15 @@ export class KnowledgeAuthority {
       throw new Error("raw input must be 1-20000 characters");
 
     return this.submitCandidate(key.identity, (current) => {
-      const merged = mergeArraySupplement(current, value);
+      // 数组语义按来源分层（用户裁决 2026-09-07「用户输入最高优先级」）：
+      // user-stated 提议携带的就是用户裁决的完整数组，**替换语义**逐字采纳
+      // ——聊天修订纪律（系统提示词）要求删/改/增都传完整数组，并集改写会
+      // 把「删掉竞品甲」静默吞回。model-inferred（富化/材料/探针候选）是
+      // 部分名单，维持**增量并集**，永不清空已确认数据。revise add（知识
+      // 卡加行）语义是「加一条」，在 revise 内部单独走并集，不受本分层影响。
+      const merged = input.origin === "user-stated"
+        ? value
+        : mergeArraySupplement(current, value);
       return {
         rawInput,
         origin: input.origin,

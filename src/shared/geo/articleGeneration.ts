@@ -199,6 +199,10 @@ export interface ArticleOperationProjection {
   policyVersion: typeof ARTICLE_GENERATION_POLICY_VERSION;
   status: "running" | "completed" | "completed-with-failures";
   articles: ArticleProjection[];
+  /** 票 #45 排行项暂缓：seed 准备时竞品不足五家被跳过的 ranking 计划项
+   * （itemId＋fail-closed 错误码）。非排行文章照常生成；名单补齐后门卡
+   * 续跑只补这些项。缺省/空 = 无暂缓（direct 源与旧操作不带此字段）。 */
+  deferredRankingItems?: Array<{ itemId: string; reason: string }>;
   createdAt: string;
   updatedAt: string;
 }

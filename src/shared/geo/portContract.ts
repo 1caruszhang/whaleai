@@ -298,7 +298,9 @@ export const GEO_PORT_CONTRACT = {
       preference: {
         number: 4,
         weight: 0.1,
-        signal: "human-curated-approved-pool",
+        // 2026-09-07：名单权威迁运营台（backend preference_channels 表），
+        // 按官方行业分类码下发（0=通用兜底），本地 overlay 叠加。
+        signal: "ops-console-curated-per-industry",
       },
     },
     mergeSemantics: "union-by-resource-id-sum-distinct-path-weights",
@@ -451,10 +453,19 @@ export const GEO_PORT_CONTRACT = {
     },
     // 偏好匹配与命中清单（2026-08-28 用户裁决 Q12）：exact 语义=核心名相等
     // （池子挂牌名后缀漂移不再静默断链）；命中清单在推荐配额之前按名单逐项
-    // 计算（每项一行代表：全名逐字命中者优先，否则包代表规则），随投影落库
-    // ——旧「从推荐集反推」口径下偏好 0.15 权重永远进不了 top30、面板恒显 0。
+    // 计算（每项一行代表：全名逐字命中者优先，否则包代表规则），随投影落
+    // 库——旧「从推荐集反推」口径下偏好 0.15 权重永远进不了 top30、面板恒显 0。
+    // 2026-09-07 名单来源运营台化：基础名单由 backend /config/preference-
+    // channels?codes=… 按品牌所属行业码（preferenceIndustryCodes：两张官方
+    // 附录的行业并集，1-25 与 WE_MEDIA_INDUSTRY_NAMES 逐条一致、26=工业
+    // 贸易为媒体附录独有类目的补位；0=通用兜底）服务端合并去重后下发，
+    // 行业隔离在端点完成；行业键是计划行业选择器、不是渠道形态分类——
+    // 条目按名称/域名对媒体+自媒体全池匹配。拉取 best-effort（5s 超时、
+    // 严格解析 ≤100 条、失败降级空名单），无网关/开发直连=空基础名单。
+    // 软隔离边界：防界面/投影暴露，不防登录用户直接遍历 codes 调 API。
     preferenceMatching: {
       exactSemantics: "core-name-equality",
+      source: "ops-console-per-industry-codes-with-universal-fallback",
       matchedListProjection: "preferenceMatchedChannels",
       matchedListScope: "pre-quota",
     },

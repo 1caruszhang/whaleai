@@ -8,10 +8,21 @@ import { geoServices } from '../geo/service-composition';
 import {
   createKnowledgeAuthority,
   KNOWLEDGE_EXCERPT_MAX_LENGTH,
+  parsedStringList,
   type FactKeyInput,
   type KnowledgeProposalInput,
 } from '../geo/knowledge-authority';
-import { createBrandMaterialPort, MaterialImportService, materialLogProjection, type MaterialProcessResult } from '../geo/material-import';
+import { createBrandMaterialPort, MaterialImportService, materialLogProjection, type BrandMaterialContext, type MaterialProcessResult, type RankingCompetitorTopUpOutcome } from '../geo/material-import';
+// 竞品不足门与续跑语义住在 geo 层独立模块（票 #45 拆出）：decide-batch
+// 裁决路由也要 import 自动续跑钩子，不能背上本文件的整条工具依赖链——
+// 本文件只消费、不转发该模块的符号。
+import {
+  rankingCompetitorRequirement,
+  rankingDeficitInstruction,
+  rankingTopUpNarrative,
+  resumePendingRankingGeneration,
+  sessionRankingCompetitorGate,
+} from '../geo/ranking-competitor-gate';
 import {
   createQuestionPoolPort,
   QuestionPoolService,
@@ -46,7 +57,8 @@ import {
 } from '../geo/probe-samples';
 import {
   filterValidRankingCompetitors,
-  RANKING_COMPETITORS_INSUFFICIENT_CODE,
+  mergeRankingCompetitorTiers,
+  RANKING_COMPETITORS_REQUIRED_COUNT,
 } from '../../shared/geo/competitorRoster';
 import type {
   ArticleOperationProjection,
@@ -679,132 +691,21 @@ export async function proposeBrandFact(input: KnowledgeProposalInput) {
   };
 }
 
-export interface RankingCompetitorConfirmationChallenge {
-  subject: string;
-  source: ArticleOperationSource;
-  issuedAfterUserMessageId: string;
-}
-
-export interface AuthorizedRankingCompetitorConfirmation
-  extends RankingCompetitorConfirmationChallenge {
-  userInstruction: string;
-}
-
-function normalizedConfirmationText(value: string): string {
-  return value.trim().replace(/\s+/g, " ").toLocaleLowerCase("zh-CN");
-}
-
-/** Session-owned、Sidecar 生命周期内的一次排行榜竞品补充门。 */
-export class RankingCompetitorConfirmationGate {
-  private pending: RankingCompetitorConfirmationChallenge | null = null;
-
-  issue(challenge: RankingCompetitorConfirmationChallenge): void {
-    if (
-      this.pending &&
-      normalizedConfirmationText(this.pending.subject) ===
-        normalizedConfirmationText(challenge.subject) &&
-      JSON.stringify(this.pending.source) === JSON.stringify(challenge.source)
-    ) {
-      return;
-    }
-    this.pending = structuredClone(challenge);
-  }
-
-  /**
-   * 部分采纳后把围栏推进到刚消费的用户消息：同一条消息不得再授权下一轮
-   * 采纳（否则消息里顺带提到的名字都能被后续调用逐个直采纳）。不能走
-   * issue()——同主体去重会把它变成空操作（生成重试正是靠该去重不移动围栏）。
-   */
-  advanceFence(userMessageId: string): void {
-    if (this.pending) this.pending.issuedAfterUserMessageId = userMessageId;
-  }
-
-  clear(): void {
-    this.pending = null;
-  }
-
-  authorize(
-    input: { names: string[] },
-    latestUserMessage: { id: string; content: string } | null,
-  ): AuthorizedRankingCompetitorConfirmation {
-    const pending = this.pending;
-    if (!pending) throw new Error("ranking_competitor_confirmation_not_requested");
-    if (
-      !latestUserMessage ||
-      latestUserMessage.id === pending.issuedAfterUserMessageId
-    ) {
-      throw new Error("ranking_competitor_confirmation_user_reply_required");
-    }
-    const latestInstruction = normalizedConfirmationText(
-      latestUserMessage.content,
-    );
-    if (!latestInstruction) {
-      throw new Error("ranking_competitor_confirmation_user_reply_required");
-    }
-    const missingFromUserMessage = input.names.filter(
-      (name) =>
-        !latestInstruction.includes(normalizedConfirmationText(name)),
-    );
-    if (missingFromUserMessage.length > 0) {
-      throw new Error(
-        `ranking_competitor_confirmation_name_not_user_stated:${missingFromUserMessage.join("、")}`,
-      );
-    }
-    return {
-      ...structuredClone(pending),
-      userInstruction: latestUserMessage.content,
-    };
-  }
-}
-
-const rankingCompetitorGatesBySession = new Map<
-  string,
-  RankingCompetitorConfirmationGate
->();
-
-/**
- * `createXiaojingGeoServer()` 每个 Agent turn 都会重建 MCP server；竞品不足门
- * 必须由 Session Sidecar 持有，不能绑在单轮 server factory 闭包里。按
- * Session : Sidecar = 1 : 1，一个 sidecar 进程生命周期内最多只有一个 session
- * 键，Map 不需要淘汰机制。
- */
-export function sessionRankingCompetitorGate(
-  sessionId: string,
-): RankingCompetitorConfirmationGate {
-  const key = sessionId.trim();
-  if (!key) throw new Error("ranking_competitor_confirmation_session_required");
-  const existing = rankingCompetitorGatesBySession.get(key);
-  if (existing) return existing;
-  const gate = new RankingCompetitorConfirmationGate();
-  rankingCompetitorGatesBySession.set(key, gate);
-  return gate;
-}
-
 type RankingCompetitorAuthority = Pick<
   ReturnType<typeof createKnowledgeAuthority>,
   "inspect" | "propose" | "decide"
 >;
-
-function parsedStringList(raw: string | null | undefined): string[] {
-  if (!raw) return [];
-  try {
-    const parsed = JSON.parse(raw) as unknown;
-    return (Array.isArray(parsed) ? parsed : [parsed])
-      .filter(
-        (value): value is string =>
-          typeof value === "string" && Boolean(value.trim()),
-      )
-      .map((value) => value.trim());
-  } catch {
-    return [];
-  }
-}
 
 /**
  * 排行榜不足五家时的自然语言补充入口。只接受用户在当前消息中明确确认的
  * 名称；工具把原话作为 asked 来源，经同一个 KnowledgeAuthority 提议并立即
  * adopt。调用边界从 Session Gate 取主体、从最新持久化用户消息取原话；
  * 模型发现的名字仍走普通候选卡，不能调用本入口自动确认。
+ *
+ * 达标口径与 decide-batch 钩子同一份（票 #45 评审修复）：两层合并——直接
+ * 层在前、潜在层补位、身份排除（内核 mergeRankingCompetitorTiers），与
+ * Rust seed 的 fail-closed 计数同构。聊天补名只写直接层，但达标判定必须
+ * 看合并名单，否则「4 直接＋2 潜在」在卡片路径续跑、在聊天路径判不足。
  */
 export async function confirmRankingCompetitors(
   input: { subject: string; names: string[]; userInstruction: string },
@@ -818,23 +719,16 @@ export async function confirmRankingCompetitors(
   if (!subject || !userInstruction || names.length === 0) {
     throw new Error("ranking_competitor_confirmation_invalid");
   }
-  const [fullName, shortNames, relatedBrands] = await Promise.all([
-    authority.inspect({
-      subject,
-      predicate: "enterprise-profile.fullname",
-      scope: { entityScope: "brand" },
-    }),
-    authority.inspect({
-      subject,
-      predicate: "enterprise-profile.shortnames",
-      scope: { entityScope: "brand" },
-    }),
-    authority.inspect({
-      subject,
-      predicate: "enterprise-profile.relatedbrands",
-      scope: { entityScope: "brand" },
-    }),
-  ]);
+  const brandFact = (predicate: string) =>
+    authority.inspect({ subject, predicate, scope: { entityScope: "brand" } });
+  const [fullName, shortNames, relatedBrands, currentCompetitors, currentPotential] =
+    await Promise.all([
+      brandFact("enterprise-profile.fullname"),
+      brandFact("enterprise-profile.shortnames"),
+      brandFact("enterprise-profile.relatedbrands"),
+      brandFact("enterprise-profile.competitors"),
+      brandFact("enterprise-profile.potentialcompetitors"),
+    ]);
   const identity = {
     workspaceBrandName: subject,
     fullNames: parsedStringList(fullName?.normalizedValueJson),
@@ -846,6 +740,14 @@ export async function confirmRankingCompetitors(
   if (invalid.length > 0) {
     throw new Error(`ranking_competitor_name_invalid:${invalid.join("、")}`);
   }
+  // user-stated 数组提议是替换语义（用户裁决 2026-09-07「用户输入最高
+  // 优先级」）：本入口自己拼「已确认在前＋新增去重追加」的全量数组再
+  // 提议——直接提议新增名会在替换语义下清掉既有确认名单。
+  const existingCompetitors = parsedStringList(currentCompetitors?.normalizedValueJson);
+  const fullCompetitors = [...existingCompetitors];
+  for (const name of allowedNames) {
+    if (!fullCompetitors.includes(name)) fullCompetitors.push(name);
+  }
   const candidate = await authority.propose({
     rawInput: userInstruction,
     origin: "user-stated",
@@ -855,7 +757,7 @@ export async function confirmRankingCompetitors(
       predicate: "enterprise-profile.competitors",
       scope: { entityScope: "brand" },
     },
-    value: allowedNames,
+    value: fullCompetitors,
     source: {
       excerpt: userInstruction,
       confidence: 1,
@@ -870,40 +772,17 @@ export async function confirmRankingCompetitors(
     reason: userInstruction,
   });
   const competitors = parsedStringList(result.current?.normalizedValueJson);
-  const confirmedCount = filterValidRankingCompetitors(
+  const potentialCompetitors = parsedStringList(currentPotential?.normalizedValueJson);
+  const confirmedCount = mergeRankingCompetitorTiers(
     competitors,
+    potentialCompetitors,
     identity,
   ).length;
   return {
     kind: "ranking-competitors-confirmed",
     added: names,
     confirmedCount,
-    readyForRanking: confirmedCount >= 5,
-  };
-}
-
-/**
- * ranking 生成因竞品不足 fail-closed 时的 UX 补名入口（票 #43：文案留工具
- * 层，错误码常量自名单内核进口——错误语义与 resolveRankingRoster 的抛错
- * 单源）。
- */
-export function rankingCompetitorRequirement(error: unknown): {
-  kind: "ranking-competitors-required";
-  confirmedCount: number;
-  missingCount: number;
-  instruction: string;
-} | null {
-  const message = error instanceof Error ? error.message : String(error);
-  const match =
-    new RegExp(`${RANKING_COMPETITORS_INSUFFICIENT_CODE}:(\\d+)`).exec(message);
-  if (!match) return null;
-  const confirmedCount = Math.min(4, Math.max(0, Number(match[1])));
-  const missingCount = 5 - confirmedCount;
-  return {
-    kind: "ranking-competitors-required",
-    confirmedCount,
-    missingCount,
-    instruction: `当前已确认 ${confirmedCount} 家竞品，还差 ${missingCount} 家。请用户直接在聊天中回复要补充并确认的竞品名称。`,
+    readyForRanking: confirmedCount >= RANKING_COMPETITORS_REQUIRED_COUNT,
   };
 }
 
@@ -1099,6 +978,21 @@ export async function createXiaojingGeoServer() {
   const { createSdkMcpServer, tool } = await import('@anthropic-ai/claude-agent-sdk');
   const { z } = await import('zod/v4');
   const rankingCompetitorGate = sessionRankingCompetitorGate(context.sessionId);
+  // 门卡自动补搜（票 #45）：排行生成因竞品不足 fail-closed/暂缓发门卡时，
+  // 按缺口重跑联网富化并把候选推上既有确认卡——用户不再需要凭记忆手打
+  // 名字。best-effort：任何失败回落纯指令文案，不阻断门卡本身。
+  // 节流（用户裁决 2026-09-09）：补搜不扣点，同一门卡只跑一次——额度由
+  // 门卡认领；被拒（已补查过 / 无挂起门卡）与失败同样返回 null。
+  const runRankingCompetitorTopUp = async (
+    brandContext: BrandMaterialContext,
+  ): Promise<RankingCompetitorTopUpOutcome | null> => {
+    if (!rankingCompetitorGate.claimTopUp()) return null;
+    try {
+      return await materialImportService().topUpRankingCompetitors(brandContext);
+    } catch {
+      return null;
+    }
+  };
   const latestUserMessage = async () => {
     const transcript = await loadSessionTranscript(context.sessionId);
     const latest = [...transcript.messages]
@@ -1339,7 +1233,7 @@ export async function createXiaojingGeoServer() {
       ),
       tool(
         'propose_brand_fact',
-        'Submit raw text and one structured brand-fact candidate to KnowledgeAuthority. This never confirms a new or changed value. Use origin=model-inferred and intent=chat-observation for facts merely noticed during ordinary chat; those always remain suggestions. Use origin=user-stated and intent=knowledge-update only when the user explicitly asked to add or update knowledge.',
+        'Submit raw text and one structured brand-fact candidate to KnowledgeAuthority. This never confirms a new or changed value. Use origin=model-inferred and intent=chat-observation for facts merely noticed during ordinary chat; those always remain suggestions. Use origin=user-stated and intent=knowledge-update only when the user explicitly asked to add or update knowledge. Array semantics differ by origin (user ruling: user input has top priority): a user-stated array value REPLACES the current authoritative array verbatim — for delete/correct/add on any array field (competitors, relatedBrands, products...), first read the current value with inspect_brand_fact and submit the complete corrected array (drop removed items, append new ones); a model-inferred array value is merged as a supplement (current items kept, new ones appended) so partial candidate lists never wipe confirmed data.',
         {
           rawInput: z.string().min(1).max(20_000),
           origin: z.enum(['user-stated', 'model-inferred']),
@@ -1408,30 +1302,33 @@ export async function createXiaojingGeoServer() {
               ],
             };
           }
-          rankingCompetitorGate.clear();
-          try {
-            const operation = await articleService().start({
-              ...stageIdentity(),
-              source: challenge.source,
-            });
+          // 续跑走共享 helper（票 #45）：与确认卡裁决的自动续跑同一份逻辑，
+          // source 按暂缓项受限，续跑再不足时重挂门卡返回新缺口。
+          const outcome = await resumePendingRankingGeneration({
+            gate: rankingCompetitorGate,
+            challenge,
+            startOperation: (source) =>
+              articleService().start({ ...stageIdentity(), source }),
+            fenceUserMessageId: latest!.id,
+          });
+          if (outcome.kind === "ranking-generation-still-required") {
             return {
               content: [
-                {
-                  type: "text" as const,
-                  text: JSON.stringify({ kind: "article-operation", operation }),
-                },
-              ],
-            };
-          } catch (error) {
-            const requirement = rankingCompetitorRequirement(error);
-            if (!requirement) throw error;
-            rankingCompetitorGate.advanceFence(latest!.id);
-            return {
-              content: [
-                { type: "text" as const, text: JSON.stringify(requirement) },
+                { type: "text" as const, text: JSON.stringify(outcome.requirement) },
               ],
             };
           }
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: JSON.stringify({
+                  kind: "article-operation",
+                  operation: outcome.operation,
+                }),
+              },
+            ],
+          };
         },
         { alwaysLoad: true },
       ),
@@ -1911,9 +1808,23 @@ export async function createXiaojingGeoServer() {
                   source,
                   issuedAfterUserMessageId: latest.id,
                 });
+                // 门卡自动补搜（票 #45）：按缺口重跑富化，候选上确认卡；
+                // 失败/空手回落纯指令文案（聊天补名通道保留）。
+                const narrative = rankingTopUpNarrative(
+                  await runRankingCompetitorTopUp(brandContext),
+                  '继续生成',
+                );
                 return {
                   content: [
-                    { type: "text" as const, text: JSON.stringify(requirement) },
+                    { type: "text" as const, text: JSON.stringify(narrative.topUp ? {
+                      ...requirement,
+                      topUp: narrative.topUp,
+                      instruction: rankingDeficitInstruction(
+                        requirement.confirmedCount,
+                        requirement.missingCount,
+                        narrative.suffix,
+                      ),
+                    } : requirement) },
                   ],
                 };
               }
@@ -1923,8 +1834,47 @@ export async function createXiaojingGeoServer() {
             rankingCompetitorGate.clear();
             // 生成收尾：complete 执行段，确认门（审核并批准文章）就地停靠。
             await recordGeoOperationMilestone(identity, 'articles-generated');
+            // 票 #45 排行项暂缓：非排行文章已进本次 operation；竞品不足的
+            // ranking 项逐项留痕，发门卡＋自动补搜，名单补齐后续跑只补这些项。
+            const deferred = operation.deferredRankingItems ?? [];
+            if (deferred.length > 0) {
+              const [brandContext, latest] = await Promise.all([
+                brandMaterialPort().context(),
+                latestUserMessage(),
+              ]);
+              // 门卡始终发出（票 #45 评审修复）：无持久化用户消息时围栏取空串
+              // ——授权要求「新于围栏的消息」，空围栏下任何后续用户消息都
+              // 可授权聊天补名；自动续跑钩子不依赖围栏。否则门卡缺发会让
+              // envelope 承诺的「确认后自动续跑」失效。
+              rankingCompetitorGate.issue({
+                subject: brandContext.brandName,
+                source,
+                issuedAfterUserMessageId: latest?.id ?? '',
+                deferredItemIds: deferred.map((item) => item.itemId),
+              });
+              const topUp = await runRankingCompetitorTopUp(brandContext);
+              const narrative = rankingTopUpNarrative(topUp, '续跑暂缓项');
+              // 「未获得新候选」只在补搜真跑过且两层皆空时说；节流被拒或失败
+              // 时不提补查，免得把「本门卡已补查过」说成「查了没有」。
+              const topUpNote = topUp && !narrative.topUp ? '，自动补查未获得新候选' : '';
+              return {
+                content: [
+                  { type: 'text' as const, text: JSON.stringify({
+                    kind: 'article-operation',
+                    operation,
+                    deferredRanking: {
+                      count: deferred.length,
+                      ...(narrative.topUp ? { topUp: narrative.topUp } : {}),
+                      instruction: narrative.suffix
+                        ? `本次生成暂缓了 ${deferred.length} 个排行榜项（已确认竞品不足 ${RANKING_COMPETITORS_REQUIRED_COUNT} 家）。${narrative.suffix}`
+                        : `本次生成暂缓了 ${deferred.length} 个排行榜项（已确认竞品不足 ${RANKING_COMPETITORS_REQUIRED_COUNT} 家${topUpNote}）。请用户在聊天中回复要补充并确认的竞品名称，或补充服务区域后重试。`,
+                    },
+                  }) },
+                ],
+              };
+            }
             return {
-              content: [{ type: 'text' as const, text: JSON.stringify({ kind: 'article-operation', operation }) }],
+              content: [{ type: 'text', text: JSON.stringify({ kind: 'article-operation', operation }) }],
             };
           },
         },

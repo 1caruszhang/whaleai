@@ -4,7 +4,7 @@
 
 ## 名单语义内核（票 #43，2026-09-03）
 
-竞品名单的全部语义收进一个纯函数内核模块：`src/shared/geo/competitorRoster.ts`（零 I/O、零 LLM）。职责边界一句话——**从已确认事实到一切名单投影＋一切名单名字判定**。全仓消费方（文章生成、确定性审校、NL 补名确认、选题/标题红线、确认卡投影、富化管线、档案页/知识面板）只从该模块进口名单语义，原居所（文章生成共享模块、material-import、competitorDetails——后者整文件溶入后删除）不留转发出口；私建名单语义由 `src/shared/geo/competitorRosterGuard.test.ts` 词法守卫拦红（内核全部导出函数名的定义处只许内核与测试文件，零豁免）。
+竞品名单的全部语义收进一个纯函数内核模块：`src/shared/geo/competitorRoster.ts`（零 I/O、零 LLM）。职责边界一句话——**从已确认事实到一切名单投影＋一切名单名字判定**。全仓消费方（文章生成、确定性审校、NL 补名确认、选题/标题红线、确认卡投影、富化管线、门卡补搜与自动续跑（票 #45 `topUpRankingCompetitors`/`resumePendingRankingGeneration`/`resumeRankingGenerationAfterKnowledgeDecision`）、档案页/知识面板）只从该模块进口名单语义，原居所（文章生成共享模块、material-import、competitorDetails——后者整文件溶入后删除）不留转发出口；私建名单语义由 `src/shared/geo/competitorRosterGuard.test.ts` 词法守卫拦红（内核全部导出函数名的定义处只许内核与测试文件，零豁免）。
 
 导出面（语义现状冻结，等价搬家不收敛语义）：
 
@@ -108,7 +108,8 @@ Rust 镜像原位不动：`articles.rs` 的 `valid_ranking_competitors`／`norma
 - **客户口径纪律（判别第 0 步）**：先从画像（目标客户/经营场景/核心优势已注入提示词）确定客户是谁；竞品=争夺同一批客户预算的对手，客户群不同的候选无论品类多相近两层都不进——炊班主（客户是创业者）的直接竞品是项目/加盟输出品牌，服务食客的同品类餐厅不是。**无锚（serviceArea 缺失或「全国/线上」类）时整轮富化跳过**，卡上以一行被动提示「材料未提供可定位的服务区域，竞品联网补全已跳过」，不追问。
 - **地域锚粒度（2026-08-30 用户裁决）**：声明什么粒度锚什么粒度。城市/区县锚（成都新都）白名单字符串比对硬拦跨城；**省级锚（广东省/广西壮族自治区等）归一短名（广东/广西）直接拼进查询**——查询锚定本身是最强地域过滤，地域相关性由抽取模型自证，代码不做省→市映射；混合声明（广东省、长沙市）含省段即按省级宽口径处理。已接受残余风险：省级锚下偶有真实但外省品牌进卡，确认卡逐行删除兜底。
 - **enable_search 合并式调用降级为兜底**：仅当 `searchSources` 不可用（无 key/调用失败/返回为空）时回落，回落路径同样过③的本地地域闸（存在闸在回落路径无快照可比，接受降级并保持 inferred 必审）。
-- **≥5 家可用为目标**（缓冲 10 家不变）。闸门永不放水凑数；不足时卡上被动展示可用家数，编辑框既有能力可补名（用户点名走既有 `confirm_ranking_competitors` 窄通道）。不设检索阶梯重试——先观察固定 2 查询 + 闸门的存活率，不够再议（见显式延后）。
+- **≥5 家可用为目标，缓冲直达（票 #45 修订）**：续搜阶梯（票 #23 立项、票 #45 升档）按**两层合并燃料**（已知直接＋已知潜在＋候选直接＋候选潜在 <10 即续搜；已知＝本次抽取 ∪ 已确认权威值，两层同口径——评审收口：本次抽取值与富化候选同卡陈列，供给口径与直接层旧约定一致），最多 5 轮；饥饿时（某轮补枪语料在标准帽 3/域下零增长）单调放宽域帽到 5 重并一次；单查召回 30 条。闸门永不放水凑数；不足时卡上被动展示可用家数，编辑框既有能力可补名（用户点名走既有 `confirm_ranking_competitors` 窄通道）。已知潜在层计入达标与跳过口径（两层合并 ≥10 即 deficit_zero 跳过），但不进 knownCompetitors——同名允许潜在层升格直接层，升格由确认卡裁决。
+- **门卡自动补搜＋确认后自动续跑＋排行项暂缓（票 #45）**：排行生成因 <5 fail-closed 发门卡时，服务端自动按缺口重跑富化（`topUpRankingCompetitors`：查询词读已确认档案合成、双池纪律同材料腿，候选走既有 propose 上确认卡）；确认卡裁决竞品事实且合并名单达标后，decide-batch 路由钩子经 `resumePendingRankingGeneration` 共享 helper 自动续跑（confirm 工具内联续跑并入，防双发）。Rust seed 准备时竞品不足的 ranking 项逐项留痕（操作投影 `deferredRankingItems`）并跳过、非排行照常生成，全批暂缓维持整批 Err（错误码不变）；续跑时 plan 类 source 的 itemIds 替换为暂缓项。补搜不扣点、同一门卡只跑一次（用户裁决 2026-09-09：额度由门卡 `claimTopUp` 持有，换卡或门卡清空后重置；被拒回落纯指令文案）。聊天手打补名保留并行通道。
 - **排行 roster 组装（ADR-0007 Decision 6，用户裁决 2026-08-30）**：直接层优先，不足 5 家用潜在层按序补足到 5——`resolveRankingRoster`（TS）与 `valid_ranking_competitors`（Rust，`articles.rs`）同构，契约用例共享 `rankingCompetitorContractCases.json`；跨层归一名嵌套互斥、身份/关联主体排除两层共用；标题红线名单（topic-plan）同步含两层。fail-closed 门槛按合并后计数（正文段 policyVersion v4→v5，invariants D15）。
 
 ### 元数据退役
@@ -125,6 +126,7 @@ Rust 镜像原位不动：`articles.rs` 的 `valid_ranking_competitors`／`norma
 修订语义 = **新提议 + 再裁决**（版本递增、全程留痕），全部复用既有机制：
 
 - 用户在聊天中说「删掉竞品里的XX / 把XX改成YY」→ agent 走**现有** `propose_brand_fact` 提议新名单 → 既有确认卡出现 → 用户裁决，版本+1。
+- 数组替换语义（用户裁决 2026-09-07「用户输入最高优先级」）：user-stated 数组提议**逐字替换**权威值（agent 先读当前值、提交含全部当项的完整数组）——旧实现 propose 对数组无条件并集改写，「删掉XX」曾被静默吞回（候选与现值同值，确认后无变化）；机器来源（model-inferred）保留增量并集，`confirm_ranking_competitors` 入口自拼全量数组再提议（详见 `knowledge_authority.md` 数组语义段）。
 - 实现工作仅为**系统提示词补一条纪律**：已确认事实（含竞品名单）的修改必须经提议-裁决，不得口头直接宣布改完。
 - 面板修订入口与专用路由**延后**（见显式延后）；聊天是本产品唯一 Agent 入口，路径今天已存在，缺的只是可发现性。
 
@@ -137,12 +139,12 @@ Rust 镜像原位不动：`articles.rs` 的 `valid_ranking_competitors`／`norma
 - **已接受风险（用户明示）**：联网素材可能渗入目标品牌段落（如把招商软文数字织进品牌介绍）。工程侧推荐的「一次预取资料块 + 离线写作」方案被否决，理由是实现更简单；风险登记在 ADR 0007，若日后事故复现可按该 ADR 的 Considered Options 回切。
 - 竞品条目既有「定性+品类描述为主、目标品牌信息密度写足」的编排纪律（`articleGeneration.ts:195`）保留，联网素材主要作用是消除名称级与事实级编造。
 
-## 显式延后（用户裁定 v1 不做）
+## 显式延后（用户裁定 v1 不做；票 #45 修订）
 
-- **检索阶梯**（多轮变体重试直至 ≥5 家）：先观察固定 2 查询+双闸的存活率，大城市榜单语料大概率足够；不够再议加一轮重试。
+- ~~**检索阶梯**（多轮变体重试直至 ≥5 家）~~：票 #23 达标续搜已落地，票 #45 升档为两层合并直达缓冲 10、最多 5 轮、饥饿帽 5、召回 30（见上文「≥5 家可用为目标，缓冲直达」）。
 - **知识面板修订入口 + propose-revision 专用路由**：聊天路径已可用，面板入口只提升可发现性。
 - **存量懒清洗模块**（消费时静默复核、TTL 缓存、档案记录）：v1 用聊天修订手动清理；新导入已干净。
-- **逐字段证据标注**（Measured/Estimated/N-A）、**维度后选**（先取料后选六维度）、**用户口头补充通道**、**薄资料处置机制**、**竞品别名字段**：全部不做。
+- **逐字段证据标注**（Measured/Estimated/N-A）、**维度后选**（先取料后选六维度）、**主动征询式口头补充**（票 #45 后聊天补名与确认卡补搜双通道并存，主动问询仍不做）、**薄资料处置机制**、**竞品别名字段**：全部不做。
 
 ## 改动清单
 
@@ -156,7 +158,20 @@ Rust 镜像原位不动：`articles.rs` 的 `valid_ranking_competitors`／`norma
 | 修订纪律 | `src/server/system-prompt.ts` | 补一条：已确认事实修改必须经提议-裁决 |
 | 文章联网 | `src/server/geo/article-generation.ts` | ranking 分支启用联网调用 |
 
-无 Rust 改动、无 management API 新路由、无 schema 变更。
+票 #45 追加改动（供给闭环）：
+
+| 层 | 文件 | 改动 |
+|---|---|---|
+| 导入管线 | `src/server/geo/material-import.ts` | 续搜目标 7→10（两层合并计数）；轮数 3→5；饥饿域帽 3→5；召回 20→30；分闸 drops 计数进 competitor-search 投影与 debug dump（主路径与 enable_search 兜底路径同形）；新增 `topUpRankingCompetitors`（门卡补搜：档案合成查询词→富化→propose）；双池查询词纪律文本单源（材料腿抽取与门卡补搜合成共用） |
+| 门卡模块 | `src/server/geo/ranking-competitor-gate.ts`（新） | Session 持有的 `RankingCompetitorConfirmationGate`（challenge 增 `deferredItemIds`、`pendingChallenge()` 观察口、`resumeOnce` 单飞——键为 challenge 身份：主体＋原请求＋暂缓项，不含围栏与 userInstruction）；`resumePendingRankingGeneration` 共享续跑 helper；`resumeRankingGenerationAfterKnowledgeDecision` 路由钩子入口（两层合并 ≥5 达标）；`rankingCompetitorRequirement`/`rankingDeficitInstruction`/`rankingTopUpNarrative` 门卡文案单源。独立于工具注册文件，裁决路由不背工具依赖链 |
+| 工具层 | `src/server/tools/xiaojing-geo-tool.ts` | generate_articles 失败/暂缓两路径发门卡＋自动补搜＋信封合并；`confirm_ranking_competitors` 续跑并入共享 helper，达标判定改两层合并（与钩子同口径，`mergeRankingCompetitorTiers`） |
+| 裁决路由 | `src/server/routes/xiaojing-knowledge.ts` | decide-batch 检出竞品类事实采纳后 fire-and-forget 自动续跑钩子 |
+| 知识权威 | `src/server/geo/knowledge-authority.ts` | 共享读取 helper `parsedStringList`/`inspectBrandScopeStringList`（钩子与门卡补搜种子读取收敛）、`brandLayerScopeJson`（名单类消费只读品牌层）；user-stated 数组提议为替换语义（聊天补名自拼「已确认在前＋新增追加」全量数组） |
+| Rust | `src-tauri/src/brand_workspace/articles.rs` | seed 准备 ranking 项不足五家改暂缓留痕（`DeferredRankingItem`＋操作 spec/投影 `deferredRankingItems`）；全批暂缓维持整批 Err；`validate_ranking_competitors` 与契约用例不动 |
+| 共享类型 | `src/shared/geo/articleGeneration.ts` | `ArticleOperationProjection.deferredRankingItems?` |
+| 提示词 | `src/server/system-prompt.ts` | 门卡窄例外措辞补确认卡补搜路径（自动续跑、不再重复 generate_articles） |
+
+原 v1 无 Rust 改动、无 management API 新路由、无 schema 变更；票 #45 的 Rust 改动限 seed 准备分支与投影，spec JSON 增字段（旧操作读侧缺省空数组），无 schema 变更、无新路由。
 
 ## 验收
 

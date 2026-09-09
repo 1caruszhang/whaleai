@@ -56,6 +56,13 @@ export interface RankingCompetitorIdentity {
 export const RANKING_COMPETITORS_INSUFFICIENT_CODE =
   "article_generation_ranking_competitors_insufficient";
 
+/**
+ * 排行名单的最低竞品家数（陈列位 2–6，票 #45 评审：达标判定只此一处定义，
+ * 消费方一律进口，不写裸 5）。fail-closed 门槛本身是 ADR-0007 裁决语义，
+ * 本常量只消灭散落字面量，不改变任何行为。
+ */
+export const RANKING_COMPETITORS_REQUIRED_COUNT = 5;
+
 // ---------------------------------------------------------------------------
 // 具名键
 // ---------------------------------------------------------------------------
@@ -241,12 +248,15 @@ export function resolveRankingRoster<T extends BrandProfileFact>(
       relatedBrands: profile.relatedBrands ?? [],
     },
   );
-  if (competitors.length < 5) {
+  if (competitors.length < RANKING_COMPETITORS_REQUIRED_COUNT) {
     throw new Error(
       `${RANKING_COMPETITORS_INSUFFICIENT_CODE}:${competitors.length}`,
     );
   }
-  return { targetBrand, competitors: competitors.slice(0, 5) };
+  return {
+    targetBrand,
+    competitors: competitors.slice(0, RANKING_COMPETITORS_REQUIRED_COUNT),
+  };
 }
 
 // ---------------------------------------------------------------------------

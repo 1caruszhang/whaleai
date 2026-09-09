@@ -210,6 +210,13 @@ pub struct ArticleProjection {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
+pub struct DeferredRankingItem {
+    pub item_id: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct ArticleOperationProjection {
     pub id: String,
     pub workspace_id: String,
@@ -221,6 +228,11 @@ pub struct ArticleOperationProjection {
     pub policy_version: String,
     pub status: String,
     pub articles: Vec<ArticleProjection>,
+    /// 票 #45 排行项暂缓：seed 准备时竞品不足五家被跳过的 ranking 计划项
+    /// （itemId＋fail-closed 错误码）。非排行文章照常生成；名单补齐后由
+    /// TS 门卡续跑只补这些项。空数组 = 无暂缓（含 direct 源与旧操作）。
+    #[serde(default)]
+    pub deferred_ranking_items: Vec<DeferredRankingItem>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -1716,6 +1728,12 @@ fn prepare_plan_article_seeds(
         None
     };
     let mut seeds = Vec::with_capacity(consumed.len());
+    // 票 #45 排行项暂缓：竞品不足五家的 ranking 项逐项留痕并跳过，其余项
+    // 照常生成——一个薄名单不再连坐阻断整批（含非排行文章）。排行文章本身
+    // 仍 fail-closed（validate_ranking_competitors 判定不改，永不拿 <5 家
+    // 硬生成）；全批都是暂缓项时维持整批 Err（错误码不变，TS 门卡正则
+    // 依赖它触发补名流程）。
+    let mut deferred_ranking_items: Vec<DeferredRankingItem> = Vec::new();
     for item_id in &consumed {
         let item = by_id
             .get(item_id)
@@ -1739,7 +1757,13 @@ fn prepare_plan_article_seeds(
                     .as_ref()
                     .ok_or_else(|| "article_generation_knowledge_snapshot_empty".to_string())?,
             )?;
-            validate_ranking_competitors(&facts, &workspace.name)?;
+            if let Err(reason) = validate_ranking_competitors(&facts, &workspace.name) {
+                deferred_ranking_items.push(DeferredRankingItem {
+                    item_id: item_id.clone(),
+                    reason,
+                });
+                continue;
+            }
         }
         validate_snapshot_facts(connection, effective_knowledge_version, &facts)?;
         seeds.push(ArticleSeed {
@@ -1758,6 +1782,12 @@ fn prepare_plan_article_seeds(
             planned_facts: facts,
         });
     }
+    // 全批暂缓（本次选取全是竞品不足的 ranking 项）：与旧整批 Err 行为保持
+    // 一致——错误码字符串原样抛出，TS rankingCompetitorRequirement 正则靠它
+    // 触发门卡补名。
+    if seeds.is_empty() && !deferred_ranking_items.is_empty() {
+        return Err(deferred_ranking_items[0].reason.clone());
+    }
     let spec = json!({
         "kind": "confirmed-topic-plan",
         "planId": plan_id,
@@ -1766,6 +1796,8 @@ fn prepare_plan_article_seeds(
         "selectedItemIds": consumed,
         // 资格全集（血缘）：确认 plan 当时冻结的 selectedItemIds。
         "planSelectedItemIds": selected,
+        // 票 #45 排行项暂缓留痕：被跳过的 ranking 计划项与 fail-closed 错误码。
+        "deferredRankingItems": deferred_ranking_items,
     });
     Ok((
         effective_knowledge_version,
@@ -2121,10 +2153,18 @@ fn read_article_operation(
         .query_row(
             "SELECT operation_id, created_by_session_id, source_kind, topic_plan_id,
                     topic_plan_revision, knowledge_version, policy_version, status,
-                    created_at, updated_at
+                    created_at, updated_at, operation_spec_json
              FROM geo_article_operations WHERE operation_id=?1",
             [operation_id],
             |row| {
+                // 票 #45 暂缓留痕：deferredRankingItems 存在 spec 里；旧操作
+                // 无此字段，缺省空数组。
+                let spec_json: String = row.get(10)?;
+                let deferred_ranking_items = serde_json::from_str::<Value>(&spec_json)
+                    .ok()
+                    .and_then(|spec| spec.get("deferredRankingItems").cloned())
+                    .and_then(|items| serde_json::from_value(items).ok())
+                    .unwrap_or_default();
                 Ok(ArticleOperationProjection {
                     id: row.get(0)?,
                     workspace_id: workspace_id.to_string(),
@@ -2136,6 +2176,7 @@ fn read_article_operation(
                     policy_version: row.get(6)?,
                     status: row.get(7)?,
                     articles: Vec::new(),
+                    deferred_ranking_items,
                     created_at: row.get(8)?,
                     updated_at: row.get(9)?,
                 })
@@ -2836,6 +2877,188 @@ mod tests {
     }
 
     #[test]
+    fn mixed_plan_defers_ranking_items_below_five_and_generates_the_rest() {
+        // 票 #45 排行项暂缓：一个薄名单不再连坐阻断整批——竞品不足五家的
+        // ranking 项逐项留痕并跳过，非排行文章照常进 seeds；排行文章本身
+        // 仍 fail-closed（暂缓 ≠ 拿 4 家硬生成）。
+        let (_root, store, workspace) = seeded_store();
+        let connection = BrandWorkspaceStore::open(&workspace).expect("db");
+        let topics = json!([{
+            "id": "topic-guide",
+            "name": "选购指南",
+            "summary": "本地服务选购指南"
+        }, {
+            "id": "topic-ranking",
+            "name": "本地服务对比",
+            "summary": "本地服务六家客观对比"
+        }]);
+        let items = json!([{
+            "id": "selected-guide",
+            "topicId": "topic-guide",
+            "contentType": "guide",
+            "typeSelectionReason": "适合指南",
+            "title": "本地服务选购指南",
+            "plannedFacts": [{
+                "factKey": "fact-1",
+                "predicate": "profile.history",
+                "normalizedValueJson": "\"成立10年\""
+            }],
+            "approvalStatus": "approved"
+        }, {
+            "id": "selected-ranking",
+            "topicId": "topic-ranking",
+            "contentType": "ranking",
+            "typeSelectionReason": "适合并列清单",
+            "title": "2026 年本地服务六家对比",
+            "plannedFacts": [{
+                "factKey": "fact-1",
+                "predicate": "profile.history",
+                "normalizedValueJson": "\"成立10年\""
+            }],
+            "approvalStatus": "approved"
+        }]);
+        connection
+            .execute_batch("PRAGMA foreign_keys=OFF;")
+            .expect("disable fixture foreign keys");
+        connection
+            .execute(
+                "INSERT INTO geo_topic_plans
+                    (id, operation_id, created_by_session_id, question_pool_id,
+                     question_pool_revision, knowledge_version, product_line, target_region,
+                     policy_version, status, revision, topics_json, items_json,
+                     selected_item_ids_json, model_audit_json, provider_snapshot_json,
+                     model_attempts_json, created_at, updated_at)
+                 VALUES ('plan-mixed', 'plan-operation-mixed', 'session-article', 'pool-mixed',
+                         1, 1, '知识服务', '中国', 'topic-policy', 'confirmed', 1,
+                         ?1, ?2, '[\"selected-guide\",\"selected-ranking\"]', '{}', '{}', '[]',
+                         '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+                params![topics.to_string(), items.to_string()],
+            )
+            .expect("mixed plan fixture");
+        connection
+            .execute_batch("PRAGMA foreign_keys=ON;")
+            .expect("restore fixture foreign keys");
+        drop(connection);
+
+        let operation = store
+            .start_article_operation(
+                &workspace.id,
+                "session-article",
+                ArticleOperationStartRequest {
+                    source_kind: "confirmed-topic-plan".to_string(),
+                    topic_plan_id: Some("plan-mixed".to_string()),
+                    item_ids: None,
+                    direct_spec: None,
+                },
+            )
+            .expect("guide item generates despite the thin ranking roster");
+        // 指南项照常进 seeds；排行项暂缓留痕（itemId＋fail-closed 错误码）。
+        assert_eq!(operation.articles.len(), 1);
+        assert_eq!(
+            operation.articles[0].source_plan_item_id.as_deref(),
+            Some("selected-guide")
+        );
+        assert_eq!(operation.deferred_ranking_items.len(), 1);
+        assert_eq!(
+            operation.deferred_ranking_items[0].item_id,
+            "selected-ranking"
+        );
+        assert_eq!(
+            operation.deferred_ranking_items[0].reason,
+            format!("{}:0", ranking_insufficient_code())
+        );
+
+        // 名单补齐后只补生成暂缓项：itemIds 限定 selected-ranking 仍命中
+        // plan 的资格全集。
+        let connection = BrandWorkspaceStore::open(&workspace).expect("db");
+        append_competitor_snapshot(
+            &connection,
+            &["竞品甲", "竞品乙", "竞品丙", "竞品丁", "竞品戊"],
+        );
+        drop(connection);
+        let resume = store
+            .start_article_operation(
+                &workspace.id,
+                "session-article",
+                ArticleOperationStartRequest {
+                    source_kind: "confirmed-topic-plan".to_string(),
+                    topic_plan_id: Some("plan-mixed".to_string()),
+                    item_ids: Some(vec!["selected-ranking".to_string()]),
+                    direct_spec: None,
+                },
+            )
+            .expect("deferred ranking item generates after roster top-up");
+        assert_eq!(resume.articles.len(), 1);
+        assert_eq!(
+            resume.articles[0].source_plan_item_id.as_deref(),
+            Some("selected-ranking")
+        );
+        assert!(resume.deferred_ranking_items.is_empty());
+    }
+
+    #[test]
+    fn all_ranking_plan_with_thin_roster_keeps_the_whole_batch_error() {
+        // 全批都是竞品不足的 ranking 项：维持整批 Err（错误码不变）——TS
+        // rankingCompetitorRequirement 正则靠它触发门卡补名流程。
+        let (_root, store, workspace) = seeded_store();
+        let connection = BrandWorkspaceStore::open(&workspace).expect("db");
+        let topics = json!([{
+            "id": "topic-ranking",
+            "name": "本地服务对比",
+            "summary": "本地服务六家客观对比"
+        }]);
+        let items = json!([{
+            "id": "selected-ranking",
+            "topicId": "topic-ranking",
+            "contentType": "ranking",
+            "typeSelectionReason": "适合并列清单",
+            "title": "2026 年本地服务六家对比",
+            "plannedFacts": [{
+                "factKey": "fact-1",
+                "predicate": "profile.history",
+                "normalizedValueJson": "\"成立10年\""
+            }],
+            "approvalStatus": "approved"
+        }]);
+        connection
+            .execute_batch("PRAGMA foreign_keys=OFF;")
+            .expect("disable fixture foreign keys");
+        connection
+            .execute(
+                "INSERT INTO geo_topic_plans
+                    (id, operation_id, created_by_session_id, question_pool_id,
+                     question_pool_revision, knowledge_version, product_line, target_region,
+                     policy_version, status, revision, topics_json, items_json,
+                     selected_item_ids_json, model_audit_json, provider_snapshot_json,
+                     model_attempts_json, created_at, updated_at)
+                 VALUES ('plan-ranking-only', 'plan-operation-ranking-only', 'session-article',
+                         'pool-ranking-only', 1, 1, '知识服务', '中国', 'topic-policy', 'confirmed', 1,
+                         ?1, ?2, '[\"selected-ranking\"]', '{}', '{}', '[]',
+                         '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+                params![topics.to_string(), items.to_string()],
+            )
+            .expect("ranking-only plan fixture");
+        connection
+            .execute_batch("PRAGMA foreign_keys=ON;")
+            .expect("restore fixture foreign keys");
+        drop(connection);
+
+        let error = store
+            .start_article_operation(
+                &workspace.id,
+                "session-article",
+                ArticleOperationStartRequest {
+                    source_kind: "confirmed-topic-plan".to_string(),
+                    topic_plan_id: Some("plan-ranking-only".to_string()),
+                    item_ids: None,
+                    direct_spec: None,
+                },
+            )
+            .expect_err("all-deferred batch keeps the legacy whole-batch error");
+        assert_eq!(error, format!("{}:0", ranking_insufficient_code()));
+    }
+
+    #[test]
     fn direct_spec_versions_retry_and_approved_copy_are_stable() {
         let (_root, store, workspace) = seeded_store();
         let operation = store
@@ -3379,7 +3602,8 @@ mod tests {
                 "planId": "plan-article",
                 "planRevision": 7,
                 "selectedItemIds": ["selected-item"],
-                "planSelectedItemIds": ["selected-item"]
+                "planSelectedItemIds": ["selected-item"],
+                "deferredRankingItems": []
             })
         );
     }
@@ -3701,7 +3925,8 @@ mod tests {
                 "planId": "plan-subset",
                 "planRevision": 7,
                 "selectedItemIds": ["item-c", "item-a"],
-                "planSelectedItemIds": ["item-a", "item-b", "item-c"]
+                "planSelectedItemIds": ["item-a", "item-b", "item-c"],
+                "deferredRankingItems": []
             })
         );
 

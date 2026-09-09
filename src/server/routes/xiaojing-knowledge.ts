@@ -13,6 +13,11 @@ import {
 } from '../../shared/systemReminder';
 import { createKnowledgeAuthority, type KnowledgeDecision } from '../geo/knowledge-authority';
 import {
+  competitorFactAdopted,
+  resumeRankingGenerationAfterKnowledgeDecision,
+  sessionRankingCompetitorGate,
+} from '../geo/ranking-competitor-gate';
+import {
   createBrandMaterialPort,
   fetchWebsiteMaterial,
   materialLogProjection,
@@ -223,6 +228,10 @@ export async function handleXiaojingKnowledgeRoute(
         settledAt?: string | null;
       }> = [];
       const reminders: KnowledgeDecisionReminderInput[] = [];
+      // 票 #45 自动续跑：本批是否采纳了品牌 scope 的竞品类事实（两层）——
+      // 判定收敛在 competitorFactAdopted（只认 adopt 决策、精确谓词、排除
+      // 产品线 scope），reject/keep 不改变权威值不触发。
+      let adoptedCompetitorFacts = false;
       for (const item of payload.decisions) {
         try {
           const result = await authority.decide({
@@ -232,6 +241,9 @@ export async function handleXiaojingKnowledgeRoute(
             actorId: 'desktop-user',
             editedValue: item.editedValue,
           });
+          if (competitorFactAdopted(item.decision, result.current)) {
+            adoptedCompetitorFacts = true;
+          }
           results.push({
             candidateId: item.candidateId,
             ok: true,
@@ -272,6 +284,18 @@ export async function handleXiaojingKnowledgeRoute(
           { workspaceId, sessionId: runtimeSessionId },
           'knowledge-confirmed',
         );
+      }
+      // 票 #45 自动续跑：竞品事实采纳后名单达标且有挂起门卡时，自动续跑
+      // 原生成请求（plan 类按暂缓项受限）。fire-and-forget：不阻塞裁决
+      // 响应，任何失败在 helper 内部吞掉记日志（生成进度走既有 operation
+      // 轮询，无需把结果带回本响应）。
+      if (adoptedCompetitorFacts) {
+        void resumeRankingGenerationAfterKnowledgeDecision({
+          workspaceId,
+          sessionId: runtimeSessionId,
+          accountToken: requestAccountAccessToken(request),
+          gate: sessionRankingCompetitorGate(runtimeSessionId),
+        });
       }
       return jsonResponse({
         success: results.every((item) => item.ok),
