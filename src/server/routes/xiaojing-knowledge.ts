@@ -174,6 +174,18 @@ export async function handleXiaojingKnowledgeRoute(
         { workspaceId, sessionId: runtimeSessionId },
         'knowledge-confirmed',
       );
+      // 票 #45 自动续跑（与 decide-batch 同一口径）：单条裁决采纳了品牌
+      // scope 的竞品类事实时，同样 fire-and-forget 检查名单达标并续跑挂起
+      // 门卡——两条裁决面（单卡 KnowledgeConflictCard 与批量确认卡）必须
+      // 等价，否则走单卡确认的用户拿不到「确认后自动续跑」。
+      if (competitorFactAdopted(payload.decision, result.current)) {
+        void resumeRankingGenerationAfterKnowledgeDecision({
+          workspaceId,
+          sessionId: runtimeSessionId,
+          accountToken: requestAccountAccessToken(request),
+          gate: sessionRankingCompetitorGate(runtimeSessionId),
+        });
+      }
       return jsonResponse({
         success: true,
         result,

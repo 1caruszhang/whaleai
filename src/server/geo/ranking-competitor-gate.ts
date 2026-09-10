@@ -147,10 +147,11 @@ export class RankingCompetitorConfirmationGate {
   }
 
   /**
-   * 续跑单飞（票 #45 评审）：同一门卡的续跑（confirm 工具与 decide-batch
-   * 路由钩子可能并发触发）在飞行中共用一次 start——先到者清门卡并启动，
-   * 后到者直接复用其结果，不再发起第二次 start。key 是 challenge 身份，
-   * 换了门卡（不同 key）不复用。
+   * 续跑单飞（票 #45 评审）：同一门卡的续跑（confirm 工具与裁决路由钩子
+   * 可能并发触发）在飞行中共用一次 start——先到者启动，后到者直接复用其
+   * 结果，不再发起第二次 start。key 是 challenge 身份，换了门卡（不同
+   * key）不复用。门卡的生命周期归 flight 体管（成功/非排行错误清空，再
+   * 不足原样存续），本方法不动门卡。
    */
   resumeOnce(
     key: string,
@@ -272,6 +273,42 @@ const RANKING_DEFICIT_DEFAULT_GUIDANCE =
   "请用户直接在聊天中回复要补充并确认的竞品名称。";
 
 /**
+ * 排行名单快照（票 #45 评审去重）：identity 三谓词＋两层竞品一次读齐。
+ * confirm 工具与裁决续跑钩子共用——两处此前各自内联同一「五谓词→
+ * mergeRankingCompetitorTiers 输入」形状，读法漂移会直接变成达标口径
+ * 漂移。读取失败按空名单降级（与 inspectBrandScopeStringList 同口径）。
+ */
+export interface RankingRosterSnapshot {
+  identity: {
+    workspaceBrandName: string;
+    fullNames: string[];
+    shortNames: string[];
+    relatedBrands: string[];
+  };
+  competitors: string[];
+  potentialCompetitors: string[];
+}
+
+export async function readRankingRosterSnapshot(
+  authority: Parameters<typeof inspectBrandScopeStringList>[0],
+  subject: string,
+): Promise<RankingRosterSnapshot> {
+  const [fullNames, shortNames, relatedBrands, competitors, potentialCompetitors] =
+    await Promise.all([
+      inspectBrandScopeStringList(authority, subject, "enterprise-profile.fullname"),
+      inspectBrandScopeStringList(authority, subject, "enterprise-profile.shortnames"),
+      inspectBrandScopeStringList(authority, subject, "enterprise-profile.relatedbrands"),
+      inspectBrandScopeStringList(authority, subject, "enterprise-profile.competitors"),
+      inspectBrandScopeStringList(authority, subject, "enterprise-profile.potentialcompetitors"),
+    ]);
+  return {
+    identity: { workspaceBrandName: subject, fullNames, shortNames, relatedBrands },
+    competitors,
+    potentialCompetitors,
+  };
+}
+
+/**
  * 缺口句式单源：「当前已确认 X 家竞品，还差 Y 家。」＋后续指引。门卡纯指令
  * 文案用缺省指引；自动补搜有结果时调用方传入补搜叙述替换（空串同缺省）。
  */
@@ -307,12 +344,13 @@ export function rankingCompetitorRequirement(error: unknown): RankingCompetitorR
 }
 
 /**
- * 门卡续跑共享入口（票 #45）：确认卡裁决（decide-batch 路由钩子）与
- * confirm_ranking_competitors 工具共用同一份续跑逻辑，防双发。名单达标后
- * 清门卡并以「暂缓项受限」的 source 续跑原生成请求——plan 类 source 的
- * itemIds 替换为 challenge.deferredItemIds（只补生成暂缓的排行项），direct
- * 源原样重发。续跑再抛不足（补充名与品牌身份互斥等边缘）时按旧围栏重挂
- * 门卡并返回新缺口，不抛错。
+ * 门卡续跑共享入口（票 #45）：确认卡裁决（单条 decide 与 decide-batch
+ * 路由钩子）与 confirm_ranking_competitors 工具共用同一份续跑逻辑，防双发。
+ * 名单达标后清门卡并以「暂缓项受限」的 source 续跑原生成请求——plan 类
+ * source 的 itemIds 替换为 challenge.deferredItemIds（只补生成暂缓的排行
+ * 项），direct 源原样重发。续跑再抛不足（补充名与品牌身份互斥等边缘）时
+ * 同一门卡原样存续（补搜额度不重置），围栏推进到最新用户消息并返回新
+ * 缺口，不抛错。
  */
 export async function resumePendingRankingGeneration(options: {
   gate: RankingCompetitorConfirmationGate;
@@ -331,23 +369,32 @@ export async function resumePendingRankingGeneration(options: {
   // 单飞经门卡持有（票 #45 评审防双发）：同一门卡并发触发的续跑共用一次
   // start——键只取 challenge 身份，工具路径附带的 userInstruction 与围栏
   // 消息 id 不参与（否则工具×钩子两路径键必不同，单飞形同虚设）。
+  // 门卡在 start 成功或非排行错误时才清空；再不足时原样存续（清空重挂
+  // 会重置补搜额度，违反「同一门卡只跑一次」），只把围栏推进到刚消费
+  // 的用户消息。
   const outcome = await gate.resumeOnce(rankingChallengeKey(challenge), async () => {
-    gate.clear();
     try {
       const operation = await options.startOperation(source);
+      gate.clear();
       return { kind: "ranking-generation-resumed" as const, operation };
     } catch (error) {
       const requirement = rankingCompetitorRequirement(error);
-      if (!requirement) throw error;
-      // 重挂门卡（同主体去重会让 issue 空转，这里 pending 已清空必然生效），
-      // 围栏推进到最新用户消息：续跑失败后的补名仍需新的用户回复授权。
+      if (!requirement) {
+        gate.clear();
+        throw error;
+      }
+      // 续跑再不足（补充名与品牌身份互斥等边缘）：重挂同一门卡——issue 的
+      // 同主体去重只刷新暂缓集合，不动补搜额度；围栏由 advanceFence 显式
+      // 推进到最新用户消息，续跑失败后的补名仍需新的用户回复授权。
       gate.issue({
         subject: challenge.subject,
         source: challenge.source,
-        issuedAfterUserMessageId:
-          options.fenceUserMessageId ?? challenge.issuedAfterUserMessageId,
+        issuedAfterUserMessageId: challenge.issuedAfterUserMessageId,
         ...(challenge.deferredItemIds ? { deferredItemIds: challenge.deferredItemIds } : {}),
       });
+      gate.advanceFence(
+        options.fenceUserMessageId ?? challenge.issuedAfterUserMessageId,
+      );
       return { kind: "ranking-generation-still-required" as const, requirement };
     }
   }) as RankingGenerationResumeOutcome;
@@ -355,11 +402,11 @@ export async function resumePendingRankingGeneration(options: {
 }
 
 /**
- * 确认卡裁决后的自动续跑钩子（票 #45）：decide-batch 路由在竞品事实被
- * 采纳后调用——重算合并名单（内核投影：身份排除＋两层合并），达标且有
- * 挂起门卡时清门卡并自动续跑原生成请求（plan 类按暂缓项受限）。fire-
- * and-forget 由路由侧控制；本函数自身全容错，任何异常只记日志不抛出。
- * authority/startOperation 可注入，单测不落库不打网关。
+ * 确认卡裁决后的自动续跑钩子（票 #45）：知识裁决路由（单条 decide 与
+ * decide-batch）在竞品事实被采纳后调用——重算合并名单（内核投影：身份
+ * 排除＋两层合并），达标且有挂起门卡时清门卡并自动续跑原生成请求（plan
+ * 类按暂缓项受限）。fire-and-forget 由路由侧控制；本函数自身全容错，任何
+ * 异常只记日志不抛出。authority/startOperation 可注入，单测不落库不打网关。
  */
 export async function resumeRankingGenerationAfterKnowledgeDecision(input: {
   workspaceId: string;
@@ -381,23 +428,11 @@ export async function resumeRankingGenerationAfterKnowledgeDecision(input: {
       workspaceId: input.workspaceId,
       sessionId: input.sessionId,
     });
-    const [fullNames, shortNames, relatedBrands, competitors, potential] =
-      await Promise.all([
-        inspectBrandScopeStringList(authority, pending.subject, "enterprise-profile.fullname"),
-        inspectBrandScopeStringList(authority, pending.subject, "enterprise-profile.shortnames"),
-        inspectBrandScopeStringList(authority, pending.subject, "enterprise-profile.relatedbrands"),
-        inspectBrandScopeStringList(authority, pending.subject, "enterprise-profile.competitors"),
-        inspectBrandScopeStringList(authority, pending.subject, "enterprise-profile.potentialcompetitors"),
-      ]);
+    const snapshot = await readRankingRosterSnapshot(authority, pending.subject);
     const merged = mergeRankingCompetitorTiers(
-      competitors,
-      potential,
-      {
-        workspaceBrandName: pending.subject,
-        fullNames,
-        shortNames,
-        relatedBrands,
-      },
+      snapshot.competitors,
+      snapshot.potentialCompetitors,
+      snapshot.identity,
     );
     if (merged.length < RANKING_COMPETITORS_REQUIRED_COUNT) return { resumed: false };
     const startOperation = input.startOperation ?? ((source: ArticleOperationSource) => {

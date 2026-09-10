@@ -20,6 +20,7 @@ import {
   rankingCompetitorRequirement,
   rankingDeficitInstruction,
   rankingTopUpNarrative,
+  readRankingRosterSnapshot,
   resumePendingRankingGeneration,
   sessionRankingCompetitorGate,
 } from '../geo/ranking-competitor-gate';
@@ -719,22 +720,10 @@ export async function confirmRankingCompetitors(
   if (!subject || !userInstruction || names.length === 0) {
     throw new Error("ranking_competitor_confirmation_invalid");
   }
-  const brandFact = (predicate: string) =>
-    authority.inspect({ subject, predicate, scope: { entityScope: "brand" } });
-  const [fullName, shortNames, relatedBrands, currentCompetitors, currentPotential] =
-    await Promise.all([
-      brandFact("enterprise-profile.fullname"),
-      brandFact("enterprise-profile.shortnames"),
-      brandFact("enterprise-profile.relatedbrands"),
-      brandFact("enterprise-profile.competitors"),
-      brandFact("enterprise-profile.potentialcompetitors"),
-    ]);
-  const identity = {
-    workspaceBrandName: subject,
-    fullNames: parsedStringList(fullName?.normalizedValueJson),
-    shortNames: parsedStringList(shortNames?.normalizedValueJson),
-    relatedBrands: parsedStringList(relatedBrands?.normalizedValueJson),
-  };
+  // 名单快照单源（票 #45 评审去重）：identity 三谓词＋两层竞品与裁决续跑
+  // 钩子同一份读法，达标口径不会因两处各自内联而漂移。
+  const snapshot = await readRankingRosterSnapshot(authority, subject);
+  const { identity } = snapshot;
   const allowedNames = filterValidRankingCompetitors(names, identity);
   const invalid = names.filter((name) => !allowedNames.includes(name));
   if (invalid.length > 0) {
@@ -743,8 +732,7 @@ export async function confirmRankingCompetitors(
   // user-stated 数组提议是替换语义（用户裁决 2026-09-07「用户输入最高
   // 优先级」）：本入口自己拼「已确认在前＋新增去重追加」的全量数组再
   // 提议——直接提议新增名会在替换语义下清掉既有确认名单。
-  const existingCompetitors = parsedStringList(currentCompetitors?.normalizedValueJson);
-  const fullCompetitors = [...existingCompetitors];
+  const fullCompetitors = [...snapshot.competitors];
   for (const name of allowedNames) {
     if (!fullCompetitors.includes(name)) fullCompetitors.push(name);
   }
@@ -772,10 +760,9 @@ export async function confirmRankingCompetitors(
     reason: userInstruction,
   });
   const competitors = parsedStringList(result.current?.normalizedValueJson);
-  const potentialCompetitors = parsedStringList(currentPotential?.normalizedValueJson);
   const confirmedCount = mergeRankingCompetitorTiers(
     competitors,
-    potentialCompetitors,
+    snapshot.potentialCompetitors,
     identity,
   ).length;
   return {
@@ -1296,6 +1283,10 @@ export async function createXiaojingGeoServer() {
             userInstruction: challenge.userInstruction,
           });
           if (!confirmed.readyForRanking) {
+            // 部分采纳后推进围栏（票 #45：同一条消息不得授权多轮采纳——
+            // 消息里顺带提到的名字不能被下一次调用逐个直采纳，续轮补名
+            // 必须有新于本轮的用户回复）。
+            rankingCompetitorGate.advanceFence(latest!.id);
             return {
               content: [
                 { type: "text" as const, text: JSON.stringify(confirmed) },
@@ -1802,11 +1793,14 @@ export async function createXiaojingGeoServer() {
                   brandMaterialPort().context(),
                   latestUserMessage(),
                 ]);
-                if (!latest) throw error;
+                // 门卡始终发出（与下方排行项暂缓路径同口径）：无持久化用户
+                // 消息时围栏取空串——授权要求「新于围栏的消息」，空围栏下
+                // 任何后续用户消息都可授权聊天补名；自动续跑钩子不依赖围
+                // 栏。缺发门卡会让确认卡承诺的「确认后自动续跑」失效。
                 rankingCompetitorGate.issue({
                   subject: brandContext.brandName,
                   source,
-                  issuedAfterUserMessageId: latest.id,
+                  issuedAfterUserMessageId: latest?.id ?? "",
                 });
                 // 门卡自动补搜（票 #45）：按缺口重跑富化，候选上确认卡；
                 // 失败/空手回落纯指令文案（聊天补名通道保留）。

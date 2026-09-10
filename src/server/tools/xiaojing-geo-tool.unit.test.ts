@@ -453,6 +453,37 @@ describe("resumePendingRankingGeneration (票 #45)", () => {
     // 门卡重挂（围栏推进到 fenceUserMessageId），供下一轮补名授权。
     expect(gate.pendingChallenge()).toMatchObject({ issuedAfterUserMessageId: "user-9" });
   });
+
+  it("keeps the top-up quota across the still-insufficient re-issue (票 #45 修复)", async () => {
+    // 用户裁决「补搜免费＋同一门卡只跑一次」：续跑再不足时同一门卡原样
+    // 存续——曾经的 clear() 重挂会把 topUpClaimed 一并归零，每次「达标→
+    // 续跑失败→再点生成」都能再白嫖一次联网补搜。
+    const gate = new RankingCompetitorConfirmationGate();
+    gate.issue({
+      subject: "目标品牌",
+      source: { kind: "confirmed-topic-plan", itemIds: ["item-a", "item-rank"] },
+      issuedAfterUserMessageId: "user-1",
+      deferredItemIds: ["item-rank"],
+    });
+    expect(gate.claimTopUp()).toBe(true);
+    const startOperation = vi.fn(async () => {
+      throw new Error("article_generation_ranking_competitors_insufficient:4");
+    });
+    const outcome = await resumePendingRankingGeneration({
+      gate,
+      challenge: gate.pendingChallenge()!,
+      startOperation,
+      fenceUserMessageId: "user-2",
+    });
+
+    expect(outcome.kind).toBe("ranking-generation-still-required");
+    // 同一挑战原样存续：暂缓项不丢、围栏推进，但补搜额度不重置。
+    expect(gate.pendingChallenge()).toMatchObject({
+      deferredItemIds: ["item-rank"],
+      issuedAfterUserMessageId: "user-2",
+    });
+    expect(gate.claimTopUp()).toBe(false);
+  });
 });
 
 describe("rankingTopUpNarrative (票 #45 评审去重)", () => {
