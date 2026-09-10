@@ -12,7 +12,7 @@
 
 SDK `settingSources` 为空，因此不会从用户级或 workspace 配置自动扩展产品能力。产品能力边界的静态说明（登记能力全部可用、范围外不得声称或代答）收敛在 prompt 身份段一次说清，`inspect_brand_context` 返回体不再逐次重复携带。Prompt 不是权限边界；tool allowlist、Rust admission 和 BrandWorkspace revision checks 必须独立拒绝越权。
 
-主聊天是唯一 Agent 发起入口。结构化卡片只提交用户决策或确定性 action，不能组装第二套 prompt 或启动另一个 Agent。排行榜生成返回已确认竞品不足 5 家时有一个窄例外：Agent 留在当前聊天说明缺口；Session Sidecar 同时绑定原文章请求与签发时用户消息，该状态跨 Agent turn 与每轮 MCP server 重建存续，同请求重试不移动原签发边界。用户随后明确写出名称后，`confirm_ranking_competitors` 只传名称；服务端从 Gate 取主体、逐字核对最新持久化用户消息，再把该原话作为 `asked/user-stated` 审计，经同一 KnowledgeAuthority 提议并立即采纳；补足后工具直接恢复原文章请求。该入口不得接收模型推断、联网发现或仅被提到的名称。
+主聊天是唯一 Agent 发起入口。结构化卡片只提交用户决策或确定性 action，不能组装第二套 prompt 或启动另一个 Agent。排行榜生成返回已确认竞品不足 5 家时有一个窄例外：Agent 留在当前聊天说明缺口；Session Sidecar 同时绑定原文章请求与签发时用户消息，该状态跨 Agent turn 与每轮 MCP server 重建存续，同请求重试不移动原签发边界，部分采纳后边界推进到刚消费的用户消息（同一条消息不得授权多轮采纳）。门卡签发时服务端按缺口自动联网补搜一次（不扣点、同一门卡只跑一次），候选上知识确认卡裁决。用户随后明确写出名称后，`confirm_ranking_competitors` 只传名称；服务端从 Gate 取主体、逐字核对最新持久化用户消息，再把该原话作为 `asked/user-stated` 审计，经同一 KnowledgeAuthority 提议并立即采纳。名单达标后恢复原文章请求有两条等价触发：补足后工具直接恢复，或确认卡裁决竞品事实后（单条 decide 与 decide-batch）路由钩子自动恢复——同一共享 helper 单飞，plan 类请求按暂缓项受限只补生成暂缓部分。该入口不得接收模型推断、联网发现或仅被提到的名称。
 
 系统文本不得包含 Provider secret、内部端口、用户正文或本地绝对路径。修改 prompt 时同步更新对应 unit test，并验证不扩大工具集合。
 
