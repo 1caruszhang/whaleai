@@ -194,8 +194,18 @@ const RULE_FILE_SCOPES = new Map([
   ['removed product metadata', (name) => name === 'package.json'],
 ]);
 
-/** 已审计的命中豁免：label + 文件 + 谓词，每条必须写明安全理由。 */
+/** 已审计的命中豁免：label + file（或 filePrefix 前缀）+ 谓词，每条必须写明安全理由。 */
 const AUDITED_HIT_EXEMPTIONS = [
+  {
+    label: 'removed product route',
+    filePrefix: 'admin-web/',
+    // admin-web（票 46 运营台 SPA）的路由挂 /admin 前缀下（如 /accounts），
+    // 是运营台产品面而非已退役的桌面端路由——本规则面向旧桌面产品树，
+    // 词表（accounts/spaces/tasks/…）与 SPA 路由同形是巧合而非语义回归。
+    // 仅豁免该规则于 admin-web 树；其余规则（旧品牌名/旧作者/退役进程树
+    // 等）照常全量扫描 admin-web，不削弱既有检查。
+    matches: () => true,
+  },
   {
     label: 'removed update configuration',
     file: 'src-tauri/tauri.windows.conf.json',
@@ -285,7 +295,8 @@ for (const path of files.sort()) {
           const audited = AUDITED_HIT_EXEMPTIONS.some(
             (exemption) =>
               exemption.label === label
-              && exemption.file === file
+              && (exemption.file === file
+                || (exemption.filePrefix !== undefined && file.startsWith(exemption.filePrefix)))
               && exemption.matches({ line: lines[index], matched: match[0] }),
           );
           if (!audited) {

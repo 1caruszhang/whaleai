@@ -12,8 +12,11 @@ name: xiaojing-backend
 services:
   api:
     # 服务器上镜像经 docker load / pull 注入同名 tag 后，compose 不会重建；
-    # 本地开发才会用到该 build 上下文。
-    build: .
+    # 本地开发才会用到该 build 上下文。票 46 起上下文=仓库根（镜像同时打进
+    # admin-web 运营台 SPA 产物），Dockerfile 在 backend/ 下。
+    build:
+      context: ..
+      dockerfile: backend/Dockerfile
     image: xiaojing-backend:${XIAOJING_IMAGE_TAG:-local}
     env_file:
       # 占位：服务器上指向真实 env 文件路径；默认读取 compose 同目录 .env。

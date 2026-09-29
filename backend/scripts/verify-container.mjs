@@ -7,7 +7,8 @@
  * 无 sqlite 数据 / 无 node_modules）→ 起宿主机 mock DeepSeek 上游 +
  * mock OSS 上游（HTTPS，自签 fixture 证书）→ docker compose up（SSE 上游
  * 与 OSS 内网 endpoint 都指向 mock）→ 等 HEALTHCHECK 健康 →
- * /healthz + /admin 登录页 200 + 建号/登录/余额合约冒烟 + /v1/messages
+ * /healthz + /admin SPA 静态托管（index.html / 深链 fallback / 静态资源）
+ * + 建号/登录/余额合约冒烟 + /v1/messages
  * SSE 透传形状验证（mock 逐事件对比）+ 图片 PUT 网关冒烟（票 #15：
  * 二进制逐字节、Content-Type/公共读 ACL 透传、ACL 计入重签串、负向 4xx
  * 零上游调用）→ compose down -v 收尾。
@@ -40,6 +41,8 @@ import { deflateSync } from 'node:zlib';
 
 const run = promisify(execFile);
 const backendDir = join(dirname(fileURLToPath(import.meta.url)), '..');
+// 票 46 起构建上下文=仓库根（镜像同时打进 admin-web SPA 产物）。
+const repoRoot = join(backendDir, '..');
 
 const IMAGE = 'xiaojing-backend:verify';
 const COMPOSE_PROJECT = 'xiaojing-backend-verify';
@@ -143,11 +146,12 @@ async function buildImage(tmpDir) {
   // 构建机无法直连 docker.io 时，Dockerfile 首行 `# syntax=docker/dockerfile:1`
   // 的前端镜像拉不下来（本 Dockerfile 只用经典指令，内置前端构建产物等价）
   // ——验证构建改用去掉 syntax 行的临时 Dockerfile，仓库 Dockerfile 不动。
+  // COPY 路径相对构建上下文（仓库根），-f 用绝对路径不受临时目录影响。
   const dockerfile = await readFile(join(backendDir, 'Dockerfile'), 'utf8');
   const verifyDockerfile = join(tmpDir, 'Dockerfile.verify');
   await writeFile(verifyDockerfile, dockerfile.replace(/^# syntax=[^\r\n]*\r?\n/, ''));
   const { stdout } = await docker(
-    ['build', '-t', IMAGE, ...buildArgs, '-f', verifyDockerfile, backendDir],
+    ['build', '-t', IMAGE, ...buildArgs, '-f', verifyDockerfile, repoRoot],
     {
       maxBuffer: 32 * 1024 * 1024,
     },
@@ -418,11 +422,32 @@ async function smokeHttp(upstreamRequests) {
   const adminPage = await fetch(`${BASE_URL}/admin`);
   const adminHtml = await adminPage.text();
   check(
-    '/admin 登录页 → 200 且渲染运营登录表单',
+    '/admin 静态运营台 → 200 返回 SPA index.html（票 46）',
     adminPage.status === 200 &&
       (adminPage.headers.get('content-type') ?? '').includes('text/html') &&
-      adminHtml.includes('运营登录') &&
-      adminHtml.includes('action="/admin/session"'),
+      adminHtml.includes('id="root"') &&
+      adminHtml.includes('鲸杉geo'),
+  );
+
+  // SPA 深链 fallback：/admin/<任意深链> 也回 index.html（react-router 承接）。
+  const deepLink = await fetch(`${BASE_URL}/admin/accounts`);
+  const deepLinkHtml = await deepLink.text();
+  check(
+    '/admin/<深链> SPA fallback → 200 index.html',
+    deepLink.status === 200 &&
+      (deepLink.headers.get('content-type') ?? '').includes('text/html') &&
+      deepLinkHtml.includes('id="root"'),
+  );
+
+  // 静态资源可加载：index.html 引用的哈希 JS 200 且 content-type 正确。
+  const assetPath = adminHtml.match(/src="(\/admin\/assets\/[^"]+\.js)"/)?.[1];
+  const assetResponse = assetPath ? await fetch(`${BASE_URL}${assetPath}`) : null;
+  check(
+    'SPA 静态资源可加载（index.html 引用的哈希 JS → 200 text/javascript）',
+    assetResponse !== null &&
+      assetResponse.status === 200 &&
+      (assetResponse.headers.get('content-type') ?? '').includes('text/javascript'),
+    assetPath ? `asset=${assetPath} status=${assetResponse?.status}` : 'index.html 未引用 /admin/assets/*.js',
   );
 
   const anonymous = await jsonFetch('/auth/me');
