@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light dark" />
+    <title>鲸杉geo · 运营台</title>
+    <script>
+      // 主题首屏防闪：hydration 前把已选主题落到 <html class>，避免浅色系统闪黑。
+      (function () {
+        try {
+          var stored = localStorage.getItem('xiaojing-admin-theme');
+          var dark =
+            stored === 'dark' ||
+            ((stored === null || stored === 'system') &&
+              window.matchMedia('(prefers-color-scheme: dark)').matches);
+          if (dark) document.documentElement.classList.add('dark');
+        } catch (error) {
+          /* localStorage 不可用时维持跟随系统默认 */
+        }
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
