@@ -12,6 +12,11 @@ import type { BackendDeps } from '../deps';
  *
  * 护栏（与本模块的注册顺序共同保证，见 http/app.ts）：
  * - JSON API（/admin/login、/admin/accounts/*）注册在前、优先匹配，绝不被吞；
+ * - spec #45 枚举的 SPA 接管面只有 GET /admin 与 GET /admin/accounts/:accountId；
+ *   其余 SSR 自有 GET 页面（SSR_PAGE_PASSTHROUGH_PREFIXES）在票 #51「SPA
+ *   上线验证后整体退役」前必须保持可用——本中间件对它们原样透传，绝不被
+ *   SPA fallback 遮蔽（2026-09-29 验收回归：GET /admin/preference-channels
+ *   曾整页被吞，其全部生产表单因此不可用）；
  * - 本中间件只拦 GET，/admin/session、/admin/ui/* 等既有表单 POST 原样透传；
  * - 产物不存在（本地开发/测试未构建）时整链透传，既有 SSR 页面行为不变——
  *   测试与开发零扰动，镜像内（产物在 dist/admin-web）才启用；
@@ -43,6 +48,23 @@ function defaultAdminWebRoot(): string {
   return fileURLToPath(new URL('./admin-web', import.meta.url));
 }
 
+/**
+ * SSR 自有 GET 页面透传清单（票 46）：spec #45 的 SPA 接管面只枚举 GET
+ * /admin 与 GET /admin/accounts/:accountId，其余 SSR 页面在票 #51 整体
+ * 退役前必须保持可用。当前清单：
+ * - /admin/preference-channels：偏好名单管理页（校验名单、snapshot
+ *   refresh/verify、pick/category/delete 等生产表单都 POST 到
+ *   /admin/ui/preference-channels/*，T1 起必须可用）。
+ * 新增 SSR GET 页面时在此登记；票 #51 退役时随页面一并删除。
+ */
+const SSR_PAGE_PASSTHROUGH_PREFIXES = ['/admin/preference-channels'];
+
+function isSsrOwnedPage(path: string): boolean {
+  return SSR_PAGE_PASSTHROUGH_PREFIXES.some(
+    prefix => path === prefix || path.startsWith(`${prefix}/`),
+  );
+}
+
 /** SPA 长缓存只在内容哈希资源上开；index.html 每次协商，新版本立即生效。 */
 function cacheControlFor(filePath: string): string {
   return filePath.endsWith(`${sep}index.html`) || filePath.endsWith('/index.html')
@@ -63,7 +85,10 @@ export function createAdminSpaMiddleware(deps: BackendDeps) {
   return createMiddleware(async (c, next) => {
     const path = c.req.path;
     const isAdminPath = path === '/admin' || path === '/admin/' || path.startsWith('/admin/');
-    if (!enabled || !isAdminPath || c.req.method !== 'GET') return await next();
+    if (!enabled || !isAdminPath) return await next();
+    // SSR 自有 GET 页面显式透传（createAdminPageRoutes 注册在本中间件之后）。
+    if (isSsrOwnedPage(path)) return await next();
+    if (c.req.method !== 'GET') return await next();
 
     let relative = path.slice('/admin/'.length); // '/admin' 与 '/admin/' → ''
     try {

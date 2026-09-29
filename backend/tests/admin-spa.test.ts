@@ -19,7 +19,9 @@ import {
  * 全部走 Hono app.request() 的 HTTP 合约边界：产物存在时 GET /admin 与
  * 任意 /admin/<深链> 回 index.html、静态资源按扩展名给 MIME；JSON API
  * （/admin/login、/admin/accounts/*）与非 GET 表单路由优先级更高、绝不被
- * SPA 吞掉；路径穿越不逃出产物根；产物不存在时既有 SSR 页面行为不变。
+ * SPA 吞掉；SSR 自有 GET 页面（/admin/preference-channels，spec #45 接管
+ * 面之外）显式透传；路径穿越不逃出产物根；产物不存在时既有 SSR 页面
+ * 行为不变。
  */
 
 const FIXTURE_INDEX =
@@ -134,6 +136,41 @@ describe('admin SPA 静态托管（票 46）', () => {
     const sneaky = await getText(tb.app, '/admin/%2e%2e/outside-secret.txt');
     expect(sneaky.status).toBe(404);
     expect(await sneaky.text()).not.toContain('SECRET-OUTSIDE-ROOT');
+  });
+
+  it('SSR 自有页面透传：GET /admin/preference-channels 不被 SPA 遮蔽（票 46 回归）', async () => {
+    // spec #45 的 SPA 接管面只枚举 GET /admin 与 GET /admin/accounts/:accountId；
+    // 偏好名单管理页（及其全部生产表单）在票 #51 退役前必须保持 SSR 可用。
+
+    // 未登录：SSR 会话门 303 回 /admin（若被 SPA fallback 遮蔽则会是 200 index.html）。
+    const anonymous = await getText(tb.app, '/admin/preference-channels');
+    expect(anonymous.status).toBe(303);
+    expect(anonymous.headers.get('location')).toBe('/admin');
+
+    // 登录后：返回 SSR 页面 HTML（标题「偏好名单」），不是 fixture 的 index.html。
+    const login = await tb.app.request('/admin/session', {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ password: TEST_ADMIN_PASSWORD }).toString(),
+    });
+    expect(login.status).toBe(303);
+    const cookie = (login.headers.get('set-cookie') ?? '').split(';')[0]!;
+    expect(cookie).not.toBe('');
+    const page = await tb.app.request('/admin/preference-channels', { headers: { cookie } });
+    expect(page.status).toBe(200);
+    expect(page.headers.get('content-type')).toContain('text/html');
+    const body = await page.text();
+    expect(body).toContain('<title>偏好名单</title>');
+    expect(body).toContain('偏好名单');
+    expect(body).not.toContain('id="root"');
+
+    // 带查询参数的页面 GET 同样透传（行业切换视图）。
+    const industryView = await tb.app.request('/admin/preference-channels?industry=1', {
+      headers: { cookie },
+    });
+    expect(industryView.status).toBe(200);
+    expect(industryView.headers.get('content-type')).toContain('text/html');
+    expect(await industryView.text()).toContain('<title>偏好名单</title>');
   });
 
   it('未注入构建产物（adminWebRoot 缺省且目录不存在）时既有 SSR 页面行为不变', async () => {

@@ -233,8 +233,10 @@ admin-web（仓库平级 `admin-web/`：React 19 + Vite + Tailwind + shadcn/ui +
 react-router + TanStack Query）构建产物打进后端镜像 `dist/admin-web`，Hono
 对 `/admin/*` 做静态托管：GET 命中文件直接回（Vite 内容哈希资源），未命中
 回 index.html（SPA fallback，react-router 承接前端路由）。JSON API 路由
-注册在前、优先匹配，绝不被 SPA 吞；非 GET 表单路由原样透传；产物不存在
-（本地开发/测试未构建）时整链透传，SSR 页面（下表）与既有行为不变。
+注册在前、优先匹配，绝不被 SPA 吞；非 GET 表单路由原样透传；SSR 自有
+GET 页面（spec #45 接管面之外，当前为 `/admin/preference-channels`）走
+显式透传清单，票 #51 退役前保持可用；产物不存在（本地开发/测试未构建）
+时整链透传，SSR 页面（下表）与既有行为不变。
 `ADMIN_WEB_ROOT`（可选）可覆盖产物目录（测试注入 fixture）。SPA 登录走
 既有 `POST /admin/login`（Bearer JWT 存 localStorage，任一 API 401 清凭证
 回登录页）；SSR 页面在 SPA 上线验证后整体退役（#45）。
