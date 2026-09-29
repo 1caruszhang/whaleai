@@ -6,6 +6,7 @@ import { AdminLoginThrottle } from '../auth/admin-login-throttle';
 import { AppError } from '../errors';
 import { createAdminPageRoutes } from './admin-pages';
 import { createAdminRoutes } from './admin-routes';
+import { createAdminSpaMiddleware } from './admin-spa';
 import { createAuthRoutes } from './auth-routes';
 import { createBillingRoutes } from './billing-routes';
 import { createConfigRoutes } from './config-routes';
@@ -54,6 +55,10 @@ export function createBackendApp(deps: BackendDeps): Hono<BackendEnv> {
   app.route('/', createBillingRoutes(deps));
   app.route('/', createConfigRoutes(deps));
   app.route('/', createAdminRoutes(deps, adminThrottle));
+  // 票 46：admin-web SPA 静态托管 /admin/*。JSON API 路由注册在前、优先
+  // 匹配，绝不被 SPA 吞掉；本中间件只拦 GET 且产物存在（镜像内）才生效，
+  // 未命中/未构建时透传——SSR 页面（下一行注册）与既有行为不变。
+  app.use('*', createAdminSpaMiddleware(deps));
   app.route('/', createAdminPageRoutes(deps, adminThrottle));
   app.route('/', createGatewayRoutes(deps));
   app.route('/', createProviderProxyRoutes(deps));
