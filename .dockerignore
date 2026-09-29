@@ -1,0 +1,48 @@
+# 本仓库 Docker 构建统一以仓库根为上下文（docker build -f backend/Dockerfile .，
+# 票 46 起）：只放行 backend/ 与 admin-web/ 构建所需文件。密钥、数据、依赖
+# 与构建产物一律不进构建上下文（红线，见 specs/guides/deploy-api-jingshanai.md；
+# backend/.dockerignore 在根上下文下不再生效，其规则在此对齐收紧）。
+
+# 通用：git 元数据、依赖、构建产物、密钥与本地数据
+.git/
+**/node_modules/
+**/dist/
+**/.env
+**/.env.*
+!**/.env.example
+**/*.tsbuildinfo
+.eslintcache
+.turbo/
+
+# backend：构建只需 package.json / package-lock.json / scripts/bundle.mjs / src
+backend/data/
+backend/tests/
+backend/*.md
+backend/Dockerfile
+backend/docker-compose.yml
+backend/tsconfig.json
+backend/vitest.config.ts
+backend/.dockerignore
+backend/.env.example
+backend/scripts/deploy-ecs.sh
+backend/scripts/verify-container.mjs
+backend/scripts/verify-backup.mjs
+backend/scripts/verify-oss-image.mjs
+backend/scripts/backup-run.sh
+backend/scripts/backup-sqlite.mjs
+backend/scripts/fixtures/
+
+# admin-web：构建只需 package.json / package-lock.json 与源码/配置
+admin-web/vitest.config.ts
+
+# 仓库其余区域与桌面端产物与后端镜像无关
+/src/
+/src-tauri/
+/scripts/
+/dist/
+/docs/
+/specs/
+/artifacts/
+/.scratch/
+/.husky/
+/*.md
