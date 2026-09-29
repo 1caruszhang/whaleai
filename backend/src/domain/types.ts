@@ -15,6 +15,8 @@ export interface AccountRow {
   chat_quota_used_milli: number;
   /** 运营备注（账号归属标识，0009）；仅 /admin 读写，不进用户投影。 */
   admin_note: string;
+  /** 用户名（显示名，0014）：≤64 字符、可空、不参与登录；仅 /admin 读写。 */
+  display_name: string;
 }
 
 export interface AuthSessionRow {

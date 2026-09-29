@@ -69,7 +69,10 @@ describe('admin SPA 静态托管（票 46）', () => {
   });
 
   it('构建产物存在时 GET /admin 与任意 /admin/<深链> 均 fallback 到 index.html', async () => {
-    for (const path of ['/admin', '/admin/', '/admin/accounts', '/admin/accounts/abc123', '/admin/x/y/z']) {
+    // 注意：GET /admin/accounts 自票 47 起是 JSON 列表接口（spec 45 接口
+    // 扩展，注册在 SPA 中间件之前优先匹配），不再走 SPA fallback——其 JSON
+    // 契约在下一条用例单独断言。
+    for (const path of ['/admin', '/admin/', '/admin/accounts/abc123', '/admin/x/y/z']) {
       const response = await getText(tb.app, path);
       expect(response.status, `GET ${path} 应 200`).toBe(200);
       expect(response.headers.get('content-type')).toContain('text/html');
@@ -111,6 +114,16 @@ describe('admin SPA 静态托管（票 46）', () => {
     const usage = await getJson(tb.app, `/admin/accounts/${accountId}/chat-usage`, adminToken);
     expect(usage.status).toBe(200);
     expect(usage.body.account).toBeTruthy();
+
+    // GET /admin/accounts（无尾段）是票 47 的 JSON 列表接口：无凭证 401
+    // JSON、带凭证 200 JSON——都不是 index.html。
+    const listNoToken = await getJson(tb.app, '/admin/accounts');
+    expect(listNoToken.status).toBe(401);
+    expect(listNoToken.body.error).toBe('invalid_token');
+    const list = await getJson(tb.app, '/admin/accounts', adminToken);
+    expect(list.status).toBe(200);
+    expect(list.body.accounts).toBeInstanceOf(Array);
+    expect(list.body.total).toBeTypeOf('number');
   });
 
   it('非 GET 方法不被 SPA 吞：既有 SSR 表单路由仍按原契约工作', async () => {

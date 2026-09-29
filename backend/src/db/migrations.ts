@@ -336,6 +336,29 @@ export const MIGRATIONS: readonly Migration[] = [
       ALTER TABLE distribution_pool_snapshot ADD COLUMN fans_number INTEGER;
     `,
   },
+  {
+    // 票 47（spec 45 原编号 0008_account_profile_fields；注册表 0008 已被
+    // 既有 0008_permit_last_activity 占用，append-only 顺延为 0014）：账号
+    // 运营画像两件套——accounts 加用户名（display_name，≤64 字符、可空、
+    // 不参与登录：建号可选填、详情页可编辑）；新建 account_brands 镜像
+    // 客户端品牌工作区名称（客户端全量快照上报、唯一权威，见 ADR 0007）。
+    // 表结构 CHECK 约束品牌名非空且 ≤64 字符；每账号 ≤100 条是跨行约束，
+    // ANSI SQL 无表内表达，由票 50 的上报端点校验。本票只建结构与查询，
+    // 写入由票 50 的 PUT /auth/me/brands 落。
+    name: '0014_account_profile_fields',
+    sql: `
+      ALTER TABLE accounts ADD COLUMN display_name TEXT NOT NULL DEFAULT ''
+        CHECK (LENGTH(display_name) <= 64);
+
+      CREATE TABLE account_brands (
+        account_id TEXT NOT NULL REFERENCES accounts(id),
+        workspace_id TEXT NOT NULL CHECK (LENGTH(workspace_id) BETWEEN 1 AND 64),
+        name TEXT NOT NULL CHECK (LENGTH(name) BETWEEN 1 AND 64),
+        PRIMARY KEY (account_id, workspace_id)
+      );
+      CREATE INDEX idx_account_brands_account ON account_brands(account_id);
+    `,
+  },
 ];
 
 /** 建表只经本 runner：幂等、每条迁移独立事务、记录进 schema_migrations。 */
