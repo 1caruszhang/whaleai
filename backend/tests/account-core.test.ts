@@ -276,6 +276,23 @@ describe('account core HTTP contract', () => {
     expect(badPhone.body.error).toBe('validation_error');
   });
 
+  it('throttles wrong ops-password attempts on /admin/login without locking the right one out', async () => {
+    // 票 10 节流（票 51 迁移自 SSR 会话测试）：连续失败递增延时，只延时
+    // 不断锁——正确密码随后仍可登录。独立 backend 注入 unitMs=1 免真实延时。
+    const tbFast = await startTestBackend({ config: { adminLoginThrottleUnitMs: 1 } });
+    try {
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        const wrong = await postJson(tbFast.app, '/admin/login', { password: `wrong-${attempt}` });
+        expect(wrong.status).toBe(401);
+      }
+      const ok = await postJson(tbFast.app, '/admin/login', { password: 'ops-password-123' });
+      expect(ok.status).toBe(200);
+      expect(str(ok.body.adminToken)).toBeTruthy();
+    } finally {
+      await tbFast.cleanup();
+    }
+  });
+
   it('revokes the session on logout while the JWT keeps its natural window', async () => {
     const { app } = tb;
     await provisionAccount(app, '13800000009', 'initial-pass-9');

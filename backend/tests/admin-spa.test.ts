@@ -15,13 +15,14 @@ import {
 } from './helpers';
 
 /**
- * 票 46 验收：/admin 静态托管（admin-web 构建产物 → SPA fallback）。
- * 全部走 Hono app.request() 的 HTTP 合约边界：产物存在时 GET /admin 与
- * 任意 /admin/<深链> 回 index.html、静态资源按扩展名给 MIME；JSON API
- * （/admin/login、/admin/accounts/*）与非 GET 表单路由优先级更高、绝不被
- * SPA 吞掉；SSR 自有 GET 页面（/admin/preference-channels，spec #45 接管
- * 面之外）显式透传；路径穿越不逃出产物根；产物不存在时既有 SSR 页面
- * 行为不变。
+ * 票 46 验收 + 票 51 退役回归：/admin 静态托管（admin-web 构建产物 →
+ * SPA fallback）。全部走 Hono app.request() 的 HTTP 合约边界：产物存在时
+ * GET /admin 与任意 /admin/<深链> 回 index.html、静态资源按扩展名给 MIME；
+ * JSON API（/admin/login、/admin/accounts/*）与非 GET 表单路由优先级更高、
+ * 绝不被 SPA 吞掉；唯一保留的 SSR GET 页面（/admin/preference-channels）
+ * 显式透传；账号运营台 SSR 面（票 51）已退役——/admin/session、/admin/logout
+ * 等路由 404；路径穿越不逃出产物根；产物不存在时 GET /admin 404（SSR 登录
+ * 页已退役，SPA 未构建即无壳），偏好名单页仍按 SSR 会话门工作。
  */
 
 const FIXTURE_INDEX =
@@ -80,6 +81,15 @@ describe('admin SPA 静态托管（票 46）', () => {
     }
   });
 
+  it('深链 GET /admin/accounts/:accountId 直达 SPA 详情页壳（票 51 验收）', async () => {
+    // 账号详情深链（票 46 承接 + 票 49 详情页就绪）：SSR 详情页退役后，
+    // 该路径由 SPA fallback 回 index.html，react-router 前端接管渲染详情。
+    const response = await getText(tb.app, '/admin/accounts/acc-deep-link-42');
+    expect(response.status).toBe(200);
+    expect(response.headers.get('content-type')).toContain('text/html');
+    expect(await response.text()).toBe(FIXTURE_INDEX);
+  });
+
   it('静态资源按路径命中文件并按扩展名给 MIME', async () => {
     const js = await getText(tb.app, '/admin/assets/index-fixture.js');
     expect(js.status).toBe(200);
@@ -126,23 +136,27 @@ describe('admin SPA 静态托管（票 46）', () => {
     expect(list.body.total).toBeTypeOf('number');
   });
 
-  it('非 GET 方法不被 SPA 吞：既有 SSR 表单路由仍按原契约工作', async () => {
-    const wrong = await tb.app.request('/admin/session', {
+  it('非 GET 方法不被 SPA 吞：保留的偏好名单表单透传，退役路由 404', async () => {
+    // 保留的偏好名单表单 POST（未登录）：303 回 /admin——表单路由透传，
+    // 不是 index.html（若被 SPA 遮蔽则会是 200）。
+    const pick = await tb.app.request('/admin/ui/preference-channels/pick', {
       method: 'POST',
       headers: { 'content-type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({ password: 'not-the-ops-password' }).toString(),
+      body: new URLSearchParams({ category: '0' }).toString(),
     });
-    expect(wrong.status).toBe(401);
-    expect(wrong.headers.get('content-type')).toContain('text/html');
-    expect(await wrong.text()).toContain('运营密码不正确');
+    expect(pick.status).toBe(303);
+    expect(pick.headers.get('location')).toBe('/admin');
 
-    const logout = await tb.app.request('/admin/logout', {
-      method: 'POST',
-      headers: { 'content-type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({}).toString(),
-    });
-    expect(logout.status).toBe(303);
-    expect(logout.headers.get('location')).toBe('/admin');
+    // 账号运营台 SSR 面（票 51）退役：/admin/session、/admin/logout 与
+    // /admin/ui/accounts* 表单均已删除——POST 一律 404，不再有 SSR 会话。
+    for (const path of ['/admin/session', '/admin/logout', '/admin/ui/accounts']) {
+      const retired = await tb.app.request(path, {
+        method: 'POST',
+        headers: { 'content-type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({}).toString(),
+      });
+      expect(retired.status, `POST ${path} 应 404`).toBe(404);
+    }
   });
 
   it('路径穿越不逃出产物根：编码 ../ 不得读到根外文件', async () => {
@@ -153,21 +167,27 @@ describe('admin SPA 静态托管（票 46）', () => {
 
   it('SSR 自有页面透传：GET /admin/preference-channels 不被 SPA 遮蔽（票 46 回归）', async () => {
     // spec #45 的 SPA 接管面只枚举 GET /admin 与 GET /admin/accounts/:accountId；
-    // 偏好名单管理页（及其全部生产表单）在票 #51 退役前必须保持 SSR 可用。
+    // 偏好名单管理页（及其全部生产表单）是票 51 后唯一保留的 SSR 面，必须
+    // 保持 SSR 可用。
 
     // 未登录：SSR 会话门 303 回 /admin（若被 SPA fallback 遮蔽则会是 200 index.html）。
     const anonymous = await getText(tb.app, '/admin/preference-channels');
     expect(anonymous.status).toBe(303);
     expect(anonymous.headers.get('location')).toBe('/admin');
 
-    // 登录后：返回 SSR 页面 HTML（标题「偏好名单」），不是 fixture 的 index.html。
-    const login = await tb.app.request('/admin/session', {
+    // 登录（票 51 桥接：POST /admin/login JSON 成功即下发 SSR 会话 cookie）：
+    // /admin/session 已退役，这是会话 cookie 的唯一入口。
+    const login = await tb.app.request('/admin/login', {
       method: 'POST',
-      headers: { 'content-type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({ password: TEST_ADMIN_PASSWORD }).toString(),
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ password: TEST_ADMIN_PASSWORD }),
     });
-    expect(login.status).toBe(303);
-    const cookie = (login.headers.get('set-cookie') ?? '').split(';')[0]!;
+    expect(login.status).toBe(200);
+    const setCookie = login.headers.get('set-cookie') ?? '';
+    expect(setCookie).toContain('xiaojing_admin=');
+    expect(setCookie).toContain('HttpOnly');
+    expect(setCookie).toContain('SameSite=Lax');
+    const cookie = setCookie.split(';')[0]!;
     expect(cookie).not.toBe('');
     const page = await tb.app.request('/admin/preference-channels', { headers: { cookie } });
     expect(page.status).toBe(200);
@@ -186,15 +206,18 @@ describe('admin SPA 静态托管（票 46）', () => {
     expect(await industryView.text()).toContain('<title>偏好名单</title>');
   });
 
-  it('未注入构建产物（adminWebRoot 缺省且目录不存在）时既有 SSR 页面行为不变', async () => {
+  it('未注入构建产物（adminWebRoot 缺省且目录不存在）时：SSR 登录页已退役、偏好名单页不受影响', async () => {
     const plain = await startTestBackend({});
     try {
+      // 票 51：GET /admin 的 SSR 登录页已退役；无 SPA 产物时不再有 HTML
+      // 登录表单（action="/admin/session" 不复存在）——404 即整链透传证明。
       const loginPage = await getText(plain.app, '/admin');
-      expect(loginPage.status).toBe(200);
-      expect(loginPage.headers.get('content-type')).toContain('text/html');
-      const body = await loginPage.text();
-      expect(body).toContain('action="/admin/session"');
-      expect(body).toContain('运营密码');
+      expect(loginPage.status).toBe(404);
+
+      // 保留的偏好名单页照常按 SSR 会话门工作（未登录 303 回 /admin）。
+      const preferencePage = await getText(plain.app, '/admin/preference-channels');
+      expect(preferencePage.status).toBe(303);
+      expect(preferencePage.headers.get('location')).toBe('/admin');
     } finally {
       await plain.cleanup();
     }

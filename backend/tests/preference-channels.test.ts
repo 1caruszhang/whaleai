@@ -22,6 +22,9 @@ import {
  * /config/preference-channels 按官方行业分类码下发（码过滤 / 通用兜底 /
  * 核心名去重 / 他行业不返回 / 账号 token 鉴权）。全部走 app.request 的
  * HTTP 合约边界，不触真实网络。
+ *
+ * 票 51 注：/admin/session 已随账号运营台 SSR 面退役——本文件的 SSR 会话
+ * cookie 改由 POST /admin/login（JSON）成功时桥接下发获取（唯一入口）。
  */
 
 async function postForm(
@@ -46,8 +49,12 @@ async function getHtml(app: Hono<BackendEnv>, path: string, cookie?: string): Pr
 }
 
 async function pageLogin(app: Hono<BackendEnv>): Promise<string> {
-  const response = await postForm(app, '/admin/session', { password: TEST_ADMIN_PASSWORD });
-  expect(response.status).toBe(303);
+  const response = await app.request('/admin/login', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ password: TEST_ADMIN_PASSWORD }),
+  });
+  expect(response.status).toBe(200);
   const setCookie = response.headers.get('set-cookie') ?? '';
   expect(setCookie).not.toBe('');
   return setCookie.split(';')[0];
