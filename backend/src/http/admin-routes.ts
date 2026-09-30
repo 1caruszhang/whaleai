@@ -4,7 +4,15 @@ import { z } from 'zod';
 import type { BackendDeps } from '../deps';
 import type { AdminLoginThrottle } from '../auth/admin-login-throttle';
 import { timingSafeStringEqual } from '../auth/passwords';
-import { accountProjection, createAccountWithGrant, findAccountById } from '../domain/accounts';
+import {
+  accountProjection,
+  adminAccountProjection,
+  createAccountWithGrant,
+  findAccountById,
+  listAdminAccounts,
+  setAccountStatus,
+  type AdminAccountSort,
+} from '../domain/accounts';
 import { applyAccountLedgerDelta, balanceSnapshot, listLedgerEntries } from '../domain/ledger';
 import { listChatUsageRecords } from '../domain/chat-usage';
 import { AppError } from '../errors';
@@ -31,12 +39,38 @@ function requireAdminAuth(deps: BackendDeps) {
 
 const adminLoginSchema = z.object({ password: passwordSchema });
 
+/** 建号（票 47 起）：可选用户名（≤64 字符、不参与登录），校验口径与 SSR 表单一致。 */
 const createAccountSchema = z.object({
   phone: phoneSchema,
   initialPassword: z.string().min(8, '初始密码至少 8 位').max(128),
+  displayName: z.string().trim().max(64, '用户名最长 64 字符').optional(),
 });
 
+/** 停用/启用（票 47 JSON 化）：语义复用既有 SSR 表单，停用即时吊销全部会话。 */
+const accountStatusSchema = z.object({ status: z.enum(['active', 'disabled']) });
+
 const accountIdSchema = z.string().min(1, 'accountId 不能为空').max(64);
+
+/** 分页整数查询参数：缺省回落默认值；非整数/越界报 400。 */
+function parseQueryInt(
+  raw: string | undefined,
+  name: string,
+  fallback: number,
+  min: number,
+  max: number,
+): number {
+  if (raw === undefined || raw === '') return fallback;
+  const parsed = z.coerce
+    .number()
+    .int()
+    .min(min, `${name} 必须是 ${min}–${max} 的整数。`)
+    .max(max, `${name} 必须是 ${min}–${max} 的整数。`)
+    .safeParse(raw);
+  if (!parsed.success) {
+    throw new AppError('validation_error', parsed.error.issues[0]?.message ?? `${name} 无效。`, 400);
+  }
+  return parsed.data;
+}
 
 /** 充值入账：运营核对对公转账后点数入账，备注落流水。 */
 const topupSchema = z.object({
@@ -75,8 +109,47 @@ export function createAdminRoutes(deps: BackendDeps, throttle: AdminLoginThrottl
 
   routes.post('/admin/accounts', requireAdmin, async c => {
     const body = await parseJsonBody(c, createAccountSchema);
-    const account = createAccountWithGrant(deps, { phone: body.phone, password: body.initialPassword });
-    return c.json({ account: accountProjection(account) }, 201);
+    const account = createAccountWithGrant(deps, {
+      phone: body.phone,
+      password: body.initialPassword,
+      displayName: body.displayName,
+    });
+    return c.json({ account: adminAccountProjection(account) }, 201);
+  });
+
+  /**
+   * 账号列表（票 47）：q 手机号/用户名包含匹配；page/pageSize 分页
+   * （默认 25、上限 100）；sort=created（默认，建号倒序）/balance/active。
+   * 200 条硬上限随本端点分页化移除（SSR 页面退役前仍用旧列表，票 51）。
+   */
+  routes.get('/admin/accounts', requireAdmin, c => {
+    const q = (c.req.query('q') ?? '').trim();
+    if (Array.from(q).length > 100) {
+      throw new AppError('validation_error', '搜索关键词最长 100 字。', 400);
+    }
+    const page = parseQueryInt(c.req.query('page'), 'page', 1, 1, 1_000_000);
+    const pageSize = parseQueryInt(c.req.query('pageSize'), 'pageSize', 25, 1, 100);
+    let sort: AdminAccountSort = 'created';
+    const sortRaw = c.req.query('sort');
+    if (sortRaw !== undefined) {
+      const parsed = z.enum(['created', 'balance', 'active']).safeParse(sortRaw);
+      if (!parsed.success) {
+        throw new AppError('validation_error', 'sort 必须是 created/balance/active。', 400);
+      }
+      sort = parsed.data;
+    }
+    return c.json(listAdminAccounts(deps, { q, page, pageSize, sort }));
+  });
+
+  /** 停用/启用（票 47）：JSON 化既有 SSR 语义——停用即时吊销账号全部会话。 */
+  routes.post('/admin/accounts/:accountId/status', requireAdmin, async c => {
+    const accountId = accountIdSchema.safeParse(c.req.param('accountId'));
+    if (!accountId.success) {
+      throw new AppError('validation_error', 'accountId 无效。', 400);
+    }
+    const body = await parseJsonBody(c, accountStatusSchema);
+    const updated = setAccountStatus(deps, accountId.data, body.status);
+    return c.json({ account: adminAccountProjection(updated) });
   });
 
   routes.post('/admin/ledger/topup', requireAdmin, async c => {

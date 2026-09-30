@@ -1,5 +1,6 @@
 import { Navigate, useRoutes, type RouteObject } from 'react-router';
 import { AppShell } from '@/components/app-shell';
+import { AccountDetailPage } from '@/routes/account-detail-page';
 import { AccountsPage } from '@/routes/accounts-page';
 import { Auth401Bridge } from '@/routes/auth-401-bridge';
 import { DashboardPage } from '@/routes/dashboard-page';
@@ -10,6 +11,7 @@ import { ProtectedRoute } from '@/routes/protected-route';
  * 路由表（票 46）：basename=/admin（与后端静态托管同前缀）。声明式路由
  * （BrowserRouter + useRoutes）——测试用同一张表挂 MemoryRouter，路由模式
  * 与生产一致；未登录访问任意受保护路由 → /login。
+ * 票 47 起新增 accounts/:accountId（账号详情占位，T3 接入）。
  */
 export const appRoutes: RouteObject[] = [
   { path: '/login', element: <LoginPage /> },
@@ -23,6 +25,7 @@ export const appRoutes: RouteObject[] = [
     children: [
       { index: true, element: <DashboardPage /> },
       { path: 'accounts', element: <AccountsPage /> },
+      { path: 'accounts/:accountId', element: <AccountDetailPage /> },
     ],
   },
   { path: '*', element: <Navigate to="/" replace /> },
