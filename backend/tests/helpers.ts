@@ -101,6 +101,20 @@ export async function postJson(
   return { status: response.status, body: (await response.json()) as Json };
 }
 
+export async function putJson(
+  app: Hono<BackendEnv>,
+  path: string,
+  body: unknown,
+  token?: string,
+): Promise<ApiResponse> {
+  const response = await app.request(path, {
+    method: 'PUT',
+    headers: headers(token),
+    body: JSON.stringify(body),
+  });
+  return { status: response.status, body: (await response.json()) as Json };
+}
+
 export async function getJson(
   app: Hono<BackendEnv>,
   path: string,

@@ -250,6 +250,31 @@ export function setAccountDisplayName(
   return updated;
 }
 
+/**
+ * 品牌集服务端镜像整组替换（票 50）：PUT /auth/me/brands 的领域落点。
+ * 客户端全量快照是唯一权威，故在同一事务内 DELETE 该账号全部
+ * account_brands 行再 INSERT 新快照——重复 PUT 结果一致（幂等），多设备
+ * 同账号后写覆盖。字段校验（workspaceId 1..64、name 非空 ≤64、每账号
+ * ≤100 条、workspaceId 去重）在路由 schema 收口；表内 CHECK 只兜底。
+ * 停用账号由 requireAccountAuth 先行 403 拦截（品牌集冻结在最后状态），
+ * 本函数不再重复判断状态。
+ */
+export function replaceAccountBrands(
+  deps: BackendDeps,
+  accountId: string,
+  brands: AdminAccountBrand[],
+): void {
+  deps.db.transaction(() => {
+    deps.db.run('DELETE FROM account_brands WHERE account_id = ?', [accountId]);
+    for (const brand of brands) {
+      deps.db.run(
+        'INSERT INTO account_brands (account_id, workspace_id, name) VALUES (?, ?, ?)',
+        [accountId, brand.workspaceId, brand.name],
+      );
+    }
+  });
+}
+
 /** 对外账号投影：密码哈希/版本等内部字段不出领域层。 */
 export function accountProjection(account: AccountRow) {
   return {

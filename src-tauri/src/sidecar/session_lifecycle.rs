@@ -1370,6 +1370,11 @@ pub async fn cmd_brand_workspace_delete(
             cancel_admission();
             return Err(error);
         }
+        // 票 50 品牌集镜像：catalog 移除成功后才补报全量快照
+        // （fire-and-forget，失败静默）；删除被拒的路径不触发。
+        crate::brand_mirror::report_brand_mirror_now(
+            crate::brand_mirror::BrandMirrorTrigger::WorkspaceDeleted,
+        );
         Ok(SessionDeleteCommandResult::deleted())
     })
     .await
