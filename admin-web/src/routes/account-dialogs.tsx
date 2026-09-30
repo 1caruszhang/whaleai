@@ -11,7 +11,7 @@ import {
 } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import { ApiError } from '@/lib/api';
+import { adminApiErrorMessage } from '@/lib/api';
 import {
   adjustAdminAccount,
   createAdminAccount,
@@ -48,11 +48,6 @@ function SubmitError({ message }: { message: string }) {
   );
 }
 
-/** 服务端错误消息统一提取：ApiError 用中文 message，其余回落通用文案。 */
-function apiErrorMessage(error: unknown, fallback: string): string {
-  return error instanceof ApiError ? error.message : fallback;
-}
-
 export interface CreateAccountDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -78,7 +73,7 @@ export function CreateAccountDialog({ open, onOpenChange, onCreated }: CreateAcc
       onCreated();
     },
     onError: error => {
-      setSubmitError(apiErrorMessage(error, '建号失败，请稍后重试。'));
+      setSubmitError(adminApiErrorMessage(error, '建号失败，请稍后重试。'));
     },
   });
 
@@ -201,7 +196,7 @@ export function TopupDialog({ account, open, onOpenChange, onDone }: AccountActi
       onDone();
     },
     onError: error => {
-      setSubmitError(apiErrorMessage(error, '充值失败，请稍后重试。'));
+      setSubmitError(adminApiErrorMessage(error, '充值失败，请稍后重试。'));
     },
   });
 
@@ -303,7 +298,7 @@ export function AdjustDialog({ account, open, onOpenChange, onDone }: AccountAct
       onDone();
     },
     onError: error => {
-      setSubmitError(apiErrorMessage(error, '调点失败，请稍后重试。'));
+      setSubmitError(adminApiErrorMessage(error, '调点失败，请稍后重试。'));
     },
   });
 

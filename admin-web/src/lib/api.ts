@@ -17,6 +17,11 @@ export class ApiError extends Error {
   }
 }
 
+/** 服务端错误消息统一提取：ApiError 用中文 message，其余回落通用文案。 */
+export function adminApiErrorMessage(error: unknown, fallback: string): string {
+  return error instanceof ApiError ? error.message : fallback;
+}
+
 type UnauthorizedHandler = () => void;
 
 let unauthorizedHandler: UnauthorizedHandler | null = null;

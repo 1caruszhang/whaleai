@@ -21,7 +21,7 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table';
-import { ApiError } from '@/lib/api';
+import { adminApiErrorMessage } from '@/lib/api';
 import {
   ledgerKindLabel,
   listAdminAccountChatUsage,
@@ -64,10 +64,6 @@ const LEDGER_STATUS_LABELS: Record<string, string> = {
   refunded: '已退点',
 };
 
-function apiErrorMessage(error: unknown, fallback: string): string {
-  return error instanceof ApiError ? error.message : fallback;
-}
-
 /** 明细卡通用加载/错误门：只测外部行为，加载与错误态文案与列表页一致。 */
 function QueryGate({
   isLoading,
@@ -88,7 +84,7 @@ function QueryGate({
   if (isError) {
     return (
       <p role="alert" className="text-destructive py-8 text-center text-sm">
-        {apiErrorMessage(error, fallback)}
+        {adminApiErrorMessage(error, fallback)}
       </p>
     );
   }
@@ -141,7 +137,7 @@ function DisplayNameEditor({
       onSaved();
     },
     onError: error => {
-      setSubmitError(apiErrorMessage(error, '用户名保存失败，请稍后重试。'));
+      setSubmitError(adminApiErrorMessage(error, '用户名保存失败，请稍后重试。'));
     },
   });
 
@@ -289,7 +285,7 @@ export function AccountDetailPage() {
         {ledgerQuery.isLoading && <p className="text-muted-foreground text-sm">加载中…</p>}
         {ledgerQuery.isError && (
           <p role="alert" className="text-destructive text-sm">
-            {apiErrorMessage(ledgerQuery.error, '账号详情加载失败，请稍后重试。')}
+            {adminApiErrorMessage(ledgerQuery.error, '账号详情加载失败，请稍后重试。')}
           </p>
         )}
         {account && (

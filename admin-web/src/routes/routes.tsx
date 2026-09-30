@@ -11,7 +11,7 @@ import { ProtectedRoute } from '@/routes/protected-route';
  * 路由表（票 46）：basename=/admin（与后端静态托管同前缀）。声明式路由
  * （BrowserRouter + useRoutes）——测试用同一张表挂 MemoryRouter，路由模式
  * 与生产一致；未登录访问任意受保护路由 → /login。
- * 票 47 起新增 accounts/:accountId（账号详情占位，T3 接入）。
+ * 票 47 起新增 accounts/:accountId（账号详情，票 49 接入八数据块视图）。
  */
 export const appRoutes: RouteObject[] = [
   { path: '/login', element: <LoginPage /> },
