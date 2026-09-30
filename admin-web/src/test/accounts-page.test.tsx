@@ -25,6 +25,9 @@ import { AppRoutes } from '@/routes/routes';
  * 9 列渲染、旧账号用户名「—」、搜索/分页/排序驱动的查询参数、建号对话框
  * 校验（手机号格式/密码 ≥8 位/用户名 ≤64）、行操作下拉（停用·启用/充值/
  * 调点接既有端点）。URL 查询参数用 LocationProbe 读 useSearchParams 断言。
+ *
+ * 票 #62 T-C 扩展：新增加载骨架屏（替代「加载中…」文字）、卡片式表格
+ * 圆角容器、页码按钮与行 hover/操作按钮等视觉断言；既有语义断言全部保留。
  */
 vi.mock('@/lib/accounts', async importOriginal => {
   const actual = await importOriginal<typeof import('@/lib/accounts')>();
@@ -350,4 +353,54 @@ describe('账号列表页（票 47）', () => {
     expect(await screen.findByRole('heading', { name: '账号详情' })).toBeInTheDocument();
     expect(await screen.findByText('13800000001')).toBeInTheDocument();
   }, 15000);
+
+  // 票 #62 T-C：加载态渲染表格骨架屏（替代「加载中…」文字），数据到达后骨架退场。
+  it('加载中显示表格骨架屏，无「加载中」文字；数据到达后替换为表格', async () => {
+    let resolveList!: (value: AdminAccountListResult) => void;
+    mockedList.mockReturnValue(new Promise(resolve => (resolveList = resolve)));
+    renderApp();
+
+    expect(screen.getByTestId('accounts-skeleton')).toBeInTheDocument();
+    expect(screen.queryByText('加载中')).not.toBeInTheDocument();
+    expect(screen.queryByText('…')).not.toBeInTheDocument();
+
+    resolveList(listResult([ACCOUNT_ACTIVE]));
+    expect(await screen.findByText('13800000001')).toBeInTheDocument();
+    expect(screen.queryByTestId('accounts-skeleton')).not.toBeInTheDocument();
+  });
+
+  // 票 #62 T-C：卡片式表格（圆角 border 容器）+ 页码按钮 + 行 hover/操作按钮样式；
+  // 空态行保留「暂无账号」。9 列内容只读展示不变。
+  it('卡片式表格与分页：圆角容器、页码按钮、行 hover 类与空态行', async () => {
+    mockedList.mockResolvedValue(listResult([ACCOUNT_ACTIVE], { total: 30 }));
+    renderApp();
+
+    await screen.findByText('13800000001');
+    const wrapper = screen.getByTestId('accounts-table-card');
+    expect(wrapper).toHaveClass('overflow-hidden');
+    expect(wrapper).toHaveClass('rounded-md');
+    expect(wrapper).toHaveClass('border');
+    // 内容容器带入场动画（淡入 + 上浮）与错峰延迟。
+    expect(wrapper.parentElement).toHaveClass('animate-in');
+    expect(wrapper.parentElement?.style.animationDelay).toBe('60ms');
+
+    // 分页：页码按钮（当前页高亮变体）+ 首尾图标按钮保留可访问名。
+    expect(screen.getByRole('button', { name: '第 1 页' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '第 2 页' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '上一页' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: '下一页' })).toBeEnabled();
+
+    // 行 hover 类与操作下拉图标按钮样式（视觉类断言，不涉语义）。
+    const row = rowOf('13800000001');
+    expect(row).toHaveClass('hover:bg-muted/50');
+    expect(screen.getByRole('button', { name: '操作 13800000001' })).toHaveClass('size-9');
+  });
+
+  it('空列表渲染「暂无账号」空态行', async () => {
+    mockedList.mockResolvedValue(listResult([]));
+    renderApp();
+
+    expect(await screen.findByText('暂无账号')).toBeInTheDocument();
+    expect(screen.queryByTestId('accounts-skeleton')).not.toBeInTheDocument();
+  });
 });

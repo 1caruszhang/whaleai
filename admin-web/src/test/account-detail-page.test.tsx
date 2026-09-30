@@ -29,6 +29,9 @@ import { AppRoutes } from '@/routes/routes';
  * 发布订单、Provider 计量、对话计量）、用户名编辑（设置/清空/≤64 校验）、
  * 充值/调点复用列表页对话框（0.1 元粒度、调点备注必填，接既有端点）。
  * 数据源 limit 与 SSR 对账页同口径（流水 200、其余 50）。
+ *
+ * 票 #62 T-C 扩展：新增页头/余额卡组/明细块加载骨架屏（替代「加载中…」
+ * 文字）与余额统计卡图标块/数值样式等视觉断言；既有语义断言全部保留。
  */
 vi.mock('@/lib/accounts', async importOriginal => {
   const actual = await importOriginal<typeof import('@/lib/accounts')>();
@@ -418,5 +421,42 @@ describe('账号详情页（票 49）', () => {
     const alerts = await screen.findAllByRole('alert');
     expect(alerts.length).toBeGreaterThanOrEqual(1);
     expect(alerts[0]).toHaveTextContent('账号不存在。');
+  });
+
+  // 票 #62 T-C：加载态页头/余额卡组/点数流水块渲染骨架屏，数据到达后骨架退场。
+  it('加载中显示页头/余额卡组/流水块骨架屏，无「加载中」文字', async () => {
+    let resolveLedger!: (value: AdminAccountLedger) => void;
+    mockedLedger.mockReturnValue(new Promise(resolve => (resolveLedger = resolve)));
+    renderApp();
+
+    expect(screen.getByTestId('detail-header-skeleton')).toBeInTheDocument();
+    expect(screen.getByTestId('balance-skeleton')).toBeInTheDocument();
+    expect(screen.getByTestId('ledger-skeleton')).toBeInTheDocument();
+    expect(screen.queryByText('加载中')).not.toBeInTheDocument();
+
+    resolveLedger(LEDGER);
+    expect(await screen.findByText('13800000001')).toBeInTheDocument();
+    expect(screen.getByTestId('balance-total')).toHaveTextContent('1500 点');
+    expect(screen.queryByTestId('detail-header-skeleton')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('balance-skeleton')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('ledger-skeleton')).not.toBeInTheDocument();
+  });
+
+  // 票 #62 T-C：余额三口径统计卡视觉——圆角 border 块 + 图标色块 + 大数值，
+  // 卡片带入场动画与 hover 阴影；数值 data-testid 与文案口径不变。
+  it('余额总览卡组统计卡样式：图标块 + 数值 + 圆角边框与入场动画', async () => {
+    renderApp();
+
+    expect(await screen.findByText('13800000001')).toBeInTheDocument();
+    for (const testId of ['balance-total', 'balance-available', 'balance-frozen']) {
+      const card = screen.getByTestId(`${testId}-card`);
+      expect(card).toHaveClass('rounded-lg');
+      expect(card).toHaveClass('border');
+      expect(card.querySelector('svg')).not.toBeNull();
+      expect(screen.getByTestId(testId)).toHaveClass('tabular-nums');
+    }
+    const balanceCard = screen.getByText('余额总览').closest('[data-slot="card"]');
+    expect(balanceCard).toHaveClass('animate-in');
+    expect(balanceCard).toHaveClass('hover:shadow-md');
   });
 });

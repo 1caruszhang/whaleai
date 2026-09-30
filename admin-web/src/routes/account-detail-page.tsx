@@ -1,5 +1,12 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { ArrowLeftIcon, CreditCardIcon, SlidersHorizontalIcon } from 'lucide-react';
+import {
+  ArrowLeftIcon,
+  CreditCardIcon,
+  LockIcon,
+  SlidersHorizontalIcon,
+  UnlockIcon,
+  WalletIcon,
+} from 'lucide-react';
 import { useEffect, useState, type FormEvent, type ReactNode } from 'react';
 import { Link, useParams } from 'react-router';
 import { Badge } from '@/components/ui/badge';
@@ -13,6 +20,7 @@ import {
 } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import { Skeleton } from '@/components/ui/skeleton';
 import {
   Table,
   TableBody,
@@ -34,6 +42,7 @@ import {
   type AdminLedgerAccount,
 } from '@/lib/accounts';
 import { formatDateTime } from '@/lib/format';
+import { cn } from '@/lib/utils';
 import { AdjustDialog, TopupDialog } from '@/routes/account-dialogs';
 
 /**
@@ -47,6 +56,12 @@ import { AdjustDialog, TopupDialog } from '@/routes/account-dialogs';
  * 主数据源是 GET /admin/accounts/:accountId/ledger（账号投影含 displayName
  * + 余额三口径 + 流水）；写操作成功后失效该查询即刷新余额与流水。全部
  * 请求走 lib/api adminFetch（Bearer + 401 闭环）。
+ *
+ * 票 #62 T-C 视觉对齐 shadcn-admin 详情卡布局：页头（返回 + 标题 + 右侧
+ * 账号身份）；余额总览卡组改圆角色块图标 + 数值 + 标签的统计卡（对齐
+ * T-B 统计卡手法）；各区块卡片补入场淡入错峰与 hover 阴影；页头/余额/
+ * 明细块加载态全部换 ui/skeleton（替代「加载中…」文字）。功能与数据流
+ * 零改动，八块标题与余额三口径 data-testid 原样保留。
  */
 
 const LEDGER_LIMIT = 200; // 与 SSR 对账页同口径
@@ -64,22 +79,40 @@ const LEDGER_STATUS_LABELS: Record<string, string> = {
   refunded: '已退点',
 };
 
-/** 明细卡通用加载/错误门：只测外部行为，加载与错误态文案与列表页一致。 */
+/** 卡片入场动画：淡入 + 上浮（与 T-B 同款手法），按区块错峰。 */
+const CARD_ENTRANCE = 'animate-in fade-in-0 slide-in-from-bottom-2 fill-mode-both duration-500';
+
+/** 明细卡通用加载/错误门：加载态渲染 ui/skeleton 骨架（替代「加载中…」
+ *  文字），错误态文案与列表页一致；只测外部行为。 */
 function QueryGate({
   isLoading,
   isError,
   error,
   fallback,
+  skeletonTestId,
   children,
 }: {
   isLoading: boolean;
   isError: boolean;
   error: unknown;
   fallback: string;
+  /** 加载骨架容器 testid：新视觉断言按明细块收窄。 */
+  skeletonTestId: string;
   children: ReactNode;
 }) {
   if (isLoading) {
-    return <p className="text-muted-foreground py-8 text-center text-sm">加载中…</p>;
+    return (
+      <div data-testid={skeletonTestId} className="space-y-3 py-2">
+        <div className="flex gap-4">
+          {Array.from({ length: 4 }, (_, index) => (
+            <Skeleton key={index} className="h-4 w-16" />
+          ))}
+        </div>
+        {Array.from({ length: 3 }, (_, index) => (
+          <Skeleton key={index} className="h-8 w-full" />
+        ))}
+      </div>
+    );
   }
   if (isError) {
     return (
@@ -195,7 +228,8 @@ function FieldError({ message }: { message: string }) {
   return <p className="text-destructive text-xs">{message}</p>;
 }
 
-/** 余额三口径数据块：总/可用/冻结（冻结口径由后端 balanceSnapshot 权威）。 */
+/** 余额三口径数据块：总/可用/冻结（冻结口径由后端 balanceSnapshot 权威）。
+ *  统计卡对齐 T-B 手法：圆角色块图标 + 标签 + 大数值，hover 微阴影。 */
 function BalanceOverview({
   total,
   available,
@@ -205,13 +239,13 @@ function BalanceOverview({
   available: number;
   frozen: number;
 }) {
-  const stats: { label: string; value: number; testId: string }[] = [
-    { label: '总余额', value: total, testId: 'balance-total' },
-    { label: '可用', value: available, testId: 'balance-available' },
-    { label: '冻结', value: frozen, testId: 'balance-frozen' },
+  const stats: { label: string; value: number; testId: string; icon: typeof WalletIcon }[] = [
+    { label: '总余额', value: total, testId: 'balance-total', icon: WalletIcon },
+    { label: '可用', value: available, testId: 'balance-available', icon: UnlockIcon },
+    { label: '冻结', value: frozen, testId: 'balance-frozen', icon: LockIcon },
   ];
   return (
-    <Card>
+    <Card className={cn(CARD_ENTRANCE, 'transition-shadow hover:shadow-md')}>
       <CardHeader>
         <CardTitle>余额总览</CardTitle>
         <CardDescription>
@@ -219,12 +253,44 @@ function BalanceOverview({
         </CardDescription>
       </CardHeader>
       <CardContent className="grid gap-4 sm:grid-cols-3">
-        {stats.map(stat => (
-          <div key={stat.testId} className="rounded-lg border p-4">
-            <p className="text-muted-foreground text-sm">{stat.label}</p>
-            <p className="text-2xl font-semibold" data-testid={stat.testId}>
-              {stat.value} 点
-            </p>
+        {stats.map(({ label, value, testId, icon: Icon }) => (
+          <div
+            key={testId}
+            data-testid={`${testId}-card`}
+            className="flex items-center gap-3 rounded-lg border p-4"
+          >
+            <span className="bg-primary/10 text-primary flex size-9 shrink-0 items-center justify-center rounded-lg">
+              <Icon className="size-4" />
+            </span>
+            <div className="space-y-1">
+              <p className="text-muted-foreground text-sm">{label}</p>
+              <p className="text-2xl font-bold tabular-nums" data-testid={testId}>
+                {value} 点
+              </p>
+            </div>
+          </div>
+        ))}
+      </CardContent>
+    </Card>
+  );
+}
+
+/** 余额卡组加载骨架：标题占位 + 三块统计卡占位。 */
+function BalanceOverviewSkeleton() {
+  return (
+    <Card className={CARD_ENTRANCE}>
+      <CardHeader>
+        <Skeleton className="h-4 w-20" />
+        <Skeleton className="h-4 w-72" />
+      </CardHeader>
+      <CardContent data-testid="balance-skeleton" className="grid gap-4 sm:grid-cols-3">
+        {[0, 1, 2].map(index => (
+          <div key={index} className="flex items-center gap-3 rounded-lg border p-4">
+            <Skeleton className="size-9 rounded-lg" />
+            <div className="flex-1 space-y-2">
+              <Skeleton className="h-4 w-12" />
+              <Skeleton className="h-7 w-20" />
+            </div>
           </div>
         ))}
       </CardContent>
@@ -274,20 +340,27 @@ export function AccountDetailPage() {
 
   return (
     <div className="flex flex-col gap-6">
-      <div>
-        <Link
-          to="/accounts"
-          className="text-muted-foreground hover:text-foreground inline-flex items-center gap-1 text-sm"
-        >
-          <ArrowLeftIcon className="size-4" /> 返回账号列表
-        </Link>
-        <h1 className="text-2xl font-semibold">账号详情</h1>
-        {ledgerQuery.isLoading && <p className="text-muted-foreground text-sm">加载中…</p>}
-        {ledgerQuery.isError && (
-          <p role="alert" className="text-destructive text-sm">
-            {adminApiErrorMessage(ledgerQuery.error, '账号详情加载失败，请稍后重试。')}
-          </p>
-        )}
+      <div className="animate-in fade-in-0 slide-in-from-bottom-2 fill-mode-both duration-500 flex flex-wrap items-end justify-between gap-4">
+        <div className="space-y-2">
+          <Link
+            to="/accounts"
+            className="text-muted-foreground hover:text-foreground inline-flex items-center gap-1 text-sm"
+          >
+            <ArrowLeftIcon className="size-4" /> 返回账号列表
+          </Link>
+          <h1 className="text-2xl font-bold tracking-tight">账号详情</h1>
+          {ledgerQuery.isLoading && (
+            <div data-testid="detail-header-skeleton" className="flex items-center gap-3">
+              <Skeleton className="h-4 w-28" />
+              <Skeleton className="h-5 w-14 rounded-md" />
+            </div>
+          )}
+          {ledgerQuery.isError && (
+            <p role="alert" className="text-destructive text-sm">
+              {adminApiErrorMessage(ledgerQuery.error, '账号详情加载失败，请稍后重试。')}
+            </p>
+          )}
+        </div>
         {account && (
           <div className="flex items-center gap-2">
             <p className="text-muted-foreground text-sm">{account.phone}</p>
@@ -300,13 +373,21 @@ export function AccountDetailPage() {
         )}
       </div>
 
-      {account && balance && (
-        <BalanceOverview total={balance.total} available={balance.available} frozen={balance.frozen} />
+      {ledgerQuery.isLoading ? (
+        <BalanceOverviewSkeleton />
+      ) : (
+        account &&
+        balance && (
+          <BalanceOverview total={balance.total} available={balance.available} frozen={balance.frozen} />
+        )
       )}
 
       {account && (
         <>
-          <Card>
+          <Card
+            className={cn(CARD_ENTRANCE, 'transition-shadow hover:shadow-md')}
+            style={{ animationDelay: '60ms' }}
+          >
             <CardHeader>
               <CardTitle>用户名</CardTitle>
               <CardDescription>客户改名后列表保持准确；设置/清空即时生效。</CardDescription>
@@ -316,7 +397,10 @@ export function AccountDetailPage() {
             </CardContent>
           </Card>
 
-          <Card>
+          <Card
+            className={cn(CARD_ENTRANCE, 'transition-shadow hover:shadow-md')}
+            style={{ animationDelay: '120ms' }}
+          >
             <CardHeader>
               <CardTitle>充值 / 调点</CardTitle>
               <CardDescription>
@@ -335,7 +419,10 @@ export function AccountDetailPage() {
         </>
       )}
 
-      <Card>
+      <Card
+        className={cn(CARD_ENTRANCE, 'transition-shadow hover:shadow-md')}
+        style={{ animationDelay: '180ms' }}
+      >
         <CardHeader>
           <CardTitle>点数流水</CardTitle>
           <CardDescription>最新 {LEDGER_LIMIT} 笔（最新在前）</CardDescription>
@@ -346,6 +433,7 @@ export function AccountDetailPage() {
             isError={ledgerQuery.isError}
             error={ledgerQuery.error}
             fallback="点数流水加载失败，请稍后重试。"
+            skeletonTestId="ledger-skeleton"
           >
             <Table>
               <TableHeader>
@@ -381,7 +469,10 @@ export function AccountDetailPage() {
         </CardContent>
       </Card>
 
-      <Card>
+      <Card
+        className={cn(CARD_ENTRANCE, 'transition-shadow hover:shadow-md')}
+        style={{ animationDelay: '240ms' }}
+      >
         <CardHeader>
           <CardTitle>计费操作（permit）</CardTitle>
           <CardDescription>进行中与已结清的计费操作，最新在前</CardDescription>
@@ -392,6 +483,7 @@ export function AccountDetailPage() {
             isError={permitsQuery.isError}
             error={permitsQuery.error}
             fallback="计费操作加载失败，请稍后重试。"
+            skeletonTestId="permits-skeleton"
           >
             <Table>
               <TableHeader>
@@ -432,7 +524,10 @@ export function AccountDetailPage() {
         </CardContent>
       </Card>
 
-      <Card>
+      <Card
+        className={cn(CARD_ENTRANCE, 'transition-shadow hover:shadow-md')}
+        style={{ animationDelay: '300ms' }}
+      >
         <CardHeader>
           <CardTitle>发布订单</CardTitle>
           <CardDescription>订单预扣/结转/退点状态，最新在前</CardDescription>
@@ -443,6 +538,7 @@ export function AccountDetailPage() {
             isError={ordersQuery.isError}
             error={ordersQuery.error}
             fallback="发布订单加载失败，请稍后重试。"
+            skeletonTestId="orders-skeleton"
           >
             <Table>
               <TableHeader>
@@ -490,7 +586,10 @@ export function AccountDetailPage() {
         </CardContent>
       </Card>
 
-      <Card>
+      <Card
+        className={cn(CARD_ENTRANCE, 'transition-shadow hover:shadow-md')}
+        style={{ animationDelay: '360ms' }}
+      >
         <CardHeader>
           <CardTitle>Provider 计量（对账用）</CardTitle>
           <CardDescription>网关代理的每次 Provider 请求计量，最新在前</CardDescription>
@@ -501,6 +600,7 @@ export function AccountDetailPage() {
             isError={providerUsageQuery.isError}
             error={providerUsageQuery.error}
             fallback="Provider 计量加载失败，请稍后重试。"
+            skeletonTestId="provider-skeleton"
           >
             <Table>
               <TableHeader>
@@ -532,7 +632,10 @@ export function AccountDetailPage() {
         </CardContent>
       </Card>
 
-      <Card>
+      <Card
+        className={cn(CARD_ENTRANCE, 'transition-shadow hover:shadow-md')}
+        style={{ animationDelay: '420ms' }}
+      >
         <CardHeader>
           <CardTitle>对话计量（隐藏额度口径，千分之一点）</CardTitle>
           <CardDescription>
@@ -545,6 +648,7 @@ export function AccountDetailPage() {
             isError={chatUsageQuery.isError}
             error={chatUsageQuery.error}
             fallback="对话计量加载失败，请稍后重试。"
+            skeletonTestId="chat-skeleton"
           >
             <Table>
               <TableHeader>
