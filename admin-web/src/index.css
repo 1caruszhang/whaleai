@@ -118,4 +118,55 @@
   body {
     @apply bg-background text-foreground;
   }
+  /* 全局按钮手型（票 #60 T-A，对齐 shadcn-ui 基座）：禁用态保持默认箭头。 */
+  button:not(:disabled),
+  [role='button']:not(:disabled) {
+    cursor: pointer;
+  }
+}
+
+/* faded-bottom 工具类（票 #60 T-A，对齐 shadcn-ui 同名工具）：顶缘渐变
+ * 遮罩，用于滚动列表顶部的渐隐提示（如 Cmd+K 结果区）。 */
+@utility faded-bottom {
+  @apply [mask-image:linear-gradient(to_bottom,transparent,black_1.5rem)];
+}
+
+/* 主题切换过渡（票 #60 T-A）：ThemeProvider 在切换时给 <html> 挂
+ * theme-transition 类，让颜色平滑翻转而不是瞬时跳变。 */
+html.theme-transition,
+html.theme-transition * {
+  transition:
+    background-color 0.4s ease,
+    border-color 0.4s ease,
+    color 0.4s ease,
+    fill 0.4s ease,
+    stroke 0.4s ease;
+}
+
+/* 路由顶部进度条（票 #60 T-A，自实现，不引 react-top-loading-bar）：
+ * 每次导航提交后从 0 扫到 100% 并淡出（组件以 location.key 触发）。 */
+.route-progress {
+  position: fixed;
+  inset-inline: 0;
+  top: 0;
+  z-index: 100;
+  height: 2px;
+  background-color: var(--primary);
+  transform-origin: left center;
+  animation: route-progress-sweep 0.4s ease-out forwards;
+}
+
+@keyframes route-progress-sweep {
+  0% {
+    transform: scaleX(0);
+    opacity: 1;
+  }
+  80% {
+    transform: scaleX(0.9);
+    opacity: 1;
+  }
+  100% {
+    transform: scaleX(1);
+    opacity: 0;
+  }
 }
