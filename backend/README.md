@@ -105,7 +105,7 @@ creation）按未命中输入价计、缓存读按命中价计；折点内部以
 | `GET /auth/me` | Bearer | 账号投影（手机号、点数、首登改密标记） |
 | `POST /auth/change-password` | Bearer | 校验当前密码；成功后旧 JWT（`stale_token`）与旧 refresh 全部失效，返回新 token 对 |
 | `POST /auth/logout` | Bearer | 吊销 refreshToken 所属会话 |
-| `POST /admin/login` | — | 运营密码 → 短时运营 JWT（`{adminToken, tokenType, expiresIn}`）；成功同时同源下发 `xiaojing_admin` 会话 cookie（票 51 桥接：偏好名单 SSR 页的会话入口） |
+| `POST /admin/login` | — | 运营密码 → 短时运营 JWT（`{adminToken, tokenType, expiresIn}`）；成功后由登录响应直接写入 `xiaojing_admin` 会话 cookie（票 51 桥接：偏好名单 SSR 页的会话入口） |
 | `POST /admin/accounts` | 运营 JWT | 建号（手机号+初始密码），开通即赠 500 点并落 `grant` 流水 |
 | `GET /healthz` | — | 存活探针 |
 
@@ -250,7 +250,7 @@ GET 页面（spec #45 接管面之外，`/admin/preference-channels`，P3.x 生�
 会话凭证复用运营 JWT（audience 隔离：用户 access token 进 cookie 无效），
 `HttpOnly;SameSite=Lax` cookie 挡跨站表单 POST（CSRF 主要面）。票 51 起
 `POST /admin/session` 已退役——SSR 会话 cookie 的唯一入口是
-`POST /admin/login`（JSON）成功时同源桥接下发（SPA 登录即获 cookie，访问
+`POST /admin/login`（JSON）：由登录响应直接写入（SPA 登录即获 cookie，访问
 偏好名单页直接过会话门；登出清 localStorage，cookie 按 TTL 自然过期）。
 
 | 方法与路径 | 鉴权 | 说明 |

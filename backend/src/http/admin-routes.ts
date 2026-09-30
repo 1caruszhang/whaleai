@@ -139,9 +139,9 @@ export function createAdminRoutes(deps: BackendDeps, throttle: AdminLoginThrottl
       deps.config.adminTokenTtlSeconds,
       deps.now(),
     );
-    // 票 51 桥接：/admin/session 退役后，SPA 登录同源下发 SSR 会话 cookie，
-    // 保留的偏好名单页（admin-pages.ts）据此过会话门。JSON 契约不变——
-    // 响应体仍是 {adminToken, tokenType, expiresIn}，仅多一个 Set-Cookie。
+    // 票 51 桥接：/admin/session 退役后，SPA 登录响应直接写入 SSR 会话
+    // cookie，保留的偏好名单页（admin-pages.ts）据此过会话门。JSON 契约
+    // 不变——响应体仍是 {adminToken, tokenType, expiresIn}，仅多一个 Set-Cookie。
     setAdminSessionCookie(c, adminToken, deps.config.adminTokenTtlSeconds);
     return c.json({
       adminToken,

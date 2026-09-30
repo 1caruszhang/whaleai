@@ -51,8 +51,8 @@ import { AppError } from '../errors';
  *
  * 会话凭证仍是 signAdminToken 的运营 JWT（audience=xiaojing-admin）进
  * HttpOnly;SameSite=Lax cookie——/admin/session 退役后，唯一入口是
- * POST /admin/login（JSON）成功时经 setAdminSessionCookie 同源桥接下发
- * （SPA 登录与 SSR 页共用同一 cookie，见 admin-routes.ts）。页面门
+ * POST /admin/login（JSON）：登录响应经 setAdminSessionCookie 直接写入该
+ * cookie（SPA 登录与 SSR 页共用同一 cookie，见 admin-routes.ts）。页面门
  * requireAdminPage 无效/缺失即 303 回 /admin（SPA 登录页）。
  */
 
@@ -482,10 +482,10 @@ function parseViewIndustry(form: Record<string, string>): number {
 
 /**
  * 会话 cookie 下发（票 51 桥接）：/admin/session 退役后，运营 JWT 进 SSR
- * 会话 cookie 的唯一入口是 POST /admin/login（JSON）成功时同源下发——
- * SPA 登录即获得 cookie，随后访问偏好名单页（唯一保留的 SSR 面）页面门
- * 即通过；cookie 有效期与 adminToken 相同、自然过期（SPA 登出只清
- * localStorage，SSR cookie 按 TTL 失效）。选项与票 10 的 /admin/session
+ * 会话 cookie 的唯一入口是 POST /admin/login（JSON）——登录响应直接写入
+ * 该 cookie。SPA 登录即获得 cookie，随后访问偏好名单页（唯一保留的 SSR
+ * 面）页面门即通过；cookie 有效期与 adminToken 相同、自然过期（SPA 登出
+ * 只清 localStorage，SSR cookie 按 TTL 失效）。选项与票 10 的 /admin/session
  * 完全一致：HttpOnly;SameSite=Lax 挡跨站表单 POST（CSRF 主要面）；反代
  * TLS 终止后内网 hop 是 http，仅当本 hop 即 https 时加 Secure。
  */
