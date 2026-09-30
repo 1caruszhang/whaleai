@@ -8,6 +8,7 @@ import {
   startDistributionPoolScheduler,
   type PoolSchedulerTimers,
 } from '../src/domain/distribution-pool-scheduler';
+import { signAdminToken } from '../src/auth/tokens';
 import {
   getJson,
   provisionLoggedInAccount,
@@ -173,7 +174,16 @@ describe('preference channels admin + config endpoint', () => {
   it('blocks unauthenticated page and form access with zero writes', async () => {
     const anonymousPage = await getHtml(tb.app, '/admin/preference-channels');
     expect(anonymousPage.status).toBe(303);
-    expect(anonymousPage.headers.get('location')).toBe('/admin');
+    expect(anonymousPage.headers.get('location')).toBe('/admin/login');
+    // 票 #58：过期 cookie 与无 cookie 同口径——303 直达 SPA 登录页，不裸 401。
+    const expiredToken = await signAdminToken(tb.config.authSecret, -60, Date.now());
+    const expiredPage = await getHtml(
+      tb.app,
+      '/admin/preference-channels',
+      `xiaojing_admin=${expiredToken}`,
+    );
+    expect(expiredPage.status).toBe(303);
+    expect(expiredPage.headers.get('location')).toBe('/admin/login');
     const before = tb.db.get<{ count: number }>('SELECT COUNT(*) AS count FROM preference_channels', [])!;
     const anonymousAdd = await postForm(tb.app, '/admin/ui/preference-channels', {
       category: '13',

@@ -137,15 +137,15 @@ describe('admin SPA 静态托管（票 46）', () => {
   });
 
   it('非 GET 方法不被 SPA 吞：保留的偏好名单表单透传，退役路由 404', async () => {
-    // 保留的偏好名单表单 POST（未登录）：303 回 /admin——表单路由透传，
-    // 不是 index.html（若被 SPA 遮蔽则会是 200）。
+    // 保留的偏好名单表单 POST（未登录）：303 直达 SPA 登录页 /admin/login——
+    // 表单路由透传，不是 index.html（若被 SPA 遮蔽则会是 200）。
     const pick = await tb.app.request('/admin/ui/preference-channels/pick', {
       method: 'POST',
       headers: { 'content-type': 'application/x-www-form-urlencoded' },
       body: new URLSearchParams({ category: '0' }).toString(),
     });
     expect(pick.status).toBe(303);
-    expect(pick.headers.get('location')).toBe('/admin');
+    expect(pick.headers.get('location')).toBe('/admin/login');
 
     // 账号运营台 SSR 面（票 51）退役：/admin/session、/admin/logout 与
     // /admin/ui/accounts* 表单均已删除——POST 一律 404，不再有 SSR 会话。
@@ -170,10 +170,11 @@ describe('admin SPA 静态托管（票 46）', () => {
     // 偏好名单管理页（及其全部生产表单）是票 51 后唯一保留的 SSR 面，必须
     // 保持 SSR 可用。
 
-    // 未登录：SSR 会话门 303 回 /admin（若被 SPA fallback 遮蔽则会是 200 index.html）。
+    // 未登录：SSR 会话门 303 直达 SPA 登录页 /admin/login（若被 SPA fallback
+    // 遮蔽则会是 200 index.html）。
     const anonymous = await getText(tb.app, '/admin/preference-channels');
     expect(anonymous.status).toBe(303);
-    expect(anonymous.headers.get('location')).toBe('/admin');
+    expect(anonymous.headers.get('location')).toBe('/admin/login');
 
     // 登录（票 51 桥接：POST /admin/login JSON 成功即下发 SSR 会话 cookie）：
     // /admin/session 已退役，这是会话 cookie 的唯一入口。
@@ -214,10 +215,10 @@ describe('admin SPA 静态托管（票 46）', () => {
       const loginPage = await getText(plain.app, '/admin');
       expect(loginPage.status).toBe(404);
 
-      // 保留的偏好名单页照常按 SSR 会话门工作（未登录 303 回 /admin）。
+      // 保留的偏好名单页照常按 SSR 会话门工作（未登录 303 直达 SPA 登录页）。
       const preferencePage = await getText(plain.app, '/admin/preference-channels');
       expect(preferencePage.status).toBe(303);
-      expect(preferencePage.headers.get('location')).toBe('/admin');
+      expect(preferencePage.headers.get('location')).toBe('/admin/login');
     } finally {
       await plain.cleanup();
     }

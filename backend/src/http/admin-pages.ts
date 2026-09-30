@@ -53,7 +53,8 @@ import { AppError } from '../errors';
  * HttpOnly;SameSite=Lax cookie——/admin/session 退役后，唯一入口是
  * POST /admin/login（JSON）：登录响应经 setAdminSessionCookie 直接写入该
  * cookie（SPA 登录与 SSR 页共用同一 cookie，见 admin-routes.ts）。页面门
- * requireAdminPage 无效/缺失即 303 回 /admin（SPA 登录页）。
+ * requireAdminPage 无效/缺失即 303 直达 /admin/login（SPA 登录页），不裸
+ * 401、不自渲染旧登录面。
  */
 
 export const ADMIN_SESSION_COOKIE = 'xiaojing_admin';
@@ -510,10 +511,10 @@ export function createAdminPageRoutes(deps: BackendDeps) {
     return (await verifyAdminToken(config.authSecret, token, deps.now())).ok;
   };
 
-  /** 页面会话门：无效/缺失即 303 回 /admin（覆盖 GET 页面与全部表单 POST）。 */
+  /** 页面会话门：无效/缺失即 303 直达 SPA 登录页（覆盖 GET 页面与全部表单 POST）。 */
   const requireAdminPage = createMiddleware(async (c, next) => {
     if (!(await hasValidSession(c))) {
-      return c.redirect('/admin', 303);
+      return c.redirect('/admin/login', 303);
     }
     await next();
   });
