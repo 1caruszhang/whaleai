@@ -83,8 +83,9 @@ export interface BackendConfig {
   chatOutputCnyPerMtok: number;
   /**
    * admin-web SPA 构建产物目录（票 46）：存在 index.html 时 /admin/* 由
-   * 静态托管承接（SPA fallback），否则既有 SSR 页面兜底。镜像内默认
-   * dist/admin-web（由 bundle 输出位置推导），测试注入 fixture 目录。
+   * 静态托管承接（SPA fallback），否则整链透传（账号运营台 SSR 面已于
+   * 票 #51 退役，本地开发/测试未构建时 GET /admin 无 SPA 壳）。镜像内
+   * 默认 dist/admin-web（由 bundle 输出位置推导），测试注入 fixture 目录。
    */
   adminWebRoot?: string;
 }

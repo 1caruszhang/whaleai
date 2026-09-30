@@ -46,7 +46,8 @@ export function createBackendApp(deps: BackendDeps): Hono<BackendEnv> {
     c.json({ service: 'xiaojing-api', admin: '/admin', health: '/healthz' }),
   );
 
-  // 运营密码登录节流（票 10）：JSON 登录与 SSR 登录共享同一进程内实例。
+  // 运营密码登录节流（票 10）：JSON 登录（/admin/login）专用——SSR 登录
+  // 面已于票 #51 退役，节流实例不再与页面共享。
   const adminThrottle = new AdminLoginThrottle(
     deps.config.adminLoginThrottleUnitMs,
     deps.config.adminLoginThrottleUnitMs * 20,
@@ -57,9 +58,10 @@ export function createBackendApp(deps: BackendDeps): Hono<BackendEnv> {
   app.route('/', createAdminRoutes(deps, adminThrottle));
   // 票 46：admin-web SPA 静态托管 /admin/*。JSON API 路由注册在前、优先
   // 匹配，绝不被 SPA 吞掉；本中间件只拦 GET 且产物存在（镜像内）才生效，
-  // 未命中/未构建时透传——SSR 页面（下一行注册）与既有行为不变。
+  // 未命中/未构建时透传——SSR 偏好名单页（下一行注册，票 51 后唯一保留的
+  // SSR 面）与既有行为不变。
   app.use('*', createAdminSpaMiddleware(deps));
-  app.route('/', createAdminPageRoutes(deps, adminThrottle));
+  app.route('/', createAdminPageRoutes(deps));
   app.route('/', createGatewayRoutes(deps));
   app.route('/', createProviderProxyRoutes(deps));
   app.route('/', createDistributionCallbackRoutes(deps));

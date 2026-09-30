@@ -1,6 +1,7 @@
 import { LayoutDashboardIcon, UsersIcon } from 'lucide-react';
 import { NavLink, Outlet } from 'react-router';
 import { BrandLogo } from '@/components/brand-logo';
+import { CommandSearch } from '@/components/command-search';
 import { ThemeToggle } from '@/components/theme-toggle';
 import { UserNav } from '@/components/user-nav';
 import { cn } from '@/lib/utils';
@@ -12,7 +13,8 @@ const NAV_ITEMS = [
 
 /**
  * 受保护壳（票 46）：左侧边栏（品牌 + 仪表盘/账号导航 + 主题切换 + 退出
- * 登录），右侧内容区承接子路由。
+ * 登录），右侧内容区承接子路由。票 51 起挂载 Cmd+K 全局搜索面板
+ * （快捷键在受保护区内生效，登录页不响应）。
  */
 export function AppShell() {
   return (
@@ -48,6 +50,7 @@ export function AppShell() {
       <main className="min-w-0 flex-1 overflow-y-auto p-6 lg:p-8">
         <Outlet />
       </main>
+      <CommandSearch />
     </div>
   );
 }

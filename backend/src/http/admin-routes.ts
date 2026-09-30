@@ -27,6 +27,7 @@ import {
 import { AppError } from '../errors';
 import { signAdminToken, verifyAdminToken } from '../auth/tokens';
 import { parseJsonBody, readBearerToken } from './request';
+import { setAdminSessionCookie } from './admin-pages';
 import { passwordSchema, phoneSchema } from './schemas';
 
 /** 运营凭证：/admin/login 用运营密码（仅存环境变量）换短时 JWT。 */
@@ -48,14 +49,14 @@ function requireAdminAuth(deps: BackendDeps) {
 
 const adminLoginSchema = z.object({ password: passwordSchema });
 
-/** 建号（票 47 起）：可选用户名（≤64 字符、不参与登录），校验口径与 SSR 表单一致。 */
+/** 建号（票 47 起）：可选用户名（≤64 字符、不参与登录），校验口径与既有建号契约一致。 */
 const createAccountSchema = z.object({
   phone: phoneSchema,
   initialPassword: z.string().min(8, '初始密码至少 8 位').max(128),
   displayName: z.string().trim().max(64, '用户名最长 64 字符').optional(),
 });
 
-/** 停用/启用（票 47 JSON 化）：语义复用既有 SSR 表单，停用即时吊销全部会话。 */
+/** 停用/启用（票 47 JSON 化）：停用即时吊销全部会话。 */
 const accountStatusSchema = z.object({ status: z.enum(['active', 'disabled']) });
 
 /**
@@ -122,19 +123,28 @@ const adjustSchema = z.object({
 export function createAdminRoutes(deps: BackendDeps, throttle: AdminLoginThrottle) {
   const routes = new Hono();
   const requireAdmin = requireAdminAuth(deps);
-  // 媒介池余额与 SSR 仪表盘同一权威实现（票 10/48）：签名 /profile 代理。
+  // 媒介池余额与 SPA 仪表盘同一权威实现（票 10/48）：签名 /profile 代理。
   const upstream = new DistributionUpstream(deps, deps.fetchImpl ?? fetch);
 
   routes.post('/admin/login', async c => {
     const body = await parseJsonBody(c, adminLoginSchema);
     if (!timingSafeStringEqual(body.password, deps.config.adminPassword)) {
-      // 与 SSR 登录同一节流实例（票 10）：连续失败递增延时，防在线爆破。
+      // 登录节流（票 10）：连续失败递增延时，防在线爆破。
       await throttle.penalize();
       throw new AppError('invalid_credentials', '运营密码不正确。', 401);
     }
     throttle.reset();
+    const adminToken = await signAdminToken(
+      deps.config.authSecret,
+      deps.config.adminTokenTtlSeconds,
+      deps.now(),
+    );
+    // 票 51 桥接：/admin/session 退役后，SPA 登录响应直接写入 SSR 会话
+    // cookie，保留的偏好名单页（admin-pages.ts）据此过会话门。JSON 契约
+    // 不变——响应体仍是 {adminToken, tokenType, expiresIn}，仅多一个 Set-Cookie。
+    setAdminSessionCookie(c, adminToken, deps.config.adminTokenTtlSeconds);
     return c.json({
-      adminToken: await signAdminToken(deps.config.authSecret, deps.config.adminTokenTtlSeconds, deps.now()),
+      adminToken,
       tokenType: 'Bearer',
       expiresIn: deps.config.adminTokenTtlSeconds,
     });
@@ -153,7 +163,7 @@ export function createAdminRoutes(deps: BackendDeps, throttle: AdminLoginThrottl
   /**
    * 账号列表（票 47）：q 手机号/用户名包含匹配；page/pageSize 分页
    * （默认 25、上限 100）；sort=created（默认，建号倒序）/balance/active。
-   * 200 条硬上限随本端点分页化移除（SSR 页面退役前仍用旧列表，票 51）。
+   * 200 条硬上限随本端点分页化移除；SSR 列表退役（票 51）后这是唯一列表入口。
    */
   routes.get('/admin/accounts', requireAdmin, c => {
     const q = (c.req.query('q') ?? '').trim();
@@ -174,7 +184,7 @@ export function createAdminRoutes(deps: BackendDeps, throttle: AdminLoginThrottl
     return c.json(listAdminAccounts(deps, { q, page, pageSize, sort }));
   });
 
-  /** 停用/启用（票 47）：JSON 化既有 SSR 语义——停用即时吊销账号全部会话。 */
+  /** 停用/启用（票 47）：停用即时吊销账号全部会话。 */
   routes.post('/admin/accounts/:accountId/status', requireAdmin, async c => {
     const accountId = accountIdSchema.safeParse(c.req.param('accountId'));
     if (!accountId.success) {
@@ -208,9 +218,9 @@ export function createAdminRoutes(deps: BackendDeps, throttle: AdminLoginThrottl
   });
 
   /**
-   * 媒介池余额（票 48）：JSON 化 SSR 仪表盘余额卡的权威逻辑——低余额阈值
-   * 比较纯服务端；上游失败返回降级标记而非 500（与 SSR「余额获取失败」
-   * 降级同一语义，不阻断账号管理）。
+   * 媒介池余额（票 48）：SPA 仪表盘媒介池卡的权威逻辑——低余额阈值
+   * 比较纯服务端；上游失败返回降级标记而非 500（「余额获取失败」降级同一
+   * 语义，不阻断账号管理）。
    */
   routes.get('/admin/media-pool', requireAdmin, async c => {
     let profile: UpstreamCallResult<{ balanceCents: number }>;

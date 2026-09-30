@@ -1,9 +1,15 @@
 import { describe, expect, it } from 'vitest';
 import {
+  flattenSupermediaParams,
+  supermediaHmacSha256,
+} from '../src/gateway/provider-signing';
+import {
   getJson,
   postJson,
   startTestBackend,
   str,
+  TEST_DISTRIBUTION_APP_ID,
+  TEST_DISTRIBUTION_SECRET,
   type TestBackend,
 } from './helpers';
 
@@ -23,11 +29,11 @@ function profileUpstream(
   data: unknown,
   options?: { envelopeCode?: number; httpStatus?: number; throwNetwork?: boolean },
 ) {
-  const calls: { method: string; path: string }[] = [];
+  const calls: { method: string; path: string; params: URLSearchParams }[] = [];
   const fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const request = new Request(input, init);
     const url = new URL(request.url);
-    calls.push({ method: request.method, path: url.pathname.replace(/^\/api/, '') });
+    calls.push({ method: request.method, path: url.pathname.replace(/^\/api/, ''), params: url.searchParams });
     if (options?.throwNetwork) throw new TypeError('mock network unreachable');
     return Response.json(
       { code: options?.envelopeCode ?? 200, message: 'ok', data },
@@ -168,8 +174,20 @@ describe('admin dashboard JSON endpoints', () => {
         lowBalanceCents: 50000,
         lowBalance: true,
       });
-      // 走既有签名代理：GET /profile 公共参数齐全。
-      expect(mock.calls).toEqual([{ method: 'GET', path: '/profile' }]);
+      // 走既有签名代理：GET /profile 公共参数齐全，签名 = 展平串 HMAC-SHA256(secret)
+      // （票 51 迁移自 SSR 仪表盘测试——JSON 化后契约不变）。
+      expect(mock.calls).toHaveLength(1);
+      const call = mock.calls[0]!;
+      expect(call.method).toBe('GET');
+      expect(call.path).toBe('/profile');
+      expect(call.params.get('appid')).toBe(TEST_DISTRIBUTION_APP_ID);
+      expect(call.params.get('algorithm')).toBe('sha256');
+      expect(call.params.get('timestamp')).toMatch(/^\d{10}$/);
+      const keys = [...call.params.keys()].sort();
+      expect(keys).toEqual(['algorithm', 'appid', 'signature', 'timestamp']);
+      const params = Object.fromEntries(call.params.entries());
+      const { signature, ...signed } = params;
+      expect(signature).toBe(supermediaHmacSha256(TEST_DISTRIBUTION_SECRET, flattenSupermediaParams(signed)));
     } finally {
       await tb.cleanup();
     }

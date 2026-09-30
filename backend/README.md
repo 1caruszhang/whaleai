@@ -105,7 +105,7 @@ creation）按未命中输入价计、缓存读按命中价计；折点内部以
 | `GET /auth/me` | Bearer | 账号投影（手机号、点数、首登改密标记） |
 | `POST /auth/change-password` | Bearer | 校验当前密码；成功后旧 JWT（`stale_token`）与旧 refresh 全部失效，返回新 token 对 |
 | `POST /auth/logout` | Bearer | 吊销 refreshToken 所属会话 |
-| `POST /admin/login` | — | 运营密码 → 短时运营 JWT |
+| `POST /admin/login` | — | 运营密码 → 短时运营 JWT（`{adminToken, tokenType, expiresIn}`）；成功后由登录响应直接写入 `xiaojing_admin` 会话 cookie（票 51 桥接：偏好名单 SSR 页的会话入口） |
 | `POST /admin/accounts` | 运营 JWT | 建号（手机号+初始密码），开通即赠 500 点并落 `grant` 流水 |
 | `GET /healthz` | — | 存活探针 |
 
@@ -221,37 +221,40 @@ OSS 账单对账，不动 `ledger_entries`（Σdelta == balance 不变量）；�
 - **密码**：Node 内置 scrypt（N=16384, r=8, p=1），登录对未知手机号做等
   代价校验防时序枚举。
 
-## 运营台（票 10 /admin SSR 页面）
+## 运营台（/admin SPA + 偏好名单 SSR 页）
 
-服务端渲染的运营管理页，运营全程不接触命令行。与 JSON 运营 API 并存：
-页面 GET 挂 `/admin` 与 `/admin/accounts/:accountId`，表单动作统一挂
-`/admin/ui/*`（与 JSON API 路径不重合）；写操作走表单 POST + 303（PRG）。
+运营台以 admin-web SPA 为主形态（票 46-51）：账号开通与停用、充值对账、
+点数调整、搜索/分页/排序、账号详情（余额三口径、点数流水、permit 计费、
+发布订单、Provider/对话计量）、仪表盘与 Cmd+K 全局搜索全部走 SPA + JSON
+运营 API。账号运营台 SSR 面（票 10 的 `GET /admin` 登录页/列表、
+`GET /admin/accounts/:accountId` 对账页、`POST /admin/ui/accounts*` 表单、
+`POST /admin/session`、`POST /admin/logout`）已随票 #51 整体退役删除。
 
 ### 运营台 SPA 静态托管（票 46）
 
 admin-web（仓库平级 `admin-web/`：React 19 + Vite + Tailwind + shadcn/ui +
 react-router + TanStack Query）构建产物打进后端镜像 `dist/admin-web`，Hono
 对 `/admin/*` 做静态托管：GET 命中文件直接回（Vite 内容哈希资源），未命中
-回 index.html（SPA fallback，react-router 承接前端路由）。JSON API 路由
-注册在前、优先匹配，绝不被 SPA 吞；非 GET 表单路由原样透传；SSR 自有
-GET 页面（spec #45 接管面之外，当前为 `/admin/preference-channels`）走
-显式透传清单，票 #51 退役前保持可用；产物不存在（本地开发/测试未构建）
-时整链透传，SSR 页面（下表）与既有行为不变。
+回 index.html（SPA fallback，react-router 承接前端路由）——`GET /admin` 与
+深链 `GET /admin/accounts/:accountId` 都由 SPA 承接。JSON API 路由注册在
+前、优先匹配，绝不被 SPA 吞；非 GET 表单路由原样透传；唯一保留的 SSR
+GET 页面（spec #45 接管面之外，`/admin/preference-channels`，P3.x 生产
+功能、SPA 无对应页替代）走显式透传清单，长期保持可用；产物不存在（本地
+开发/测试未构建）时整链透传（此时 `GET /admin` 404，SPA 未构建即无壳）。
 `ADMIN_WEB_ROOT`（可选）可覆盖产物目录（测试注入 fixture）。SPA 登录走
-既有 `POST /admin/login`（Bearer JWT 存 localStorage，任一 API 401 清凭证
-回登录页）；SSR 页面在 SPA 上线验证后整体退役（#45）。
+`POST /admin/login`（Bearer JWT 存 localStorage，任一 API 401 清凭证回
+登录页）。
+
+### 保留的偏好名单 SSR 页（票 51 后唯一 SSR 面）
+
+会话凭证复用运营 JWT（audience 隔离：用户 access token 进 cookie 无效），
+`HttpOnly;SameSite=Lax` cookie 挡跨站表单 POST（CSRF 主要面）。票 51 起
+`POST /admin/session` 已退役——SSR 会话 cookie 的唯一入口是
+`POST /admin/login`（JSON）：由登录响应直接写入（SPA 登录即获 cookie，访问
+偏好名单页直接过会话门；登出清 localStorage，cookie 按 TTL 自然过期）。
 
 | 方法与路径 | 鉴权 | 说明 |
 |---|---|---|
-| `GET /admin` | 会话 cookie | 未登录渲染登录页；已登录渲染仪表盘：媒介池余额卡（代理超级媒介 `GET /profile` 实测值，低于阈值提醒预存）+ 账号列表 + 建号表单（开通即赠点） |
-| `POST /admin/session` | — | 运营密码登录：签发运营 JWT 进 `HttpOnly;SameSite=Lax` cookie（`xiaojing_admin`，有效期同 `ADMIN_TOKEN_TTL_SECONDS`）；错误密码 401 + 递增延时节流（与 JSON 登录共享计数） |
-| `POST /admin/logout` | 会话 cookie | 清除会话 cookie（Max-Age=0） |
-| `POST /admin/ui/accounts` | 会话 cookie | 建号（手机号 + 初始密码 ≥8 位） |
-| `POST /admin/ui/accounts/:accountId/status` | 会话 cookie | 停用/启用；停用即时吊销账号全部会话（`revoked_reason=admin_disabled`），余额与流水不动 |
-| `POST /admin/ui/accounts/:accountId/topup` | 会话 cookie | 充值对账确认：金额（元，最小粒度 0.1 元 = 1 点）+ 来源备注同落 `topup` 流水（`充值 ¥X：备注`） |
-| `POST /admin/ui/accounts/:accountId/adjust` | 会话 cookie | 调点（正负整数 ≠0，备注必填），落 `adjust` 流水 |
-| `POST /admin/ui/accounts/:accountId/note` | 会话 cookie | 设置/清除账号备注（运营内部标识「这是谁的号」，≤500 字，空串即清除；存 `accounts.admin_note`，不进用户投影、不落流水） |
-| `POST /admin/ui/accounts/:accountId/reset-password` | 会话 cookie | 重置密码（新密码 ≥8 位 + 确认输入防手误）：`password_version+1`（旧 access JWT 即失效）、`must_change_password=1`（用户下次登录强制改成自己的密码）、吊销全部会话（`revoked_reason=admin_password_reset`）；不校验旧密码、不签发用户会话 |
 | `GET /admin/preference-channels` | 会话 cookie | 偏好召回名单管理页（GET `?industry=&q=&u=`）：顶部行业下拉即切换（带一个内联 `onchange` 即时提交——用户裁决 2026-09-08，运营台零 JS 纪律的唯一例外）；名单区常驻展示——「通用名单」（恒展开）+「行业专属名单」按行业用原生 `<details>` 默认折叠、点击展开（当前查看的行业自动展开；均为零 JS 原生折叠）；添加只一个动作——渠道名输入（原生 `<datalist>` 候选提示，当前行业快照前 500 个不重名 + 本次搜索结果预渲染）→ 搜索（`q` 包含匹配 ≤50 条，名称完全一致的行预勾选）→ 「确认添加到本行业」（行业由当前视图以隐藏字段携带，无第二个行业下拉；行业无专属条目时在添加卡明示兜底语义）；行业候选只含本行业渠道（自媒体按 industry_category、媒体按 channel_type 映射，规则在 `pool-industry-match.ts` 与桌面码表/别名/匹配器逐条一致；官方 GEO 标记仅展示不入选——它是召回质量信号不是行业归属；0·通用=不过滤全池）；「包含未分类」复选框（`u=1`，用户裁决 2026-09-08 下午）把快照缺行业类目的渠道（category_code NULL/0/100）并入行业候选与 datalist——消除回落语义下未分类资源进不了行业专属名单的操作死角，营销专区 13/14/15 仍排除（打包卖法不是渠道），缺省不勾 = 现状行为。绑定行显示形态与快照在售状态（status≠2 标红「已下架」） |
 | `POST /admin/ui/preference-channels` | 会话 cookie | 手动添加名称条目（按核心名整族匹配的旧口子）：`{category, name(1-200), domain(≤200,可选), exact}`。**页面已不再暴露此表单**（单行业视图只走勾选绑定），接口保留供种子类名称条目的维护与测试；category 必须在品牌所属行业码白名单（0=通用，1-26）内 |
 | `POST /admin/ui/preference-channels/pick` | 会话 cookie | 勾选确认（绑定条目）：`{category, pick:<kind>:<resource_id>=on …, viewIndustry?}`（≤50 勾）；每勾一行落一条 `(category, kind, resource_id, name=挂牌名, domain=entrance 域名, exact=1)`，字段取自池快照（上游权威，不取表单回传）；引用不在快照内/勾选键被篡改 → 400 零写入；同（category, kind, resource_id）重复确认静默跳过；303 跳回 `viewIndustry` 行业视图（缺省/非法回落通用视图） |
@@ -259,16 +262,11 @@ GET 页面（spec #45 接管面之外，当前为 `/admin/preference-channels`�
 | `POST /admin/ui/preference-channels/snapshot/refresh` | 会话 cookie | 手动刷新池快照：经 `DistributionUpstream` 签名客户端串行拉取 `/media\|we-media/resource`（size=200/页，页间 120ms 限速+单页重试×3，全池 ~2.5 万条约 1 分钟，同步 POST 后 303 回原行业视图）；两类全部拉完才落库（整类替换，任一页重试耗尽仍失败则零写入、旧快照保持，报错带类别与页号），成功后页面展示「池快照：YYYY-MM-DD HH:mm」。与定时刷新（P3.3：backend 进程内每日 04:00 服务器时区＋启动时快照为空/超 24h 补刷，失败零写入只打 `[pool-snapshot]` 日志，定时器 unref 不阻塞关服）共享进程内互斥——另一方在跑时本端点立即 409 忙返回，绝不并发重入 |
 | `POST /admin/ui/preference-channels/snapshot/verify` | 会话 cookie | 校验名单（P3.1，`viewIndustry?` 303 回原视图）：全表**绑定行** (kind,id) 去重后按形态分批 200/批回源 `/resource/query` 批查（名称条目与未绑定快照行不回源，几秒完成），回写快照行 name/price_cents/status（其余列与 fetched_at 不动——「池快照：时间」语义不被扰动）；上游查无此资源=下架，删除该快照行（名单页显示「快照缺失」）；任一批失败整次 502 零写入（与全量刷新同一纪律） |
 | `POST /admin/ui/preference-channels/:id/delete` | 会话 cookie | 删除名单条目（`viewIndustry?` 携带当前视图行业，303 跳回原视图）；改动即时生效（下次分发计划发现即用新名单） |
-| `GET /admin/accounts/:accountId` | 会话 cookie | 账号对账页：余额三口径 + 点数流水 + 计费操作（permit 扣点口径）+ 发布订单 + Provider 计量 + 对话计量 |
 
-形态与安全：纯模板字符串渲染 + 统一 `esc()` 转义（手机号/备注等一切回显），
-零客户端 `<script>`、零新依赖、无独立前端工程；低余额阈值比较在服务端
-渲染时完成。会话凭证复用运营 JWT（audience 隔离：用户 access token 进
-cookie 无效）；`SameSite=Lax` 挡跨站表单 POST（CSRF 主要面）。/profile 代理
-复用票 05 展平签名栈（timestamp 取网关时钟）；上游失败时余额卡降级为
-「获取失败」，不阻断账号管理。`/profile` 余额字段上游文档未定案，现按
-`data.money` / `data.balance`（number 或十进制字符串）防御式解析，取不到
-有限数字按上游失败处理。
+偏好名单页形态与安全：纯模板字符串渲染 + 统一 `esc()` 转义，零客户端
+`<script>`（行业下拉内联 onchange 为唯一例外）、零新依赖。登录节流复用
+`POST /admin/login` 的 `AdminLoginThrottle`（连续失败递增延时，只延时
+不断锁）。
 
 ## curl 走查（验收口径）
 
@@ -413,8 +411,8 @@ curl -s "$B/gw/distribution/we-media/resource?page=2&size=15" -H "authorization:
 - `accounts`：手机号唯一、scrypt 哈希、`password_version`（JWT `pv` 对账）、
   `status`（active/disabled）、`must_change_password`、`balance`（账面总余额，
   含冻结）。
-- `accounts.admin_note`（0009）：运营备注（账号归属标识）；只经 /admin 读写，
-  不进用户投影。
+- `accounts.admin_note`（0009）：运营备注（账号归属标识）；不进用户投影。
+  写入面（SSR 表单）随账号运营台 SSR 面退役（票 51），列保留。
 - `auth_sessions`：一次登录一个会话；30 天滑动 `expires_at`；吊销留
   `revoked_reason`（logout / password_changed / refresh_reuse / admin_disabled /
   admin_password_reset）。

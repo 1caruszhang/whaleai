@@ -13,13 +13,12 @@ import type { BackendDeps } from '../deps';
  * 护栏（与本模块的注册顺序共同保证，见 http/app.ts）：
  * - JSON API（/admin/login、/admin/accounts/*）注册在前、优先匹配，绝不被吞；
  * - spec #45 枚举的 SPA 接管面只有 GET /admin 与 GET /admin/accounts/:accountId；
- *   其余 SSR 自有 GET 页面（SSR_PAGE_PASSTHROUGH_PREFIXES）在票 #51「SPA
- *   上线验证后整体退役」前必须保持可用——本中间件对它们原样透传，绝不被
- *   SPA fallback 遮蔽（2026-09-29 验收回归：GET /admin/preference-channels
- *   曾整页被吞，其全部生产表单因此不可用）；
- * - 本中间件只拦 GET，/admin/session、/admin/ui/* 等既有表单 POST 原样透传；
- * - 产物不存在（本地开发/测试未构建）时整链透传，既有 SSR 页面行为不变——
- *   测试与开发零扰动，镜像内（产物在 dist/admin-web）才启用；
+ *   票 #51 已整体退役账号运营台 SSR 面，唯一保留的 SSR GET 页面
+ *   （/admin/preference-channels，见 SSR_PAGE_PASSTHROUGH_PREFIXES）由本
+ *   中间件原样透传，绝不被 SPA fallback 遮蔽；
+ * - 本中间件只拦 GET，/admin/ui/preference-channels/* 等保留表单 POST 原样透传；
+ * - 产物不存在（本地开发/测试未构建）时整链透传，SSR 偏好名单页与测试
+ *   零扰动，镜像内（产物在 dist/admin-web）才启用；
  * - 路径穿越防护：解码后的相对路径必须留在产物根内，逃逸一律 404。
  */
 
@@ -49,13 +48,15 @@ function defaultAdminWebRoot(): string {
 }
 
 /**
- * SSR 自有 GET 页面透传清单（票 46）：spec #45 的 SPA 接管面只枚举 GET
- * /admin 与 GET /admin/accounts/:accountId，其余 SSR 页面在票 #51 整体
- * 退役前必须保持可用。当前清单：
- * - /admin/preference-channels：偏好名单管理页（校验名单、snapshot
- *   refresh/verify、pick/category/delete 等生产表单都 POST 到
- *   /admin/ui/preference-channels/*，T1 起必须可用）。
- * 新增 SSR GET 页面时在此登记；票 #51 退役时随页面一并删除。
+ * SSR 自有 GET 页面透传清单（票 46 建、票 51 收敛）：spec #45 的 SPA
+ * 接管面只枚举 GET /admin 与 GET /admin/accounts/:accountId。票 #51 已
+ * 整体退役账号运营台 SSR 面；本清单**永久保留**，当前唯一条目：
+ * - /admin/preference-channels：偏好召回名单管理页（P3.x 生产功能，
+ *   校验名单、snapshot refresh/verify、pick/category/delete 等生产表单都
+ *   POST 到 /admin/ui/preference-channels/*）。保留理由：spec #45 退役
+ *   清单未点名它、SPA 无对应页替代、且它不属账号运营台面——不能随
+ *   账号 SSR 面一并删除。
+ * 新增 SSR GET 页面时在此登记；页面退役时随登记一并删除。
  */
 const SSR_PAGE_PASSTHROUGH_PREFIXES = ['/admin/preference-channels'];
 
