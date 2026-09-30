@@ -56,3 +56,15 @@ export function listProviderUsageRecords(
     [accountId, limit],
   );
 }
+
+/** JSON 记录投影（票 49 详情页）：camelCase 口径与 chat-usage 的 records 同构。 */
+export function providerUsageRecordProjection(record: ProviderUsageRecordRow) {
+  return {
+    id: record.id,
+    provider: record.provider,
+    route: record.route,
+    inputTokens: record.input_tokens,
+    outputTokens: record.output_tokens,
+    createdAt: record.created_at,
+  };
+}

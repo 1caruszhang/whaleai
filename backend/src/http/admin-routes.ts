@@ -10,11 +10,15 @@ import {
   createAccountWithGrant,
   findAccountById,
   listAdminAccounts,
+  setAccountDisplayName,
   setAccountStatus,
   type AdminAccountSort,
 } from '../domain/accounts';
 import { applyAccountLedgerDelta, balanceSnapshot, listLedgerEntries } from '../domain/ledger';
 import { listChatUsageRecords } from '../domain/chat-usage';
+import { listPermitHistory } from '../domain/permits';
+import { listPublishOrdersForAccount, publishOrderProjection } from '../domain/publish-orders';
+import { listProviderUsageRecords, providerUsageRecordProjection } from '../domain/provider-usage';
 import { adminOverviewStats } from '../domain/admin-stats';
 import {
   DistributionUpstream,
@@ -54,6 +58,18 @@ const createAccountSchema = z.object({
 /** 停用/启用（票 47 JSON 化）：语义复用既有 SSR 表单，停用即时吊销全部会话。 */
 const accountStatusSchema = z.object({ status: z.enum(['active', 'disabled']) });
 
+/**
+ * 用户名设置/清空（票 49）：displayName 必填字段，null 与空串同义（清空），
+ * 非空 trim 后 ≤64 字符。契约：清空后 accounts.display_name 落空串。
+ */
+const displayNameSchema = z.object({
+  displayName: z
+    .string()
+    .trim()
+    .max(64, '用户名最长 64 字符')
+    .nullable(),
+});
+
 const accountIdSchema = z.string().min(1, 'accountId 不能为空').max(64);
 
 /** 分页整数查询参数：缺省回落默认值；非整数/越界报 400。 */
@@ -73,6 +89,16 @@ function parseQueryInt(
     .safeParse(raw);
   if (!parsed.success) {
     throw new AppError('validation_error', parsed.error.issues[0]?.message ?? `${name} 无效。`, 400);
+  }
+  return parsed.data;
+}
+
+/** 详情页子资源共用解析（票 49）：accountId 异形 400、未知账号 404。 */
+function requireDetailAccountId(deps: BackendDeps, raw: string): string {
+  const parsed = accountIdSchema.safeParse(raw);
+  if (!parsed.success) throw new AppError('validation_error', 'accountId 无效。', 400);
+  if (!findAccountById(deps.db, parsed.data)) {
+    throw new AppError('account_not_found', '账号不存在。', 404);
   }
   return parsed.data;
 }
@@ -160,6 +186,20 @@ export function createAdminRoutes(deps: BackendDeps, throttle: AdminLoginThrottl
   });
 
   /**
+   * 用户名设置/清空（票 49）：null 与空串同义清除，非空 trim 后 ≤64 落库
+   * （路由 schema 已拦截 >64 → 400）。详情页用户名编辑接本端点。
+   */
+  routes.post('/admin/accounts/:accountId/display-name', requireAdmin, async c => {
+    const accountId = accountIdSchema.safeParse(c.req.param('accountId'));
+    if (!accountId.success) {
+      throw new AppError('validation_error', 'accountId 无效。', 400);
+    }
+    const body = await parseJsonBody(c, displayNameSchema);
+    const updated = setAccountDisplayName(deps, accountId.data, body.displayName ?? '');
+    return c.json({ account: adminAccountProjection(updated) });
+  });
+
+  /**
    * 仪表盘聚合（票 48）：账号总数/活跃/停用、余额总计与冻结、今日充值、
    * 今日扣点（北京时间日界）、近 30 天按日序列（空窗日补零）。
    */
@@ -238,10 +278,46 @@ export function createAdminRoutes(deps: BackendDeps, throttle: AdminLoginThrottl
       createdAt: entry.created_at,
     }));
     return c.json({
-      account: accountProjection(account),
+      // 票 49：详情页余额总览与用户名编辑以本端点为主数据源，account 改用
+      // 运营投影（比用户投影多 displayName；display_name 只经 /admin 读写）。
+      account: adminAccountProjection(account),
       balance: balanceSnapshot(deps.db, account),
       entries,
     });
+  });
+
+  /**
+   * 详情页 permit 计费数据（票 49）：沿用 listPermitHistory 的既有 domain
+   * 投影（open + settled 全量、最新在前），不另造口径。
+   */
+  routes.get('/admin/accounts/:accountId/permits', requireAdmin, c => {
+    const accountId = requireDetailAccountId(deps, c.req.param('accountId'));
+    const limit = parseQueryInt(c.req.query('limit'), 'limit', 50, 1, 200);
+    return c.json({ permits: listPermitHistory(deps, accountId, limit) });
+  });
+
+  /**
+   * 详情页发布订单数据（票 49）：沿用 publishOrderProjection 的既有 domain
+   * 投影（最新在前），不另造口径。
+   */
+  routes.get('/admin/accounts/:accountId/publish-orders', requireAdmin, c => {
+    const accountId = requireDetailAccountId(deps, c.req.param('accountId'));
+    const limit = parseQueryInt(c.req.query('limit'), 'limit', 50, 1, 200);
+    const orders = listPublishOrdersForAccount(deps.db, accountId, limit).map(publishOrderProjection);
+    return c.json({ orders });
+  });
+
+  /**
+   * 详情页 Provider 计量数据（票 49）：camelCase 记录投影与 chat-usage 的
+   * records 口径同构（最新在前），不另造口径。
+   */
+  routes.get('/admin/accounts/:accountId/provider-usage', requireAdmin, c => {
+    const accountId = requireDetailAccountId(deps, c.req.param('accountId'));
+    const limit = parseQueryInt(c.req.query('limit'), 'limit', 50, 1, 200);
+    const records = listProviderUsageRecords(deps.db, accountId, limit).map(
+      providerUsageRecordProjection,
+    );
+    return c.json({ records });
   });
 
   routes.get('/admin/accounts/:accountId/chat-usage', requireAdmin, c => {
