@@ -356,7 +356,11 @@ function AccountRow({
           {account.mustChangePassword && <Badge variant="warning">待改密</Badge>}
         </span>
       </TableCell>
-      <TableCell>{account.displayName === '' ? '—' : account.displayName}</TableCell>
+      {/* 旧账号无用户名显示「—」；「—」也用于品牌集/最近活跃空态，
+          测试用 data-testid 收窄到本列。 */}
+      <TableCell data-testid="display-name">
+        {account.displayName === '' ? '—' : account.displayName}
+      </TableCell>
       <TableCell>
         {account.status === 'active' ? (
           <Badge variant="success">正常</Badge>

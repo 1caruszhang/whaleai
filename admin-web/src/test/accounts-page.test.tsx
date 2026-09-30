@@ -142,7 +142,9 @@ describe('账号列表页（票 47）', () => {
     expect(within(activeRow).getByText('鲸杉示范品牌')).toBeInTheDocument();
 
     const legacyRow = rowOf('13800000002');
-    expect(within(legacyRow).getByText('—')).toBeInTheDocument(); // 用户名
+    // 「—」是旧账号空态的共用占位（用户名/品牌集/最近活跃三列都渲染），
+    // 必须收窄到用户名列（data-testid），不能用 getByText 裸查。
+    expect(within(legacyRow).getByTestId('display-name')).toHaveTextContent('—');
     expect(within(legacyRow).getByText('已停用')).toBeInTheDocument();
     expect(within(legacyRow).getByText('0 / 0')).toBeInTheDocument();
     expect(within(legacyRow).getByText('已用尽')).toBeInTheDocument();
@@ -233,13 +235,14 @@ describe('账号列表页（票 47）', () => {
     await user.clear(within(dialog).getByLabelText(/用户名/));
     await user.type(within(dialog).getByLabelText(/用户名/), '  李四科技  ');
     await user.click(within(dialog).getByRole('button', { name: '开通账号' }));
-    await vi.waitFor(() =>
-      expect(mockedCreate).toHaveBeenCalledWith({
-        phone: '13811112222',
-        initialPassword: 'initial-pass-1',
-        displayName: '李四科技',
-      }),
-    );
+    // react-query v5 调 mutationFn 会附第二个实参 {client, meta, mutationKey}，
+    // toHaveBeenCalledWith 全参比对会因此失配；只断言首个实参（variables）。
+    await vi.waitFor(() => expect(mockedCreate).toHaveBeenCalledTimes(1));
+    expect(mockedCreate.mock.calls[0]?.[0]).toEqual({
+      phone: '13811112222',
+      initialPassword: 'initial-pass-1',
+      displayName: '李四科技',
+    });
     await vi.waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
   });
 
