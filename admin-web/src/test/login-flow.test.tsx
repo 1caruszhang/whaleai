@@ -3,7 +3,7 @@ import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { ApiError, loginAdmin } from '@/lib/api';
+import { ApiError, loginAdmin, type AdminLoginResult } from '@/lib/api';
 import { ThemeProvider } from '@/lib/theme';
 import { AppRoutes } from '@/routes/routes';
 
@@ -12,6 +12,9 @@ import { AppRoutes } from '@/routes/routes';
  * 未登录访问任意 /admin 路由 → 登录页；错误密码有错误提示；登录成功进入
  * 受保护壳；退出登录清 token 回登录页。声明式 MemoryRouter 与生产
  * BrowserRouter 同模式（均走 history 导航，不构造 data-router Request）。
+ *
+ * 票 #61 T-B 扩展：只增视觉/加载态断言（卡片入场动画类、密码可见性切换、
+ * 提交中 loading 态），既有语义断言（role=alert 等）原样保留。
  */
 vi.mock('@/lib/api', async importOriginal => {
   const actual = await importOriginal<typeof import('@/lib/api')>();
@@ -99,5 +102,47 @@ describe('登录闭环（票 46）', () => {
 
     expect(await screen.findByRole('heading', { name: '运营登录' })).toBeInTheDocument();
     expect(window.localStorage.getItem(TOKEN_KEY)).toBeNull();
+  });
+
+  it('登录卡片带入场淡入动画类', () => {
+    renderApp('/admin/login');
+    const card = screen
+      .getByRole('heading', { name: '运营登录' })
+      .closest('[data-slot="card"]');
+    expect(card).not.toBeNull();
+    expect(card?.className).toContain('animate-in');
+    expect(card?.className).toContain('fade-in-0');
+  });
+
+  it('密码可见性切换在 password/text 间切换', async () => {
+    renderApp('/admin/login');
+    const input = screen.getByLabelText('运营密码');
+    expect(input).toHaveAttribute('type', 'password');
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('button', { name: '显示密码' }));
+    expect(input).toHaveAttribute('type', 'text');
+    expect(screen.getByRole('button', { name: '隐藏密码' })).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: '隐藏密码' }));
+    expect(input).toHaveAttribute('type', 'password');
+  });
+
+  it('提交中按钮 loading 态：禁用 + 转圈图标，完成后进入仪表盘', async () => {
+    let resolveLogin!: (value: AdminLoginResult) => void;
+    mockedLogin.mockReturnValue(
+      new Promise<AdminLoginResult>(resolve => {
+        resolveLogin = resolve;
+      }),
+    );
+    renderApp('/admin/login');
+    await fillAndSubmit('correct-password');
+
+    const button = screen.getByRole('button', { name: '登录' });
+    expect(button).toBeDisabled();
+    expect(button.querySelector('svg.animate-spin')).toBeInTheDocument();
+
+    resolveLogin({ adminToken: 'test-admin-token', tokenType: 'Bearer', expiresIn: 3600 });
+    expect(await screen.findByRole('heading', { name: '仪表盘' })).toBeInTheDocument();
   });
 });

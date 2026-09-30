@@ -5,7 +5,7 @@
 ## 技术底座（一次定死，三票共用）
 
 - **不引入 framer-motion/motion**：shadcn-admin 主分支同样只用 tw-animate-css + Radix data-state 动画，其观感由「动效铺满度」而非 JS 动画库达成；引入 motion 属无谓的新运行时依赖。
-- **顶部进度条自实现**：用 react-router 的 pending 状态 + CSS，不引 react-top-loading-bar——运营台仅 4 页、切页极快，为一个进度条引入依赖不值。
+- **顶部进度条自实现**：以导航提交信号（location.key）驱动扫描动画 + CSS（壳为声明式 router，无 in-flight 信号可挂），不引 react-top-loading-bar——运营台仅 4 页、切页极快，为一个进度条引入依赖不值。
 - **页头搜索框复用现有 command-search（Cmd+K）**：样式对齐 shadcn-admin 的搜索框，点击唤起既有面板；不引 cmdk。
 - **logo 复用主应用品牌图** `src/renderer/assets/brand/xiaojing-logo.png`：复制进 `admin-web/src/assets/`（二进制品牌资产镜像，文件头注释注明来源与「改图需两端同步」纪律），替换现渐变「鲸」字文字块。
 

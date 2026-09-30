@@ -1,6 +1,6 @@
 import { useState, type FormEvent } from 'react';
 import { useMutation } from '@tanstack/react-query';
-import { EyeIcon, EyeOffIcon, Loader2Icon, TriangleAlertIcon } from 'lucide-react';
+import { EyeIcon, EyeOffIcon, Loader2Icon, LogInIcon, TriangleAlertIcon } from 'lucide-react';
 import { useLocation, useNavigate } from 'react-router';
 import { BrandLogo } from '@/components/brand-logo';
 import { Button } from '@/components/ui/button';
@@ -15,6 +15,10 @@ import { routePathFrom } from '@/routes/protected-route';
  * 登录页（票 46）：视觉参照 shadcn-admin auth 风格；调既有
  * POST /admin/login 换运营 JWT 存 localStorage；错误密码展示错误提示
  * （401 走 ApiError，不触发全局清证跳转，见 lib/api.ts）。
+ *
+ * 票 #61 T-B：对齐 shadcn-admin sign-in 页——品牌 logo 图 + 标题 + 描述
+ * 居中入卡、密码可见性切换、错误提示保留 role=alert 语义、提交按钮
+ * loading 态（LogIn 图标换转圈）、卡片入场淡入。
  */
 export function LoginPage() {
   const navigate = useNavigate();
@@ -44,13 +48,10 @@ export function LoginPage() {
 
   return (
     <div className="from-muted/60 to-background flex min-h-svh flex-col items-center justify-center gap-6 bg-linear-to-b p-6">
-      <div className="flex flex-col items-center gap-2 text-center">
-        <BrandLogo className="scale-125" />
-        <span className="text-muted-foreground text-sm">账号开通、充值对账与点数管理</span>
-      </div>
-      <Card className="w-full max-w-sm">
-        <CardHeader className="text-center">
-          <h1 className="text-xl leading-none font-semibold">运营登录</h1>
+      <Card className="animate-in fade-in-0 slide-in-from-bottom-4 fill-mode-both duration-500 w-full max-w-sm">
+        <CardHeader className="items-center gap-2 text-center">
+          <BrandLogo className="justify-center" />
+          <h1 className="text-lg font-semibold tracking-tight">运营登录</h1>
           <CardDescription>请输入运营密码以进入运营台</CardDescription>
         </CardHeader>
         <CardContent>
@@ -77,6 +78,7 @@ export function LoginPage() {
                   disabled={login.isPending}
                   aria-invalid={login.isError}
                   required
+                  className="pe-9"
                 />
                 <button
                   type="button"
@@ -93,12 +95,13 @@ export function LoginPage() {
               </div>
             </div>
             <Button type="submit" className="w-full" disabled={login.isPending || password.length === 0}>
-              {login.isPending && <Loader2Icon className="animate-spin" />}
-              {login.isPending ? '登录中…' : '登录'}
+              {login.isPending ? <Loader2Icon className="animate-spin" /> : <LogInIcon />}
+              登录
             </Button>
           </form>
         </CardContent>
       </Card>
+      <p className="text-muted-foreground text-center text-xs">账号开通、充值对账与点数管理</p>
     </div>
   );
 }
