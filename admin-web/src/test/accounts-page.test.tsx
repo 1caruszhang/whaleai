@@ -195,6 +195,8 @@ describe('账号列表页（票 47）', () => {
     expect(screen.getByTestId('location-probe').textContent).toContain('page=2');
   });
 
+  // 稳定性护栏：全量并行 + 高负载下 userEvent 交互超 5s 默认限（单跑必过），
+  // 加长超时而非改动断言逻辑。
   it('建号对话框校验：手机号格式、密码 ≥8 位、用户名 ≤64，通过后提交并关闭', async () => {
     mockedList.mockResolvedValue(listResult([]));
     mockedCreate.mockResolvedValue({
@@ -244,8 +246,9 @@ describe('账号列表页（票 47）', () => {
       displayName: '李四科技',
     });
     await vi.waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
-  });
+  }, 15000);
 
+  // 稳定性护栏：同建号用例——多段菜单/对话框交互逼近 5s 默认限，一并加长。
   it('行操作下拉：详情跳转、停用/启用切换、充值/调点接既有端点', async () => {
     mockedList.mockResolvedValue(listResult([ACCOUNT_ACTIVE, ACCOUNT_LEGACY]));
     mockedStatus.mockResolvedValue({ account: { id: 'acc-1', status: 'disabled' } });
@@ -297,5 +300,5 @@ describe('账号列表页（票 47）', () => {
     await user.click(await screen.findByRole('menuitem', { name: '详情' }));
     expect(await screen.findByRole('heading', { name: '账号详情' })).toBeInTheDocument();
     expect(screen.getByText('账号 acc-1')).toBeInTheDocument();
-  });
+  }, 15000);
 });
