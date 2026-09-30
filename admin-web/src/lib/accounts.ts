@@ -134,3 +134,180 @@ export function adjustAdminAccount(
 export function chatQuotaRemainingPoints(quota: AdminAccountChatQuota): number {
   return quota.totalPoints - quota.usedMilli / 1000;
 }
+
+// ── 票 49：账号详情页 API 层 ──
+
+/** 详情页主数据源（GET /admin/accounts/:accountId/ledger）的账号投影：运营投影（含 displayName）。 */
+export interface AdminLedgerAccount {
+  id: string;
+  phone: string;
+  status: AdminAccountStatus;
+  mustChangePassword: boolean;
+  points: number;
+  displayName: string;
+}
+
+export interface AdminLedgerEntry {
+  id: string;
+  delta: number;
+  balanceAfter: number;
+  kind: string;
+  note: string;
+  createdAt: string;
+}
+
+export interface AdminAccountLedger {
+  account: AdminLedgerAccount;
+  balance: AdminAccountBalance;
+  entries: AdminLedgerEntry[];
+}
+
+/** 点数流水（复用既有端点，SSR 对账页同源）：默认取 200 条（与 SSR 同口径）。 */
+export function listAdminAccountLedger(
+  accountId: string,
+  limit = 200,
+): Promise<AdminAccountLedger> {
+  return adminFetch<AdminAccountLedger>(`/admin/accounts/${accountId}/ledger?limit=${limit}`);
+}
+
+export type AdminPermitStatus = 'open' | 'settled';
+
+/** 计费 permit 投影（详情页 permit 计费卡，与既有 permit 计费投影同源）。 */
+export interface AdminPermit {
+  permitId: string;
+  operation: string;
+  units: number;
+  unitPrice: number;
+  basePrice: number;
+  totalPoints: number;
+  status: AdminPermitStatus;
+  frozenPoints: number;
+  consumedPoints: number;
+  refundedPoints: number;
+  unitsSucceeded: number;
+  unitsFailed: number;
+  unitsUnreported: number;
+  createdAt: string;
+  settledAt: string | null;
+}
+
+/** permit 计费列表（open + settled 全量、最新在前）。 */
+export function listAdminAccountPermits(
+  accountId: string,
+  limit = 50,
+): Promise<{ permits: AdminPermit[] }> {
+  return adminFetch<{ permits: AdminPermit[] }>(
+    `/admin/accounts/${accountId}/permits?limit=${limit}`,
+  );
+}
+
+export type AdminPublishOrderKind = 'media' | 'we-media';
+export type AdminPublishOrderPlacementStatus = 'pending' | 'placed' | 'failed';
+export type AdminPublishOrderLedgerStatus = 'frozen' | 'settled' | 'refunded';
+
+/** 发布订单投影（详情页发布订单卡，与既有 publishOrderProjection 同源）。 */
+export interface AdminPublishOrder {
+  sn: string;
+  executionId: string;
+  itemId: string;
+  kind: AdminPublishOrderKind;
+  resourceId: number;
+  title: string;
+  contentUrl: string;
+  mediaPriceCents: number;
+  points: number;
+  perArticleMaxPoints: number;
+  executionMaxPoints: number;
+  placementStatus: AdminPublishOrderPlacementStatus;
+  ledgerStatus: AdminPublishOrderLedgerStatus;
+  partnerSn: string | null;
+  status: number | null;
+  url: string | null;
+  publishedAt: string | null;
+  closedObservedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** 发布订单列表（最新在前）。 */
+export function listAdminAccountPublishOrders(
+  accountId: string,
+  limit = 50,
+): Promise<{ orders: AdminPublishOrder[] }> {
+  return adminFetch<{ orders: AdminPublishOrder[] }>(
+    `/admin/accounts/${accountId}/publish-orders?limit=${limit}`,
+  );
+}
+
+/** Provider 旁路计量记录（camelCase 投影，最新在前）。 */
+export interface AdminProviderUsageRecord {
+  id: string;
+  provider: string;
+  route: string;
+  inputTokens: number;
+  outputTokens: number;
+  createdAt: string;
+}
+
+/** Provider 计量列表（对账用，最新在前）。 */
+export function listAdminAccountProviderUsage(
+  accountId: string,
+  limit = 50,
+): Promise<{ records: AdminProviderUsageRecord[] }> {
+  return adminFetch<{ records: AdminProviderUsageRecord[] }>(
+    `/admin/accounts/${accountId}/provider-usage?limit=${limit}`,
+  );
+}
+
+/** 对话旁路计量记录（隐藏额度口径，最新在前）。 */
+export interface AdminChatUsageRecord {
+  id: string;
+  model: string;
+  inputTokens: number;
+  cacheReadTokens: number;
+  cacheCreationTokens: number;
+  outputTokens: number;
+  pointsMilli: number;
+  createdAt: string;
+}
+
+/** 对话计量列表 + 本周期隐藏额度累计（千分之一点）。 */
+export function listAdminAccountChatUsage(
+  accountId: string,
+  limit = 50,
+): Promise<{ account: AdminLedgerAccount; quotaUsedMilli: number; records: AdminChatUsageRecord[] }> {
+  return adminFetch<{ account: AdminLedgerAccount; quotaUsedMilli: number; records: AdminChatUsageRecord[] }>(
+    `/admin/accounts/${accountId}/chat-usage?limit=${limit}`,
+  );
+}
+
+/**
+ * 设置/清空用户名：displayName 传 null 清空（与空串同义，后端落空串）；
+ * 非空 ≤64 由页面校验 + 后端 schema 双护栏。成功后回显运营投影。
+ */
+export function setAdminAccountDisplayName(
+  accountId: string,
+  displayName: string | null,
+): Promise<{ account: AdminLedgerAccount }> {
+  return adminFetch<{ account: AdminLedgerAccount }>(
+    `/admin/accounts/${accountId}/display-name`,
+    { method: 'POST', body: JSON.stringify({ displayName }) },
+  );
+}
+
+/** 点数流水类型 → 中文标签（与 SSR 对账页同一词表）。 */
+export function ledgerKindLabel(kind: string): string {
+  const labels: Record<string, string> = {
+    grant: '开通赠送',
+    topup: '充值',
+    adjust: '调整',
+    consume: '扣点',
+    refund: '退款',
+  };
+  return labels[kind] ?? kind;
+}
+
+/** permit 状态 → 中文（与 SSR 对账页同一词表）。 */
+export function permitStatusLabel(status: AdminPermitStatus): string {
+  return status === 'open' ? '进行中' : '已结清';
+}

@@ -6,6 +6,11 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   adjustAdminAccount,
   createAdminAccount,
+  listAdminAccountChatUsage,
+  listAdminAccountLedger,
+  listAdminAccountPermits,
+  listAdminAccountPublishOrders,
+  listAdminAccountProviderUsage,
   listAdminAccounts,
   setAdminAccountStatus,
   topupAdminAccount,
@@ -30,6 +35,12 @@ vi.mock('@/lib/accounts', async importOriginal => {
     setAdminAccountStatus: vi.fn(),
     topupAdminAccount: vi.fn(),
     adjustAdminAccount: vi.fn(),
+    // 票 49：行操作「详情」跳真实详情页（替换占位），其 API 层一并 mock。
+    listAdminAccountLedger: vi.fn(),
+    listAdminAccountPermits: vi.fn(),
+    listAdminAccountPublishOrders: vi.fn(),
+    listAdminAccountProviderUsage: vi.fn(),
+    listAdminAccountChatUsage: vi.fn(),
   };
 });
 
@@ -38,6 +49,11 @@ const mockedCreate = vi.mocked(createAdminAccount);
 const mockedStatus = vi.mocked(setAdminAccountStatus);
 const mockedTopup = vi.mocked(topupAdminAccount);
 const mockedAdjust = vi.mocked(adjustAdminAccount);
+const mockedDetailLedger = vi.mocked(listAdminAccountLedger);
+const mockedDetailPermits = vi.mocked(listAdminAccountPermits);
+const mockedDetailOrders = vi.mocked(listAdminAccountPublishOrders);
+const mockedDetailProviderUsage = vi.mocked(listAdminAccountProviderUsage);
+const mockedDetailChatUsage = vi.mocked(listAdminAccountChatUsage);
 
 const TOKEN_KEY = 'xiaojing-admin-token';
 
@@ -110,7 +126,40 @@ beforeEach(() => {
   mockedStatus.mockReset();
   mockedTopup.mockReset();
   mockedAdjust.mockReset();
+  mockedDetailLedger.mockReset();
+  mockedDetailPermits.mockReset();
+  mockedDetailOrders.mockReset();
+  mockedDetailProviderUsage.mockReset();
+  mockedDetailChatUsage.mockReset();
   window.localStorage.setItem(TOKEN_KEY, 'test-admin-token');
+  // 票 49：详情跳转用例的默认数据源（空明细 + 余额三口径）。
+  mockedDetailLedger.mockResolvedValue({
+    account: {
+      id: 'acc-1',
+      phone: '13800000001',
+      status: 'active',
+      mustChangePassword: true,
+      points: 1500,
+      displayName: '张三文化',
+    },
+    balance: { total: 1500, frozen: 200, available: 1300 },
+    entries: [],
+  });
+  mockedDetailPermits.mockResolvedValue({ permits: [] });
+  mockedDetailOrders.mockResolvedValue({ orders: [] });
+  mockedDetailProviderUsage.mockResolvedValue({ records: [] });
+  mockedDetailChatUsage.mockResolvedValue({
+    account: {
+      id: 'acc-1',
+      phone: '13800000001',
+      status: 'active',
+      mustChangePassword: true,
+      points: 1500,
+      displayName: '张三文化',
+    },
+    quotaUsedMilli: 0,
+    records: [],
+  });
 });
 
 describe('账号列表页（票 47）', () => {
@@ -295,10 +344,10 @@ describe('账号列表页（票 47）', () => {
       expect(mockedAdjust).toHaveBeenCalledWith('acc-1', -50, '内测活动补偿'),
     );
 
-    // 详情：跳转到详情占位页。
+    // 详情：跳转到真实详情页（票 49 替换占位），断言页头与账号投影。
     await user.click(screen.getByRole('button', { name: '操作 13800000001' }));
     await user.click(await screen.findByRole('menuitem', { name: '详情' }));
     expect(await screen.findByRole('heading', { name: '账号详情' })).toBeInTheDocument();
-    expect(screen.getByText('账号 acc-1')).toBeInTheDocument();
+    expect(await screen.findByText('13800000001')).toBeInTheDocument();
   }, 15000);
 });

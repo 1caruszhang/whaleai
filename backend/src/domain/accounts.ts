@@ -227,6 +227,29 @@ export function setAccountNote(deps: BackendDeps, accountId: string, note: strin
   }
 }
 
+/**
+ * 用户名设置/清除（票 49）：displayName 已由路由 schema trim 并校验 ≤64，
+ * 空串即清除（与 null 同义，契约在路由层收口）。display_name 只经 /admin
+ * 读写，不参与登录；不动其余任何字段。
+ */
+export function setAccountDisplayName(
+  deps: BackendDeps,
+  accountId: string,
+  displayName: string,
+): AccountRow {
+  const account = findAccountById(deps.db, accountId);
+  if (!account) throw new AppError('account_not_found', '账号不存在。', 404);
+  const nowIso = new Date(deps.now()).toISOString();
+  deps.db.run('UPDATE accounts SET display_name = ?, updated_at = ? WHERE id = ?', [
+    displayName,
+    nowIso,
+    accountId,
+  ]);
+  const updated = findAccountById(deps.db, accountId);
+  if (!updated) throw new AppError('internal_error', '用户名更新后读不到账号行。', 500);
+  return updated;
+}
+
 /** 对外账号投影：密码哈希/版本等内部字段不出领域层。 */
 export function accountProjection(account: AccountRow) {
   return {
