@@ -37,18 +37,22 @@ vi.mock('@/lib/dashboard', async importOriginal => {
 
 vi.mock('recharts', () => {
   const Passthrough = ({ children }: { children?: React.ReactNode }) => <>{children}</>;
+  /** 图表容器用 <svg> 包裹：页面里的 defs/linearGradient 等 SVG 子元素在
+   *  jsdom 下走 SVG 命名空间，避免 React 大小写告警污染测试输出。 */
+  const Svg = ({ children }: { children?: React.ReactNode }) => <svg>{children}</svg>;
   /** 折线序列：把 name 投到 DOM 供接线断言（本文件只渲染不细断言）。 */
   const Series = ({ name }: { name?: string }) => (
     <span data-testid={`chart-series-${name ?? ''}`}>{name ?? ''}</span>
   );
   return {
     ResponsiveContainer: Passthrough,
-    LineChart: Passthrough,
+    LineChart: Svg,
     CartesianGrid: () => null,
     XAxis: () => null,
     YAxis: () => null,
     Tooltip: () => null,
     Legend: () => null,
+    Area: () => null,
     Line: Series,
   };
 });

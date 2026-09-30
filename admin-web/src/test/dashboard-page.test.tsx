@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { render, screen } from '@testing-library/react';
+import { render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
@@ -17,6 +17,9 @@ import { AppRoutes } from '@/routes/routes';
  * 预存提醒与上游失败降级文案（降级不阻断页面其余部分）、统计失败的错误态。
  * recharts 整体 mock：图表渲染是库职责，本页契约是数据序列与线名接线；
  * 同时避免 jsdom 下真实 SVG 渲染拖慢整包测试（本机并行 worker 争抢）。
+ *
+ * 票 #61 T-B 扩展：加载态骨架屏（替代「加载中/…」文字）、降级卡样式、
+ * 卡片入场淡入与错峰延迟等视觉断言；既有语义断言全部保留。
  */
 vi.mock('@/lib/dashboard', async importOriginal => {
   const actual = await importOriginal<typeof import('@/lib/dashboard')>();
@@ -29,18 +32,22 @@ vi.mock('@/lib/dashboard', async importOriginal => {
 
 vi.mock('recharts', () => {
   const Passthrough = ({ children }: { children?: React.ReactNode }) => <>{children}</>;
+  /** 图表容器用 <svg> 包裹：页面里的 defs/linearGradient 等 SVG 子元素在
+   *  jsdom 下走 SVG 命名空间，避免 React 大小写告警污染测试输出。 */
+  const Svg = ({ children }: { children?: React.ReactNode }) => <svg>{children}</svg>;
   /** 折线序列：把 name 投到 DOM 供接线断言。 */
   const Series = ({ name }: { name?: string }) => (
     <span data-testid={`chart-series-${name ?? ''}`}>{name ?? ''}</span>
   );
   return {
     ResponsiveContainer: Passthrough,
-    LineChart: Passthrough,
+    LineChart: Svg,
     CartesianGrid: () => null,
     XAxis: () => null,
     YAxis: () => null,
     Tooltip: () => null,
     Legend: () => null,
+    Area: () => null,
     Line: Series,
   };
 });
@@ -72,7 +79,7 @@ function renderDashboard() {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
-  render(
+  return render(
     <QueryClientProvider client={queryClient}>
       <ThemeProvider>
         <MemoryRouter basename="/admin" initialEntries={['/admin/']}>
@@ -151,5 +158,50 @@ describe('仪表盘首页（票 48）', () => {
     expect(await screen.findByText('统计加载失败，请稍后刷新重试。')).toBeInTheDocument();
     expect(screen.getByText('趋势数据加载失败')).toBeInTheDocument();
     expect(await screen.findByText('¥1280.00')).toBeInTheDocument();
+  });
+
+  it('加载中四卡与折线图渲染骨架屏（无「加载中/…」文字）', async () => {
+    mockedStats.mockReturnValue(new Promise<AdminStatsOverview>(() => {}));
+    mockedMediaPool.mockReturnValue(new Promise<AdminMediaPool>(() => {}));
+    const { container } = renderDashboard();
+
+    await waitFor(() => {
+      expect(container.querySelectorAll('[data-slot="skeleton"]').length).toBeGreaterThan(0);
+    });
+    // 折线图骨架占位与统计卡标题同屏；旧「…/加载中」文字全部退场。
+    expect(screen.getByTestId('chart-skeleton')).toBeInTheDocument();
+    expect(screen.getByText('账号总数')).toBeInTheDocument();
+    expect(screen.queryByText('加载中')).not.toBeInTheDocument();
+    expect(screen.queryByText('…')).not.toBeInTheDocument();
+  });
+
+  it('媒介池降级卡保留降级样式：卡头描述 + 降级文案 + 入场动画', async () => {
+    mockedStats.mockResolvedValue(STATS);
+    mockedMediaPool.mockResolvedValue({ degraded: true, lowBalanceCents: 50000 });
+    const { container } = renderDashboard();
+
+    expect(
+      await screen.findByText('余额获取失败：上游暂不可用，请稍后刷新重试；账号管理不受影响。'),
+    ).toBeInTheDocument();
+    expect(screen.getByText('资金池预警与预存入口')).toBeInTheDocument();
+    const cards = [...container.querySelectorAll('[data-slot="card"]')];
+    expect(cards.some(card => card.className.includes('animate-in'))).toBe(true);
+  });
+
+  it('卡片入场动画：淡入类 + 错峰 animation-delay', async () => {
+    mockedStats.mockResolvedValue(STATS);
+    mockedMediaPool.mockResolvedValue(MEDIA_POOL_OK);
+    const { container } = renderDashboard();
+
+    expect(await screen.findByText('活跃 2 · 停用 1')).toBeInTheDocument();
+    const animated = [...container.querySelectorAll('[data-slot="card"]')].filter(card =>
+      card.className.includes('animate-in'),
+    );
+    expect(animated.length).toBeGreaterThanOrEqual(6);
+    const delays = animated
+      .map(card => (card as HTMLElement).style.animationDelay)
+      .filter(delay => delay !== '');
+    expect(delays.length).toBeGreaterThanOrEqual(2);
+    expect(new Set(delays).size).toBeGreaterThan(1);
   });
 });
