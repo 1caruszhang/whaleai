@@ -377,14 +377,15 @@ struct TokenPairWire {
     account: AccountWire,
 }
 
-fn gateway_client() -> Result<reqwest::Client, String> {
-    // 账号网关是外部 HTTPS 目标；localhost 控制面仍必须走 crate::local_http。
+/// 账号网关客户端（票 50 品牌集上报等 Rust 侧直连网关的出口复用）。
+/// 账号网关是外部 HTTPS 目标；localhost 控制面仍必须走 crate::local_http。
+pub(crate) fn gateway_client() -> Result<reqwest::Client, String> {
     #[allow(clippy::disallowed_methods)]
     let builder = reqwest::Client::builder().timeout(Duration::from_secs(20));
     crate::proxy_config::build_client_with_proxy(builder)
 }
 
-fn gateway_base_url() -> String {
+pub(crate) fn gateway_base_url() -> String {
     #[cfg(debug_assertions)]
     if let Some(value) = crate::geo_provider_credentials::normalize_endpoint_override(
         std::env::var(DEVELOPMENT_GATEWAY_BASE_URL_ENV).ok(),
@@ -737,6 +738,11 @@ pub async fn cmd_account_login(
         "[account] login ok points={} mustChangePassword={}",
         pair.account.points,
         pair.account.must_change_password
+    );
+    // 票 50 品牌集镜像：登录成功后补报全量快照（fire-and-forget，失败
+    // 静默；覆盖此前登录/离线上报的旧镜像，多设备同账号后写覆盖）。
+    crate::brand_mirror::report_brand_mirror_now(
+        crate::brand_mirror::BrandMirrorTrigger::AccountLogin,
     );
     current_state()
 }
