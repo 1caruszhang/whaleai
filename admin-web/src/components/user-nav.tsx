@@ -12,7 +12,10 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 
-/** 侧边栏用户区：运营身份 + 退出登录（清 token 回登录页，票 46）。 */
+/**
+ * 用户菜单（票 46 起，票 #60 T-A 挪入页头右端）：运营身份 + 退出登录
+ * （清 token 回登录页）。
+ */
 export function UserNav() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
@@ -30,7 +33,7 @@ export function UserNav() {
           <UserRoundIcon className="size-4" />
         </Button>
       </DropdownMenuTrigger>
-      <DropdownMenuContent align="start" className="min-w-40">
+      <DropdownMenuContent align="end" className="min-w-40">
         <DropdownMenuLabel>运营</DropdownMenuLabel>
         <DropdownMenuSeparator />
         <DropdownMenuItem variant="destructive" onSelect={logout} aria-label="退出登录">

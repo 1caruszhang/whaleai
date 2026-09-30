@@ -14,19 +14,23 @@ const THEME_OPTIONS: { value: Theme; label: string; icon: typeof SunIcon }[] = [
   { value: 'system', label: '跟随系统', icon: MonitorIcon },
 ];
 
-/** 侧边栏主题切换（票 46）：浅色 / 深色 / 跟随系统，持久化 localStorage。 */
+/**
+ * 页头主题切换（票 46 起，票 #60 T-A 视觉对齐）：浅色 / 深色 / 跟随系统
+ * 三选项持久化 localStorage 不变；触发器对齐 shadcn-admin ThemeSwitch——
+ * 日/月双图标同层叠放，随 <html class="dark"> 用 scale/rotate 交叉淡入。
+ */
 export function ThemeToggle() {
   const { theme, setTheme } = useTheme();
-  const active = THEME_OPTIONS.find(option => option.value === theme) ?? THEME_OPTIONS[2]!;
 
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
-        <Button variant="ghost" size="icon" aria-label="切换主题">
-          <active.icon className="size-4" />
+        <Button variant="ghost" size="icon" aria-label="切换主题" className="relative scale-95">
+          <SunIcon className="size-4 scale-100 rotate-0 transition-all dark:scale-0 dark:-rotate-90" />
+          <MoonIcon className="absolute size-4 scale-0 rotate-90 transition-all dark:scale-100 dark:rotate-0" />
         </Button>
       </DropdownMenuTrigger>
-      <DropdownMenuContent align="start" className="min-w-32">
+      <DropdownMenuContent align="end" className="min-w-32">
         {THEME_OPTIONS.map(option => (
           <DropdownMenuItem
             key={option.value}
