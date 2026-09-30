@@ -16,7 +16,6 @@ import {
   adjustAdminAccount,
   createAdminAccount,
   topupAdminAccount,
-  type AdminAccount,
 } from '@/lib/accounts';
 
 /**
@@ -175,8 +174,12 @@ export function CreateAccountDialog({ open, onOpenChange, onCreated }: CreateAcc
   );
 }
 
+/**
+ * 充值/调点对话框（票 47 列表页与票 49 详情页共用）：只依赖账号的最小
+ * 形状（id + phone），列表行与详情页账号投影都能满足。
+ */
 export interface AccountActionDialogProps {
-  account: AdminAccount;
+  account: { id: string; phone: string };
   open: boolean;
   onOpenChange: (open: boolean) => void;
   /** 操作成功后：父组件失效列表并关闭对话框。 */
