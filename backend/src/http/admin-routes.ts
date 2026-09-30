@@ -15,6 +15,11 @@ import {
 } from '../domain/accounts';
 import { applyAccountLedgerDelta, balanceSnapshot, listLedgerEntries } from '../domain/ledger';
 import { listChatUsageRecords } from '../domain/chat-usage';
+import { adminOverviewStats } from '../domain/admin-stats';
+import {
+  DistributionUpstream,
+  type UpstreamCallResult,
+} from '../gateway/distribution-upstream';
 import { AppError } from '../errors';
 import { signAdminToken, verifyAdminToken } from '../auth/tokens';
 import { parseJsonBody, readBearerToken } from './request';
@@ -91,6 +96,8 @@ const adjustSchema = z.object({
 export function createAdminRoutes(deps: BackendDeps, throttle: AdminLoginThrottle) {
   const routes = new Hono();
   const requireAdmin = requireAdminAuth(deps);
+  // 媒介池余额与 SSR 仪表盘同一权威实现（票 10/48）：签名 /profile 代理。
+  const upstream = new DistributionUpstream(deps, deps.fetchImpl ?? fetch);
 
   routes.post('/admin/login', async c => {
     const body = await parseJsonBody(c, adminLoginSchema);
@@ -150,6 +157,40 @@ export function createAdminRoutes(deps: BackendDeps, throttle: AdminLoginThrottl
     const body = await parseJsonBody(c, accountStatusSchema);
     const updated = setAccountStatus(deps, accountId.data, body.status);
     return c.json({ account: adminAccountProjection(updated) });
+  });
+
+  /**
+   * 仪表盘聚合（票 48）：账号总数/活跃/停用、余额总计与冻结、今日充值、
+   * 今日扣点（北京时间日界）、近 30 天按日序列（空窗日补零）。
+   */
+  routes.get('/admin/stats/overview', requireAdmin, c => {
+    return c.json(adminOverviewStats(deps.db, deps.now()));
+  });
+
+  /**
+   * 媒介池余额（票 48）：JSON 化 SSR 仪表盘余额卡的权威逻辑——低余额阈值
+   * 比较纯服务端；上游失败返回降级标记而非 500（与 SSR「余额获取失败」
+   * 降级同一语义，不阻断账号管理）。
+   */
+  routes.get('/admin/media-pool', requireAdmin, async c => {
+    let profile: UpstreamCallResult<{ balanceCents: number }>;
+    try {
+      profile = await upstream.fetchProfile();
+    } catch {
+      // 上游不可达不阻断运营台：降级为标记而非错误。
+      profile = { ok: false, response: new Response('', { status: 502 }) };
+    }
+    const lowBalanceCents = deps.config.adminMediaPoolLowBalanceCents;
+    if (!profile.ok) {
+      return c.json({ degraded: true, lowBalanceCents });
+    }
+    const balanceCents = profile.data.balanceCents;
+    return c.json({
+      degraded: false,
+      balanceCents,
+      lowBalanceCents,
+      lowBalance: balanceCents < lowBalanceCents,
+    });
   });
 
   routes.post('/admin/ledger/topup', requireAdmin, async c => {
