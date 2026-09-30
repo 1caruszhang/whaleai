@@ -287,9 +287,11 @@ describe('GET /admin/accounts 列表接口（票 47）', () => {
       mustChangePassword: true,
       balance: { total: 1500, frozen: 200, available: 1300 },
       chatQuota: { totalPoints: 100, usedMilli: 0 },
+      // brands 按实现约定排序：品牌名 name 升序（SQLite BINARY 按 UTF-8 字节序），
+      // 与 workspace 插入顺序无关——第二品牌(0xE7…) < 鲸杉示范品牌(0xE9…)。
       brands: [
-        { workspaceId: 'ws-1', name: '鲸杉示范品牌' },
         { workspaceId: 'ws-2', name: '第二品牌' },
+        { workspaceId: 'ws-1', name: '鲸杉示范品牌' },
       ],
       lastActiveAt: new Date(BASE_MS + 5000).toISOString(),
       createdAt: new Date(BASE_MS + 1000).toISOString(),

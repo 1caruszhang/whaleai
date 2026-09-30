@@ -148,6 +148,9 @@ export function listAdminAccounts(
   for (const row of rows) brandsByAccount.set(row.id, []);
   if (ids.length > 0) {
     const placeholders = ids.map(() => '?').join(', ');
+    // 品牌集排序依据：name 升序（SQLite BINARY 按 UTF-8 字节序），与 workspace
+    // 写入顺序无关，保证同账号行字段在分页/重查之间稳定。spec 未规定顺序，
+    // 前端如另有偏好按此契约对齐（见 admin-accounts-list.test.ts 行字段用例）。
     for (const brand of db.all<{ account_id: string; workspace_id: string; name: string }>(
       `SELECT account_id, workspace_id, name FROM account_brands WHERE account_id IN (${placeholders})
        ORDER BY account_id, name`,
