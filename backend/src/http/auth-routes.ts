@@ -7,7 +7,6 @@ import {
   changeAccountPassword,
   findAccountById,
   login,
-  replaceAccountBrands,
 } from '../domain/accounts';
 import type { AccountRow } from '../domain/types';
 import { AppError } from '../errors';
@@ -59,23 +58,6 @@ const changePasswordSchema = z.object({
 });
 
 const logoutSchema = z.object({ refreshToken: refreshTokenSchema });
-
-/**
- * 品牌集全量快照（票 50）：客户端唯一权威上报的 [{workspaceId, name}]。
- * 边界与迁移 0014 的 account_brands CHECK 同口径：workspaceId 1..64、
- * name 非空 ≤64；每账号 ≤100 条与同一快照内 workspaceId 去重在 schema
- * 收口（跨行上限 ANSI SQL 表内无法表达，见 migrations.ts 0014 注释）。
- */
-const brandSnapshotEntrySchema = z.object({
-  workspaceId: z.string().min(1, '工作区标识不能为空').max(64, '工作区标识过长'),
-  name: z.string().min(1, '品牌名称不能为空').max(64, '品牌名称过长'),
-});
-const brandSnapshotSchema = z
-  .array(brandSnapshotEntrySchema)
-  .max(100, '品牌数量超过上限')
-  .refine(entries => new Set(entries.map(entry => entry.workspaceId)).size === entries.length, {
-    message: '工作区标识重复',
-  });
 
 async function tokenPairResponse(
   deps: BackendDeps,
@@ -133,14 +115,6 @@ export function createAuthRoutes(deps: BackendDeps) {
 
   routes.get('/auth/me', requireAccount, c => {
     return c.json({ account: accountProjection(c.get('account')) });
-  });
-
-  // 品牌集服务端镜像（票 50）：客户端全量快照上报，事务内整组替换。
-  // 停用账号由 requireAccountAuth 的 status 检查先行 403 拦截。
-  routes.put('/auth/me/brands', requireAccount, async c => {
-    const brands = await parseJsonBody(c, brandSnapshotSchema);
-    replaceAccountBrands(deps, c.get('account').id, brands);
-    return c.json({ ok: true });
   });
 
   routes.post('/auth/change-password', requireAccount, async c => {

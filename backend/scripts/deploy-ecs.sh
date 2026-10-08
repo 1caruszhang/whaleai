@@ -127,19 +127,17 @@ cmd_package() {
   local tag=${1:-$(default_tag)}
   local tarball
   tarball=$(image_tarball "$tag")
-  local backend repo_root
+  local backend
   backend=$(backend_dir)
-  # 票 46 起构建上下文=仓库根（镜像同时打进 admin-web SPA 产物）。
-  repo_root=$(cd "$backend/.." && pwd)
   mkdir -p "$(deploy_dir)"
 
   command -v docker >/dev/null || die "本机没有 docker CLI"
 
-  local build_cmd=(docker buildx build --platform linux/amd64 --load -f "$backend/Dockerfile" -t "$IMAGE_NAME:$tag")
+  local build_cmd=(docker buildx build --platform linux/amd64 --load -t "$IMAGE_NAME:$tag")
   if [ -n "${XIAOJING_NPM_REGISTRY:-}" ]; then
     build_cmd+=(--build-arg "NPM_REGISTRY=$XIAOJING_NPM_REGISTRY")
   fi
-  build_cmd+=("$repo_root")
+  build_cmd+=("$backend")
 
   log "构建 linux/amd64 镜像 $IMAGE_NAME:${tag}（deps 层在模拟下运行，首次可能较慢）"
   if ! with_isolated_docker_config "${build_cmd[@]}"; then
@@ -308,26 +306,18 @@ REMOTE
 
 remote_local_smoke() {
   local target=$1
-  log "服务器本地冒烟（只读：healthz / admin SPA 静态托管与深链 / 无 token 401）"
+  log "服务器本地冒烟（只读：healthz / admin 登录页 / 无 token 401）"
   ssh_cmd "$target" bash -s <<'REMOTE'
 set -uo pipefail
 status=0
 health=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8787/healthz)
 [ "$health" = 200 ] && echo "PASS /healthz 200" || { echo "FAIL /healthz $health"; status=1; }
 admin=$(curl -s http://127.0.0.1:8787/admin)
-if printf '%s' "$admin" | grep -q 'id="root"'; then
-  echo "PASS /admin 静态运营台（SPA index.html）"
+if printf '%s' "$admin" | grep -q '/admin/session'; then
+  echo "PASS /admin 登录页"
 else
   code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8787/admin)
-  echo "FAIL /admin（${code}，无 SPA 壳）"
-  status=1
-fi
-deep=$(curl -s http://127.0.0.1:8787/admin/accounts)
-if printf '%s' "$deep" | grep -q 'id="root"'; then
-  echo "PASS /admin/<深链> SPA fallback → index.html"
-else
-  code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8787/admin/accounts)
-  echo "FAIL /admin/accounts（${code}，无 SPA 壳）"
+  echo "FAIL /admin（${code}，无登录表单）"
   status=1
 fi
 me=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8787/auth/me)
@@ -416,20 +406,12 @@ cmd_smoke() {
   health=$(curl -s -o /dev/null -w '%{http_code}' "$base$HEALTH_URL_PATH" || true)
   [ "$health" = 200 ] && echo "PASS $base$HEALTH_URL_PATH → 200" || { echo "FAIL $base$HEALTH_URL_PATH → $health"; status=1; }
   admin_code=$(curl -s -o /dev/null -w '%{http_code}' "$base$ADMIN_URL_PATH" || true)
-  local admin_body deep_code deep_body
+  local admin_body
   admin_body=$(curl -s "$base$ADMIN_URL_PATH" || true)
-  if [ "$admin_code" = 200 ] && printf '%s' "$admin_body" | grep -q 'id="root"'; then
-    echo "PASS $base$ADMIN_URL_PATH → 200 静态运营台（SPA index.html）"
+  if [ "$admin_code" = 200 ] && printf '%s' "$admin_body" | grep -q '/admin/session'; then
+    echo "PASS $base$ADMIN_URL_PATH → 200 登录表单"
   else
-    echo "FAIL $base$ADMIN_URL_PATH → ${admin_code}（无 SPA 壳）"
-    status=1
-  fi
-  deep_code=$(curl -s -o /dev/null -w '%{http_code}' "$base$ADMIN_URL_PATH/accounts" || true)
-  deep_body=$(curl -s "$base$ADMIN_URL_PATH/accounts" || true)
-  if [ "$deep_code" = 200 ] && printf '%s' "$deep_body" | grep -q 'id="root"'; then
-    echo "PASS $base$ADMIN_URL_PATH/<深链> → 200 SPA fallback"
-  else
-    echo "FAIL $base$ADMIN_URL_PATH/accounts → ${deep_code}（无 SPA 壳）"
+    echo "FAIL $base$ADMIN_URL_PATH → ${admin_code}（无登录表单）"
     status=1
   fi
   me=$(curl -s -o /dev/null -w '%{http_code}' "$base/auth/me" || true)

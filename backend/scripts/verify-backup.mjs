@@ -268,8 +268,7 @@ async function main() {
         `NPM_REGISTRY=${process.env.XIAOJING_NPM_REGISTRY}`,
       );
     const { stdout: buildOut } = await docker(
-      // 票 46 起构建上下文=仓库根（镜像同时打进 admin-web SPA 产物）。
-      ["build", "-t", IMAGE, ...buildArgs, "-f", join(backendDir, "Dockerfile"), join(backendDir, "..")],
+      ["build", "-t", IMAGE, ...buildArgs, backendDir],
       {
         maxBuffer: 32 * 1024 * 1024,
       },

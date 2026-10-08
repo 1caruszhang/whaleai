@@ -81,13 +81,6 @@ export interface BackendConfig {
   chatInputCnyPerMtok: number;
   chatInputCacheHitCnyPerMtok: number;
   chatOutputCnyPerMtok: number;
-  /**
-   * admin-web SPA 构建产物目录（票 46）：存在 index.html 时 /admin/* 由
-   * 静态托管承接（SPA fallback），否则整链透传（账号运营台 SSR 面已于
-   * 票 #51 退役，本地开发/测试未构建时 GET /admin 无 SPA 壳）。镜像内
-   * 默认 dist/admin-web（由 bundle 输出位置推导），测试注入 fixture 目录。
-   */
-  adminWebRoot?: string;
 }
 
 export class MissingConfigError extends Error {
@@ -186,6 +179,5 @@ export function loadBackendConfig(env: Record<string, string | undefined>): Back
     chatInputCnyPerMtok: readPositiveNumber(env, 'CHAT_INPUT_CNY_PER_MTOK', 2),
     chatInputCacheHitCnyPerMtok: readPositiveNumber(env, 'CHAT_INPUT_CACHE_HIT_CNY_PER_MTOK', 0.2),
     chatOutputCnyPerMtok: readPositiveNumber(env, 'CHAT_OUTPUT_CNY_PER_MTOK', 3),
-    ...(env.ADMIN_WEB_ROOT ? { adminWebRoot: env.ADMIN_WEB_ROOT } : {}),
   };
 }

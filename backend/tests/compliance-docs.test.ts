@@ -125,14 +125,6 @@ describe("《隐私政策》覆盖决策票 13 全部要点（票 11 验收项 3
     expect(privacyDoc).toMatch(/不上传运营服务器/);
   });
 
-  // 票 50（ADR 0007）：品牌工作区名称同步至运营后台是唯一的品牌事实
-  // 例外，且声明只同步名称、其余工作内容仍仅存本机。
-  it("声明品牌工作区名称同步至运营后台（仅名称，其余仍仅存本机）", () => {
-    expect(privacyDoc).toContain("品牌工作区名称");
-    expect(privacyDoc).toContain("品牌工作区名称同步至运营后台");
-    expect(privacyDoc).toContain("仅同步名称");
-  });
-
   // 决策票 13：注销账号删除服务器侧数据；本地数据由用户自行删除。
   it("声明注销账号时删除服务器侧数据", () => {
     expect(privacyDoc).toContain("注销账号");

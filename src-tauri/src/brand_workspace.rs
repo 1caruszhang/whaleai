@@ -1166,16 +1166,11 @@ pub async fn cmd_brand_workspace_create(
     name: String,
     productLines: Vec<String>,
 ) -> Result<BrandWorkspace, String> {
-    let workspace = tauri::async_runtime::spawn_blocking(move || {
+    tauri::async_runtime::spawn_blocking(move || {
         production_store()?.create_workspace(&name, productLines)
     })
     .await
-    .map_err(|error| format!("brand workspace create task failed: {error}"))??;
-    // 票 50 品牌集镜像：新建成功后补报全量快照（fire-and-forget，失败静默）。
-    crate::brand_mirror::report_brand_mirror_now(
-        crate::brand_mirror::BrandMirrorTrigger::WorkspaceCreated,
-    );
-    Ok(workspace)
+    .map_err(|error| format!("brand workspace create task failed: {error}"))?
 }
 
 #[tauri::command]

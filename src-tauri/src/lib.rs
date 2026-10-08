@@ -3,7 +3,6 @@
 pub mod account_auth;
 pub mod app_dirs;
 pub mod attachment_protocol;
-mod brand_mirror;
 pub mod brand_workspace;
 mod commands;
 pub mod config_io;
@@ -294,12 +293,6 @@ pub fn run() {
                     crate::ulog_warn!("[geo-recovery] startup failed: {}", error);
                 }
             }
-            // 票 50 品牌集镜像：应用启动补报（仅已登录时实际发出，未登录
-            // 自动跳过；fire-and-forget，失败静默、下次触发自然补报）。
-            // 位置在 dev_env 加载与凭据读取初始化之后。
-            crate::brand_mirror::report_brand_mirror_now(
-                crate::brand_mirror::BrandMirrorTrigger::AppStartup,
-            );
 
             let terminal_events = sidecars_for_terminal_forwarder
                 .lock()
