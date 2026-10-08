@@ -167,8 +167,7 @@ docker compose logs --tail 50 api       # 应看到 applied migrations 与 liste
 
 # 本机回环冒烟（公网入口要等第 4 步宝塔反代 + SSL）
 curl -s http://127.0.0.1:8787/healthz   # {"ok":true}
-curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8787/admin   # 200 = SPA index.html 壳（票 51 起，SSR 登录页已退役）
-curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8787/admin/accounts/abc   # 200 = 深链 SPA fallback 同壳
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8787/admin   # 200
 ```
 
 常用运维命令：
@@ -259,8 +258,7 @@ server {
   curl -sI http://api.jingshanai.com/healthz | head -3
   # 443 冒烟
   curl -s https://api.jingshanai.com/healthz     # {"ok":true}
-  curl -s -o /dev/null -w '%{http_code}\n' https://api.jingshanai.com/admin   # 200 = SPA index.html 壳（票 51 起，SSR 登录页已退役）
-  curl -s -o /dev/null -w '%{http_code}\n' https://api.jingshanai.com/admin/accounts/abc   # 200 = 深链 SPA fallback 同壳
+  curl -s -o /dev/null -w '%{http_code}\n' https://api.jingshanai.com/admin   # 200
   ```
 
 ## 5. 备份（SQLite 卷，每日自动化）
@@ -384,21 +382,20 @@ XIAOJING_IMAGE_TAG=<旧tag> docker compose up -d
 （`cd backend && npm run verify:container`）；以下为**上线后真实环境**动作，由运营/用户执行：
 
 1. **公网登录冒烟**：`curl -s https://api.jingshanai.com/healthz` → `{"ok":true}`；
-   浏览器打开 `https://api.jingshanai.com/admin` → 出现 SPA 登录页（index.html
-   壳，票 51 起不再是 SSR 登录表单）→ 运营密码登录落在仪表盘首页。
-2. **真实账号冒烟**：SPA「开通账号」（真实手机号 + 初始密码）→ 客户端登录 → 首登改密 →
+   浏览器打开 `https://api.jingshanai.com/admin` → 运营密码登录成功。
+2. **真实账号冒烟**：/admin 建号（真实手机号 + 初始密码）→ 客户端登录 → 首登改密 →
    「设置 → 个人信息」看到 500 赠点。
-3. **真实计费入账**：对公转账 ¥200 → SPA 账号列表/详情「充值」确认 → 客户端余额 +2000 点；
-   账号详情页流水出现 `grant` 与 `topup`，Σdelta == balance。
+3. **真实计费入账**：对公转账 ¥200 → /admin 充值确认 → 客户端余额 +2000 点；
+   /admin 账号页流水出现 `grant` 与 `topup`，Σdelta == balance。
 4. **（可选）真实 probe 记账**：客户端跑一次基线探测（5 点/问），核对流水 `consume`
    与 permit 回报口径，供与火山/DeepSeek 账单周度对账。
-5. **媒介池余额卡**：SPA 仪表盘首页显示超级媒介 `GET /profile` 实测余额（前置：资金池已预存）；
+5. **媒介池余额卡**：/admin 首页显示超级媒介 `GET /profile` 实测余额（前置：资金池已预存）；
    低于 ¥500 会出现预存提醒。
 6. **OSS 内网实测**（票 12 验收项「OSS 访问实测走内网 endpoint」）：
    ```bash
    # ECS 上应能解析内网域名（同地域证明）
    getent hosts oss-cn-chengdu-internal.aliyuncs.com
-   # 客户端跑一次文章发布预览（putHtml），观察返回 URL 与 SPA 账号详情页 Provider 计量出现 oss 记录；
+   # 客户端跑一次文章发布预览（putHtml），观察返回 URL 与 /admin Provider 计量出现 oss 记录；
    # 或服务器抓容器出网：内网域名解析为 100.64.x.x 段私网地址即走内网
    docker compose logs api | grep -i internal || true
    ```

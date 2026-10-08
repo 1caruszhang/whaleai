@@ -116,7 +116,6 @@ describe('migrations', () => {
         '0011_preference_channel_pick_flow',
         '0012_pool_snapshot_category_geo',
         '0013_pool_snapshot_platform_fans',
-        '0014_account_profile_fields',
       ]);
       expect(migrateDatabase(db)).toEqual([]);
 
@@ -136,7 +135,6 @@ describe('migrations', () => {
         'distribution_resource_cache',
         'preference_channels',
         'distribution_pool_snapshot',
-        'account_brands',
         'schema_migrations',
       ]) {
         expect(tables).toContain(expected);
